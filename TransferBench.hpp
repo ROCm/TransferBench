@@ -61,7 +61,26 @@ typedef enum
   MEM_GPU_FINE = 3     // Fine-grained global GPU memory
 } MemType;
 
+bool IsGpuType(MemType m)
+{
+  return (m == MEM_GPU || m == MEM_GPU_FINE);
+}
+
 char const MemTypeStr[5] = "CGBF";
+
+MemType inline CharToMemType(char const c)
+{
+  switch (c)
+  {
+  case 'C': return MEM_CPU;
+  case 'G': return MEM_GPU;
+  case 'B': return MEM_CPU_FINE;
+  case 'F': return MEM_GPU_FINE;
+  default:
+    printf("[ERROR] Unexpected mem type (%c)\n", c);
+    exit(1);
+  }
+}
 
 typedef enum
 {
@@ -141,7 +160,10 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
                   MemType* memType, int* memIndex);
 
 void ParseTransfers(char* line, int numCpus, int numGpus,
-                TransferMap& transferMap);
+                    std::vector<Transfer>& transfers);
+
+void ExecuteTransfers(EnvVars const& ev, int testNum, std::vector<size_t> const& valuesOfN,
+                      std::vector<Transfer>& transfers);
 
 void EnablePeerAccess(int const deviceId, int const peerDeviceId);
 void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPtr);
@@ -150,6 +172,7 @@ void CheckPages(char* byteArray, size_t numBytes, int targetId);
 void CheckOrFill(ModeType mode, int N, bool isMemset, bool isHipCall, std::vector<float> const& fillPattern, float* ptr);
 void RunTransfer(EnvVars const& ev, size_t const N, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);
 void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N, int numBlocksToUse, int readMode, int skipCpu);
+void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool const isRandom);
 
 // Return the maximum bandwidth measured for given (src/dst) pair
 double GetPeakBandwidth(EnvVars const& ev,
