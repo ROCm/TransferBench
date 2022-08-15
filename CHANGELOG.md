@@ -1,5 +1,25 @@
 # Changelog for TransferBench
 
+## v1.03
+### Added
+- New preset modes stress-test benchmarks "sweep" and "randomsweep"
+  - sweep iterates over all possible sets of Transfers to test
+  - randomsweep iterates over random sets of Transfers
+  -  New sweep-only environment variables can modify sweep
+     - SWEEP_SRC - String containing only "B","C","F", or "G", defining possible source memory types
+     - SWEEP_EXE - String containing only "C", or "G", defining possible executors
+     - SWEEP_DST - String containing only "B","C","F", or "G", defining possible destination memory types
+     - SWEEP_SRC_IS_EXE - Restrict executor to be the same as the source if non-zero
+     - SWEEP_MIN - Minimum number of parallel transfers to test
+     - SWEEP_MAX - Maximum number of parallel transfers to test
+     - SWEEP_COUNT - Maximum number of tests to run
+     - SWEEP_TIME_LIMIT - Maximum number of seconds to run tests for
+- New environment variable to restrict number of available GPUs to test on (primarily for sweep runs)
+  - NUM_CPU_DEVICES - Number of CPU devices
+  - NUM_GPU_DEVICES - Number of GPU devices
+### Changed
+- Fixed timing display for CPU-executors when using single stream mode
+
 ## v1.02
 ### Added
 - Setting NUM_ITERATIONS to negative number indicates to run for -NUM_ITERATIONS seconds per Test
