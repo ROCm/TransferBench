@@ -24,17 +24,25 @@ THE SOFTWARE.
 #define ENVVARS_HPP
 
 #include <algorithm>
-
-#define TB_VERSION "1.03"
+#include <random>
+#include <time.h>
+#define TB_VERSION "1.04"
 
 extern char const MemTypeStr[];
+
+enum ConfigModeEnum
+{
+  CFG_FILE  = 0,
+  CFG_P2P   = 1,
+  CFG_SWEEP = 2
+};
 
 // This class manages environment variable that affect TransferBench
 class EnvVars
 {
 public:
   // Default configuration values
-  int const DEFAULT_NUM_WARMUPS          =  3;
+  int const DEFAULT_NUM_WARMUPS          =  1;
   int const DEFAULT_NUM_ITERATIONS       = 10;
   int const DEFAULT_SAMPLING_FACTOR      =  1;
   int const DEFAULT_NUM_CPU_PER_TRANSFER =  4;
@@ -73,9 +81,19 @@ public:
   int sweepMax;          // Max number of simulatneous Transfers to be executed per test
   int sweepTestLimit;    // Max number of tests to run during sweep (0 = no limit)
   int sweepTimeLimit;    // Max number of seconds to run sweep for  (0 = no limit)
+  int sweepXgmiMin;      // Min number of XGMI hops for Transfers
+  int sweepXgmiMax;      // Max number of XGMI hops for Transfers (-1 = no limit)
+  int sweepSeed;         // Random seed to use
+  int sweepRandBytes;    // Whether or not to use random number of bytes per Transfer
   std::string sweepSrc;  // Set of src memory types to be swept
   std::string sweepExe;  // Set of executors to be swept
   std::string sweepDst;  // Set of dst memory types to be swept
+
+  // Used to track current configuration mode
+  ConfigModeEnum configMode;
+
+  // Random generator
+  std::default_random_engine *generator;
 
   // Constructor that collects values
   EnvVars()
@@ -104,14 +122,23 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
 
-    sweepSrcIsExe     = GetEnvVar("SWEEP_SRC_IS_EXE", DEFAULT_SWEEP_SRC_IS_EXE);
-    sweepMin          = GetEnvVar("SWEEP_MIN", DEFAULT_SWEEP_MIN);
-    sweepMax          = GetEnvVar("SWEEP_MAX", DEFAULT_SWEEP_MAX);
-    sweepSrc          = GetEnvVar("SWEEP_SRC", DEFAULT_SWEEP_SRC);
-    sweepExe          = GetEnvVar("SWEEP_EXE", DEFAULT_SWEEP_EXE);
-    sweepDst          = GetEnvVar("SWEEP_DST", DEFAULT_SWEEP_DST);
-    sweepTestLimit    = GetEnvVar("SWEEP_TEST_LIMIT", DEFAULT_SWEEP_TEST_LIMIT);
-    sweepTimeLimit    = GetEnvVar("SWEEP_TIME_LIMIT", DEFAULT_SWEEP_TIME_LIMIT);
+    sweepSrcIsExe     = GetEnvVar("SWEEP_SRC_IS_EXE"    , DEFAULT_SWEEP_SRC_IS_EXE);
+    sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
+    sweepMax          = GetEnvVar("SWEEP_MAX"           , DEFAULT_SWEEP_MAX);
+    sweepSrc          = GetEnvVar("SWEEP_SRC"           , DEFAULT_SWEEP_SRC);
+    sweepExe          = GetEnvVar("SWEEP_EXE"           , DEFAULT_SWEEP_EXE);
+    sweepDst          = GetEnvVar("SWEEP_DST"           , DEFAULT_SWEEP_DST);
+    sweepTestLimit    = GetEnvVar("SWEEP_TEST_LIMIT"    , DEFAULT_SWEEP_TEST_LIMIT);
+    sweepTimeLimit    = GetEnvVar("SWEEP_TIME_LIMIT"    , DEFAULT_SWEEP_TIME_LIMIT);
+    sweepXgmiMin      = GetEnvVar("SWEEP_XGMI_MIN"      , 0);
+    sweepXgmiMax      = GetEnvVar("SWEEP_XGMI_MAX"      , -1);
+    sweepRandBytes    = GetEnvVar("SWEEP_RAND_BYTES"    , 0);
+
+    // Determine random seed
+
+    char *sweepSeedStr = getenv("SWEEP_SEED");
+    sweepSeed = (sweepSeedStr != NULL ? atoi(sweepSeedStr) : time(NULL));
+    generator = new std::default_random_engine(sweepSeed);
 
     // Check for fill pattern
     char* pattern = getenv("FILL_PATTERN");
@@ -303,10 +330,10 @@ public:
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
       printf("%-20s = %12d : Using %d CPU thread(s) per CPU-executed Transfer\n", "NUM_CPU_PER_TRANSFER", numCpuPerTransfer, numCpuPerTransfer);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
-      printf("%-20s = %12d : Running %d %s per test\n", "NUM_ITERATIONS", numIterations,
+      printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
              numIterations > 0 ? numIterations : -numIterations,
              numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("%-20s = %12d : Running %d warmup iteration(s) per topology\n", "NUM_WARMUPS", numWarmups, numWarmups);
+      printf("%-20s = %12d : Running %d warmup iteration(s) per Test\n", "NUM_WARMUPS", numWarmups, numWarmups);
       printf("%-20s = %12d : Output to %s\n", "OUTPUT_TO_CSV", outputToCsv,
              outputToCsv ? "CSV" : "console");
       printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
@@ -329,6 +356,30 @@ public:
              useSingleStream, (useSingleStream ? "device" : "Transfer"));
       printf("\n");
     }
+    else
+    {
+      printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
+      printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
+      printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
+      printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
+      if (fillPattern.size())
+        printf("Pattern: %s", getenv("FILL_PATTERN"));
+      else
+        printf("Pseudo-random: (Element i = i modulo 383 + 31)");
+      printf("\n");
+      printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
+      printf("NUM_CPU_PER_TRANSFER,%d,Using %d CPU thread(s) per CPU-executed Transfer\n", numCpuPerTransfer, numCpuPerTransfer);
+      printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
+      printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
+             numIterations > 0 ? numIterations : -numIterations,
+             numIterations > 0 ? "timed iteration(s)" : "second(s)");
+      printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
+      printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
+      printf("USE_HIP_CALL,%d,Using %s for GPU-executed copies\n", useHipCall, useHipCall ? "HIP functions" : "custom kernels");
+      printf("USE_MEMSET,%d,Performing %s\n", useMemset, useMemset ? "memset" : "memcopy");
+      printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
+    }
   };
 
   // Display env var settings
@@ -338,6 +389,7 @@ public:
     {
       printf("Sweep configuration (TransferBench v%s)\n", TB_VERSION);
       printf("=====================================================\n");
+      printf("%-20s = %12d : Random seed\n", "SWEEP_SEED", sweepSeed);
       printf("%-20s = %12s : Source Memory Types to sweep\n", "SWEEP_SRC", sweepSrc.c_str());
       printf("%-20s = %12s : Executor Types to sweep\n", "SWEEP_EXE", sweepExe.c_str());
       printf("%-20s = %12s : Destination Memory Types to sweep\n", "SWEEP_DST", sweepDst.c_str());
@@ -346,6 +398,9 @@ public:
       printf("%-20s = %12d : Max simultaneous Transfers              (0 = no limit)\n", "SWEEP_MAX", sweepMax);
       printf("%-20s = %12d : Max number of tests to run during sweep (0 = no limit)\n", "SWEEP_TEST_LIMIT", sweepTestLimit);
       printf("%-20s = %12d : Max number of seconds to run sweep for  (0 = no limit)\n", "SWEEP_TIME_LIMIT", sweepTimeLimit);
+      printf("%-20s = %12d : Min number of XGMI hops for Transfers\n", "SWEEP_XGMI_MIN", sweepXgmiMin);
+      printf("%-20s = %12d : Max number of XGMI hops for Transfers (-1 = no limit)\n", "SWEEP_XGMI_MAX", sweepXgmiMax);
+      printf("%-20s = %12d : Using %s number of bytes per Transfer\n", "SWEEP_RAND_BYTES", sweepRandBytes, sweepRandBytes ? "random" : "constant");
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
       printf("%-20s = %12d : Using %d CPU thread(s) per CPU-executed Transfer\n", "NUM_CPU_PER_TRANSFER", numCpuPerTransfer, numCpuPerTransfer);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
@@ -357,10 +412,10 @@ public:
       else
         printf("Pseudo-random: (Element i = i modulo 383 + 31)");
       printf("\n");
-      printf("%-20s = %12d : Running %d %s per test\n", "NUM_ITERATIONS", numIterations,
+      printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
              numIterations > 0 ? numIterations : -numIterations,
              numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("%-20s = %12d : Running %d warmup iteration(s) per topology\n", "NUM_WARMUPS", numWarmups, numWarmups);
+      printf("%-20s = %12d : Running %d warmup iteration(s) per Test\n", "NUM_WARMUPS", numWarmups, numWarmups);
       printf("%-20s = %12d : Output to %s\n", "OUTPUT_TO_CSV", outputToCsv,
              outputToCsv ? "CSV" : "console");
       printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
@@ -378,6 +433,41 @@ public:
       printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
              useSingleStream, (useSingleStream ? "device" : "Transfer"));
       printf("\n");
+    }
+    else
+    {
+      printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
+      printf("SWEEP_SRC,%s,Source Memory Types to sweep\n", sweepSrc.c_str());
+      printf("SWEEP_EXE,%s,Executor Types to sweep\n", sweepExe.c_str());
+      printf("SWEEP_DST,%s,Destination Memory Types to sweep\n", sweepDst.c_str());
+      printf("SWEEP_SRC_IS_EXE,%d, Transfer executor %s Transfer source\n", sweepSrcIsExe, sweepSrcIsExe ? "must match" : "may have any");
+      printf("SWEEP_SEED,%d,Random seed\n", sweepSeed);
+      printf("SWEEP_MIN,%d,Min simultaneous Transfers\n", sweepMin);
+      printf("SWEEP_MAX,%d,Max simultaneous Transfers (0 = no limit)\n", sweepMax);
+      printf("SWEEP_TEST_LIMIT,%d,Max number of tests to run during sweep (0 = no limit)\n", sweepTestLimit);
+      printf("SWEEP_TIME_LIMIT,%d,Max number of seconds to run sweep for (0 = no limit)\n", sweepTimeLimit);
+      printf("SWEEP_XGMI_MIN,%d,Min number of XGMI hops for Transfers\n", sweepXgmiMin);
+      printf("SWEEP_XGMI_MAX,%d,Max number of XGMI hops for Transfers (-1 = no limit)\n", sweepXgmiMax);
+      printf("SWEEP_RAND_BYTES,%d,Using %s number of bytes per Transfer\n", sweepRandBytes, sweepRandBytes ? "random" : "constant");
+      printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
+      printf("NUM_CPU_PER_TRANSFER,%d,Using %d CPU thread(s) per CPU-executed Transfer\n", numCpuPerTransfer, numCpuPerTransfer);
+      printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
+      printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
+      printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
+      printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
+      if (fillPattern.size())
+        printf("Pattern: %s", getenv("FILL_PATTERN"));
+      else
+        printf("Pseudo-random: (Element i = i modulo 383 + 31)");
+      printf("\n");
+      printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
+             numIterations > 0 ? numIterations : -numIterations,
+             numIterations > 0 ? "timed iteration(s)" : "second(s)");
+      printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
+      printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
+      printf("USE_HIP_CALL,%d,Using %s for GPU-executed copies\n", useHipCall, useHipCall ? "HIP functions" : "custom kernels");
+      printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
     }
   };
 

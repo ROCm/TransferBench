@@ -1,5 +1,18 @@
 # Changelog for TransferBench
 
+## v1.04
+### Added
+- New environment variables for sweep based presets
+  - SWEEP_XGMI_MIN   - Min number of XGMI hops for Transfers
+  - SWEEP_XGMI_MAX   - Max number of XGMI hops for Transfers
+  - SWEEP_SEED       - Random seed being used
+  - SWEEP_RAND_BYTES - Use random amount of bytes (up to pre-specified N) for each Transfer
+### Changed
+  - CSV output for sweep includes env vars section followed by output
+  - CSV output no longer lists env var parameters in columns
+  - Default number of warmup iterations changed from 3 to 1
+  - Splitting CSV output of link type to ExeToSrcLinkType and ExeToDstLinkType
+
 ## v1.03
 ### Added
 - New preset modes stress-test benchmarks "sweep" and "randomsweep"

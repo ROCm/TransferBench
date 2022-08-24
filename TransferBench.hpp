@@ -111,6 +111,7 @@ struct Transfer
   MemType dstMemType;          // Destination memory type
   int     dstIndex;            // Destination device index
   int     numBlocksToUse;      // Number of threadblocks to use for this Transfer
+  size_t  numBytes;            // Number of bytes to Transfer
 
   // Memory
   float*  srcMem;              // Source memory
@@ -132,6 +133,7 @@ typedef std::pair<MemType, int> Executor;
 struct ExecutorInfo
 {
   std::vector<Transfer>    transfers;     // Transfers to execute
+  size_t                   totalBytes;    // Total bytes this executor transfers
 
   // For GPU-Executors
   int                      totalBlocks;   // Total number of CUs/CPU threads to use
@@ -170,7 +172,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
 void DeallocateMemory(MemType memType, void* memPtr);
 void CheckPages(char* byteArray, size_t numBytes, int targetId);
 void CheckOrFill(ModeType mode, int N, bool isMemset, bool isHipCall, std::vector<float> const& fillPattern, float* ptr);
-void RunTransfer(EnvVars const& ev, size_t const N, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);
+void RunTransfer(EnvVars const& ev, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);
 void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N, int numBlocksToUse, int readMode, int skipCpu);
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool const isRandom);
 
