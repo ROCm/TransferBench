@@ -1,5 +1,12 @@
 # Changelog for TransferBench
 
+## v1.05
+### Added
+- Topology output now includes NUMA node information
+- Support for NUMA nodes with no CPU cores (e.g. CXL memory)
+### Removed
+- SWEEP_SRC_IS_EXE environment variable
+
 ## v1.04
 ### Added
 - New environment variables for sweep based presets

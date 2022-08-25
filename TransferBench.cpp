@@ -563,13 +563,76 @@ int RemappedIndex(int const origIdx, MemType const memType)
 
 void DisplayTopology(bool const outputToCsv)
 {
+  int numCpuDevices = numa_num_configured_nodes();
   int numGpuDevices;
   HIP_CALL(hipGetDeviceCount(&numGpuDevices));
 
   if (outputToCsv)
   {
-    printf("NumCpus,%d\n", numa_num_configured_nodes());
+    printf("NumCpus,%d\n", numCpuDevices);
     printf("NumGpus,%d\n", numGpuDevices);
+  }
+  else
+  {
+    printf("\nDetected topology: %d CPU NUMA node(s)   %d GPU device(s)\n", numa_num_configured_nodes(), numGpuDevices);
+  }
+
+  // Print out detected CPU topology
+  if (outputToCsv)
+  {
+    printf("NUMA");
+    for (int j = 0; j < numCpuDevices; j++)
+      printf(",NUMA%02d", j);
+    printf(",# CPUs,ClosestGPUs\n");
+  }
+  else
+  {
+    printf("        |");
+    for (int j = 0; j < numCpuDevices; j++)
+      printf("NUMA %02d |", j);
+    printf(" # Cpus | Closest GPU(s)\n");
+    for (int j = 0; j <= numCpuDevices; j++)
+      printf("--------+");
+    printf("--------+-------------\n");
+  }
+
+  for (int i = 0; i < numCpuDevices; i++)
+  {
+    printf("NUMA %02d%s", i, outputToCsv ? "," : " |");
+    for (int j = 0; j < numCpuDevices; j++)
+    {
+      int numaDist = numa_distance(i,j);
+      if (outputToCsv)
+	printf("%d,", numaDist);
+      else
+	printf(" %6d |", numaDist);
+    }
+
+    int numCpus = 0;
+    for (int j = 0; j < numa_num_configured_cpus(); j++)
+      if (numa_node_of_cpu(j) == i) numCpus++;
+    if (outputToCsv)
+      printf("%d,", numCpus);
+    else
+      printf(" %6d | ", numCpus);
+
+    bool isFirst = true;
+    for (int j = 0; j < numGpuDevices; j++)
+    {
+      if (GetClosestNumaNode(RemappedIndex(j, MEM_GPU)) == i)
+      {
+        if (isFirst) isFirst = false;
+	else printf(",");
+	printf("%d", j);
+      }
+    }
+    printf("\n");
+  }
+  printf("\n");
+
+  // Print out detected GPU topology
+  if (outputToCsv)
+  {
     printf("GPU");
     for (int j = 0; j < numGpuDevices; j++)
       printf(",GPU %02d", j);
@@ -577,7 +640,6 @@ void DisplayTopology(bool const outputToCsv)
   }
   else
   {
-    printf("\nDetected topology: %d CPU NUMA node(s)   %d GPU device(s)\n", numa_num_configured_nodes(), numGpuDevices);
     printf("        |");
     for (int j = 0; j < numGpuDevices; j++)
       printf(" GPU %02d |", j);
@@ -1232,6 +1294,13 @@ double GetPeakBandwidth(EnvVars const& ev,
   transfers[0]->exeIndex   = RemappedIndex((readMode == 0 ? srcIndex : dstIndex), transfers[0]->exeMemType);
   transfers[1]->exeIndex   = RemappedIndex((readMode == 0 ? dstIndex : srcIndex), transfers[1]->exeMemType);
 
+  // Abort if executing on NUMA node with no CPUs
+  for (int i = 0; i <= isBidirectional; i++)
+  {
+    if (transfers[i]->exeMemType == MEM_CPU && ev.numCpusPerNuma[transfers[i]->exeIndex] == 0)
+      return 0;
+  }
+
   for (int i = 0; i <= isBidirectional; i++)
   {
     AllocateMemory(transfers[i]->srcMemType, transfers[i]->srcIndex,
@@ -1375,36 +1444,33 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
   std::vector<size_t> valuesOfN(1, numBytesPerTransfer / sizeof(float));
 
   // Compute how many possible Transfers are permitted (unique SRC/EXE/DST triplets)
-  bool hasCpuExecutor = false;
-  bool hasGpuExecutor = false;
   std::vector<std::pair<MemType, int>> exeList;
   for (auto exe : ev.sweepExe)
   {
     MemType const exeMemType = CharToMemType(exe);
-    int numDevices;
     if (IsGpuType(exeMemType))
     {
-      numDevices = ev.numGpuDevices;
-      hasGpuExecutor = true;
+      for (int exeIndex = 0; exeIndex < ev.numGpuDevices; ++exeIndex)
+        exeList.push_back(std::make_pair(exeMemType, exeIndex));
     }
     else
     {
-      numDevices = ev.numCpuDevices;
-      hasCpuExecutor = true;
+      for (int exeIndex = 0; exeIndex < ev.numCpuDevices; ++exeIndex)
+      {
+        // Skip NUMA nodes that have no CPUs (e.g. CXL)
+        if (ev.numCpusPerNuma[exeIndex] == 0) continue;
+        exeList.push_back(std::make_pair(exeMemType, exeIndex));
+      }
     }
-    for (int exeIndex = 0; exeIndex < numDevices; ++exeIndex)
-      exeList.push_back(std::make_pair(exeMemType, exeIndex));
   }
-  int numExes = ev.sweepSrcIsExe ? 1 : exeList.size();
+  int numExes = exeList.size();
 
   std::vector<std::pair<MemType, int>> srcList;
   for (auto src : ev.sweepSrc)
   {
     MemType const srcMemType = CharToMemType(src);
     int const numDevices = IsGpuType(srcMemType) ? ev.numGpuDevices : ev.numCpuDevices;
-    // Skip source memory type if executor is supposed to be source but not specified
-    if ((IsGpuType(srcMemType) && !hasGpuExecutor) ||
-        (!IsGpuType(srcMemType) && !hasCpuExecutor)) continue;
+
     for (int srcIndex = 0; srcIndex < numDevices; ++srcIndex)
       srcList.push_back(std::make_pair(srcMemType, srcIndex));
   }

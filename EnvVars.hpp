@@ -26,7 +26,7 @@ THE SOFTWARE.
 #include <algorithm>
 #include <random>
 #include <time.h>
-#define TB_VERSION "1.04"
+#define TB_VERSION "1.05"
 
 extern char const MemTypeStr[];
 
@@ -47,7 +47,6 @@ public:
   int const DEFAULT_SAMPLING_FACTOR      =  1;
   int const DEFAULT_NUM_CPU_PER_TRANSFER =  4;
 
-  int const DEFAULT_SWEEP_SRC_IS_EXE  = 0;
   std::string const DEFAULT_SWEEP_SRC = "CG";
   std::string const DEFAULT_SWEEP_EXE = "CG";
   std::string const DEFAULT_SWEEP_DST = "CG";
@@ -76,7 +75,6 @@ public:
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
 
   // Environment variables only for Sweep-preset
-  int sweepSrcIsExe;     // Non-zero if executor should always be the same as source
   int sweepMin;          // Min number of simultaneous Transfers to be executed per test
   int sweepMax;          // Max number of simulatneous Transfers to be executed per test
   int sweepTestLimit;    // Max number of tests to run during sweep (0 = no limit)
@@ -94,6 +92,9 @@ public:
 
   // Random generator
   std::default_random_engine *generator;
+
+  // Track how many CPUs are available per NUMA node
+  std::vector<int> numCpusPerNuma;
 
   // Constructor that collects values
   EnvVars()
@@ -122,7 +123,6 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
 
-    sweepSrcIsExe     = GetEnvVar("SWEEP_SRC_IS_EXE"    , DEFAULT_SWEEP_SRC_IS_EXE);
     sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
     sweepMax          = GetEnvVar("SWEEP_MAX"           , DEFAULT_SWEEP_MAX);
     sweepSrc          = GetEnvVar("SWEEP_SRC"           , DEFAULT_SWEEP_SRC);
@@ -287,6 +287,12 @@ public:
         exit(1);
       }
     }
+
+    // Determine how many CPUs exit per NUMA node (to avoid executing on NUMA without CPUs)
+    numCpusPerNuma.resize(numDetectedCpus);
+    int const totalCpus = numa_num_configured_cpus();
+    for (int i = 0; i < totalCpus; i++)
+      numCpusPerNuma[numa_node_of_cpu(i)]++;
   }
 
   // Display info on the env vars that can be used
@@ -393,7 +399,6 @@ public:
       printf("%-20s = %12s : Source Memory Types to sweep\n", "SWEEP_SRC", sweepSrc.c_str());
       printf("%-20s = %12s : Executor Types to sweep\n", "SWEEP_EXE", sweepExe.c_str());
       printf("%-20s = %12s : Destination Memory Types to sweep\n", "SWEEP_DST", sweepDst.c_str());
-      printf("%-20s = %12d : Transfer executor %s Transfer source\n", "SWEEP_SRC_IS_EXE", sweepSrcIsExe, sweepSrcIsExe ? "must match" : "may have any");
       printf("%-20s = %12d : Min simultaneous Transfers\n", "SWEEP_MIN", sweepMin);
       printf("%-20s = %12d : Max simultaneous Transfers              (0 = no limit)\n", "SWEEP_MAX", sweepMax);
       printf("%-20s = %12d : Max number of tests to run during sweep (0 = no limit)\n", "SWEEP_TEST_LIMIT", sweepTestLimit);
@@ -440,7 +445,6 @@ public:
       printf("SWEEP_SRC,%s,Source Memory Types to sweep\n", sweepSrc.c_str());
       printf("SWEEP_EXE,%s,Executor Types to sweep\n", sweepExe.c_str());
       printf("SWEEP_DST,%s,Destination Memory Types to sweep\n", sweepDst.c_str());
-      printf("SWEEP_SRC_IS_EXE,%d, Transfer executor %s Transfer source\n", sweepSrcIsExe, sweepSrcIsExe ? "must match" : "may have any");
       printf("SWEEP_SEED,%d,Random seed\n", sweepSeed);
       printf("SWEEP_MIN,%d,Min simultaneous Transfers\n", sweepMin);
       printf("SWEEP_MAX,%d,Max simultaneous Transfers (0 = no limit)\n", sweepMax);
