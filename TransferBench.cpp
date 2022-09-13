@@ -1598,6 +1598,8 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
 
   int numTestsRun = 0;
   int M = ev.sweepMin;
+  std::uniform_int_distribution<int> distribution(ev.sweepMin, maxParallelTransfers);
+
   // Create bitmask of numPossible triplets, of which M will be chosen
   std::string bitmask(M, 1);  bitmask.resize(numPossible, 0);
   auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -1607,8 +1609,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
     {
       // Pick random number of simultaneous transfers to execute
       // NOTE: This currently skews distribution due to some #s having more possibilities than others
-      M = ((maxParallelTransfers > ev.sweepMin) ? (rand() % (maxParallelTransfers - ev.sweepMin)) : 0)
-        + ev.sweepMin;
+      M = distribution(*ev.generator);
 
       // Generate a random bitmask
       for (int i = 0; i < numPossible; i++)
