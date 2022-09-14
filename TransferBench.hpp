@@ -55,18 +55,23 @@ size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);  // Amount of data transferre
 // Different src/dst memory types supported
 typedef enum
 {
-  MEM_CPU      = 0,    // Coarse-grained pinned CPU memory
-  MEM_GPU      = 1,    // Coarse-grained global GPU memory
-  MEM_CPU_FINE = 2,    // Fine-grained pinned CPU memory
-  MEM_GPU_FINE = 3     // Fine-grained global GPU memory
+  MEM_CPU          = 0, // Coarse-grained pinned CPU memory
+  MEM_GPU          = 1, // Coarse-grained global GPU memory
+  MEM_CPU_FINE     = 2, // Fine-grained pinned CPU memory
+  MEM_GPU_FINE     = 3, // Fine-grained global GPU memory
+  MEM_CPU_UNPINNED = 4 // Unpinned CPU memory
 } MemType;
 
 bool IsGpuType(MemType m)
 {
   return (m == MEM_GPU || m == MEM_GPU_FINE);
 }
+bool IsCpuType(MemType m)
+{
+  return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED);
+}
 
-char const MemTypeStr[5] = "CGBF";
+char const MemTypeStr[6] = "CGBFU";
 
 MemType inline CharToMemType(char const c)
 {
@@ -76,6 +81,7 @@ MemType inline CharToMemType(char const c)
   case 'G': return MEM_GPU;
   case 'B': return MEM_CPU_FINE;
   case 'F': return MEM_GPU_FINE;
+  case 'U': return MEM_CPU_UNPINNED;
   default:
     printf("[ERROR] Unexpected mem type (%c)\n", c);
     exit(1);
@@ -169,7 +175,7 @@ void ExecuteTransfers(EnvVars const& ev, int testNum, std::vector<size_t> const&
 
 void EnablePeerAccess(int const deviceId, int const peerDeviceId);
 void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPtr);
-void DeallocateMemory(MemType memType, void* memPtr);
+void DeallocateMemory(MemType memType, void* memPtr, size_t const size = 0);
 void CheckPages(char* byteArray, size_t numBytes, int targetId);
 void CheckOrFill(ModeType mode, int N, bool isMemset, bool isHipCall, std::vector<float> const& fillPattern, float* ptr);
 void RunTransfer(EnvVars const& ev, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);

@@ -467,8 +467,8 @@ void ExecuteTransfers(EnvVars const& ev,
       MemType const& dstMemType = transfer.dstMemType;
 
       // Allocate (maximum) source / destination memory based on type / device index
-      DeallocateMemory(srcMemType, transfer.srcMem);
-      DeallocateMemory(dstMemType, transfer.dstMem);
+      DeallocateMemory(srcMemType, transfer.srcMem,  maxN * sizeof(float) + ev.byteOffset);
+      DeallocateMemory(dstMemType, transfer.dstMem,  maxN * sizeof(float) + ev.byteOffset);
       transfer.blockParam.clear();
     }
 
@@ -733,8 +733,8 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
 
   switch (typeChar)
   {
-  case 'C': case 'c': case 'B': case 'b':
-    *memType = (typeChar == 'C' || typeChar == 'c') ? MEM_CPU : MEM_CPU_FINE;
+  case 'C': case 'c': case 'B': case 'b': case 'U': case 'u':
+    *memType = (typeChar == 'C' || typeChar == 'c') ? MEM_CPU : ((typeChar == 'B' || typeChar == 'b') ? MEM_CPU_FINE : MEM_CPU_UNPINNED);
     if (*memIndex < 0 || *memIndex >= numCpus)
     {
       printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", numCpus-1, *memIndex);
@@ -750,7 +750,7 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
     }
     break;
   default:
-    printf("[ERROR] Unrecognized memory type %s.  Expecting either 'B', 'C' or 'G' or 'F'\n", token.c_str());
+    printf("[ERROR] Unrecognized memory type %s.  Expecting either 'B','C','U','G' or 'F'\n", token.c_str());
     exit(1);
   }
 }
@@ -839,7 +839,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     exit(1);
   }
 
-  if (memType == MEM_CPU || memType == MEM_CPU_FINE)
+  if (memType == MEM_CPU || memType == MEM_CPU_FINE || memType == MEM_CPU_UNPINNED)
   {
     // Set numa policy prior to call to hipHostMalloc
     // NOTE: It may be possible that the actual configured numa nodes do not start at 0
@@ -864,12 +864,17 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     {
       HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser));
     }
-    else
+    else if (memType == MEM_CPU)
     {
       HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent));
     }
+    else if (memType == MEM_CPU_UNPINNED)
+    {
+      *memPtr = numa_alloc_onnode(numBytes, numaIdx);
+    }
 
     // Check that the allocated pages are actually on the correct NUMA node
+    memset(*memPtr, 0, numBytes);
     CheckPages((char*)*memPtr, numBytes, numaIdx);
 
     // Reset to default numa mem policy
@@ -898,11 +903,15 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
   }
 }
 
-void DeallocateMemory(MemType memType, void* memPtr)
+void DeallocateMemory(MemType memType, void* memPtr, size_t const bytes)
 {
   if (memType == MEM_CPU || memType == MEM_CPU_FINE)
   {
     HIP_CALL(hipHostFree(memPtr));
+  }
+  else if (memType == MEM_CPU_UNPINNED)
+  {
+    numa_free(memPtr, bytes);
   }
   else if (memType == MEM_GPU || memType == MEM_GPU_FINE)
   {
@@ -1024,20 +1033,16 @@ std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount)
 std::string GetDesc(MemType srcMemType, int srcIndex,
                     MemType dstMemType, int dstIndex)
 {
-  if (srcMemType == MEM_CPU || srcMemType == MEM_CPU_FINE)
+  if (IsCpuType(srcMemType))
   {
-    if (dstMemType == MEM_CPU || dstMemType == MEM_CPU_FINE)
-      return (srcIndex == dstIndex) ? "LOCAL" : "NUMA";
-    else if (dstMemType == MEM_GPU || dstMemType == MEM_GPU_FINE)
-      return "PCIE";
-    else
-      goto error;
+    if (IsCpuType(dstMemType)) return (srcIndex == dstIndex) ? "LOCAL" : "NUMA";
+    if (IsGpuType(dstMemType)) return "PCIE";
+    goto error;
   }
-  else if (srcMemType == MEM_GPU || srcMemType == MEM_GPU_FINE)
+  if (IsGpuType(srcMemType))
   {
-    if (dstMemType == MEM_CPU || dstMemType == MEM_CPU_FINE)
-      return "PCIE";
-    else if (dstMemType == MEM_GPU || dstMemType == MEM_GPU_FINE)
+    if (IsCpuType(dstMemType)) return "PCIE";
+    if (IsGpuType(dstMemType))
     {
       if (srcIndex == dstIndex) return "LOCAL";
       else
@@ -1049,8 +1054,6 @@ std::string GetDesc(MemType srcMemType, int srcIndex,
         return GetLinkTypeDesc(linkType, hopCount);
       }
     }
-    else
-      goto error;
   }
 error:
   printf("[ERROR] Unrecognized memory type\n");
