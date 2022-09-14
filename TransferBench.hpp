@@ -170,7 +170,7 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
 void ParseTransfers(char* line, int numCpus, int numGpus,
                     std::vector<Transfer>& transfers);
 
-void ExecuteTransfers(EnvVars const& ev, int testNum, std::vector<size_t> const& valuesOfN,
+void ExecuteTransfers(EnvVars const& ev, int const testNum, size_t const N,
                       std::vector<Transfer>& transfers);
 
 void EnablePeerAccess(int const deviceId, int const peerDeviceId);
