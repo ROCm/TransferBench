@@ -118,6 +118,7 @@ struct Transfer
   int     dstIndex;            // Destination device index
   int     numBlocksToUse;      // Number of threadblocks to use for this Transfer
   size_t  numBytes;            // Number of bytes to Transfer
+  size_t  numBytesToCopy;      // Number of bytes to copy
 
   // Memory
   float*  srcMem;              // Source memory
@@ -138,7 +139,7 @@ typedef std::pair<MemType, int> Executor;
 
 struct ExecutorInfo
 {
-  std::vector<Transfer>    transfers;     // Transfers to execute
+  std::vector<Transfer*>   transfers;     // Transfers to execute
   size_t                   totalBytes;    // Total bytes this executor transfers
 
   // For GPU-Executors
@@ -171,7 +172,7 @@ void ParseTransfers(char* line, int numCpus, int numGpus,
                     std::vector<Transfer>& transfers);
 
 void ExecuteTransfers(EnvVars const& ev, int const testNum, size_t const N,
-                      std::vector<Transfer>& transfers);
+                      std::vector<Transfer>& transfers, bool verbose = true);
 
 void EnablePeerAccess(int const deviceId, int const peerDeviceId);
 void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPtr);
