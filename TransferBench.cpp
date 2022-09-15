@@ -851,19 +851,11 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
   if (IsCpuType(memType))
   {
     // Set numa policy prior to call to hipHostMalloc
-    // NOTE: It may be possible that the actual configured numa nodes do not start at 0
-    //       so remapping may be necessary
-    // Find the 'deviceId'-th available NUMA node
-    int numaIdx = 0;
-    for (int i = 0; i <= devIndex; i++)
-      while (!numa_bitmask_isbitset(numa_get_mems_allowed(), numaIdx))
-        ++numaIdx;
-
-    unsigned long nodemask = (1ULL << numaIdx);
+    unsigned long nodemask = (1ULL << devIndex);
     long retCode = set_mempolicy(MPOL_BIND, &nodemask, sizeof(nodemask)*8);
     if (retCode)
     {
-      printf("[ERROR] Unable to set NUMA memory policy to bind to NUMA node %d\n", numaIdx);
+      printf("[ERROR] Unable to set NUMA memory policy to bind to NUMA node %d\n", devIndex);
       exit(1);
     }
 
@@ -879,12 +871,12 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     }
     else if (memType == MEM_CPU_UNPINNED)
     {
-      *memPtr = numa_alloc_onnode(numBytes, numaIdx);
+      *memPtr = numa_alloc_onnode(numBytes, devIndex);
     }
 
     // Check that the allocated pages are actually on the correct NUMA node
     memset(*memPtr, 0, numBytes);
-    CheckPages((char*)*memPtr, numBytes, numaIdx);
+    CheckPages((char*)*memPtr, numBytes, devIndex);
 
     // Reset to default numa mem policy
     retCode = set_mempolicy(MPOL_DEFAULT, NULL, 8);
