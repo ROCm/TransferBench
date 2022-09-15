@@ -1543,6 +1543,14 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
   std::uniform_int_distribution<int> randSize(1, numBytesPerTransfer / sizeof(float));
   std::uniform_int_distribution<int> distribution(ev.sweepMin, maxParallelTransfers);
 
+  // Log sweep to configuration file
+  FILE *fp = fopen("lastSweep.cfg", "w");
+  if (!fp)
+  {
+    printf("[ERROR] Unable to open lastSweep.cfg.  Check permissions\n");
+    exit(1);
+  }
+
   // Create bitmask of numPossible triplets, of which M will be chosen
   std::string bitmask(M, 1);  bitmask.resize(numPossible, 0);
   auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -1581,7 +1589,8 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
       }
     }
 
-    ExecuteTransfers(ev, ++numTestsRun, numBytesPerTransfer / sizeof(float), transfers);
+    LogTransfers(fp, ++numTestsRun, transfers);
+    ExecuteTransfers(ev, numTestsRun, numBytesPerTransfer / sizeof(float), transfers);
 
     // Check for test limit
     if (numTestsRun == ev.sweepTestLimit)
@@ -1613,4 +1622,22 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
         bitmask[i] = (i < M) ? 1 : 0;
     }
   }
+  fclose(fp);
+}
+
+void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& transfers)
+{
+  fprintf(fp, "# Test %d\n", testNum);
+  fprintf(fp, "%d", -1 * (int)transfers.size());
+  for (auto const& transfer : transfers)
+  {
+    fprintf(fp, " (%c%d->%c%d->%c%d %d %lu)",
+            MemTypeStr[transfer.srcMemType], transfer.srcIndex,
+            MemTypeStr[transfer.exeMemType], transfer.exeIndex,
+            MemTypeStr[transfer.dstMemType], transfer.dstIndex,
+            transfer.numBlocksToUse,
+            transfer.numBytes);
+  }
+  fprintf(fp, "\n");
+  fflush(fp);
 }

@@ -200,3 +200,4 @@ std::string GetDesc(MemType srcMemType, int srcIndex,
 std::string GetTransferDesc(Transfer const& transfer);
 int RemappedIndex(int const origIdx, MemType const memType);
 int GetWallClockRate(int deviceId);
+void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& transfers);
