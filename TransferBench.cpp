@@ -530,7 +530,7 @@ void DisplayUsage(char const* cmdName)
   printf("              g2g{_rr} - All GPU/GPU pairs benchmark {with remote reads}\n");
   printf("              sweep    - Sweep across possible sets of Transfers\n");
   printf("              rsweep   - Randomly sweep across possible sets of Transfers\n");
-  printf("            - 3rd optional argument will be used as # of CUs to use (uses all by default)\n");
+  printf("            - 3rd optional argument used as # of CUs to use (all by default for p2p / 4 for sweep)\n");
   printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
   printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
          DEFAULT_BYTES_PER_TRANSFER);
