@@ -26,7 +26,7 @@ THE SOFTWARE.
 #include <algorithm>
 #include <random>
 #include <time.h>
-#define TB_VERSION "1.05"
+#define TB_VERSION "1.06"
 
 extern char const MemTypeStr[];
 
