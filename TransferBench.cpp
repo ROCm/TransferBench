@@ -174,7 +174,7 @@ void ExecuteTransfers(EnvVars const& ev,
   }
 
   // Loop over each executor and prepare GPU resources
-  std::vector<Transfer*> transferList;
+  std::map<int, Transfer*> transferList;
   for (auto& exeInfoPair : transferMap)
   {
     Executor const& executor = exeInfoPair.first;
@@ -215,7 +215,7 @@ void ExecuteTransfers(EnvVars const& ev,
 
       transfer->blockParam.resize(exeMemType == MEM_CPU ? ev.numCpuPerTransfer : blocksToUse);
       exeInfo.totalBlocks += transfer->blockParam.size();
-      transferList.push_back(transfer);
+      transferList[transfer->transferIndex] = transfer;
     }
 
     // Prepare per-threadblock parameters for GPU executors
@@ -338,8 +338,9 @@ void ExecuteTransfers(EnvVars const& ev,
   // Validate that each transfer has transferred correctly
   size_t totalBytesTransferred = 0;
   int const numTransfers = transferList.size();
-  for (auto transfer : transferList)
+  for (auto transferPair : transferList)
   {
+    Transfer* transfer = transferPair.second;
     CheckOrFill(MODE_CHECK, transfer->numBytesToCopy / sizeof(float), ev.useMemset, ev.useHipCall, ev.fillPattern, transfer->dstMem + initOffset);
     totalBytesTransferred += transfer->numBytesToCopy;
   }
@@ -422,8 +423,9 @@ void ExecuteTransfers(EnvVars const& ev,
   }
   else
   {
-    for (auto const& transfer : transferList)
+    for (auto const& transferPair : transferList)
     {
+      Transfer* transfer = transferPair.second;
       double transferDurationMsec = transfer->transferTime / (1.0 * numTimedIterations);
       double transferBandwidthGbs = (transfer->numBytesToCopy / 1.0E9) / transferDurationMsec * 1000.0f;
       maxGpuTime = std::max(maxGpuTime, transferDurationMsec);
@@ -757,11 +759,11 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
 
   // If numTransfers < 0, read quads (srcMem, exeMem, dstMem, #CUs)
   // otherwise read triples (srcMem, exeMem, dstMem)
-  bool const perTransferCUs = (numTransfers < 0);
+  bool const advancedMode = (numTransfers < 0);
   numTransfers = abs(numTransfers);
 
   int numBlocksToUse;
-  if (!perTransferCUs)
+  if (!advancedMode)
   {
     iss >> numBlocksToUse;
     if (numBlocksToUse <= 0 || iss.fail())
@@ -771,27 +773,50 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
     }
   }
 
+  size_t numBytes = 0;
   for (int i = 0; i < numTransfers; i++)
   {
     Transfer transfer;
     transfer.transferIndex = i;
     transfer.numBytes = 0;
     transfer.numBytesToCopy = 0;
-    iss >> srcMem >> exeMem >> dstMem;
-    if (perTransferCUs) iss >> numBlocksToUse;
-    if (iss.fail())
+    if (!advancedMode)
     {
-      if (perTransferCUs)
-        printf("Parsing error: Unable to read valid Transfer quadruple (possibly missing a SRC or EXE or DST or #CU)\n");
-      else
-        printf("Parsing error: Unable to read valid Transfer triplet (possibly missing a SRC or EXE or DST)\n");
-      exit(1);
+      iss >> srcMem >> exeMem >> dstMem;
+      if (iss.fail())
+      {
+        printf("Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet\n", i+1);
+        exit(1);
+      }
+    }
+    else
+    {
+      std::string numBytesToken;
+      iss >> srcMem >> exeMem >> dstMem >> numBlocksToUse >> numBytesToken;
+      if (iss.fail())
+      {
+        printf("Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple\n", i+1);
+        exit(1);
+      }
+      if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1)
+      {
+        printf("Parsing error: '%s' is not a valid expression of numBytes for Transfer %d\n", numBytesToken.c_str(), i+1);
+        exit(1);
+      }
+      char units = numBytesToken.back();
+      switch (units)
+      {
+      case 'K': case 'k': numBytes *= 1024; break;
+      case 'M': case 'm': numBytes *= 1024*1024; break;
+      case 'G': case 'g': numBytes *= 1024*1024*1024; break;
+      }
     }
 
     ParseMemType(srcMem, numCpus, numGpus, &transfer.srcMemType, &transfer.srcIndex);
     ParseMemType(exeMem, numCpus, numGpus, &transfer.exeMemType, &transfer.exeIndex);
     ParseMemType(dstMem, numCpus, numGpus, &transfer.dstMemType, &transfer.dstIndex);
     transfer.numBlocksToUse = numBlocksToUse;
+    transfer.numBytes = numBytes;
     transfers.push_back(transfer);
   }
 }
