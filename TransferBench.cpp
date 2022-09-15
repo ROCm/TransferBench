@@ -76,8 +76,10 @@ int main(int argc, char **argv)
   // - Tests that sweep across possible sets of Transfers
   if (!strcmp(argv[1], "sweep") || !strcmp(argv[1], "rsweep"))
   {
+    int numBlocksToUse = (argc > 3 ? atoi(argv[3]) : 4);
+
     ev.configMode = CFG_SWEEP;
-    RunSweepPreset(ev, numBytesPerTransfer, !strcmp(argv[1], "rsweep"));
+    RunSweepPreset(ev, numBytesPerTransfer, numBlocksToUse, !strcmp(argv[1], "rsweep"));
     exit(0);
   }
   // - Tests that benchmark peer-to-peer performance
@@ -1373,7 +1375,7 @@ int GetWallClockRate(int deviceId)
   return wallClockPerDeviceMhz[deviceId];
 }
 
-void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool const isRandom)
+void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numBlocksToUse, bool const isRandom)
 {
   ev.DisplaySweepEnvVars();
 
@@ -1574,7 +1576,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
         transfer.exeIndex       = possibleTransfers[value].exeIndex;
         transfer.dstMemType     = possibleTransfers[value].dstMemType;
         transfer.dstIndex       = possibleTransfers[value].dstIndex;
-        transfer.numBlocksToUse = IsGpuType(transfer.exeMemType) ? 4 : ev.numCpuPerTransfer;
+        transfer.numBlocksToUse = IsGpuType(transfer.exeMemType) ? numBlocksToUse : ev.numCpuPerTransfer;
         transfer.transferIndex  = transfers.size();
         transfer.numBytes       = ev.sweepRandBytes ? randSize(*ev.generator) * sizeof(float) : 0;
         transfers.push_back(transfer);

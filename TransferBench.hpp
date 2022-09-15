@@ -181,7 +181,7 @@ void CheckPages(char* byteArray, size_t numBytes, int targetId);
 void CheckOrFill(ModeType mode, int N, bool isMemset, bool isHipCall, std::vector<float> const& fillPattern, float* ptr);
 void RunTransfer(EnvVars const& ev, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);
 void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N, int numBlocksToUse, int readMode, int skipCpu);
-void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool const isRandom);
+void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numBlocksToUse, bool const isRandom);
 
 // Return the maximum bandwidth measured for given (src/dst) pair
 double GetPeakBandwidth(EnvVars const& ev,
