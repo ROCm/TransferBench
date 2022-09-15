@@ -54,9 +54,6 @@ int main(int argc, char **argv)
   EnvVars ev;
 
   // Determine number of bytes to run per Transfer
-  // If a non-zero number of bytes is specified, use it
-  // Otherwise generate array of bytes values to execute over
-  std::vector<size_t> valuesOfN;
   size_t numBytesPerTransfer = argc > 2 ? atoll(argv[2]) : DEFAULT_BYTES_PER_TRANSFER;
   if (argc > 2)
   {
@@ -69,14 +66,20 @@ int main(int argc, char **argv)
     case 'G': case 'g': numBytesPerTransfer *= 1024*1024*1024; break;
     }
   }
-  PopulateTestSizes(numBytesPerTransfer, ev.samplingFactor, valuesOfN);
+  if (numBytesPerTransfer % 4)
+  {
+    printf("[ERROR] numBytesPerTransfer (%lu) must be a multiple of 4\n", numBytesPerTransfer);
+    exit(1);
+  }
 
   // Check for preset tests
   // - Tests that sweep across possible sets of Transfers
   if (!strcmp(argv[1], "sweep") || !strcmp(argv[1], "rsweep"))
   {
+    int numBlocksToUse = (argc > 3 ? atoi(argv[3]) : 4);
+
     ev.configMode = CFG_SWEEP;
-    RunSweepPreset(ev, numBytesPerTransfer, !strcmp(argv[1], "rsweep"));
+    RunSweepPreset(ev, numBytesPerTransfer, numBlocksToUse, !strcmp(argv[1], "rsweep"));
     exit(0);
   }
   // - Tests that benchmark peer-to-peer performance
@@ -129,7 +132,26 @@ int main(int argc, char **argv)
     ParseTransfers(line, ev.numCpuDevices, ev.numGpuDevices, transfers);
     if (transfers.empty()) continue;
 
-    ExecuteTransfers(ev, ++testNum, valuesOfN, transfers);
+    // If the number of bytes is specified, use it
+    if (numBytesPerTransfer != 0)
+    {
+      size_t N = numBytesPerTransfer / sizeof(float);
+      ExecuteTransfers(ev, ++testNum, N, transfers);
+    }
+    else
+    {
+      // Otherwise generate a range of values
+      for (int N = 256; N <= (1<<27); N *= 2)
+      {
+        int delta = std::max(32, N / ev.samplingFactor);
+        int curr = N;
+        while (curr < N * 2)
+        {
+          ExecuteTransfers(ev, ++testNum, N, transfers);
+          curr += delta;
+        }
+      }
+    }
   }
   fclose(fp);
 
@@ -137,28 +159,24 @@ int main(int argc, char **argv)
 }
 
 void ExecuteTransfers(EnvVars const& ev,
-                      int testNum,
-                      std::vector<size_t> const& valuesOfN,
-                      std::vector<Transfer>& transfers)
+                      int const testNum,
+                      size_t const N,
+                      std::vector<Transfer>& transfers,
+                      bool verbose)
 {
   int const initOffset = ev.byteOffset / sizeof(float);
 
-  // Find the largest N to be used - memory will only be allocated once per set of Transfers
-  size_t maxN = valuesOfN[0];
-  for (auto N : valuesOfN)
-    maxN = std::max(maxN, N);
-
   // Map transfers by executor
   TransferMap transferMap;
-  for (Transfer const& transfer : transfers)
+  for (Transfer& transfer : transfers)
   {
     Executor executor(transfer.exeMemType, transfer.exeIndex);
     ExecutorInfo& executorInfo = transferMap[executor];
-    executorInfo.transfers.push_back(transfer);
+    executorInfo.transfers.push_back(&transfer);
   }
 
   // Loop over each executor and prepare GPU resources
-  std::vector<Transfer*> transferList;
+  std::map<int, Transfer*> transferList;
   for (auto& exeInfoPair : transferMap)
   {
     Executor const& executor = exeInfoPair.first;
@@ -167,18 +185,18 @@ void ExecuteTransfers(EnvVars const& ev,
     exeInfo.totalBlocks = 0;
 
     // Loop over each transfer this executor is involved in
-    for (Transfer& transfer : exeInfo.transfers)
+    for (Transfer* transfer : exeInfo.transfers)
     {
       // Get some aliases to transfer variables
-      MemType const& exeMemType  = transfer.exeMemType;
-      MemType const& srcMemType  = transfer.srcMemType;
-      MemType const& dstMemType  = transfer.dstMemType;
-      int     const& blocksToUse = transfer.numBlocksToUse;
+      MemType const& exeMemType  = transfer->exeMemType;
+      MemType const& srcMemType  = transfer->srcMemType;
+      MemType const& dstMemType  = transfer->dstMemType;
+      int     const& blocksToUse = transfer->numBlocksToUse;
 
       // Get potentially remapped device indices
-      int const srcIndex = RemappedIndex(transfer.srcIndex, srcMemType);
-      int const exeIndex = RemappedIndex(transfer.exeIndex, exeMemType);
-      int const dstIndex = RemappedIndex(transfer.dstIndex, dstMemType);
+      int const srcIndex = RemappedIndex(transfer->srcIndex, srcMemType);
+      int const exeIndex = RemappedIndex(transfer->exeIndex, exeMemType);
+      int const dstIndex = RemappedIndex(transfer->dstIndex, dstMemType);
 
       // Enable peer-to-peer access if necessary (can only be called once per unique pair)
       if (exeMemType == MEM_GPU)
@@ -193,12 +211,13 @@ void ExecuteTransfers(EnvVars const& ev,
       }
 
       // Allocate (maximum) source / destination memory based on type / device index
-      AllocateMemory(srcMemType, srcIndex, maxN * sizeof(float) + ev.byteOffset, (void**)&transfer.srcMem);
-      AllocateMemory(dstMemType, dstIndex, maxN * sizeof(float) + ev.byteOffset, (void**)&transfer.dstMem);
+      transfer->numBytesToCopy = (transfer->numBytes ? transfer->numBytes : N * sizeof(float));
+      AllocateMemory(srcMemType, srcIndex, transfer->numBytesToCopy + ev.byteOffset, (void**)&transfer->srcMem);
+      AllocateMemory(dstMemType, dstIndex, transfer->numBytesToCopy + ev.byteOffset, (void**)&transfer->dstMem);
 
-      transfer.blockParam.resize(exeMemType == MEM_CPU ? ev.numCpuPerTransfer : blocksToUse);
-      exeInfo.totalBlocks += transfer.blockParam.size();
-      transferList.push_back(&transfer);
+      transfer->blockParam.resize(exeMemType == MEM_CPU ? ev.numCpuPerTransfer : blocksToUse);
+      exeInfo.totalBlocks += transfer->blockParam.size();
+      transferList[transfer->transferIndex] = transfer;
     }
 
     // Prepare per-threadblock parameters for GPU executors
@@ -227,209 +246,163 @@ void ExecuteTransfers(EnvVars const& ev,
       int transferOffset = 0;
       for (int i = 0; i < exeInfo.transfers.size(); i++)
       {
-        exeInfo.transfers[i].blockParamGpuPtr = exeInfo.blockParamGpu + transferOffset;
-        transferOffset += exeInfo.transfers[i].blockParam.size();
+        exeInfo.transfers[i]->blockParamGpuPtr = exeInfo.blockParamGpu + transferOffset;
+        transferOffset += exeInfo.transfers[i]->blockParam.size();
       }
     }
   }
 
-  // Loop over all the different number of bytes to use per Transfer
-  for (auto N : valuesOfN)
+  if (verbose && !ev.outputToCsv) printf("Test %d:\n", testNum);
+
+  // Prepare input memory and block parameters for current N
+  for (auto& exeInfoPair : transferMap)
   {
-    std::uniform_int_distribution<int> distribution(1,N);
-    if (!ev.outputToCsv) printf("Test %d:\n", testNum);
+    ExecutorInfo& exeInfo = exeInfoPair.second;
+    exeInfo.totalBytes = 0;
 
-    // Prepare input memory and block parameters for current N
-    for (auto& exeInfoPair : transferMap)
+    int transferOffset = 0;
+    for (int i = 0; i < exeInfo.transfers.size(); ++i)
     {
-      ExecutorInfo& exeInfo = exeInfoPair.second;
-      exeInfo.totalBytes = 0;
+      // Prepare subarrays each threadblock works on and fill src memory with patterned data
+      Transfer* transfer = exeInfo.transfers[i];
+      transfer->PrepareBlockParams(ev, transfer->numBytesToCopy / sizeof(float));
+      exeInfo.totalBytes += transfer->numBytesToCopy;
 
-      int transferOffset = 0;
-      for (int i = 0; i < exeInfo.transfers.size(); ++i)
+      // Copy block parameters to GPU for GPU executors
+      if (transfer->exeMemType == MEM_GPU)
       {
-        // Prepare subarrays each threadblock works on and fill src memory with patterned data
-        Transfer& transfer = exeInfo.transfers[i];
-        transfer.numBytes = ((ev.configMode == CFG_SWEEP && ev.sweepRandBytes) ? distribution(*ev.generator) : N) * sizeof(float);
-        transfer.PrepareBlockParams(ev, transfer.numBytes / sizeof(float));
-        exeInfo.totalBytes += transfer.numBytes;
-
-        // Copy block parameters to GPU for GPU executors
-        if (transfer.exeMemType == MEM_GPU)
-        {
-          HIP_CALL(hipMemcpy(&exeInfo.blockParamGpu[transferOffset],
-                             transfer.blockParam.data(),
-                             transfer.blockParam.size() * sizeof(BlockParam),
-                             hipMemcpyHostToDevice));
-          transferOffset += transfer.blockParam.size();
-        }
+        HIP_CALL(hipMemcpy(&exeInfo.blockParamGpu[transferOffset],
+                           transfer->blockParam.data(),
+                           transfer->blockParam.size() * sizeof(BlockParam),
+                           hipMemcpyHostToDevice));
+        transferOffset += transfer->blockParam.size();
       }
     }
+  }
 
-    // Launch kernels (warmup iterations are not counted)
-    double totalCpuTime = 0;
-    size_t numTimedIterations = 0;
-    std::stack<std::thread> threads;
-    for (int iteration = -ev.numWarmups; ; iteration++)
+  // Launch kernels (warmup iterations are not counted)
+  double totalCpuTime = 0;
+  size_t numTimedIterations = 0;
+  std::stack<std::thread> threads;
+  for (int iteration = -ev.numWarmups; ; iteration++)
+  {
+    if (ev.numIterations > 0 && iteration >= ev.numIterations) break;
+    if (ev.numIterations < 0 && totalCpuTime > -ev.numIterations) break;
+
+    // Pause before starting first timed iteration in interactive mode
+    if (verbose && ev.useInteractive && iteration == 0)
     {
-      if (ev.numIterations > 0 && iteration >= ev.numIterations) break;
-      if (ev.numIterations < 0 && totalCpuTime > -ev.numIterations) break;
-
-      // Pause before starting first timed iteration in interactive mode
-      if (ev.useInteractive && iteration == 0)
-      {
-        printf("Hit <Enter> to continue: ");
-        scanf("%*c");
-        printf("\n");
-      }
-
-      // Start CPU timing for this iteration
-      auto cpuStart = std::chrono::high_resolution_clock::now();
-
-      // Execute all Transfers in parallel
-      for (auto& exeInfoPair : transferMap)
-      {
-        ExecutorInfo& exeInfo = exeInfoPair.second;
-        int const numTransfersToRun = (IsGpuType(exeInfoPair.first.first) && ev.useSingleStream) ?
-          1 : exeInfo.transfers.size();
-        for (int i = 0; i < numTransfersToRun; ++i)
-          threads.push(std::thread(RunTransfer, std::ref(ev), iteration, std::ref(exeInfo), i));
-      }
-
-      // Wait for all threads to finish
-      int const numTransfers = threads.size();
-      for (int i = 0; i < numTransfers; i++)
-      {
-        threads.top().join();
-        threads.pop();
-      }
-
-      // Stop CPU timing for this iteration
-      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-      double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
-
-      if (iteration >= 0)
-      {
-        ++numTimedIterations;
-        totalCpuTime += deltaSec;
-      }
-    }
-
-    // Pause for interactive mode
-    if (ev.useInteractive)
-    {
-      printf("Transfers complete. Hit <Enter> to continue: ");
+      printf("Hit <Enter> to continue: ");
       scanf("%*c");
       printf("\n");
     }
 
-    // Validate that each transfer has transferred correctly
-    size_t totalBytesTransferred = 0;
-    int const numTransfers = transferList.size();
-    for (auto transfer : transferList)
+    // Start CPU timing for this iteration
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    // Execute all Transfers in parallel
+    for (auto& exeInfoPair : transferMap)
     {
-      CheckOrFill(MODE_CHECK, transfer->numBytes / sizeof(float), ev.useMemset, ev.useHipCall, ev.fillPattern, transfer->dstMem + initOffset);
-      totalBytesTransferred += transfer->numBytes;
+      ExecutorInfo& exeInfo = exeInfoPair.second;
+      int const numTransfersToRun = (IsGpuType(exeInfoPair.first.first) && ev.useSingleStream) ?
+        1 : exeInfo.transfers.size();
+      for (int i = 0; i < numTransfersToRun; ++i)
+        threads.push(std::thread(RunTransfer, std::ref(ev), iteration, std::ref(exeInfo), i));
     }
 
-    // Report timings
-    totalCpuTime = totalCpuTime / (1.0 * numTimedIterations) * 1000;
-    double totalBandwidthGbs = (totalBytesTransferred / 1.0E6) / totalCpuTime;
-    double maxGpuTime = 0;
-
-    if (ev.useSingleStream)
+    // Wait for all threads to finish
+    int const numTransfers = threads.size();
+    for (int i = 0; i < numTransfers; i++)
     {
-      for (auto& exeInfoPair : transferMap)
+      threads.top().join();
+      threads.pop();
+    }
+
+    // Stop CPU timing for this iteration
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
+
+    if (iteration >= 0)
+    {
+      ++numTimedIterations;
+      totalCpuTime += deltaSec;
+    }
+  }
+
+  // Pause for interactive mode
+  if (verbose && ev.useInteractive)
+  {
+    printf("Transfers complete. Hit <Enter> to continue: ");
+    scanf("%*c");
+    printf("\n");
+  }
+
+  // Validate that each transfer has transferred correctly
+  size_t totalBytesTransferred = 0;
+  int const numTransfers = transferList.size();
+  for (auto transferPair : transferList)
+  {
+    Transfer* transfer = transferPair.second;
+    CheckOrFill(MODE_CHECK, transfer->numBytesToCopy / sizeof(float), ev.useMemset, ev.useHipCall, ev.fillPattern, transfer->dstMem + initOffset);
+    totalBytesTransferred += transfer->numBytesToCopy;
+  }
+
+  // Report timings
+  totalCpuTime = totalCpuTime / (1.0 * numTimedIterations) * 1000;
+  double totalBandwidthGbs = (totalBytesTransferred / 1.0E6) / totalCpuTime;
+  double maxGpuTime = 0;
+
+  if (ev.useSingleStream)
+  {
+    for (auto& exeInfoPair : transferMap)
+    {
+      ExecutorInfo  exeInfo    = exeInfoPair.second;
+      MemType const exeMemType = exeInfoPair.first.first;
+      int     const exeIndex   = exeInfoPair.first.second;
+
+      // Compute total time for CPU executors
+      if (!IsGpuType(exeMemType))
       {
-        ExecutorInfo  exeInfo    = exeInfoPair.second;
-        MemType const exeMemType = exeInfoPair.first.first;
-        int     const exeIndex   = exeInfoPair.first.second;
-
-        // Compute total time for CPU executors
-        if (!IsGpuType(exeMemType))
-        {
-          exeInfo.totalTime = 0;
-          for (auto const& transfer : exeInfo.transfers)
-            exeInfo.totalTime = std::max(exeInfo.totalTime, transfer.transferTime);
-        }
-
-        double exeDurationMsec = exeInfo.totalTime / (1.0 * numTimedIterations);
-        double exeBandwidthGbs = (exeInfo.totalBytes / 1.0E9) / exeDurationMsec * 1000.0f;
-        maxGpuTime = std::max(maxGpuTime, exeDurationMsec);
-
-        if (!ev.outputToCsv)
-        {
-          printf(" Executor: %cPU %02d        (# Transfers %02lu)| %9.3f GB/s | %8.3f ms | %12lu bytes\n",
-                 MemTypeStr[exeMemType], exeIndex, exeInfo.transfers.size(), exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes);
-        }
-
-        int totalCUs = 0;
+        exeInfo.totalTime = 0;
         for (auto const& transfer : exeInfo.transfers)
-        {
-          double transferDurationMsec = transfer.transferTime / (1.0 * numTimedIterations);
-          double transferBandwidthGbs = (N * sizeof(float) / 1.0E9) / transferDurationMsec * 1000.0f;
-          totalCUs += transfer.exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer.numBlocksToUse;
-
-          if (!ev.outputToCsv)
-          {
-            printf("                            Transfer  %02d | %9.3f GB/s | %8.3f ms | %12lu bytes | %c%02d -> %c%02d:(%03d) -> %c%02d\n",
-                   transfer.transferIndex,
-                   transferBandwidthGbs,
-                   transferDurationMsec,
-                   transfer.numBytes,
-                   MemTypeStr[transfer.srcMemType], transfer.srcIndex,
-                   MemTypeStr[transfer.exeMemType], transfer.exeIndex,
-                   transfer.exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer.numBlocksToUse,
-                   MemTypeStr[transfer.dstMemType], transfer.dstIndex);
-
-          }
-          else
-          {
-            printf("%d,%d,%lu,%c%02d,%c%02d,%c%02d,%d,%.3f,%.3f,%s,%s,%p,%p\n",
-                   testNum, transfer.transferIndex, transfer.numBytes,
-                   MemTypeStr[transfer.srcMemType], transfer.srcIndex,
-                   MemTypeStr[transfer.exeMemType], transfer.exeIndex,
-                   MemTypeStr[transfer.dstMemType], transfer.dstIndex,
-                   transfer.exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer.numBlocksToUse,
-                   transferBandwidthGbs, transferDurationMsec,
-                   GetDesc(transfer.exeMemType, transfer.exeIndex, transfer.srcMemType, transfer.srcIndex).c_str(),
-                   GetDesc(transfer.exeMemType, transfer.exeIndex, transfer.dstMemType, transfer.dstIndex).c_str(),
-                   transfer.srcMem + initOffset, transfer.dstMem + initOffset);
-          }
-        }
-
-        if (ev.outputToCsv)
-        {
-          printf("%d,ALL,%lu,ALL,%c%02d,ALL,%d,%.3f,%.3f,ALL,ALL,ALL,ALL\n",
-                 testNum, totalBytesTransferred,
-                 MemTypeStr[exeMemType], exeIndex, totalCUs,
-                 exeBandwidthGbs, exeDurationMsec);
-        }
+          exeInfo.totalTime = std::max(exeInfo.totalTime, transfer->transferTime);
       }
-    }
-    else
-    {
-      for (auto const& transfer : transferList)
+
+      double exeDurationMsec = exeInfo.totalTime / (1.0 * numTimedIterations);
+      double exeBandwidthGbs = (exeInfo.totalBytes / 1.0E9) / exeDurationMsec * 1000.0f;
+      maxGpuTime = std::max(maxGpuTime, exeDurationMsec);
+
+      if (verbose && !ev.outputToCsv)
+      {
+        printf(" Executor: %cPU %02d        (# Transfers %02lu)| %9.3f GB/s | %8.3f ms | %12lu bytes\n",
+               MemTypeStr[exeMemType], exeIndex, exeInfo.transfers.size(), exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes);
+      }
+
+      int totalCUs = 0;
+      for (auto const& transfer : exeInfo.transfers)
       {
         double transferDurationMsec = transfer->transferTime / (1.0 * numTimedIterations);
-        double transferBandwidthGbs = (transfer->numBytes / 1.0E9) / transferDurationMsec * 1000.0f;
-        maxGpuTime = std::max(maxGpuTime, transferDurationMsec);
+        double transferBandwidthGbs = (N * sizeof(float) / 1.0E9) / transferDurationMsec * 1000.0f;
+        totalCUs += transfer->exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer->numBlocksToUse;
+
+        if (!verbose) continue;
         if (!ev.outputToCsv)
         {
-          printf(" Transfer %02d: %c%02d -> [%cPU %02d:%03d] -> %c%02d | %9.3f GB/s | %8.3f ms | %12lu bytes | %-16s\n",
+          printf("                            Transfer  %02d | %9.3f GB/s | %8.3f ms | %12lu bytes | %c%02d -> %c%02d:(%03d) -> %c%02d\n",
                  transfer->transferIndex,
+                 transferBandwidthGbs,
+                 transferDurationMsec,
+                 transfer->numBytesToCopy,
                  MemTypeStr[transfer->srcMemType], transfer->srcIndex,
                  MemTypeStr[transfer->exeMemType], transfer->exeIndex,
                  transfer->exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer->numBlocksToUse,
-                 MemTypeStr[transfer->dstMemType], transfer->dstIndex,
-                 transferBandwidthGbs, transferDurationMsec,
-                 transfer->numBytes,
-                 GetTransferDesc(*transfer).c_str());
+                 MemTypeStr[transfer->dstMemType], transfer->dstIndex);
+
         }
         else
         {
           printf("%d,%d,%lu,%c%02d,%c%02d,%c%02d,%d,%.3f,%.3f,%s,%s,%p,%p\n",
-                 testNum, transfer->transferIndex, transfer->numBytes,
+                 testNum, transfer->transferIndex, transfer->numBytesToCopy,
                  MemTypeStr[transfer->srcMemType], transfer->srcIndex,
                  MemTypeStr[transfer->exeMemType], transfer->exeIndex,
                  MemTypeStr[transfer->dstMemType], transfer->dstIndex,
@@ -440,9 +413,56 @@ void ExecuteTransfers(EnvVars const& ev,
                  transfer->srcMem + initOffset, transfer->dstMem + initOffset);
         }
       }
-    }
 
-    // Display aggregate statistics
+      if (verbose && ev.outputToCsv)
+      {
+        printf("%d,ALL,%lu,ALL,%c%02d,ALL,%d,%.3f,%.3f,ALL,ALL,ALL,ALL\n",
+               testNum, totalBytesTransferred,
+               MemTypeStr[exeMemType], exeIndex, totalCUs,
+               exeBandwidthGbs, exeDurationMsec);
+      }
+    }
+  }
+  else
+  {
+    for (auto const& transferPair : transferList)
+    {
+      Transfer* transfer = transferPair.second;
+      double transferDurationMsec = transfer->transferTime / (1.0 * numTimedIterations);
+      double transferBandwidthGbs = (transfer->numBytesToCopy / 1.0E9) / transferDurationMsec * 1000.0f;
+      maxGpuTime = std::max(maxGpuTime, transferDurationMsec);
+      if (!verbose) continue;
+      if (!ev.outputToCsv)
+      {
+        printf(" Transfer %02d: %c%02d -> [%cPU %02d:%03d] -> %c%02d | %9.3f GB/s | %8.3f ms | %12lu bytes | %-16s\n",
+               transfer->transferIndex,
+               MemTypeStr[transfer->srcMemType], transfer->srcIndex,
+               MemTypeStr[transfer->exeMemType], transfer->exeIndex,
+               transfer->exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer->numBlocksToUse,
+               MemTypeStr[transfer->dstMemType], transfer->dstIndex,
+               transferBandwidthGbs, transferDurationMsec,
+               transfer->numBytesToCopy,
+               GetTransferDesc(*transfer).c_str());
+      }
+      else
+      {
+        printf("%d,%d,%lu,%c%02d,%c%02d,%c%02d,%d,%.3f,%.3f,%s,%s,%p,%p\n",
+               testNum, transfer->transferIndex, transfer->numBytesToCopy,
+               MemTypeStr[transfer->srcMemType], transfer->srcIndex,
+               MemTypeStr[transfer->exeMemType], transfer->exeIndex,
+               MemTypeStr[transfer->dstMemType], transfer->dstIndex,
+               transfer->exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer->numBlocksToUse,
+               transferBandwidthGbs, transferDurationMsec,
+               GetDesc(transfer->exeMemType, transfer->exeIndex, transfer->srcMemType, transfer->srcIndex).c_str(),
+               GetDesc(transfer->exeMemType, transfer->exeIndex, transfer->dstMemType, transfer->dstIndex).c_str(),
+               transfer->srcMem + initOffset, transfer->dstMem + initOffset);
+      }
+    }
+  }
+
+  // Display aggregate statistics
+  if (verbose)
+  {
     if (!ev.outputToCsv)
     {
       printf(" Aggregate Bandwidth (CPU timed)         | %9.3f GB/s | %8.3f ms | %12lu bytes | Overhead: %.3f ms\n",
@@ -462,14 +482,14 @@ void ExecuteTransfers(EnvVars const& ev,
     for (auto& transfer : exeInfo.transfers)
     {
       // Get some aliases to Transfer variables
-      MemType const& exeMemType = transfer.exeMemType;
-      MemType const& srcMemType = transfer.srcMemType;
-      MemType const& dstMemType = transfer.dstMemType;
+      MemType const& exeMemType = transfer->exeMemType;
+      MemType const& srcMemType = transfer->srcMemType;
+      MemType const& dstMemType = transfer->dstMemType;
 
       // Allocate (maximum) source / destination memory based on type / device index
-      DeallocateMemory(srcMemType, transfer.srcMem);
-      DeallocateMemory(dstMemType, transfer.dstMem);
-      transfer.blockParam.clear();
+      DeallocateMemory(srcMemType, transfer->srcMem,  N * sizeof(float) + ev.byteOffset);
+      DeallocateMemory(dstMemType, transfer->dstMem,  N * sizeof(float) + ev.byteOffset);
+      transfer->blockParam.clear();
     }
 
     MemType const exeMemType = exeInfoPair.first.first;
@@ -510,7 +530,7 @@ void DisplayUsage(char const* cmdName)
   printf("              g2g{_rr} - All GPU/GPU pairs benchmark {with remote reads}\n");
   printf("              sweep    - Sweep across possible sets of Transfers\n");
   printf("              rsweep   - Randomly sweep across possible sets of Transfers\n");
-  printf("            - 3rd optional argument will be used as # of CUs to use (uses all by default)\n");
+  printf("            - 3rd optional argument used as # of CUs to use (all by default for p2p / 4 for sweep)\n");
   printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
   printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
          DEFAULT_BYTES_PER_TRANSFER);
@@ -603,9 +623,9 @@ void DisplayTopology(bool const outputToCsv)
     {
       int numaDist = numa_distance(i,j);
       if (outputToCsv)
-	printf("%d,", numaDist);
+        printf("%d,", numaDist);
       else
-	printf(" %6d |", numaDist);
+        printf(" %6d |", numaDist);
     }
 
     int numCpus = 0;
@@ -622,8 +642,8 @@ void DisplayTopology(bool const outputToCsv)
       if (GetClosestNumaNode(RemappedIndex(j, MEM_GPU)) == i)
       {
         if (isFirst) isFirst = false;
-	else printf(",");
-	printf("%d", j);
+        else printf(",");
+        printf("%d", j);
       }
     }
     printf("\n");
@@ -687,40 +707,6 @@ void DisplayTopology(bool const outputToCsv)
   }
 }
 
-void PopulateTestSizes(size_t const numBytesPerTransfer,
-                       int const samplingFactor,
-                       std::vector<size_t>& valuesOfN)
-{
-  valuesOfN.clear();
-
-  // If the number of bytes is specified, use it
-  if (numBytesPerTransfer != 0)
-  {
-    if (numBytesPerTransfer % 4)
-    {
-      printf("[ERROR] numBytesPerTransfer (%lu) must be a multiple of 4\n", numBytesPerTransfer);
-      exit(1);
-    }
-    size_t N = numBytesPerTransfer / sizeof(float);
-    valuesOfN.push_back(N);
-  }
-  else
-  {
-    // Otherwise generate a range of values
-    // (Powers of 2, with samplingFactor samples between successive powers of 2)
-    for (int N = 256; N <= (1<<27); N *= 2)
-    {
-      int delta = std::max(32, N / samplingFactor);
-      int curr = N;
-      while (curr < N * 2)
-      {
-        valuesOfN.push_back(curr);
-        curr += delta;
-      }
-    }
-  }
-}
-
 void ParseMemType(std::string const& token, int const numCpus, int const numGpus, MemType* memType, int* memIndex)
 {
   char typeChar;
@@ -733,8 +719,8 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
 
   switch (typeChar)
   {
-  case 'C': case 'c': case 'B': case 'b':
-    *memType = (typeChar == 'C' || typeChar == 'c') ? MEM_CPU : MEM_CPU_FINE;
+  case 'C': case 'c': case 'B': case 'b': case 'U': case 'u':
+    *memType = (typeChar == 'C' || typeChar == 'c') ? MEM_CPU : ((typeChar == 'B' || typeChar == 'b') ? MEM_CPU_FINE : MEM_CPU_UNPINNED);
     if (*memIndex < 0 || *memIndex >= numCpus)
     {
       printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", numCpus-1, *memIndex);
@@ -750,7 +736,7 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
     }
     break;
   default:
-    printf("[ERROR] Unrecognized memory type %s.  Expecting either 'B', 'C' or 'G' or 'F'\n", token.c_str());
+    printf("[ERROR] Unrecognized memory type %s.  Expecting either 'B','C','U','G' or 'F'\n", token.c_str());
     exit(1);
   }
 }
@@ -775,11 +761,11 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
 
   // If numTransfers < 0, read quads (srcMem, exeMem, dstMem, #CUs)
   // otherwise read triples (srcMem, exeMem, dstMem)
-  bool const perTransferCUs = (numTransfers < 0);
+  bool const advancedMode = (numTransfers < 0);
   numTransfers = abs(numTransfers);
 
   int numBlocksToUse;
-  if (!perTransferCUs)
+  if (!advancedMode)
   {
     iss >> numBlocksToUse;
     if (numBlocksToUse <= 0 || iss.fail())
@@ -789,25 +775,50 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
     }
   }
 
+  size_t numBytes = 0;
   for (int i = 0; i < numTransfers; i++)
   {
     Transfer transfer;
     transfer.transferIndex = i;
-    iss >> srcMem >> exeMem >> dstMem;
-    if (perTransferCUs) iss >> numBlocksToUse;
-    if (iss.fail())
+    transfer.numBytes = 0;
+    transfer.numBytesToCopy = 0;
+    if (!advancedMode)
     {
-      if (perTransferCUs)
-        printf("Parsing error: Unable to read valid Transfer quadruple (possibly missing a SRC or EXE or DST or #CU)\n");
-      else
-        printf("Parsing error: Unable to read valid Transfer triplet (possibly missing a SRC or EXE or DST)\n");
-      exit(1);
+      iss >> srcMem >> exeMem >> dstMem;
+      if (iss.fail())
+      {
+        printf("Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet\n", i+1);
+        exit(1);
+      }
+    }
+    else
+    {
+      std::string numBytesToken;
+      iss >> srcMem >> exeMem >> dstMem >> numBlocksToUse >> numBytesToken;
+      if (iss.fail())
+      {
+        printf("Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple\n", i+1);
+        exit(1);
+      }
+      if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1)
+      {
+        printf("Parsing error: '%s' is not a valid expression of numBytes for Transfer %d\n", numBytesToken.c_str(), i+1);
+        exit(1);
+      }
+      char units = numBytesToken.back();
+      switch (units)
+      {
+      case 'K': case 'k': numBytes *= 1024; break;
+      case 'M': case 'm': numBytes *= 1024*1024; break;
+      case 'G': case 'g': numBytes *= 1024*1024*1024; break;
+      }
     }
 
     ParseMemType(srcMem, numCpus, numGpus, &transfer.srcMemType, &transfer.srcIndex);
     ParseMemType(exeMem, numCpus, numGpus, &transfer.exeMemType, &transfer.exeIndex);
     ParseMemType(dstMem, numCpus, numGpus, &transfer.dstMemType, &transfer.dstIndex);
     transfer.numBlocksToUse = numBlocksToUse;
+    transfer.numBytes = numBytes;
     transfers.push_back(transfer);
   }
 }
@@ -839,22 +850,14 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     exit(1);
   }
 
-  if (memType == MEM_CPU || memType == MEM_CPU_FINE)
+  if (IsCpuType(memType))
   {
     // Set numa policy prior to call to hipHostMalloc
-    // NOTE: It may be possible that the actual configured numa nodes do not start at 0
-    //       so remapping may be necessary
-    // Find the 'deviceId'-th available NUMA node
-    int numaIdx = 0;
-    for (int i = 0; i <= devIndex; i++)
-      while (!numa_bitmask_isbitset(numa_get_mems_allowed(), numaIdx))
-        ++numaIdx;
-
-    unsigned long nodemask = (1ULL << numaIdx);
+    unsigned long nodemask = (1ULL << devIndex);
     long retCode = set_mempolicy(MPOL_BIND, &nodemask, sizeof(nodemask)*8);
     if (retCode)
     {
-      printf("[ERROR] Unable to set NUMA memory policy to bind to NUMA node %d\n", numaIdx);
+      printf("[ERROR] Unable to set NUMA memory policy to bind to NUMA node %d\n", devIndex);
       exit(1);
     }
 
@@ -864,13 +867,18 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     {
       HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser));
     }
-    else
+    else if (memType == MEM_CPU)
     {
       HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent));
     }
+    else if (memType == MEM_CPU_UNPINNED)
+    {
+      *memPtr = numa_alloc_onnode(numBytes, devIndex);
+    }
 
     // Check that the allocated pages are actually on the correct NUMA node
-    CheckPages((char*)*memPtr, numBytes, numaIdx);
+    memset(*memPtr, 0, numBytes);
+    CheckPages((char*)*memPtr, numBytes, devIndex);
 
     // Reset to default numa mem policy
     retCode = set_mempolicy(MPOL_DEFAULT, NULL, 8);
@@ -898,11 +906,15 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
   }
 }
 
-void DeallocateMemory(MemType memType, void* memPtr)
+void DeallocateMemory(MemType memType, void* memPtr, size_t const bytes)
 {
   if (memType == MEM_CPU || memType == MEM_CPU_FINE)
   {
     HIP_CALL(hipHostFree(memPtr));
+  }
+  else if (memType == MEM_CPU_UNPINNED)
+  {
+    numa_free(memPtr, bytes);
   }
   else if (memType == MEM_GPU || memType == MEM_GPU_FINE)
   {
@@ -1024,20 +1036,16 @@ std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount)
 std::string GetDesc(MemType srcMemType, int srcIndex,
                     MemType dstMemType, int dstIndex)
 {
-  if (srcMemType == MEM_CPU || srcMemType == MEM_CPU_FINE)
+  if (IsCpuType(srcMemType))
   {
-    if (dstMemType == MEM_CPU || dstMemType == MEM_CPU_FINE)
-      return (srcIndex == dstIndex) ? "LOCAL" : "NUMA";
-    else if (dstMemType == MEM_GPU || dstMemType == MEM_GPU_FINE)
-      return "PCIE";
-    else
-      goto error;
+    if (IsCpuType(dstMemType)) return (srcIndex == dstIndex) ? "LOCAL" : "NUMA";
+    if (IsGpuType(dstMemType)) return "PCIE";
+    goto error;
   }
-  else if (srcMemType == MEM_GPU || srcMemType == MEM_GPU_FINE)
+  if (IsGpuType(srcMemType))
   {
-    if (dstMemType == MEM_CPU || dstMemType == MEM_CPU_FINE)
-      return "PCIE";
-    else if (dstMemType == MEM_GPU || dstMemType == MEM_GPU_FINE)
+    if (IsCpuType(dstMemType)) return "PCIE";
+    if (IsGpuType(dstMemType))
     {
       if (srcIndex == dstIndex) return "LOCAL";
       else
@@ -1049,8 +1057,6 @@ std::string GetDesc(MemType srcMemType, int srcIndex,
         return GetLinkTypeDesc(linkType, hopCount);
       }
     }
-    else
-      goto error;
   }
 error:
   printf("[ERROR] Unrecognized memory type\n");
@@ -1066,13 +1072,13 @@ std::string GetTransferDesc(Transfer const& transfer)
 void RunTransfer(EnvVars const& ev, int const iteration,
                  ExecutorInfo& exeInfo, int const transferIdx)
 {
-  Transfer& transfer = exeInfo.transfers[transferIdx];
+  Transfer* transfer = exeInfo.transfers[transferIdx];
 
   // GPU execution agent
-  if (transfer.exeMemType == MEM_GPU)
+  if (transfer->exeMemType == MEM_GPU)
   {
     // Switch to executing GPU
-    int const exeIndex = RemappedIndex(transfer.exeIndex, MEM_GPU);
+    int const exeIndex = RemappedIndex(transfer->exeIndex, MEM_GPU);
     HIP_CALL(hipSetDevice(exeIndex));
 
     hipStream_t& stream     = exeInfo.streams[transferIdx];
@@ -1088,24 +1094,24 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
       // Execute hipMemset / hipMemcpy
       if (ev.useMemset)
-        HIP_CALL(hipMemsetAsync(transfer.dstMem + initOffset, 42, transfer.numBytes, stream));
+        HIP_CALL(hipMemsetAsync(transfer->dstMem + initOffset, 42, transfer->numBytesToCopy, stream));
       else
-        HIP_CALL(hipMemcpyAsync(transfer.dstMem + initOffset,
-                                transfer.srcMem + initOffset,
-                                transfer.numBytes, hipMemcpyDefault,
+        HIP_CALL(hipMemcpyAsync(transfer->dstMem + initOffset,
+                                transfer->srcMem + initOffset,
+                                transfer->numBytesToCopy, hipMemcpyDefault,
                                 stream));
       // Record stop event
       HIP_CALL(hipEventRecord(stopEvent, stream));
     }
     else
     {
-      int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalBlocks : transfer.numBlocksToUse;
+      int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalBlocks : transfer->numBlocksToUse;
       hipExtLaunchKernelGGL(ev.useMemset ? GpuMemsetKernel : GpuCopyKernel,
                             dim3(numBlocksToRun, 1, 1),
                             dim3(BLOCKSIZE, 1, 1),
                             ev.sharedMemBytes, stream,
                             startEvent, stopEvent,
-                            0, transfer.blockParamGpuPtr);
+                            0, transfer->blockParamGpuPtr);
     }
 
     // Synchronize per iteration, unless in single sync mode, in which case
@@ -1120,33 +1126,33 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
       if (ev.useSingleStream)
       {
-        for (Transfer& currTransfer : exeInfo.transfers)
+        for (Transfer* currTransfer : exeInfo.transfers)
         {
-          long long minStartCycle = currTransfer.blockParamGpuPtr[0].startCycle;
-          long long maxStopCycle  = currTransfer.blockParamGpuPtr[0].stopCycle;
-          for (int i = 1; i < currTransfer.numBlocksToUse; i++)
+          long long minStartCycle = currTransfer->blockParamGpuPtr[0].startCycle;
+          long long maxStopCycle  = currTransfer->blockParamGpuPtr[0].stopCycle;
+          for (int i = 1; i < currTransfer->numBlocksToUse; i++)
           {
-            minStartCycle = std::min(minStartCycle, currTransfer.blockParamGpuPtr[i].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  currTransfer.blockParamGpuPtr[i].stopCycle);
+            minStartCycle = std::min(minStartCycle, currTransfer->blockParamGpuPtr[i].startCycle);
+            maxStopCycle  = std::max(maxStopCycle,  currTransfer->blockParamGpuPtr[i].stopCycle);
           }
           int const wallClockRate = GetWallClockRate(exeIndex);
           double iterationTimeMs = (maxStopCycle - minStartCycle) / (double)(wallClockRate);
-          currTransfer.transferTime += iterationTimeMs;
+          currTransfer->transferTime += iterationTimeMs;
         }
         exeInfo.totalTime += gpuDeltaMsec;
       }
       else
       {
-        transfer.transferTime += gpuDeltaMsec;
+        transfer->transferTime += gpuDeltaMsec;
       }
     }
   }
-  else if (transfer.exeMemType == MEM_CPU) // CPU execution agent
+  else if (transfer->exeMemType == MEM_CPU) // CPU execution agent
   {
     // Force this thread and all child threads onto correct NUMA node
-    if (numa_run_on_node(transfer.exeIndex))
+    if (numa_run_on_node(transfer->exeIndex))
     {
-      printf("[ERROR] Unable to set CPU to NUMA node %d\n", transfer.exeIndex);
+      printf("[ERROR] Unable to set CPU to NUMA node %d\n", transfer->exeIndex);
       exit(1);
     }
 
@@ -1156,7 +1162,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
     // Launch child-threads to perform memcopies
     for (int i = 0; i < ev.numCpuPerTransfer; i++)
-      childThreads.push_back(std::thread(ev.useMemset ? CpuMemsetKernel : CpuCopyKernel, std::ref(transfer.blockParam[i])));
+      childThreads.push_back(std::thread(ev.useMemset ? CpuMemsetKernel : CpuCopyKernel, std::ref(transfer->blockParam[i])));
 
     // Wait for child-threads to finish
     for (int i = 0; i < ev.numCpuPerTransfer; i++)
@@ -1166,7 +1172,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
     // Record time if not a warmup iteration
     if (iteration >= 0)
-      transfer.transferTime += (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0);
+      transfer->transferTime += (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0);
   }
 }
 
@@ -1272,109 +1278,40 @@ double GetPeakBandwidth(EnvVars const& ev,
   int const initOffset = ev.byteOffset / sizeof(float);
 
   // Prepare Transfers
-  std::vector<Transfer*> transfers;
-  ExecutorInfo exeInfo[2];
-  for (int i = 0; i < 2; i++)
-  {
-    exeInfo[i].transfers.resize(1);
-    exeInfo[i].streams.resize(1);
-    exeInfo[i].startEvents.resize(1);
-    exeInfo[i].stopEvents.resize(1);
-    transfers.push_back(&exeInfo[i].transfers[0]);
-  }
-
-  transfers[0]->srcMemType = transfers[1]->dstMemType = srcMemType;
-  transfers[0]->dstMemType = transfers[1]->srcMemType = dstMemType;
-  transfers[0]->srcIndex   = transfers[1]->dstIndex   = RemappedIndex(srcIndex, srcMemType);
-  transfers[0]->dstIndex   = transfers[1]->srcIndex   = RemappedIndex(dstIndex, dstMemType);
+  std::vector<Transfer> transfers(2);
+  transfers[0].srcMemType     = transfers[1].dstMemType     = srcMemType;
+  transfers[0].dstMemType     = transfers[1].srcMemType     = dstMemType;
+  transfers[0].srcIndex       = transfers[1].dstIndex       = RemappedIndex(srcIndex, srcMemType);
+  transfers[0].dstIndex       = transfers[1].srcIndex       = RemappedIndex(dstIndex, dstMemType);
+  transfers[0].numBytes       = transfers[1].numBytes       = N * sizeof(float);
+  transfers[0].numBlocksToUse = transfers[1].numBlocksToUse = numBlocksToUse;
 
   // Either perform (local read + remote write), or (remote read + local write)
-  transfers[0]->exeMemType = (readMode == 0 ? srcMemType : dstMemType);
-  transfers[1]->exeMemType = (readMode == 0 ? dstMemType : srcMemType);
-  transfers[0]->exeIndex   = RemappedIndex((readMode == 0 ? srcIndex : dstIndex), transfers[0]->exeMemType);
-  transfers[1]->exeIndex   = RemappedIndex((readMode == 0 ? dstIndex : srcIndex), transfers[1]->exeMemType);
+  transfers[0].exeMemType = (readMode == 0 ? srcMemType : dstMemType);
+  transfers[1].exeMemType = (readMode == 0 ? dstMemType : srcMemType);
+  transfers[0].exeIndex   = RemappedIndex((readMode == 0 ? srcIndex : dstIndex), transfers[0].exeMemType);
+  transfers[1].exeIndex   = RemappedIndex((readMode == 0 ? dstIndex : srcIndex), transfers[1].exeMemType);
+
+  transfers.resize(isBidirectional + 1);
 
   // Abort if executing on NUMA node with no CPUs
   for (int i = 0; i <= isBidirectional; i++)
   {
-    if (transfers[i]->exeMemType == MEM_CPU && ev.numCpusPerNuma[transfers[i]->exeIndex] == 0)
+    if (transfers[i].exeMemType == MEM_CPU && ev.numCpusPerNuma[transfers[i].exeIndex] == 0)
       return 0;
   }
 
-  for (int i = 0; i <= isBidirectional; i++)
-  {
-    AllocateMemory(transfers[i]->srcMemType, transfers[i]->srcIndex,
-                   N * sizeof(float) + ev.byteOffset, (void**)&transfers[i]->srcMem);
-    AllocateMemory(transfers[i]->dstMemType, transfers[i]->dstIndex,
-                   N * sizeof(float) + ev.byteOffset, (void**)&transfers[i]->dstMem);
-
-    // Prepare block parameters on CPU
-    transfers[i]->numBlocksToUse = (transfers[i]->exeMemType == MEM_GPU) ? numBlocksToUse : ev.numCpuPerTransfer;
-    transfers[i]->blockParam.resize(transfers[i]->numBlocksToUse);
-    transfers[i]->PrepareBlockParams(ev, N);
-
-    if (transfers[i]->exeMemType == MEM_GPU)
-    {
-      // Copy block parameters onto GPU
-      AllocateMemory(MEM_GPU, transfers[i]->exeIndex, numBlocksToUse * sizeof(BlockParam),
-                     (void **)&transfers[i]->blockParamGpuPtr);
-      HIP_CALL(hipMemcpy(transfers[i]->blockParamGpuPtr,
-                         transfers[i]->blockParam.data(),
-                         numBlocksToUse * sizeof(BlockParam),
-                         hipMemcpyHostToDevice));
-
-      // Prepare GPU resources
-      HIP_CALL(hipSetDevice(transfers[i]->exeIndex));
-      HIP_CALL(hipStreamCreate(&exeInfo[i].streams[0]));
-      HIP_CALL(hipEventCreate(&exeInfo[i].startEvents[0]));
-      HIP_CALL(hipEventCreate(&exeInfo[i].stopEvents[0]));
-    }
-  }
-
-  std::stack<std::thread> threads;
-
-  // Perform iteration
-  for (int iteration = -ev.numWarmups; iteration < ev.numIterations; iteration++)
-  {
-    // Perform timed iterations
-    for (int i = 0; i <= isBidirectional; i++)
-      threads.push(std::thread(RunTransfer, std::ref(ev), iteration, std::ref(exeInfo[i]), 0));
-
-    // Wait for all threads to finish
-    for (int i = 0; i <= isBidirectional; i++)
-    {
-      threads.top().join();
-      threads.pop();
-    }
-  }
-
-  // Validate that each Transfer has transferred correctly
-  for (int i = 0; i <= isBidirectional; i++)
-    CheckOrFill(MODE_CHECK, N, ev.useMemset, ev.useHipCall, ev.fillPattern, transfers[i]->dstMem + initOffset);
+  ExecuteTransfers(ev, 0, N, transfers, false);
 
   // Collect aggregate bandwidth
   double totalBandwidth = 0;
   for (int i = 0; i <= isBidirectional; i++)
   {
-    double transferDurationMsec = transfers[i]->transferTime / (1.0 * ev.numIterations);
-    double transferBandwidthGbs = (N * sizeof(float) / 1.0E9) / transferDurationMsec * 1000.0f;
+    double transferDurationMsec = transfers[i].transferTime / (1.0 * ev.numIterations);
+    double transferBandwidthGbs = (transfers[i].numBytesToCopy / 1.0E9) / transferDurationMsec * 1000.0f;
     totalBandwidth += transferBandwidthGbs;
   }
 
-  // Release GPU memory
-  for (int i = 0; i <= isBidirectional; i++)
-  {
-    DeallocateMemory(transfers[i]->srcMemType, transfers[i]->srcMem);
-    DeallocateMemory(transfers[i]->dstMemType, transfers[i]->dstMem);
-
-    if (transfers[i]->exeMemType == MEM_GPU)
-    {
-      DeallocateMemory(MEM_GPU, transfers[i]->blockParamGpuPtr);
-      HIP_CALL(hipStreamDestroy(exeInfo[i].streams[0]));
-      HIP_CALL(hipEventDestroy(exeInfo[i].startEvents[0]));
-      HIP_CALL(hipEventDestroy(exeInfo[i].stopEvents[0]));
-    }
-  }
   return totalBandwidth;
 }
 
@@ -1438,10 +1375,9 @@ int GetWallClockRate(int deviceId)
   return wallClockPerDeviceMhz[deviceId];
 }
 
-void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool const isRandom)
+void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numBlocksToUse, bool const isRandom)
 {
   ev.DisplaySweepEnvVars();
-  std::vector<size_t> valuesOfN(1, numBytesPerTransfer / sizeof(float));
 
   // Compute how many possible Transfers are permitted (unique SRC/EXE/DST triplets)
   std::vector<std::pair<MemType, int>> exeList;
@@ -1598,6 +1534,17 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
 
   int numTestsRun = 0;
   int M = ev.sweepMin;
+  std::uniform_int_distribution<int> randSize(1, numBytesPerTransfer / sizeof(float));
+  std::uniform_int_distribution<int> distribution(ev.sweepMin, maxParallelTransfers);
+
+  // Log sweep to configuration file
+  FILE *fp = fopen("lastSweep.cfg", "w");
+  if (!fp)
+  {
+    printf("[ERROR] Unable to open lastSweep.cfg.  Check permissions\n");
+    exit(1);
+  }
+
   // Create bitmask of numPossible triplets, of which M will be chosen
   std::string bitmask(M, 1);  bitmask.resize(numPossible, 0);
   auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -1607,8 +1554,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
     {
       // Pick random number of simultaneous transfers to execute
       // NOTE: This currently skews distribution due to some #s having more possibilities than others
-      M = ((maxParallelTransfers > ev.sweepMin) ? (rand() % (maxParallelTransfers - ev.sweepMin)) : 0)
-        + ev.sweepMin;
+      M = distribution(*ev.generator);
 
       // Generate a random bitmask
       for (int i = 0; i < numPossible; i++)
@@ -1630,13 +1576,15 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
         transfer.exeIndex       = possibleTransfers[value].exeIndex;
         transfer.dstMemType     = possibleTransfers[value].dstMemType;
         transfer.dstIndex       = possibleTransfers[value].dstIndex;
-        transfer.numBlocksToUse = IsGpuType(transfer.exeMemType) ? 4 : ev.numCpuPerTransfer;
+        transfer.numBlocksToUse = IsGpuType(transfer.exeMemType) ? numBlocksToUse : ev.numCpuPerTransfer;
         transfer.transferIndex  = transfers.size();
+        transfer.numBytes       = ev.sweepRandBytes ? randSize(*ev.generator) * sizeof(float) : 0;
         transfers.push_back(transfer);
       }
     }
 
-    ExecuteTransfers(ev, ++numTestsRun, valuesOfN, transfers);
+    LogTransfers(fp, ++numTestsRun, transfers);
+    ExecuteTransfers(ev, numTestsRun, numBytesPerTransfer / sizeof(float), transfers);
 
     // Check for test limit
     if (numTestsRun == ev.sweepTestLimit)
@@ -1668,4 +1616,22 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, bool co
         bitmask[i] = (i < M) ? 1 : 0;
     }
   }
+  fclose(fp);
+}
+
+void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& transfers)
+{
+  fprintf(fp, "# Test %d\n", testNum);
+  fprintf(fp, "%d", -1 * (int)transfers.size());
+  for (auto const& transfer : transfers)
+  {
+    fprintf(fp, " (%c%d->%c%d->%c%d %d %lu)",
+            MemTypeStr[transfer.srcMemType], transfer.srcIndex,
+            MemTypeStr[transfer.exeMemType], transfer.exeIndex,
+            MemTypeStr[transfer.dstMemType], transfer.dstIndex,
+            transfer.numBlocksToUse,
+            transfer.numBytes);
+  }
+  fprintf(fp, "\n");
+  fflush(fp);
 }

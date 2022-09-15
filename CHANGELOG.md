@@ -1,5 +1,15 @@
 # Changelog for TransferBench
 
+## v1.06
+### Added
+- Added unpinned CPU memory type ('U').  May require HSA_XNACK=1 in order to access via GPU executors
+- Adding logging of sweep configuration to lastSweep.cfg
+- Adding ability to specify number of CUs to use for sweep-based presets
+### Changed
+- Fixing random sweep repeatibility
+- Fixing bug with CPU NUMA node memory allocation
+- Modified advanced configuration file format to accept bytes per Transfer
+
 ## v1.05
 ### Added
 - Topology output now includes NUMA node information
