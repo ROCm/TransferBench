@@ -546,7 +546,7 @@ int RemappedIndex(int const origIdx, MemType const memType)
   static std::vector<int> remapping;
 
   // No need to re-map CPU devices
-  if (memType == MEM_CPU) return origIdx;
+  if (IsCpuType(memType)) return origIdx;
 
   // Build remapping on first use
   if (remapping.empty())
