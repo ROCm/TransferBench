@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.07
+### Changed
+- Fix bug with allocations involving non-default CPU memory types
+
 ## v1.06
 ### Added
 - Added unpinned CPU memory type ('U').  May require HSA_XNACK=1 in order to access via GPU executors
