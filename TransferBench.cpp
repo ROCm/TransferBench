@@ -543,24 +543,31 @@ void DisplayUsage(char const* cmdName)
 
 int RemappedIndex(int const origIdx, MemType const memType)
 {
-  static std::vector<int> remapping;
+  static std::vector<int> remappingCpu;
+  static std::vector<int> remappingGpu;
 
-  // No need to re-map CPU devices
-  if (IsCpuType(memType)) return origIdx;
+  // Build CPU remapping on first use
+  // Skip numa nodes that are not configured
+  if (remappingCpu.empty())
+  {
+    for (int node = 0; node <= numa_max_node(); node++)
+      if (numa_bitmask_isbitset(numa_get_mems_allowed(), node))
+        remappingCpu.push_back(node);
+  }
 
-  // Build remapping on first use
-  if (remapping.empty())
+  // Build remappingGpu on first use
+  if (remappingGpu.empty())
   {
     int numGpuDevices;
     HIP_CALL(hipGetDeviceCount(&numGpuDevices));
-    remapping.resize(numGpuDevices);
+    remappingGpu.resize(numGpuDevices);
 
     int const usePcieIndexing = getenv("USE_PCIE_INDEX") ? atoi(getenv("USE_PCIE_INDEX")) : 0;
     if (!usePcieIndexing)
     {
-      // For HIP-based indexing no remapping is necessary
+      // For HIP-based indexing no remappingGpu is necessary
       for (int i = 0; i < numGpuDevices; ++i)
-        remapping[i] = i;
+        remappingGpu[i] = i;
     }
     else
     {
@@ -575,10 +582,10 @@ int RemappedIndex(int const origIdx, MemType const memType)
       // Sort GPUs by PCIe address then use that as mapping
       std::sort(mapping.begin(), mapping.end());
       for (int i = 0; i < numGpuDevices; ++i)
-        remapping[i] = mapping[i].second;
+        remappingGpu[i] = mapping[i].second;
     }
   }
-  return remapping[origIdx];
+  return IsCpuType(memType) ? remappingCpu[origIdx] : remappingGpu[origIdx];
 }
 
 void DisplayTopology(bool const outputToCsv)
@@ -594,7 +601,8 @@ void DisplayTopology(bool const outputToCsv)
   }
   else
   {
-    printf("\nDetected topology: %d CPU NUMA node(s)   %d GPU device(s)\n", numa_num_configured_nodes(), numGpuDevices);
+    printf("\nDetected topology: %d configured CPU NUMA node(s) [%d total]   %d GPU device(s)\n",
+           numa_num_configured_nodes(), numa_max_node() + 1, numGpuDevices);
   }
 
   // Print out detected CPU topology
@@ -603,38 +611,42 @@ void DisplayTopology(bool const outputToCsv)
     printf("NUMA");
     for (int j = 0; j < numCpuDevices; j++)
       printf(",NUMA%02d", j);
-    printf(",# CPUs,ClosestGPUs\n");
+    printf(",# CPUs,ClosestGPUs,ActualNode\n");
   }
   else
   {
-    printf("        |");
+    printf("            |");
     for (int j = 0; j < numCpuDevices; j++)
-      printf("NUMA %02d |", j);
-    printf(" # Cpus | Closest GPU(s)\n");
+      printf("NUMA %02d|", j);
+    printf(" #Cpus | Closest GPU(s)\n");
+
+    printf("------------+");
     for (int j = 0; j <= numCpuDevices; j++)
-      printf("--------+");
-    printf("--------+-------------\n");
+      printf("-------+");
+    printf("---------------\n");
   }
 
   for (int i = 0; i < numCpuDevices; i++)
   {
-    printf("NUMA %02d%s", i, outputToCsv ? "," : " |");
+    int nodeI = RemappedIndex(i, MEM_CPU);
+    printf("NUMA %02d (%02d)%s", i, nodeI, outputToCsv ? "," : "|");
     for (int j = 0; j < numCpuDevices; j++)
     {
-      int numaDist = numa_distance(i,j);
+      int nodeJ = RemappedIndex(j, MEM_CPU);
+      int numaDist = numa_distance(nodeI, nodeJ);
       if (outputToCsv)
         printf("%d,", numaDist);
       else
-        printf(" %6d |", numaDist);
+        printf(" %5d |", numaDist);
     }
 
     int numCpus = 0;
     for (int j = 0; j < numa_num_configured_cpus(); j++)
-      if (numa_node_of_cpu(j) == i) numCpus++;
+      if (numa_node_of_cpu(j) == nodeI) numCpus++;
     if (outputToCsv)
       printf("%d,", numCpus);
     else
-      printf(" %6d | ", numCpus);
+      printf(" %5d | ", numCpus);
 
     bool isFirst = true;
     for (int j = 0; j < numGpuDevices; j++)
@@ -869,7 +881,11 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     }
     else if (memType == MEM_CPU)
     {
-      HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent));
+      if (hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent) != hipSuccess)
+      {
+        printf("[ERROR] Unable to allocate non-coherent host memory on NUMA node %d\n", devIndex);
+        exit(1);
+      }
     }
     else if (memType == MEM_CPU_UNPINNED)
     {
@@ -1150,9 +1166,10 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   else if (transfer->exeMemType == MEM_CPU) // CPU execution agent
   {
     // Force this thread and all child threads onto correct NUMA node
-    if (numa_run_on_node(transfer->exeIndex))
+    int const exeIndex = RemappedIndex(transfer->exeIndex, MEM_CPU);
+    if (numa_run_on_node(exeIndex))
     {
-      printf("[ERROR] Unable to set CPU to NUMA node %d\n", transfer->exeIndex);
+      printf("[ERROR] Unable to set CPU to NUMA node %d\n", exeIndex);
       exit(1);
     }
 
@@ -1179,9 +1196,8 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N, int numBlocksToUse, int readMode, int skipCpu)
 {
   // Collect the number of available CPUs/GPUs on this machine
-  int numGpus;
-  HIP_CALL(hipGetDeviceCount(&numGpus));
-  int const numCpus = numa_num_configured_nodes();
+  int const numGpus = ev.numGpuDevices;
+  int const numCpus = ev.numCpuDevices;
   int const numDevices = numCpus + numGpus;
 
   // Enable peer to peer for each GPU
@@ -1281,16 +1297,16 @@ double GetPeakBandwidth(EnvVars const& ev,
   std::vector<Transfer> transfers(2);
   transfers[0].srcMemType     = transfers[1].dstMemType     = srcMemType;
   transfers[0].dstMemType     = transfers[1].srcMemType     = dstMemType;
-  transfers[0].srcIndex       = transfers[1].dstIndex       = RemappedIndex(srcIndex, srcMemType);
-  transfers[0].dstIndex       = transfers[1].srcIndex       = RemappedIndex(dstIndex, dstMemType);
+  transfers[0].srcIndex       = transfers[1].dstIndex       = srcIndex;
+  transfers[0].dstIndex       = transfers[1].srcIndex       = dstIndex;
   transfers[0].numBytes       = transfers[1].numBytes       = N * sizeof(float);
   transfers[0].numBlocksToUse = transfers[1].numBlocksToUse = numBlocksToUse;
 
   // Either perform (local read + remote write), or (remote read + local write)
   transfers[0].exeMemType = (readMode == 0 ? srcMemType : dstMemType);
   transfers[1].exeMemType = (readMode == 0 ? dstMemType : srcMemType);
-  transfers[0].exeIndex   = RemappedIndex((readMode == 0 ? srcIndex : dstIndex), transfers[0].exeMemType);
-  transfers[1].exeIndex   = RemappedIndex((readMode == 0 ? dstIndex : srcIndex), transfers[1].exeMemType);
+  transfers[0].exeIndex   = (readMode == 0 ? srcIndex   : dstIndex);
+  transfers[1].exeIndex   = (readMode == 0 ? dstIndex   : srcIndex);
 
   transfers.resize(isBidirectional + 1);
 
