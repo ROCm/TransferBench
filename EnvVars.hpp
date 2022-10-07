@@ -26,7 +26,7 @@ THE SOFTWARE.
 #include <algorithm>
 #include <random>
 #include <time.h>
-#define TB_VERSION "1.07"
+#define TB_VERSION "1.08"
 
 extern char const MemTypeStr[];
 
@@ -105,7 +105,7 @@ public:
 
     int numDetectedCpus = numa_num_configured_nodes();
     int numDetectedGpus;
-    hipGetDeviceCount(&numGpuDevices);
+    hipGetDeviceCount(&numDetectedGpus);
 
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);

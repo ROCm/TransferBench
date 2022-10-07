@@ -1,5 +1,11 @@
 # Changelog for TransferBench
 
+## v1.08
+### Changed
+- Fixing handling of non-configured NUMA nodes
+- Topology detection now shows actual NUMA node indices
+- Fix for issue with NUM_GPU_DEVICES
+
 ## v1.07
 ### Changed
 - Fix bug with allocations involving non-default CPU memory types
