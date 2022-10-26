@@ -1,5 +1,11 @@
 # Changelog for TransferBench
 
+## v1.09
+### Added
+- Printing off src/dst memory addresses during interactive mode
+### Changed
+- Switching to numa_set_preferred instead of set_mempolicy
+
 ## v1.08
 ### Changed
 - Fixing handling of non-configured NUMA nodes

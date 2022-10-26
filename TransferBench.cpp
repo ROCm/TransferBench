@@ -292,6 +292,12 @@ void ExecuteTransfers(EnvVars const& ev,
     // Pause before starting first timed iteration in interactive mode
     if (verbose && ev.useInteractive && iteration == 0)
     {
+      printf("Memory prepared:\n");
+
+      for (Transfer& transfer : transfers)
+      {
+        printf("Transfer %03d: SRC: %p DST: %p\n", transfer.transferIndex, transfer.srcMem, transfer.dstMem);
+      }
       printf("Hit <Enter> to continue: ");
       scanf("%*c");
       printf("\n");
@@ -865,16 +871,9 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
   if (IsCpuType(memType))
   {
     // Set numa policy prior to call to hipHostMalloc
-    unsigned long nodemask = (1ULL << devIndex);
-    long retCode = set_mempolicy(MPOL_BIND, &nodemask, sizeof(nodemask)*8);
-    if (retCode)
-    {
-      printf("[ERROR] Unable to set NUMA memory policy to bind to NUMA node %d\n", devIndex);
-      exit(1);
-    }
+    numa_set_preferred(devIndex);
 
     // Allocate host-pinned memory (should respect NUMA mem policy)
-
     if (memType == MEM_CPU_FINE)
     {
       HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser));
@@ -897,12 +896,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     CheckPages((char*)*memPtr, numBytes, devIndex);
 
     // Reset to default numa mem policy
-    retCode = set_mempolicy(MPOL_DEFAULT, NULL, 8);
-    if (retCode)
-    {
-      printf("[ERROR] Unable reset to default NUMA memory policy\n");
-      exit(1);
-    }
+    numa_set_preferred(-1);
   }
   else if (memType == MEM_GPU)
   {
