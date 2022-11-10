@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.10
+### Fixed
+- Fix incorrect bandwidth calculation when using single stream mode and per-Transfer data sizes
+
 ## v1.09
 ### Added
 - Printing off src/dst memory addresses during interactive mode

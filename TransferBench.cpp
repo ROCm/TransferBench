@@ -388,7 +388,7 @@ void ExecuteTransfers(EnvVars const& ev,
       for (auto const& transfer : exeInfo.transfers)
       {
         double transferDurationMsec = transfer->transferTime / (1.0 * numTimedIterations);
-        double transferBandwidthGbs = (N * sizeof(float) / 1.0E9) / transferDurationMsec * 1000.0f;
+        double transferBandwidthGbs = (transfer->numBytesToCopy / 1.0E9) / transferDurationMsec * 1000.0f;
         totalCUs += transfer->exeMemType == MEM_CPU ? ev.numCpuPerTransfer : transfer->numBlocksToUse;
 
         if (!verbose) continue;
