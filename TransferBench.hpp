@@ -38,15 +38,15 @@ THE SOFTWARE.
 #include "EnvVars.hpp"
 
 // Helper macro for catching HIP errors
-#define HIP_CALL(cmd)                                                   \
-    do {                                                                \
-        hipError_t error = (cmd);                                       \
-        if (error != hipSuccess)                                        \
-        {                                                               \
-            std::cerr << "Encountered HIP error (" << hipGetErrorString(error) << ") at line " \
-                      << __LINE__ << " in file " << __FILE__ << "\n";   \
-            exit(-1);                                                   \
-        }                                                               \
+#define HIP_CALL(cmd)                                                                   \
+    do {                                                                                \
+        hipError_t error = (cmd);                                                       \
+        if (error != hipSuccess)                                                        \
+        {                                                                               \
+            std::cerr << "Encountered HIP error (" << hipGetErrorString(error)          \
+                      << ") at line " << __LINE__ << " in file " << __FILE__ << "\n";   \
+            exit(-1);                                                                   \
+        }                                                                               \
     } while (0)
 
 // Simple configuration parameters
@@ -59,92 +59,106 @@ typedef enum
   MEM_GPU          = 1, // Coarse-grained global GPU memory
   MEM_CPU_FINE     = 2, // Fine-grained pinned CPU memory
   MEM_GPU_FINE     = 3, // Fine-grained global GPU memory
-  MEM_CPU_UNPINNED = 4 // Unpinned CPU memory
+  MEM_CPU_UNPINNED = 4, // Unpinned CPU memory
+  MEM_NULL         = 5, // NULL memory - used for empty
 } MemType;
-
-bool IsGpuType(MemType m)
-{
-  return (m == MEM_GPU || m == MEM_GPU_FINE);
-}
-bool IsCpuType(MemType m)
-{
-  return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED);
-}
-
-char const MemTypeStr[6] = "CGBFU";
-
-MemType inline CharToMemType(char const c)
-{
-  switch (c)
-  {
-  case 'C': return MEM_CPU;
-  case 'G': return MEM_GPU;
-  case 'B': return MEM_CPU_FINE;
-  case 'F': return MEM_GPU_FINE;
-  case 'U': return MEM_CPU_UNPINNED;
-  default:
-    printf("[ERROR] Unexpected mem type (%c)\n", c);
-    exit(1);
-  }
-}
 
 typedef enum
 {
-  MODE_FILL  = 0,         // Fill data with pattern
-  MODE_CHECK = 1          // Check data against pattern
-} ModeType;
+  EXE_CPU          = 0, // CPU executor              (subExecutor = CPU thread)
+  EXE_GPU_GFX      = 1, // GPU kernel-based executor (subExecutor = threadblock/CU)
+  EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
+} ExeType;
 
-// Each threadblock copies N floats from src to dst
-struct BlockParam
+bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE); }
+bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
+bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
+bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
+
+char const MemTypeStr[7] = "CGBFUN";
+char const ExeTypeStr[4] = "CGD";
+char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
+
+MemType inline CharToMemType(char const c)
 {
-  int       N;
-  float*    src;
-  float*    dst;
-  long long startCycle;
-  long long stopCycle;
+  char const* val = strchr(MemTypeStr, toupper(c));
+  if (*val) return (MemType)(val - MemTypeStr);
+  printf("[ERROR] Unexpected memory type (%c)\n", c);
+  exit(1);
+}
+
+ExeType inline CharToExeType(char const c)
+{
+  char const* val = strchr(ExeTypeStr, toupper(c));
+  if (*val) return (ExeType)(val - ExeTypeStr);
+  printf("[ERROR] Unexpected executor type (%c)\n", c);
+  exit(1);
+}
+
+// Each subExecutor is provided with subarrays to work on
+#define MAX_SRCS 16
+#define MAX_DSTS 16
+struct SubExecParam
+{
+  size_t    N;                                  // Number of floats this subExecutor works on
+  int       numSrcs;                            // Number of source arrays
+  int       numDsts;                            // Number of destination arrays
+  float*    src[MAX_SRCS];                      // Source array pointers
+  float*    dst[MAX_DSTS];                      // Destination array pointers
+  long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
+  long long stopCycle;                          // Stop  timestamp for in-kernel timing (GPU-GFX executor)
 };
 
-// Each Transfer is a uni-direction operation from a src memory to dst memory
+// Each Transfer performs reads from source memory location(s), sums them (if multiple sources are specified)
+// then writes the summation to each of the specified destination memory location(s)
 struct Transfer
 {
-  int     transferIndex;       // Transfer identifier
+  int                       transferIndex;      // Transfer identifier (within a Test)
+  ExeType                   exeType;            // Transfer executor type
+  int                       exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
+  int                       numSubExecs;        // Number of subExecutors to use for this Transfer
+  size_t                    numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
+  size_t                    numBytesActual;     // Actual number of bytes to copy
+  double                    transferTime;       // Time taken in milliseconds
 
-  // Transfer config
-  MemType exeMemType;          // Transfer executor type (CPU or GPU)
-  int     exeIndex;            // Executor index (NUMA node for CPU / device ID for GPU)
-  MemType srcMemType;          // Source memory type
-  int     srcIndex;            // Source device index
-  MemType dstMemType;          // Destination memory type
-  int     dstIndex;            // Destination device index
-  int     numBlocksToUse;      // Number of threadblocks to use for this Transfer
-  size_t  numBytes;            // Number of bytes to Transfer
-  size_t  numBytesToCopy;      // Number of bytes to copy
+  int                       numSrcs;            // Number of sources
+  std::vector<MemType>      srcType;            // Source memory types
+  std::vector<int>          srcIndex;           // Source device indice
+  std::vector<float*>       srcMem;             // Source memory
 
-  // Memory
-  float*  srcMem;              // Source memory
-  float*  dstMem;              // Destination memory
+  int                       numDsts;            // Number of destinations
+  std::vector<MemType>      dstType;            // Destination memory type
+  std::vector<int>          dstIndex;           // Destination device index
+  std::vector<float*>       dstMem;             // Destination memory
 
-  // How memory is split across threadblocks / CPU cores
-  std::vector<BlockParam> blockParam;
-  BlockParam* blockParamGpuPtr;
+  std::vector<SubExecParam> subExecParam;       // Defines subarrays assigned to each threadblock
+  SubExecParam*             subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
 
-  // Results
-  double  transferTime;
+  // Prepares src/dst subarray pointers for each SubExecutor
+  void PrepareSubExecParams(EnvVars const& ev);
 
-  // Prepares src memory and how to divide N elements across threadblocks/threads
-  void PrepareBlockParams(EnvVars const& ev, size_t const N);
+  // Prepare source arrays with input data
+  void PrepareSrc(EnvVars const& ev);
+
+  // Validate that destination data contains expected results
+  void ValidateDst(EnvVars const& ev);
+
+  // Prepare reference buffers
+  void PrepareReference(EnvVars const& ev, std::vector<float>& buffer, int bufferIdx);
+
+  // String representation functions
+  std::string SrcToStr() const;
+  std::string DstToStr() const;
 };
-
-typedef std::pair<MemType, int> Executor;
 
 struct ExecutorInfo
 {
-  std::vector<Transfer*>   transfers;     // Transfers to execute
-  size_t                   totalBytes;    // Total bytes this executor transfers
+  std::vector<Transfer*>   transfers;        // Transfers to execute
+  size_t                   totalBytes;       // Total bytes this executor transfers
+  int                      totalSubExecs;    // Total number of subExecutors to use
 
   // For GPU-Executors
-  int                      totalBlocks;   // Total number of CUs/CPU threads to use
-  BlockParam*              blockParamGpu; // Copy of block parameters in GPU device memory
+  SubExecParam*            subExecParamGpu;  // GPU copy of subExecutor parameters
   std::vector<hipStream_t> streams;
   std::vector<hipEvent_t>  startEvents;
   std::vector<hipEvent_t>  stopEvents;
@@ -153,6 +167,7 @@ struct ExecutorInfo
   double totalTime;
 };
 
+typedef std::pair<ExeType, int> Executor;
 typedef std::map<Executor, ExecutorInfo> TransferMap;
 
 // Display usage instructions
@@ -166,7 +181,9 @@ void PopulateTestSizes(size_t const numBytesPerTransfer, int const samplingFacto
                        std::vector<size_t>& valuesofN);
 
 void ParseMemType(std::string const& token, int const numCpus, int const numGpus,
-                  MemType* memType, int* memIndex);
+                  std::vector<MemType>& memType, std::vector<int>& memIndex);
+void ParseExeType(std::string const& token, int const numCpus, int const numGpus,
+                  ExeType& exeType, int& exeIndex);
 
 void ParseTransfers(char* line, int numCpus, int numGpus,
                     std::vector<Transfer>& transfers);
@@ -178,26 +195,19 @@ void EnablePeerAccess(int const deviceId, int const peerDeviceId);
 void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPtr);
 void DeallocateMemory(MemType memType, void* memPtr, size_t const size = 0);
 void CheckPages(char* byteArray, size_t numBytes, int targetId);
-void CheckOrFill(ModeType mode, int N, bool isMemset, bool isHipCall, std::vector<float> const& fillPattern, float* ptr);
 void RunTransfer(EnvVars const& ev, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);
-void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N, int numBlocksToUse, int readMode, int skipCpu);
-void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numBlocksToUse, bool const isRandom);
+void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N);
+void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExec, int const numCpuSubExec, bool const isRandom);
 
 // Return the maximum bandwidth measured for given (src/dst) pair
-double GetPeakBandwidth(EnvVars const& ev,
-                        size_t  const  N,
+double GetPeakBandwidth(EnvVars const& ev, size_t  const  N,
                         int     const  isBidirectional,
-                        int     const  readMode,
-                        int     const  numBlocksToUse,
-                        MemType const  srcMemType,
-                        int     const  srcIndex,
-                        MemType const  dstMemType,
-                        int     const  dstIndex);
+                        MemType const  srcType, int const srcIndex,
+                        MemType const  dstType, int const dstIndex);
 
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
-std::string GetDesc(MemType srcMemType, int srcIndex,
-                    MemType dstMemType, int dstIndex);
-std::string GetTransferDesc(Transfer const& transfer);
-int RemappedIndex(int const origIdx, MemType const memType);
+
+int RemappedIndex(int const origIdx, bool const isCpuType);
 int GetWallClockRate(int deviceId);
 void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& transfers);
+std::string PtrVectorToStr(std::vector<float*> const& strVector, int const initOffset);

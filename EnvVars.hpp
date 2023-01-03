@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021-2022 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2021-2023 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -26,9 +26,11 @@ THE SOFTWARE.
 #include <algorithm>
 #include <random>
 #include <time.h>
-#define TB_VERSION "1.10"
+
+#define TB_VERSION "1.11"
 
 extern char const MemTypeStr[];
+extern char const ExeTypeStr[];
 
 enum ConfigModeEnum
 {
@@ -45,10 +47,13 @@ public:
   int const DEFAULT_NUM_WARMUPS          =  1;
   int const DEFAULT_NUM_ITERATIONS       = 10;
   int const DEFAULT_SAMPLING_FACTOR      =  1;
-  int const DEFAULT_NUM_CPU_PER_TRANSFER =  4;
 
+  // Peer-to-peer Benchmark preset defaults
+  int const DEFAULT_P2P_NUM_CPU_SE    = 4;
+
+  // Sweep-preset defaults
   std::string const DEFAULT_SWEEP_SRC = "CG";
-  std::string const DEFAULT_SWEEP_EXE = "CG";
+  std::string const DEFAULT_SWEEP_EXE = "CDG";
   std::string const DEFAULT_SWEEP_DST = "CG";
   int const DEFAULT_SWEEP_MIN         = 1;
   int const DEFAULT_SWEEP_MAX         = 24;
@@ -59,20 +64,23 @@ public:
   int blockBytes;        // Each CU, except the last, gets a multiple of this many bytes to copy
   int byteOffset;        // Byte-offset for memory allocations
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
-  int numCpuPerTransfer; // Number of CPU child threads to use per CPU Transfer
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numWarmups;        // Number of un-timed warmup iterations to perform
   int outputToCsv;       // Output in CSV format
   int samplingFactor;    // Affects how many different values of N are generated (when N set to 0)
   int sharedMemBytes;    // Amount of shared memory to use per threadblock
-  int useHipCall;        // Use hipMemcpy/hipMemset instead of custom shader kernels
   int useInteractive;    // Pause for user-input before starting transfer loop
-  int useMemset;         // Perform a memset instead of a copy (ignores source memory)
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
-  int useSingleStream;   // Use a single stream per device instead of per Tink. Can not be used with USE_HIP_CALL
+  int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
+
+  // Environment variables only for Benchmark-preset
+  int useRemoteRead;     // Use destination memory type as executor instead of source memory type
+  int useDmaCopy;        // Use DMA copy instead of GPU copy
+  int numGpuSubExecs;    // Number of GPU subexecutors to use
+  int numCpuSubExecs;    // Number of CPU subexecttors to use
 
   // Environment variables only for Sweep-preset
   int sweepMin;          // Min number of simultaneous Transfers to be executed per test
@@ -86,6 +94,8 @@ public:
   std::string sweepSrc;  // Set of src memory types to be swept
   std::string sweepExe;  // Set of executors to be swept
   std::string sweepDst;  // Set of dst memory types to be swept
+
+  int enableDebug;       // Enable debug output
 
   // Used to track current configuration mode
   ConfigModeEnum configMode;
@@ -102,6 +112,8 @@ public:
     int maxSharedMemBytes = 0;
     hipDeviceGetAttribute(&maxSharedMemBytes,
                           hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0);
+    int numDeviceCUs = 0;
+    hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, 0);
 
     int numDetectedCpus = numa_num_configured_nodes();
     int numDetectedGpus;
@@ -110,19 +122,24 @@ public:
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
-    numCpuPerTransfer = GetEnvVar("NUM_CPU_PER_TRANSFER", DEFAULT_NUM_CPU_PER_TRANSFER);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , DEFAULT_NUM_WARMUPS);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , DEFAULT_SAMPLING_FACTOR);
     sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , maxSharedMemBytes / 2 + 1);
-    useHipCall        = GetEnvVar("USE_HIP_CALL"        , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
-    useMemset         = GetEnvVar("USE_MEMSET"          , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
+    enableDebug       = GetEnvVar("DEBUG"               , 0);
 
+    // P2P Benchmark related
+    useRemoteRead    = GetEnvVar("USE_REMOTE_READ"      , 0);
+    useDmaCopy       = GetEnvVar("USE_GPU_DMA"          , 0);
+    numGpuSubExecs   = GetEnvVar("NUM_GPU_SE"           , useDmaCopy ? 1 : numDeviceCUs);
+    numCpuSubExecs   = GetEnvVar("NUM_CPU_SE"           , DEFAULT_P2P_NUM_CPU_SE);
+
+    // Sweep related
     sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
     sweepMax          = GetEnvVar("SWEEP_MAX"           , DEFAULT_SWEEP_MAX);
     sweepSrc          = GetEnvVar("SWEEP_SRC"           , DEFAULT_SWEEP_SRC);
@@ -135,7 +152,6 @@ public:
     sweepRandBytes    = GetEnvVar("SWEEP_RAND_BYTES"    , 0);
 
     // Determine random seed
-
     char *sweepSeedStr = getenv("SWEEP_SEED");
     sweepSeed = (sweepSeedStr != NULL ? atoi(sweepSeedStr) : time(NULL));
     generator = new std::default_random_engine(sweepSeed);
@@ -224,11 +240,6 @@ public:
       printf("[ERROR] SAMPLING_FACTOR must be greater or equal to 1\n");
       exit(1);
     }
-    if (numCpuPerTransfer < 1)
-    {
-      printf("[ERROR] NUM_CPU_PER_TRANSFER must be greater or equal to 1\n");
-      exit(1);
-    }
     if (sharedMemBytes < 0 || sharedMemBytes > maxSharedMemBytes)
     {
       printf("[ERROR] SHARED_MEM_BYTES must be between 0 and %d\n", maxSharedMemBytes);
@@ -239,9 +250,16 @@ public:
       printf("[ERROR] BLOCK_BYTES must be a positive multiple of 4\n");
       exit(1);
     }
-    if (useSingleStream && useHipCall)
+
+    if (numGpuSubExecs <= 0)
     {
-      printf("[ERROR] Single stream mode cannot be used with HIP calls\n");
+      printf("[ERROR] NUM_GPU_SE must be greater than 0\n");
+      exit(1);
+    }
+
+    if (numCpuSubExecs <= 0)
+    {
+      printf("[ERROR] NUM_CPU_SE must be greater than 0\n");
       exit(1);
     }
 
@@ -273,10 +291,9 @@ public:
       }
     }
 
-    char const* permittedExecutors = "CG";
     for (auto ch : sweepExe)
     {
-      if (!strchr(permittedExecutors, ch))
+      if (!strchr(ExeTypeStr, ch))
       {
         printf("[ERROR] Unrecognized executor type '%c' specified for sweep executor\n", ch);
         exit(1);
@@ -293,6 +310,18 @@ public:
     int const totalCpus = numa_num_configured_cpus();
     for (int i = 0; i < totalCpus; i++)
       numCpusPerNuma[numa_node_of_cpu(i)]++;
+
+    // Check for deprecated env vars
+    if (getenv("USE_HIP_CALL"))
+    {
+      printf("[WARN] USE_HIP_CALL has been deprecated.  Please use DMA executor 'D' or set USE_GPU_DMA for P2P-Benchmark preset\n");
+    }
+
+    char* enableSdma = getenv("HSA_ENABLE_SDMA");
+    if (enableSdma && !strcmp(enableSdma, "0"))
+    {
+      printf("[WARN] DMA functionality disabled due to environment variable HSA_ENABLE_SDMA=0.  Copies will fallback to blit kernels\n");
+    }
   }
 
   // Display info on the env vars that can be used
@@ -304,18 +333,15 @@ public:
     printf(" BYTE_OFFSET            - Initial byte-offset for memory allocations.  Must be multiple of 4. Defaults to 0\n");
     printf(" FILL_PATTERN=STR       - Fill input buffer with pattern specified in hex digits (0-9,a-f,A-F).  Must be even number of digits, (byte-level big-endian)\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
-    printf(" NUM_CPU_PER_TRANSFER=C - Use C threads per Transfer for CPU-executed copies\n");
-    printf(" NUM_GPU_DEVICES=X      - Restrict number of GCPUs to X.  May not be greater than # detected HIP devices\n");
+    printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
     printf(" NUM_ITERATIONS=I       - Perform I timed iteration(s) per test\n");
     printf(" NUM_WARMUPS=W          - Perform W untimed warmup iteration(s) per test\n");
     printf(" OUTPUT_TO_CSV          - Outputs to CSV format if set\n");
     printf(" SAMPLING_FACTOR=F      - Add F samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHARED_MEM_BYTES=X     - Use X shared mem bytes per threadblock, potentially to avoid multiple threadblocks per CU\n");
-    printf(" USE_HIP_CALL           - Use hipMemcpy/hipMemset instead of custom shader kernels for GPU-executed copies\n");
     printf(" USE_INTERACTIVE        - Pause for user-input before starting transfer loop\n");
-    printf(" USE_MEMSET             - Perform a memset instead of a copy (ignores source memory)\n");
     printf(" USE_PCIE_INDEX         - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
-    printf(" USE_SINGLE_STREAM      - Use single stream per device instead of per Transfer.  Cannot be used with USE_HIP_CALL\n");
+    printf(" USE_SINGLE_STREAM      - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
   }
 
   // Display env var settings
@@ -331,10 +357,9 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31)");
+        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
       printf("\n");
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
-      printf("%-20s = %12d : Using %d CPU thread(s) per CPU-executed Transfer\n", "NUM_CPU_PER_TRANSFER", numCpuPerTransfer, numCpuPerTransfer);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
       printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
              numIterations > 0 ? numIterations : -numIterations,
@@ -344,18 +369,8 @@ public:
              outputToCsv ? "CSV" : "console");
       printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
              getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
-      printf("%-20s = %12d : Using %s for GPU-executed copies\n", "USE_HIP_CALL", useHipCall,
-             useHipCall ? "HIP functions" : "custom kernels");
-      if (useHipCall && !useMemset)
-      {
-        char* env = getenv("HSA_ENABLE_SDMA");
-        printf("%-20s = %12s : %s\n", "HSA_ENABLE_SDMA", env,
-               (env && !strcmp(env, "0")) ? "Using blit kernels for hipMemcpy" : "Using DMA copy engines");
-      }
       printf("%-20s = %12d : Running in %s mode\n", "USE_INTERACTIVE", useInteractive,
              useInteractive ? "interactive" : "non-interactive");
-      printf("%-20s = %12d : Performing %s\n", "USE_MEMSET", useMemset,
-             useMemset ? "memset" : "memcopy");
       printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
              usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
       printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
@@ -371,22 +386,81 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31)");
+        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
       printf("\n");
       printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
-      printf("NUM_CPU_PER_TRANSFER,%d,Using %d CPU thread(s) per CPU-executed Transfer\n", numCpuPerTransfer, numCpuPerTransfer);
       printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
       printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
              numIterations > 0 ? numIterations : -numIterations,
              numIterations > 0 ? "timed iteration(s)" : "second(s)");
       printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
       printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
-      printf("USE_HIP_CALL,%d,Using %s for GPU-executed copies\n", useHipCall, useHipCall ? "HIP functions" : "custom kernels");
-      printf("USE_MEMSET,%d,Performing %s\n", useMemset, useMemset ? "memset" : "memcopy");
       printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
       printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
     }
   };
+
+  // Display env var for P2P Benchmark preset
+  void DisplayP2PBenchmarkEnvVars() const
+  {
+    if (!outputToCsv)
+    {
+      printf("Peer-to-peer Benchmark configuration (TransferBench v%s)\n", TB_VERSION);
+      printf("=====================================================\n");
+      printf("%-20s = %12d : Using %s as executor\n",         "USE_REMOTE_READ", useRemoteRead , useRemoteRead ? "DST" : "SRC");
+      printf("%-20s = %12d : Using GPU-%s as GPU executor\n", "USE_GPU_DMA"    , useDmaCopy    , useDmaCopy ? "DMA" : "GFX");
+      printf("%-20s = %12d : Using %d CPU subexecutors\n",    "NUM_CPU_SE"     , numCpuSubExecs, numCpuSubExecs);
+      printf("%-20s = %12d : Using %d GPU subexecutors\n",    "NUM_GPU_SE"     , numGpuSubExecs, numGpuSubExecs);
+
+      printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
+      printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
+      printf("%-20s = %12s : ", "FILL_PATTERN", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
+      if (fillPattern.size())
+        printf("Pattern: %s", getenv("FILL_PATTERN"));
+      else
+        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
+      printf("\n");
+      printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
+      printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
+      printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
+             numIterations > 0 ? numIterations : -numIterations,
+             numIterations > 0 ? "timed iteration(s)" : "second(s)");
+      printf("%-20s = %12d : Running %d warmup iteration(s) per Test\n", "NUM_WARMUPS", numWarmups, numWarmups);
+      printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
+             getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
+      printf("%-20s = %12d : Running in %s mode\n", "USE_INTERACTIVE", useInteractive,
+             useInteractive ? "interactive" : "non-interactive");
+      printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
+             usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("\n");
+    }
+    else
+    {
+      printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
+      printf("USE_REMOTE_READ,%d,Using %s as executor\n", useRemoteRead, useRemoteRead ? "DST" : "SRC");
+      printf("USE_GPU_DMA,%d,Using GPU-%s as GPU executor\n", useDmaCopy    , useDmaCopy ? "DMA" : "GFX");
+      printf("NUM_CPU_SE,%d,Using %d CPU subexecutors\n", numCpuSubExecs, numCpuSubExecs);
+      printf("NUM_GPU_SE,%d,Using %d GPU subexecutors\n", numGpuSubExecs, numGpuSubExecs);
+      printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
+      printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
+      printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
+      if (fillPattern.size())
+        printf("Pattern: %s", getenv("FILL_PATTERN"));
+      else
+        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
+      printf("\n");
+      printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
+      printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
+      printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
+             numIterations > 0 ? numIterations : -numIterations,
+             numIterations > 0 ? "timed iteration(s)" : "second(s)");
+      printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
+      printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
+      printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
+      printf("\n");
+    }
+  }
 
   // Display env var settings
   void DisplaySweepEnvVars() const
@@ -407,7 +481,6 @@ public:
       printf("%-20s = %12d : Max number of XGMI hops for Transfers (-1 = no limit)\n", "SWEEP_XGMI_MAX", sweepXgmiMax);
       printf("%-20s = %12d : Using %s number of bytes per Transfer\n", "SWEEP_RAND_BYTES", sweepRandBytes, sweepRandBytes ? "random" : "constant");
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
-      printf("%-20s = %12d : Using %d CPU thread(s) per CPU-executed Transfer\n", "NUM_CPU_PER_TRANSFER", numCpuPerTransfer, numCpuPerTransfer);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
       printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
       printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
@@ -425,14 +498,6 @@ public:
              outputToCsv ? "CSV" : "console");
       printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
              getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
-      printf("%-20s = %12d : Using %s for GPU-executed copies\n", "USE_HIP_CALL", useHipCall,
-             useHipCall ? "HIP functions" : "custom kernels");
-      if (useHipCall && !useMemset)
-      {
-        char* env = getenv("HSA_ENABLE_SDMA");
-        printf("%-20s = %12s : %s\n", "HSA_ENABLE_SDMA", env,
-               (env && !strcmp(env, "0")) ? "Using blit kernels for hipMemcpy" : "Using DMA copy engines");
-      }
       printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
              usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
       printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
@@ -454,7 +519,6 @@ public:
       printf("SWEEP_XGMI_MAX,%d,Max number of XGMI hops for Transfers (-1 = no limit)\n", sweepXgmiMax);
       printf("SWEEP_RAND_BYTES,%d,Using %s number of bytes per Transfer\n", sweepRandBytes, sweepRandBytes ? "random" : "constant");
       printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
-      printf("NUM_CPU_PER_TRANSFER,%d,Using %d CPU thread(s) per CPU-executed Transfer\n", numCpuPerTransfer, numCpuPerTransfer);
       printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
       printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
       printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
@@ -469,7 +533,6 @@ public:
              numIterations > 0 ? "timed iteration(s)" : "second(s)");
       printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
       printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
-      printf("USE_HIP_CALL,%d,Using %s for GPU-executed copies\n", useHipCall, useHipCall ? "HIP functions" : "custom kernels");
       printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
       printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
     }
