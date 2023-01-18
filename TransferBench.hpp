@@ -35,8 +35,6 @@ THE SOFTWARE.
 #include <hip/hip_ext.h>
 #include <hsa/hsa_ext_amd.h>
 
-#include "EnvVars.hpp"
-
 // Helper macro for catching HIP errors
 #define HIP_CALL(cmd)                                                                   \
     do {                                                                                \
@@ -48,6 +46,8 @@ THE SOFTWARE.
             exit(-1);                                                                   \
         }                                                                               \
     } while (0)
+
+#include "EnvVars.hpp"
 
 // Simple configuration parameters
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);  // Amount of data transferred per Transfer
@@ -94,20 +94,6 @@ ExeType inline CharToExeType(char const c)
   printf("[ERROR] Unexpected executor type (%c)\n", c);
   exit(1);
 }
-
-// Each subExecutor is provided with subarrays to work on
-#define MAX_SRCS 16
-#define MAX_DSTS 16
-struct SubExecParam
-{
-  size_t    N;                                  // Number of floats this subExecutor works on
-  int       numSrcs;                            // Number of source arrays
-  int       numDsts;                            // Number of destination arrays
-  float*    src[MAX_SRCS];                      // Source array pointers
-  float*    dst[MAX_DSTS];                      // Destination array pointers
-  long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
-  long long stopCycle;                          // Stop  timestamp for in-kernel timing (GPU-GFX executor)
-};
 
 // Each Transfer performs reads from source memory location(s), sums them (if multiple sources are specified)
 // then writes the summation to each of the specified destination memory location(s)

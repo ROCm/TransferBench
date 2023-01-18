@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2022 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
 ROCM_PATH ?= /opt/rocm
 HIPCC=$(ROCM_PATH)/bin/hipcc
 

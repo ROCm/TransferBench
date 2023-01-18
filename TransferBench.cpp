@@ -30,7 +30,6 @@ THE SOFTWARE.
 
 #include "TransferBench.hpp"
 #include "GetClosestNumaNode.hpp"
-#include "Kernels.hpp"
 
 int main(int argc, char **argv)
 {
@@ -374,7 +373,7 @@ void ExecuteTransfers(EnvVars const& ev,
 
       if (verbose && !ev.outputToCsv)
       {
-        printf(" Executor: %s %02d        (# Transfers %02lu)| %9.3f GB/s | %8.3f ms | %12lu bytes\n",
+        printf(" Executor: %s %02d        (# Transfers %02lu)| %10.3f GB/s | %8.3f ms | %12lu bytes\n",
                ExeTypeName[exeType], exeIndex, exeInfo.transfers.size(), exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes);
       }
 
@@ -388,7 +387,7 @@ void ExecuteTransfers(EnvVars const& ev,
         if (!verbose) continue;
         if (!ev.outputToCsv)
         {
-          printf("                            Transfer  %02d | %9.3f GB/s | %8.3f ms | %12lu bytes | %s -> %c%02d:(%03d) -> %s\n",
+          printf("                            Transfer  %02d | %10.3f GB/s | %8.3f ms | %12lu bytes | %s -> %c%02d:(%03d) -> %s\n",
                  transfer->transferIndex,
                  transferBandwidthGbs,
                  transferDurationMsec,
@@ -876,7 +875,7 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
       exit(1);
     }
 
-    if (transfer.exeType == EXE_GPU_DMA && (transfer.numSrcs != 1 || transfer.numDsts != 1))
+    if (transfer.exeType == EXE_GPU_DMA && (transfer.numSrcs > 1 || transfer.numDsts > 1))
     {
       printf("[ERROR] GPU DMA executor can only be used for single source / single dst Transfers\n");
       exit(1);
@@ -1037,7 +1036,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     // In single stream mode, all the threadblocks for this GPU are launched
     // Otherwise, just launch the threadblocks associated with this single Transfer
     int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalSubExecs : transfer->numSubExecs;
-    hipExtLaunchKernelGGL(GpuReduceKernel,
+    hipExtLaunchKernelGGL(GpuKernelTable[ev.gpuKernel],
                           dim3(numBlocksToRun, 1, 1),
                           dim3(BLOCKSIZE, 1, 1),
                           ev.sharedMemBytes, stream,

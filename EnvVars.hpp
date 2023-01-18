@@ -26,6 +26,7 @@ THE SOFTWARE.
 #include <algorithm>
 #include <random>
 #include <time.h>
+#include "Kernels.hpp"
 
 #define TB_VERSION "1.11"
 
@@ -95,7 +96,9 @@ public:
   std::string sweepExe;  // Set of executors to be swept
   std::string sweepDst;  // Set of dst memory types to be swept
 
+  // Developer features
   int enableDebug;       // Enable debug output
+  int gpuKernel;         // Which GPU kernel to use
 
   // Used to track current configuration mode
   ConfigModeEnum configMode;
@@ -110,14 +113,14 @@ public:
   EnvVars()
   {
     int maxSharedMemBytes = 0;
-    hipDeviceGetAttribute(&maxSharedMemBytes,
-                          hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0);
+    HIP_CALL(hipDeviceGetAttribute(&maxSharedMemBytes,
+                                   hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0));
     int numDeviceCUs = 0;
-    hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, 0);
+    HIP_CALL(hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, 0));
 
     int numDetectedCpus = numa_num_configured_nodes();
     int numDetectedGpus;
-    hipGetDeviceCount(&numDetectedGpus);
+    HIP_CALL(hipGetDeviceCount(&numDetectedGpus));
 
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
@@ -132,6 +135,7 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
+    gpuKernel         = GetEnvVar("GPU_KERNEL"          , 0);
 
     // P2P Benchmark related
     useRemoteRead    = GetEnvVar("USE_REMOTE_READ"      , 0);
@@ -304,6 +308,11 @@ public:
         exit(1);
       }
     }
+    if (gpuKernel < 0 || gpuKernel > NUM_GPU_KERNELS)
+    {
+      printf("[ERROR] GPU kernel must be between 0 and %d\n", NUM_GPU_KERNELS);
+      exit(1);
+    }
 
     // Determine how many CPUs exit per NUMA node (to avoid executing on NUMA without CPUs)
     numCpusPerNuma.resize(numDetectedCpus);
@@ -315,6 +324,7 @@ public:
     if (getenv("USE_HIP_CALL"))
     {
       printf("[WARN] USE_HIP_CALL has been deprecated.  Please use DMA executor 'D' or set USE_GPU_DMA for P2P-Benchmark preset\n");
+      exit(1);
     }
 
     char* enableSdma = getenv("HSA_ENABLE_SDMA");
@@ -359,6 +369,7 @@ public:
       else
         printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
       printf("\n");
+      printf("%-20s = %12d : Using GPU kernel %d [%s]\n" , "GPU_KERNEL", gpuKernel, gpuKernel, GpuKernelNames[gpuKernel].c_str());
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
       printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
