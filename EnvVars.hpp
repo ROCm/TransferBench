@@ -122,6 +122,17 @@ public:
     int numDetectedGpus;
     HIP_CALL(hipGetDeviceCount(&numDetectedGpus));
 
+    hipDeviceProp_t prop;
+    HIP_CALL(hipGetDeviceProperties(&prop, 0));
+    std::string fullName = prop.gcnArchName;
+    std::string archName = fullName.substr(0, fullName.find(':'));
+
+    // Different hardware pick different GPU kernels
+    // This performance difference is generally only noticable when executing fewer CUs
+    int defaultGpuKernel = 0;
+    if      (archName == "gfx906") defaultGpuKernel = 13;
+    else if (archName == "gfx910") defaultGpuKernel = 9;
+
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
@@ -135,7 +146,7 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
-    gpuKernel         = GetEnvVar("GPU_KERNEL"          , 0);
+    gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
 
     // P2P Benchmark related
     useRemoteRead    = GetEnvVar("USE_REMOTE_READ"      , 0);

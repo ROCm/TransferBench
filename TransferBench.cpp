@@ -676,6 +676,16 @@ void DisplayTopology(bool const outputToCsv)
   {
     printf("        |");
     for (int j = 0; j < numGpuDevices; j++)
+    {
+      hipDeviceProp_t prop;
+      HIP_CALL(hipGetDeviceProperties(&prop, j));
+      std::string fullName = prop.gcnArchName;
+      std::string archName = fullName.substr(0, fullName.find(':'));
+      printf(" %6s |", archName.c_str());
+    }
+    printf("\n");
+    printf("        |");
+    for (int j = 0; j < numGpuDevices; j++)
       printf(" GPU %02d |", j);
     printf(" PCIe Bus ID  | #CUs | Closest NUMA\n");
     for (int j = 0; j <= numGpuDevices; j++)
