@@ -131,7 +131,7 @@ public:
     // This performance difference is generally only noticable when executing fewer CUs
     int defaultGpuKernel = 0;
     if      (archName == "gfx906") defaultGpuKernel = 13;
-    else if (archName == "gfx910") defaultGpuKernel = 9;
+    else if (archName == "gfx90a") defaultGpuKernel = 9;
 
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);

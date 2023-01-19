@@ -346,7 +346,7 @@ typedef void (*GpuKernelFuncPtr)(SubExecParam*);
 
 GpuKernelFuncPtr GpuKernelTable[NUM_GPU_KERNELS] =
 {
-  GpuReduceKernel<13>,
+  GpuReduceKernel<8>,
   GpuReduceKernel<1>,
   GpuReduceKernel<2>,
   GpuReduceKernel<3>,
@@ -368,7 +368,7 @@ GpuKernelFuncPtr GpuKernelTable[NUM_GPU_KERNELS] =
 
 std::string GpuKernelNames[NUM_GPU_KERNELS] =
 {
-  "Default - 13xUnroll",
+  "Default - 8xUnroll",
   "Unroll x1",
   "Unroll x2",
   "Unroll x3",
