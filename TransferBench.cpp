@@ -360,7 +360,7 @@ void ExecuteTransfers(EnvVars const& ev,
       int     const exeIndex = exeInfoPair.first.second;
 
       // Compute total time for non GPU executors
-      if (!IsGpuType(exeType))
+      if (exeType != EXE_GPU_GFX)
       {
         exeInfo.totalTime = 0;
         for (auto const& transfer : exeInfo.transfers)
@@ -373,8 +373,8 @@ void ExecuteTransfers(EnvVars const& ev,
 
       if (verbose && !ev.outputToCsv)
       {
-        printf(" Executor: %s %02d        (# Transfers %02lu)| %10.3f GB/s | %8.3f ms | %12lu bytes\n",
-               ExeTypeName[exeType], exeIndex, exeInfo.transfers.size(), exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes);
+        printf(" Executor: %3s %02d | %7.3f GB/s | %8.3f ms | %12lu bytes\n",
+               ExeTypeName[exeType], exeIndex, exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes);
       }
 
       int totalCUs = 0;
@@ -387,13 +387,13 @@ void ExecuteTransfers(EnvVars const& ev,
         if (!verbose) continue;
         if (!ev.outputToCsv)
         {
-          printf("                            Transfer  %02d | %10.3f GB/s | %8.3f ms | %12lu bytes | %s -> %c%02d:(%03d) -> %s\n",
+          printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
                  transfer->transferIndex,
                  transferBandwidthGbs,
                  transferDurationMsec,
                  transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
-                 ExeTypeStr[transfer->exeType], transfer->exeIndex,
+                 ExeTypeName[transfer->exeType], transfer->exeIndex,
                  transfer->numSubExecs,
                  transfer->DstToStr().c_str());
         }
@@ -413,7 +413,7 @@ void ExecuteTransfers(EnvVars const& ev,
 
       if (verbose && ev.outputToCsv)
       {
-        printf("%d,ALL,%lu,ALL,%c%02d,ALL,%d,%.3f,%.3f,ALL,ALL,ALL,ALL\n",
+        printf("%d,ALL,%lu,ALL,%c%02d,ALL,%d,%.3f,%.3f,ALL,ALL\n",
                testNum, totalBytesTransferred,
                MemTypeStr[exeType], exeIndex, totalCUs,
                exeBandwidthGbs, exeDurationMsec);
@@ -431,14 +431,14 @@ void ExecuteTransfers(EnvVars const& ev,
       if (!verbose) continue;
       if (!ev.outputToCsv)
       {
-        printf(" Transfer %02d: %8s->[%s%02d:%03d]->%-8s | %7.3f GB/s | %8.3f ms | %12lu bytes |\n",
+        printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
                transfer->transferIndex,
+               transferBandwidthGbs, transferDurationMsec,
+               transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
                ExeTypeName[transfer->exeType], transfer->exeIndex,
                transfer->numSubExecs,
-               transfer->DstToStr().c_str(),
-               transferBandwidthGbs, transferDurationMsec,
-               transfer->numBytesActual);
+               transfer->DstToStr().c_str());
       }
       else
       {
@@ -460,12 +460,12 @@ void ExecuteTransfers(EnvVars const& ev,
   {
     if (!ev.outputToCsv)
     {
-      printf(" Aggregate Bandwidth (CPU timed)              | %7.3f GB/s | %8.3f ms | %12lu bytes | Overhead: %.3f ms\n",
+      printf(" Aggregate (CPU)  | %7.3f GB/s | %8.3f ms | %12lu bytes | Overhead: %.3f ms\n",
              totalBandwidthGbs, totalCpuTime, totalBytesTransferred, totalCpuTime - maxGpuTime);
     }
     else
     {
-      printf("%d,ALL,%lu,ALL,ALL,ALL,ALL,%.3f,%.3f,ALL,ALL,ALL,ALL\n",
+      printf("%d,ALL,%lu,ALL,ALL,ALL,ALL,%.3f,%.3f,ALL,ALL\n",
              testNum, totalBytesTransferred, totalBandwidthGbs, totalCpuTime);
     }
   }
@@ -527,12 +527,10 @@ void DisplayUsage(char const* cmdName)
   printf("Usage: %s config <N>\n", cmdName);
   printf("  config: Either:\n");
   printf("          - Filename of configFile containing Transfers to execute (see example.cfg for format)\n");
-  printf("          - Name of preset benchmark:\n");
-  printf("              p2p{_rr} - All CPU/GPU pairs benchmark {with remote reads}\n");
-  printf("              g2g{_rr} - All GPU/GPU pairs benchmark {with remote reads}\n");
-  printf("              sweep    - Sweep across possible sets of Transfers\n");
-  printf("              rsweep   - Randomly sweep across possible sets of Transfers\n");
-  printf("            - 3rd optional argument used as # of CUs to use (all by default for p2p / 4 for sweep)\n");
+  printf("          - Name of preset config:\n");
+  printf("              p2p          - Peer-to-peer benchmark tests\n");
+  printf("              sweep/rsweep - Sweep/random sweep across possible sets of Transfers\n");
+  printf("                             - 3rd/4th optional args for # GPU SubExecs / # CPU SubExecs per Transfer\n");
   printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
   printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
          DEFAULT_BYTES_PER_TRANSFER);
