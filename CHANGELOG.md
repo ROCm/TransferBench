@@ -1,5 +1,41 @@
 # Changelog for TransferBench
 
+## v1.11
+### Added
+- New multi-input / multi-output support (MIMO).  Transfers now can reduce (element-wise summation) multiple input memory arrays
+  and write the sums to multiple outputs
+- New GPU-DMA executor 'D' (uses hipMemcpy for SDMA copies).  Previously this was done using USE_HIP_CALL, but now this allows
+  GPU-GFX kernel to run in parallel with GPU-DMA instead of applying to all GPU executors globally.
+  - GPU-DMA executor can only be used for single-input/single-output Transfers
+  - GPU-DMA executor can only be associated with one SubExecutor
+- Added new "Null" memory type 'N', which represents empty memory. This allows for read-only or write-only Transfers
+- Added new GPU_KERNEL environment variable that allows for switching between various GPU-GFX reduction kernels
+
+### Optimized
+- Slightly improved GPU-GFX kernel performance based on hardware architecture when running with fewer CUs
+
+### Changed
+- Updated the example.cfg file to cover the new features
+- Updated output to support MIMO
+- Changed CUs/CPUs threads naming to SubExecutors for consistency
+- Sweep Preset:
+  - Default sweep preset executors now includes DMA
+- P2P Benchmarks:
+  - Now only works via "p2p".  Removed "p2p_rr", "g2g" and "g2g_rr".
+    - Setting NUM_CPU_DEVICES=0 can be used to only benchmark GPU devices (like "g2g")
+    - New environment variable USE_REMOTE_READ replaces "_rr" presets
+  - New environment variable USE_GPU_DMA=1 replaces USE_HIP_CALL=1 for benchmarking with GPU-DMA Executor
+  - Number of GPU SubExecutors for benchmark can be specified via NUM_GPU_SE
+    - Defaults to all CUs for GPU-GFX, 1 for GPU-DMA
+  - Number of CPU SubExecutors for benchmark can be specified via NUM_CPU_SE
+- Psuedo-random input pattern has been slightly adjusted to have different patterns for each input array within same Transfer
+
+### Removed
+- USE_HIP_CALL has been removed.  Use GPU-DMA executor 'D' or set USE_GPU_DMA=1 for P2P benchmark presets
+  - Currently warning will be issued if USE_HIP_CALL is set to 1 and program will terminate
+- Removed NUM_CPU_PER_TRANSFER - The number of CPU SubExecutors will be whatever is specified for the Transfer
+- Removed USE_MEMSET environment variable.  This can now be done via a Transfer using the null memory type
+
 ## v1.10
 ### Fixed
 - Fix incorrect bandwidth calculation when using single stream mode and per-Transfer data sizes
