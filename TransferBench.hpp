@@ -31,8 +31,15 @@ THE SOFTWARE.
 #include <map>
 #include <iostream>
 #include <sstream>
-#include <hip/hip_runtime.h>
+
+#if defined(__NVCC__)
+#include <cuda_runtime.h>
+#define __builtin_amdgcn_s_memrealtime clock64
+#else
 #include <hip/hip_ext.h>
+
+#endif
+#include <hip/hip_runtime.h>
 #include <hsa/hsa_ext_amd.h>
 
 // Helper macro for catching HIP errors

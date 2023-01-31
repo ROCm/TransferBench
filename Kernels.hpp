@@ -29,6 +29,19 @@ THE SOFTWARE.
 #define MEMSET_CHAR     75
 #define MEMSET_VAL      13323083.0f
 
+
+#if defined(__NVCC__)
+// Define float4 addition operator for NVIDIA platform
+__device__ inline float4& operator +=(float4& a, const float4& b)
+{
+  a.x += b.x;
+  a.y += b.y;
+  a.z += b.z;
+  a.w += b.w;
+  return a;
+}
+#endif
+
 // Each subExecutor is provided with subarrays to work on
 #define MAX_SRCS 16
 #define MAX_DSTS 16
@@ -51,14 +64,14 @@ void CpuReduceKernel(SubExecParam const& p)
   if (numSrcs == 0)
   {
     for (int i = 0; i < numDsts; ++i)
-      memset((float* __restrict__)p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
+      memset(p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
   }
   else if (numSrcs == 1)
   {
     float const* __restrict__ src = p.src[0];
     for (int i = 0; i < numDsts; ++i)
     {
-      memcpy((float* __restrict__)p.dst[i], src, p.N * sizeof(float));
+      memcpy(p.dst[i], src, p.N * sizeof(float));
     }
   }
   else
@@ -88,7 +101,6 @@ GpuReduceKernel(SubExecParam* params)
   SubExecParam& p    = params[blockIdx.x];
   int const numSrcs  = p.numSrcs;
   int const numDsts  = p.numDsts;
-  int const numWaves = BLOCKSIZE   / WARP_SIZE; // Number of wavefronts per threadblock
   int const waveId   = threadIdx.x / WARP_SIZE; // Wavefront number
   int const threadId = threadIdx.x % WARP_SIZE; // Thread index within wavefront
 
@@ -177,11 +189,11 @@ GpuReduceKernel(SubExecParam* params)
       else
       {
         for (int i = 0; i < numSrcs; ++i)
-          val += ((float const* __restrict__)p.src[i])[offset];
+          val += p.src[i][offset];
       }
 
       for (int i = 0; i < numDsts; ++i)
-        ((float* __restrict__)p.dst[i])[offset] = val;
+        p.dst[i][offset] = val;
     }
   }
 
@@ -197,7 +209,6 @@ template <typename FLOAT_TYPE, int UNROLL_FACTOR>
 __device__ size_t GpuReduceFuncImpl2(SubExecParam const &p, size_t const offset, size_t const N)
 {
   int    constexpr numFloatsPerPack = sizeof(FLOAT_TYPE) / sizeof(float); // Number of floats handled at a time per thread
-  int    constexpr numWaves         = BLOCKSIZE   / WARP_SIZE;            // Number of wavefronts per threadblock
   size_t constexpr loopPackInc      = BLOCKSIZE * UNROLL_FACTOR;
   size_t constexpr numPacksPerWave  = WARP_SIZE * UNROLL_FACTOR;
   int    const     waveId           = threadIdx.x / WARP_SIZE;            // Wavefront number

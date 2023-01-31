@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.12
+### Added
+- Added support for TransferBench on NVIDIA platforms (via HIP_PLATFORM=nvidia)
+  - CPU executors on NVIDIA platform cannot access GPU memory (no large-bar access)
+
 ## v1.11
 ### Added
 - New multi-input / multi-output support (MIMO).  Transfers now can reduce (element-wise summation) multiple input memory arrays

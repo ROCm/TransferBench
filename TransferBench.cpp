@@ -291,7 +291,11 @@ void ExecuteTransfers(EnvVars const& ev,
           printf("  DST %0d: %p\n", iDst, transfer.dstMem[iDst]);
       }
       printf("Hit <Enter> to continue: ");
-      scanf("%*c");
+      if (scanf("%*c") != 0)
+      {
+        printf("[ERROR] Unexpected input\n");
+        exit(1);
+      }
       printf("\n");
     }
 
@@ -332,7 +336,11 @@ void ExecuteTransfers(EnvVars const& ev,
   if (verbose && ev.useInteractive)
   {
     printf("Transfers complete. Hit <Enter> to continue: ");
-    scanf("%*c");
+    if (scanf("%*c") != 0)
+    {
+      printf("[ERROR] Unexpected input\n");
+      exit(1);
+    }
     printf("\n");
   }
 
@@ -590,6 +598,7 @@ int RemappedIndex(int const origIdx, bool const isCpuType)
 
 void DisplayTopology(bool const outputToCsv)
 {
+
   int numCpuDevices = numa_num_configured_nodes();
   int numGpuDevices;
   HIP_CALL(hipGetDeviceCount(&numGpuDevices));
@@ -648,6 +657,7 @@ void DisplayTopology(bool const outputToCsv)
     else
       printf(" %5d | ", numCpus);
 
+#if !defined(__NVCC__)
     bool isFirst = true;
     for (int j = 0; j < numGpuDevices; j++)
     {
@@ -658,9 +668,15 @@ void DisplayTopology(bool const outputToCsv)
         printf("%d", j);
       }
     }
+#endif
     printf("\n");
   }
   printf("\n");
+
+#if defined(__NVCC__)
+  // No further topology detection done for NVIDIA platforms
+  return;
+#endif
 
   // Print out detected GPU topology
   if (outputToCsv)
@@ -691,8 +707,8 @@ void DisplayTopology(bool const outputToCsv)
     printf("--------------+------+-------------\n");
   }
 
+#if !defined(__NVCC__)
   char pciBusId[20];
-
   for (int i = 0; i < numGpuDevices; i++)
   {
     int const deviceIdx = RemappedIndex(i, false);
@@ -732,6 +748,7 @@ void DisplayTopology(bool const outputToCsv)
     else
       printf(" %11s | %4d | %d\n", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
   }
+#endif
 }
 
 void ParseMemType(std::string const& token, int const numCpus, int const numGpus,
@@ -930,11 +947,20 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     // Allocate host-pinned memory (should respect NUMA mem policy)
     if (memType == MEM_CPU_FINE)
     {
+#if defined (__NVCC__)
+      printf("[ERROR] Fine-grained CPU memory not supported on NVIDIA platform\n");
+      exit(1);
+#else
       HIP_CALL(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser));
+#endif
     }
     else if (memType == MEM_CPU)
     {
+#if defined (__NVCC__)
+      if (hipHostMalloc((void **)memPtr, numBytes, 0) != hipSuccess)
+#else
       if (hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent) != hipSuccess)
+#endif
       {
         printf("[ERROR] Unable to allocate non-coherent host memory on NUMA node %d\n", devIndex);
         exit(1);
@@ -960,8 +986,13 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
   }
   else if (memType == MEM_GPU_FINE)
   {
+#if defined (__NVCC__)
+    printf("[ERROR] Fine-grained GPU memory not supported on NVIDIA platform\n");
+    exit(1);
+#else
     HIP_CALL(hipSetDevice(devIndex));
     HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, hipDeviceMallocFinegrained));
+#endif
   }
   else
   {
@@ -1044,13 +1075,18 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     // In single stream mode, all the threadblocks for this GPU are launched
     // Otherwise, just launch the threadblocks associated with this single Transfer
     int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalSubExecs : transfer->numSubExecs;
+#if defined(__NVCC__)
+    HIP_CALL(hipEventRecord(startEvent, stream));
+    GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, BLOCKSIZE, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
+    HIP_CALL(hipEventRecord(stopEvent, stream));
+#else
     hipExtLaunchKernelGGL(GpuKernelTable[ev.gpuKernel],
                           dim3(numBlocksToRun, 1, 1),
                           dim3(BLOCKSIZE, 1, 1),
                           ev.sharedMemBytes, stream,
                           startEvent, stopEvent,
                           0, transfer->subExecParamGpuPtr);
-
+#endif
     // Synchronize per iteration, unless in single sync mode, in which case
     // synchronize during last warmup / last actual iteration
     HIP_CALL(hipStreamSynchronize(stream));
@@ -1228,8 +1264,6 @@ double GetPeakBandwidth(EnvVars const& ev, size_t const N,
   // Skip bidirectional on same device
   if (isBidirectional && srcType == dstType && srcIndex == dstIndex) return 0.0f;
 
-  int const initOffset = ev.byteOffset / sizeof(float);
-
   // Prepare Transfers
   std::vector<Transfer> transfers(2);
   transfers[0].numBytes = transfers[1].numBytes = N * sizeof(float);
@@ -1265,6 +1299,12 @@ double GetPeakBandwidth(EnvVars const& ev, size_t const N,
   {
     if (transfers[i].exeType == EXE_CPU && ev.numCpusPerNuma[transfers[i].exeIndex] == 0)
       return 0;
+
+#if defined(__NVCC__)
+    // NVIDIA platform cannot access GPU memory directly from CPU executors
+    if (transfers[i].exeType == EXE_CPU && (IsGpuType(srcType) || IsGpuType(dstType)))
+        return 0;
+#endif
   }
 
   ExecuteTransfers(ev, 0, N, transfers, false);
@@ -1549,6 +1589,9 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
       {
         if (exeList[i].second != srcList[j].second)
         {
+#if defined(__NVCC__)
+          isXgmiSrc = false;
+#else
           uint32_t exeToSrcLinkType, exeToSrcHopCount;
           HIP_CALL(hipExtGetLinkTypeAndHopCount(RemappedIndex(exeList[i].second, false),
                                                 RemappedIndex(srcList[j].second, false),
@@ -1556,6 +1599,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
                                                 &exeToSrcHopCount));
           isXgmiSrc = (exeToSrcLinkType == HSA_AMD_LINK_INFO_TYPE_XGMI);
           if (isXgmiSrc) numHopsSrc = exeToSrcHopCount;
+#endif
         }
         else
         {
@@ -1582,6 +1626,9 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
         {
           if (exeList[i].second != dstList[k].second)
           {
+#if defined(__NVCC__)
+            isXgmiSrc = false;
+#else
             uint32_t exeToDstLinkType, exeToDstHopCount;
             HIP_CALL(hipExtGetLinkTypeAndHopCount(RemappedIndex(exeList[i].second, false),
                                                   RemappedIndex(dstList[k].second, false),
@@ -1589,6 +1636,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
                                                   &exeToDstHopCount));
             isXgmiDst = (exeToDstLinkType == HSA_AMD_LINK_INFO_TYPE_XGMI);
             if (isXgmiDst) numHopsDst = exeToDstHopCount;
+#endif
           }
           else
           {
@@ -1605,6 +1653,12 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
 
         // Skip this DST if total XGMI distance (SRC + DST) is greater than max limit
         if (ev.sweepXgmiMax >= 0 && (numHopsSrc + numHopsDst) > ev.sweepXgmiMax) continue;
+
+#if defined(__NVCC__)
+        // Skip CPU executors on GPU memory on NVIDIA platform
+        if (IsCpuType(exeList[i].first) && (IsGpuType(dstList[j].first) || IsGpuType(dstList[k].first)))
+          continue;
+#endif
 
         tinfo.dstType  = dstList[k].first;
         tinfo.dstIndex = dstList[k].second;
