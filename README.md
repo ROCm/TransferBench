@@ -13,6 +13,14 @@ TransferBench is a simple utility capable of benchmarking simultaneous copies be
 
   If ROCm is installed in a folder other than `/opt/rocm/`, set ROCM_PATH appropriately
 
+## NVIDIA platform support
+
+TransferBench may also be built to run on NVIDIA platforms via HIP, but requires a HIP-compatible CUDA version installed (e.g. CUDA 11.5)
+
+To build:
+```
+   CUDA_PATH=<path_to_CUDA> HIP_PLATFORM=nvidia make`
+```
 
 ## Hints and suggestions
 - Running TransferBench with no arguments will display usage instructions and detected topology information
