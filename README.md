@@ -8,8 +8,18 @@ TransferBench is a simple utility capable of benchmarking simultaneous copies be
 2. libnuma installed on system
 
 ## Building
-  To build TransferBench:
-* `make`
+  To build TransferBench using Makefile:
+ ```shell
+ $ make
+ ```
+
+  To build TransferBench using cmake:
+ ```shell 
+$ mkdir build
+$ cd build
+$ CXX=/opt/rocm/bin/hipcc cmake ..
+$ make
+ ```
 
   If ROCm is installed in a folder other than `/opt/rocm/`, set ROCM_PATH appropriately
 

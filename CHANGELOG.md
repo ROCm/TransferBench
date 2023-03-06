@@ -1,5 +1,12 @@
 # Changelog for TransferBench
 
+## v1.13
+### Added
+- Added support for cmake
+
+### Changed
+- Converted to the Pitchfork layout standard
+
 ## v1.12
 ### Added
 - Added support for TransferBench on NVIDIA platforms (via HIP_PLATFORM=nvidia)
