@@ -5,7 +5,8 @@ else()
     set(ROCM_PATH "/opt/rocm" CACHE STRING "ROCm install directory")
 endif()
 cmake_minimum_required(VERSION 3.5)
-project(TransferBench CXX)
+set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+project(TransferBench VERSION 1.0 LANGUAGES CXX)
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/hsa/lib")
 include_directories(${ROCM_PATH}/hsa/include)
 link_libraries(numa hsa-runtime64)
@@ -13,3 +14,18 @@ set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ..)
 add_executable(TransferBench src/TransferBench.cpp)
 target_include_directories(TransferBench PRIVATE src/include)
 
+find_package(ROCM 0.8 REQUIRED PATHS ${ROCM_PATH})
+include(ROCMInstallTargets)
+include(ROCMCreatePackage)
+set(ROCMCHECKS_WARN_TOOLCHAIN_VAR OFF)
+
+set(PACKAGE_NAME TB)
+set(LIBRARY_NAME TransferBench)
+
+rocm_install(TARGETS TransferBench)
+
+rocm_create_package(
+    NAME ${LIBRARY_NAME}
+    DESCRIPTION "TransferBench package"
+    MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
+)
