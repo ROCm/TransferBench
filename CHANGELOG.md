@@ -1,9 +1,13 @@
 # Changelog for TransferBench
 
+## v1.14
+### Added
+- Added documentation
+- Added pthread linking in src/Makefile and CMakeLists.txt
+
 ## v1.13
 ### Added
 - Added support for cmake
-- Added documentation
 
 ### Changed
 - Converted to the Pitchfork layout standard
