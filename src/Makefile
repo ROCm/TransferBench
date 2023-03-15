@@ -3,12 +3,12 @@ ROCM_PATH ?= /opt/rocm
 HIPCC=$(ROCM_PATH)/bin/hipcc
 
 EXE=TransferBench
-CXXFLAGS = -O3 -I. -Iinclude -I$(ROCM_PATH)/hsa/include -lnuma -L$(ROCM_PATH)/hsa/lib -lhsa-runtime64
-
+CXXFLAGS = -O3 -I. -Iinclude -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
+LDFLAGS    += -lpthread
 all: $(EXE)
 
 $(EXE): $(EXE).cpp $(shell find -regex ".*\.\hpp")
-	$(HIPCC) $(CXXFLAGS) $< -o ../$@
+	$(HIPCC) $(CXXFLAGS) $< -o ../$@ $(LDFLAGS)
 
 clean:
 	rm -f *.o ../$(EXE)
