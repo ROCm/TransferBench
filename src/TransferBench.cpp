@@ -1452,8 +1452,7 @@ void Transfer::ValidateDst(EnvVars const& ev)
     {
       if (reference[i] != output[i])
       {
-        printf("\n[ERROR] Destination array %d value at index %lu (%.3f) does not match expected value (%.3f)\n",
-               dstIdx, i, output[i], reference[i]);
+	printf("\n[ERROR] Destination array %d value at index %lu (%.3f) [%X] does not match expected value (%.3f) [%X]\n", dstIdx, i, output[i], *(unsigned int*)&output[i], reference[i], *(unsigned int*)&reference[i]);
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
                this->SrcToStr().c_str(),
