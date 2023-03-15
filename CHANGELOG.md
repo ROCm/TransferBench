@@ -3,6 +3,7 @@
 ## v1.13
 ### Added
 - Added support for cmake
+- Added documentation
 
 ### Changed
 - Converted to the Pitchfork layout standard
