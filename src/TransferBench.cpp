@@ -1051,7 +1051,6 @@ void CheckPages(char* array, size_t numBytes, int targetId)
   if (mistakeCount > 0)
   {
     printf("[ERROR] %lu out of %lu pages for memory allocation were not on NUMA node %d\n", mistakeCount, numPages, targetId);
-    printf("[ERROR] Ensure up-to-date ROCm is installed\n");
     exit(1);
   }
 }
@@ -1331,8 +1330,7 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
   int    const targetMultiple = ev.blockBytes / sizeof(float);
 
   // In some cases, there may not be enough data for all subExectors
-  int const maxSubExecToUse = std::min((int)(N + targetMultiple - 1) / targetMultiple, this->numSubExecs);
-
+  int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple, (size_t)this->numSubExecs);
   this->subExecParam.clear();
   this->subExecParam.resize(this->numSubExecs);
 
@@ -1452,7 +1450,15 @@ void Transfer::ValidateDst(EnvVars const& ev)
     {
       if (reference[i] != output[i])
       {
-	printf("\n[ERROR] Destination array %d value at index %lu (%.3f) [%X] does not match expected value (%.3f) [%X]\n", dstIdx, i, output[i], *(unsigned int*)&output[i], reference[i], *(unsigned int*)&reference[i]);
+        printf("\n[ERROR] Unexpected mismatch at index %lu of destination array %d:\n", i, dstIdx);
+        for (int srcIdx = 0; srcIdx < this->numSrcs; ++srcIdx)
+        {
+          float srcVal;
+          HIP_CALL(hipMemcpy(&srcVal, this->srcMem[srcIdx] + initOffset + i, sizeof(float), hipMemcpyDefault));
+          printf("[ERROR] SRC %02d   value: %8.6f [%08X]\n", srcIdx, srcVal, *(unsigned int*)&srcVal);
+        }
+        printf("[ERROR] EXPECTED value: %8.6f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
+        printf("[ERROR] DST %02d   value: %8.6f [%08X]\n", dstIdx, output[i], *(unsigned int*)&output[i]);
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
                this->SrcToStr().c_str(),
