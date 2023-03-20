@@ -28,7 +28,7 @@ THE SOFTWARE.
 #include <time.h>
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.14"
+#define TB_VERSION "1.15"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];

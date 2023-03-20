@@ -1,11 +1,18 @@
 # Changelog for TransferBench
 
+## v1.15
+### Fixed
+- Fixed a bug that prevented single Transfers > 8GB
+### Changed
+- Removed "check for latest ROCm" warning when allocating too much memory
+- Printing off source memory value as well when mis-match is detected
+
 ## v1.14
 ### Added
 - Added documentation
 - Added pthread linking in src/Makefile and CMakeLists.txt
 - Added printing off the hex value of the floats for output and reference
- 
+
 ## v1.13
 ### Added
 - Added support for cmake
