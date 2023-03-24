@@ -1,7 +1,13 @@
 # Anywhere {branch} is used, the branch name will be substituted.
 # These comments will also be removed.
-root: introduction
+root: index
 subtrees:
   - numbered: False
     entries:
     - file: instructions
+    - file: examples/index
+    subtrees:
+      - numbered: False
+        entries:
+        - file: examples/config
+      
