@@ -262,7 +262,6 @@ void ExecuteTransfers(EnvVars const& ev,
                            transfer->subExecParam.data(),
                            transfer->subExecParam.size() * sizeof(SubExecParam),
                            hipMemcpyHostToDevice));
-
         transferOffset += transfer->subExecParam.size();
       }
     }
@@ -978,21 +977,26 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     // Reset to default numa mem policy
     numa_set_preferred(-1);
   }
-  else if (memType == MEM_GPU)
+  if (IsGpuType(memType))
   {
-    // Allocate GPU memory on appropriate device
-    HIP_CALL(hipSetDevice(devIndex));
-    HIP_CALL(hipMalloc((void**)memPtr, numBytes));
-  }
-  else if (memType == MEM_GPU_FINE)
-  {
+    if (memType == MEM_GPU)
+    {
+      // Allocate GPU memory on appropriate device
+      HIP_CALL(hipSetDevice(devIndex));
+      HIP_CALL(hipMalloc((void**)memPtr, numBytes));
+    }
+    else if (memType == MEM_GPU_FINE)
+    {
 #if defined (__NVCC__)
-    printf("[ERROR] Fine-grained GPU memory not supported on NVIDIA platform\n");
-    exit(1);
+      printf("[ERROR] Fine-grained GPU memory not supported on NVIDIA platform\n");
+      exit(1);
 #else
-    HIP_CALL(hipSetDevice(devIndex));
-    HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, hipDeviceMallocFinegrained));
+      HIP_CALL(hipSetDevice(devIndex));
+      HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, hipDeviceMallocFinegrained));
+
 #endif
+    }
+    HIP_CALL(hipMemset(*memPtr, 0, numBytes));
   }
   else
   {
@@ -1417,9 +1421,30 @@ void Transfer::PrepareSrc(EnvVars const& ev)
   std::vector<float> reference(N);
   for (int srcIdx = 0; srcIdx < this->numSrcs; ++srcIdx)
   {
-    //PrepareReference(ev, reference, srcIdx);
     PrepareReference(ev, reference, srcIdx);
     HIP_CALL(hipMemcpy(this->srcMem[srcIdx] + initOffset, reference.data(), this->numBytesActual, hipMemcpyDefault));
+
+    // Perform check just to make sure that data has been copied properly
+    std::vector<float> srcCopy(N);
+    HIP_CALL(hipMemcpy(srcCopy.data(), this->srcMem[srcIdx] + initOffset, this->numBytesActual, hipMemcpyDefault));
+
+    for (size_t i = 0; i < N; ++i)
+    {
+      if (reference[i] != srcCopy[i])
+      {
+        printf("\n[ERROR] Unexpected mismatch at index %lu of source array %d:\n", i, srcIdx);
+        printf("[ERROR] SRC %02d   value: %10.5f [%08X]\n", srcIdx, srcCopy[i], *(unsigned int*)&srcCopy[i]);
+        printf("[ERROR] EXPECTED value: %10.5f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
+        printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
+               this->transferIndex,
+               this->SrcToStr().c_str(),
+               ExeTypeStr[this->exeType], this->exeIndex,
+               this->numSubExecs,
+               this->DstToStr().c_str());
+        if (!ev.continueOnError)
+          exit(1);
+      }
+    }
   }
 }
 
@@ -1455,17 +1480,18 @@ void Transfer::ValidateDst(EnvVars const& ev)
         {
           float srcVal;
           HIP_CALL(hipMemcpy(&srcVal, this->srcMem[srcIdx] + initOffset + i, sizeof(float), hipMemcpyDefault));
-          printf("[ERROR] SRC %02d   value: %8.6f [%08X]\n", srcIdx, srcVal, *(unsigned int*)&srcVal);
+          printf("[ERROR] SRC %02d   value: %10.5f [%08X]\n", srcIdx, srcVal, *(unsigned int*)&srcVal);
         }
-        printf("[ERROR] EXPECTED value: %8.6f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
-        printf("[ERROR] DST %02d   value: %8.6f [%08X]\n", dstIdx, output[i], *(unsigned int*)&output[i]);
+        printf("[ERROR] EXPECTED value: %10.5f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
+        printf("[ERROR] DST %02d   value: %10.5f [%08X]\n", dstIdx, output[i], *(unsigned int*)&output[i]);
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
                this->SrcToStr().c_str(),
                ExeTypeStr[this->exeType], this->exeIndex,
                this->numSubExecs,
                this->DstToStr().c_str());
-        exit(1);
+        if (!ev.continueOnError)
+          exit(1);
       }
     }
   }

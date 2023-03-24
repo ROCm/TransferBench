@@ -1,5 +1,11 @@
 # Changelog for TransferBench
 
+## v1.16
+### Added
+- Additional src array validation during preparation
+- Adding new env var CONTINUE_ON_ERROR to resume tests after mis-match detection
+- Initializing GPU memory to 0 during allocation
+
 ## v1.15
 ### Fixed
 - Fixed a bug that prevented single Transfers > 8GB
