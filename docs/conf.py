@@ -8,6 +8,7 @@ from rocm_docs import ROCmDocs
 
 docs_core = ROCmDocs("TransferBench Documentation")
 docs_core.setup()
+docs_core.run_doxygen()
 
 for sphinx_var in ROCmDocs.SPHINX_VARS:
     globals()[sphinx_var] = getattr(docs_core, sphinx_var)
