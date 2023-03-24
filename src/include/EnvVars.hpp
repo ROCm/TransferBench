@@ -28,7 +28,7 @@ THE SOFTWARE.
 #include <time.h>
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.15"
+#define TB_VERSION "1.16"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -64,6 +64,7 @@ public:
   // Environment variables
   int blockBytes;        // Each CU, except the last, gets a multiple of this many bytes to copy
   int byteOffset;        // Byte-offset for memory allocations
+  int continueOnError;   // Continue tests even after mismatch detected
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
@@ -135,6 +136,7 @@ public:
 
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
+    continueOnError   = GetEnvVar("CONTINUE_ON_ERROR"   , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
@@ -352,6 +354,7 @@ public:
     printf("======================\n");
     printf(" BLOCK_BYTES=B          - Each CU (except the last) receives a multiple of BLOCK_BYTES to copy\n");
     printf(" BYTE_OFFSET            - Initial byte-offset for memory allocations.  Must be multiple of 4. Defaults to 0\n");
+    printf(" CONTINUE_ON_ERROR      - Continue tests even after mismatch detected\n");
     printf(" FILL_PATTERN=STR       - Fill input buffer with pattern specified in hex digits (0-9,a-f,A-F).  Must be even number of digits, (byte-level big-endian)\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
@@ -374,6 +377,7 @@ public:
       printf("=====================================================\n");
       printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
       printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
+      printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
       printf("%-20s = %12s : ", "FILL_PATTERN", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
@@ -404,6 +408,7 @@ public:
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
       printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
       printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
+      printf("CONTINUE_ON_ERROR,%d,Continue test on mismatch error\n", continueOnError);
       printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
