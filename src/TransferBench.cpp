@@ -977,7 +977,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     // Reset to default numa mem policy
     numa_set_preferred(-1);
   }
-  if (IsGpuType(memType))
+  else if (IsGpuType(memType))
   {
     if (memType == MEM_GPU)
     {
