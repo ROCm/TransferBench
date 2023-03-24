@@ -4,16 +4,14 @@ ConfigFile Format
 
 A Transfer is defined as a single operation where an Executor reads and adds together
 values from Source (SRC) memory locations, then writes the sum to destination (DST) memory locations.
-This simplifies to a simple copy operation when dealing with single SRC/DST.
+This simplifies to a simple copy operation when dealing with single SRC/DST.::
 
-::
    SRC 0                DST 0
    SRC 1 -> Executor -> DST 1
    SRC X                DST Y
 
-Three Executors are supported by TransferBench
+Three Executors are supported by TransferBench::
 
-::
    Executor:        SubExecutor:
    1) CPU           CPU thread
    2) GPU           GPU threadblock/Compute Unit (CU)
@@ -37,9 +35,8 @@ There are two ways to specify a Test:
 
    -Transfers (srcMem1->Executor1->dstMem1 SEs1 Bytes1) ... (srcMemL->ExecutorL->dstMemL SEsL BytesL)
 
-Argument Details:
+Argument Details:::
 
-::
    Transfers:   Number of Transfers to be run in parallel
    SEs      :   Number of SubExectors to use (CPU threads/ GPU threadblocks)
    srcMemL   :   Source memory locations (Where the data is to be read from)
@@ -61,9 +58,8 @@ Argument Details:
                   - F:    Fine-grain device memory (on GPU device indexed from 0 to [GPUs - 1])
                   - N:    Null memory              (index ignored)
 
-Examples:
+Examples:::
 
-::
    1 4 (G0->G0->G1)                   Uses 4 CUs on GPU0 to copy from GPU0 to GPU1
    1 4 (C1->G2->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
    2 4 G0->G0->G1 G1->G1->G0          Copes from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs

@@ -1,3 +1,5 @@
+.. _Examples:
+
 --------------------
 Examples
 --------------------
@@ -6,4 +8,4 @@ Examples
    :maxdepth: 3
    :caption: Contents:
 
-   examples
+   configfile_format

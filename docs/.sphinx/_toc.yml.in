@@ -9,5 +9,5 @@ subtrees:
     subtrees:
       - numbered: False
         entries:
-        - file: examples/config
+        - file: examples/configfile_format
       
