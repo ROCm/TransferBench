@@ -26,9 +26,10 @@ THE SOFTWARE.
 #include <algorithm>
 #include <random>
 #include <time.h>
+#include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.16"
+#define TB_VERSION "1.17"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];

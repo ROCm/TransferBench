@@ -1526,9 +1526,14 @@ int GetWallClockRate(int deviceId)
     HIP_CALL(hipGetDeviceCount(&numGpuDevices));
     wallClockPerDeviceMhz.resize(numGpuDevices);
 
-    hipDeviceProp_t prop;
     for (int i = 0; i < numGpuDevices; i++)
     {
+#if defined(__NVCC__)
+      int value = 1410000;
+      //HIP_CALL(hipDeviceGetAttribute(&value, hipDeviceAttributeClockRate, i));
+      //value *= 1000;
+#else
+      hipDeviceProp_t prop;
       HIP_CALL(hipGetDeviceProperties(&prop, i));
       int value = 25000;
       switch (prop.gcnArch)
@@ -1537,6 +1542,7 @@ int GetWallClockRate(int deviceId)
       default:
         printf("Unrecognized GCN arch %d\n", prop.gcnArch);
       }
+#endif
       wallClockPerDeviceMhz[i] = value;
     }
   }
