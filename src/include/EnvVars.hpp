@@ -74,6 +74,7 @@ public:
   int sharedMemBytes;    // Amount of shared memory to use per threadblock
   int useInteractive;    // Pause for user-input before starting transfer loop
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
+  int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
   int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
@@ -146,6 +147,7 @@ public:
     sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , maxSharedMemBytes / 2 + 1);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
+    usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
     gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
@@ -177,6 +179,12 @@ public:
     char* pattern = getenv("FILL_PATTERN");
     if (pattern != NULL)
     {
+      if (usePrepSrcKernel)
+      {
+        printf("[ERROR] Unable to use FILL_PATTERN and USE_PREP_KERNEL together\n");
+        exit(1);
+      }
+
       int patternLen = strlen(pattern);
       if (patternLen % 2)
       {
@@ -365,6 +373,7 @@ public:
     printf(" SHARED_MEM_BYTES=X     - Use X shared mem bytes per threadblock, potentially to avoid multiple threadblocks per CU\n");
     printf(" USE_INTERACTIVE        - Pause for user-input before starting transfer loop\n");
     printf(" USE_PCIE_INDEX         - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
+    printf(" USE_PREP_KERNEL        - Use GPU kernel to initialize source data array pattern\n");
     printf(" USE_SINGLE_STREAM      - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
   }
 
@@ -382,7 +391,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: (Element i = ((i * 517) modulo 383 + 31) * (InputIdx + 1)");
       printf("\n");
       printf("%-20s = %12d : Using GPU kernel %d [%s]\n" , "GPU_KERNEL", gpuKernel, gpuKernel, GpuKernelNames[gpuKernel].c_str());
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
@@ -399,6 +408,8 @@ public:
              useInteractive ? "interactive" : "non-interactive");
       printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
              usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("%-20s = %12d : Using %s to initialize source data\n", "USE_PREP_KERNEL",
+             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
              useSingleStream, (useSingleStream ? "device" : "Transfer"));
       printf("\n");
@@ -413,7 +424,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: (Element i = ((i * 517) modulo 383 + 31) * (InputIdx + 1)");
       printf("\n");
       printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
       printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
@@ -423,6 +434,8 @@ public:
       printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
       printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
       printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
+             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
     }
   };
@@ -441,11 +454,12 @@ public:
 
       printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
       printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
+      printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
       printf("%-20s = %12s : ", "FILL_PATTERN", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: (Element i = ((i * 517) modulo 383 + 31) * (InputIdx + 1)");
       printf("\n");
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
@@ -459,6 +473,8 @@ public:
              useInteractive ? "interactive" : "non-interactive");
       printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
              usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("%-20s = %12d : Using %s to initialize source data\n", "USE_PREP_KERNEL",
+             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("\n");
     }
     else
@@ -485,6 +501,8 @@ public:
       printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
       printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
       printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
+      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
+             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("\n");
     }
   }
@@ -527,9 +545,12 @@ public:
              getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
       printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
              usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
+             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
              useSingleStream, (useSingleStream ? "device" : "Transfer"));
       printf("\n");
+      printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
     }
     else
     {
@@ -561,6 +582,8 @@ public:
       printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
       printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
       printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
+      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
+             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
     }
   };

@@ -85,6 +85,28 @@ void CpuReduceKernel(SubExecParam const& p)
   }
 }
 
+std::string PrepSrcValueString()
+{
+  return "Element i = ((i * 517) modulo 383 + 31) * (srcBufferIdx + 1)";
+}
+
+__host__ __device__ float PrepSrcValue(int srcBufferIdx, size_t idx)
+{
+  return (((idx % 383) * 517) % 383 + 31) * (srcBufferIdx + 1);
+}
+
+// GPU kernel to prepare src buffer data
+__global__ void
+PrepSrcDataKernel(float* ptr, size_t N, int srcBufferIdx)
+{
+  for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+       idx < N;
+       idx += blockDim.x * gridDim.x)
+  {
+    ptr[idx] = PrepSrcValue(srcBufferIdx, idx);
+  }
+}
+
 // Helper function for memset
 template <typename T> __device__ __forceinline__ T      MemsetVal();
 template <>           __device__ __forceinline__ float  MemsetVal(){ return MEMSET_VAL; };

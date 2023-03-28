@@ -131,7 +131,7 @@ struct Transfer
   void PrepareSubExecParams(EnvVars const& ev);
 
   // Prepare source arrays with input data
-  void PrepareSrc(EnvVars const& ev);
+  bool PrepareSrc(EnvVars const& ev);
 
   // Validate that destination data contains expected results
   void ValidateDst(EnvVars const& ev);
