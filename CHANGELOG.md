@@ -5,6 +5,8 @@
 - Allow switch to GFX kernel for source array initialization (USE_PREP_KERNEL)
   - USE_PREP_KERNEL cannot be used with FILL_PATTERN
 - Adding ability to compile with nvcc only (TransferBenchCuda)
+### Changed
+- Default pattern set to [Element i = ((i * 517) modulo 383 + 31) * (srcBufferIdx + 1)]
 
 ## v1.16
 ### Added

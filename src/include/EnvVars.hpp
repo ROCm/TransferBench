@@ -394,7 +394,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = ((i * 517) modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
       printf("\n");
       printf("%-20s = %12d : Using GPU kernel %d [%s]\n" , "GPU_KERNEL", gpuKernel, gpuKernel, GpuKernelNames[gpuKernel].c_str());
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
@@ -427,7 +427,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = ((i * 517) modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
       printf("\n");
       printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
       printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
@@ -462,7 +462,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = ((i * 517) modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
       printf("\n");
       printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
       printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
@@ -493,7 +493,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31) * (InputIdx + 1)");
+        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
       printf("\n");
       printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
       printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
@@ -536,7 +536,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31)");
+        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
       printf("\n");
       printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
              numIterations > 0 ? numIterations : -numIterations,
@@ -577,7 +577,7 @@ public:
       if (fillPattern.size())
         printf("Pattern: %s", getenv("FILL_PATTERN"));
       else
-        printf("Pseudo-random: (Element i = i modulo 383 + 31)");
+        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
       printf("\n");
       printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
              numIterations > 0 ? numIterations : -numIterations,
