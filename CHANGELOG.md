@@ -7,6 +7,8 @@
 - Adding ability to compile with nvcc only (TransferBenchCuda)
 ### Changed
 - Default pattern set to [Element i = ((i * 517) modulo 383 + 31) * (srcBufferIdx + 1)]
+### Fixed
+- Re-adding example.cfg file
 
 ## v1.16
 ### Added
