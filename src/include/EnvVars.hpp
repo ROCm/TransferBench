@@ -118,6 +118,12 @@ public:
     int maxSharedMemBytes = 0;
     HIP_CALL(hipDeviceGetAttribute(&maxSharedMemBytes,
                                    hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0));
+#if !defined(__NVCC__)
+    int defaultSharedMemBytes = maxSharedMemBytes / 2 + 1;
+#else
+    int defaultSharedMemBytes = 0;
+#endif
+
     int numDeviceCUs = 0;
     HIP_CALL(hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, 0));
 
@@ -145,7 +151,7 @@ public:
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , DEFAULT_NUM_WARMUPS);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , DEFAULT_SAMPLING_FACTOR);
-    sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , maxSharedMemBytes / 2 + 1);
+    sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , defaultSharedMemBytes);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
@@ -550,8 +556,8 @@ public:
              usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
       printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
              useSingleStream, (useSingleStream ? "device" : "Transfer"));
-      printf("\n");
       printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
+      printf("\n");
     }
     else
     {
