@@ -26,7 +26,7 @@ python3 -m sphinx -T -E -b html -d _build/doctrees -D language=en . _build/html
  ```
 
   To build TransferBench using cmake:
- ```shell 
+ ```shell
 $ mkdir build
 $ cd build
 $ CXX=/opt/rocm/bin/hipcc cmake ..
@@ -37,11 +37,16 @@ $ make
 
 ## NVIDIA platform support
 
-TransferBench may also be built to run on NVIDIA platforms via HIP, but requires a HIP-compatible CUDA version installed (e.g. CUDA 11.5)
+TransferBench may also be built to run on NVIDIA platforms either via HIP, or native nvcc
 
-To build:
+To build with HIP for NVIDIA (requires HIP-compatible CUDA version installed e.g. CUDA 11.5):
 ```
    CUDA_PATH=<path_to_CUDA> HIP_PLATFORM=nvidia make`
+```
+
+To build with native nvcc: (Builds TransferBenchCuda)
+```
+   make
 ```
 
 ## Hints and suggestions

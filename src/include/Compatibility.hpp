@@ -53,6 +53,7 @@ THE SOFTWARE.
 #define hipDeviceGetAttribute                              cudaDeviceGetAttribute
 #define hipDeviceGetPCIBusId                               cudaDeviceGetPCIBusId
 #define hipDeviceSetCacheConfig                            cudaDeviceSetCacheConfig
+#define hipDeviceSynchronize                               cudaDeviceSynchronize
 #define hipEventCreate                                     cudaEventCreate
 #define hipEventDestroy                                    cudaEventDestroy
 #define hipEventElapsedTime                                cudaEventElapsedTime

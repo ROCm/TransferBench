@@ -5,8 +5,5 @@
 all:
 	cd src ; make
 
-TransferBenchCuda:
-	cd src ; make TransferBenchCuda
-
 clean:
 	cd src ; make clean

@@ -1,5 +1,11 @@
 # Changelog for TransferBench
 
+## v1.17
+### Added
+- Allow switch to GFX kernel for source array initialization (USE_PREP_KERNEL)
+  - USE_PREP_KERNEL cannot be used with FILL_PATTERN
+- Adding ability to compile with nvcc only (TransferBenchCuda)
+
 ## v1.16
 ### Added
 - Additional src array validation during preparation
