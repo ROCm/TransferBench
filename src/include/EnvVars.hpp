@@ -116,8 +116,10 @@ public:
   EnvVars()
   {
     int maxSharedMemBytes = 0;
+#if !defined(__NVCC__)
     HIP_CALL(hipDeviceGetAttribute(&maxSharedMemBytes,
                                    hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0));
+#endif
     int numDeviceCUs = 0;
     HIP_CALL(hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, 0));
 
