@@ -34,6 +34,7 @@ THE SOFTWARE.
   } while (0)
 
 // Structure to hold HSA agent information
+#if !defined(__NVCC__)
 struct AgentData
 {
   bool isInitialized;
@@ -128,11 +129,15 @@ AgentData& GetAgentData()
   }
   return agentData;
 }
+#endif
 
 // Returns closest CPU NUMA node to provided GPU
 // NOTE: This assumes HSA GPU indexing is similar to HIP GPU indexing
 int GetClosestNumaNode(int gpuIdx)
 {
+#if defined(__NVCC__)
+  return -1;
+#else
   AgentData& agentData = GetAgentData();
   if (gpuIdx < 0 || gpuIdx >= agentData.closestNumaNode.size())
   {
@@ -140,4 +145,5 @@ int GetClosestNumaNode(int gpuIdx)
     exit(1);
   }
   return agentData.closestNumaNode[gpuIdx];
+#endif
 }

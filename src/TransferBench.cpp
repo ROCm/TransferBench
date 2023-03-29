@@ -240,6 +240,7 @@ void ExecuteTransfers(EnvVars const& ev,
   if (verbose && !ev.outputToCsv) printf("Test %d:\n", testNum);
 
   // Prepare input memory and block parameters for current N
+  bool isSrcCorrect = true;
   for (auto& exeInfoPair : transferMap)
   {
     ExecutorInfo& exeInfo = exeInfoPair.second;
@@ -251,7 +252,7 @@ void ExecuteTransfers(EnvVars const& ev,
       // Prepare subarrays each threadblock works on and fill src memory with patterned data
       Transfer* transfer = exeInfo.transfers[i];
       transfer->PrepareSubExecParams(ev);
-      transfer->PrepareSrc(ev);
+      isSrcCorrect &= transfer->PrepareSrc(ev);
       exeInfo.totalBytes += transfer->numBytesActual;
 
       // Copy block parameters to GPU for GPU executors
@@ -271,7 +272,7 @@ void ExecuteTransfers(EnvVars const& ev,
   double totalCpuTime = 0;
   size_t numTimedIterations = 0;
   std::stack<std::thread> threads;
-  for (int iteration = -ev.numWarmups; ; iteration++)
+  for (int iteration = -ev.numWarmups; isSrcCorrect; iteration++)
   {
     if (ev.numIterations > 0 && iteration    >= ev.numIterations) break;
     if (ev.numIterations < 0 && totalCpuTime > -ev.numIterations) break;
@@ -332,7 +333,7 @@ void ExecuteTransfers(EnvVars const& ev,
   }
 
   // Pause for interactive mode
-  if (verbose && ev.useInteractive)
+  if (verbose && isSrcCorrect && ev.useInteractive)
   {
     printf("Transfers complete. Hit <Enter> to continue: ");
     if (scanf("%*c") != 0)
@@ -358,6 +359,7 @@ void ExecuteTransfers(EnvVars const& ev,
   double totalBandwidthGbs = (totalBytesTransferred / 1.0E6) / totalCpuTime;
   double maxGpuTime = 0;
 
+  if (!isSrcCorrect) goto cleanup;
   if (ev.useSingleStream)
   {
     for (auto& exeInfoPair : transferMap)
@@ -478,6 +480,7 @@ void ExecuteTransfers(EnvVars const& ev,
   }
 
   // Release GPU memory
+cleanup:
   for (auto exeInfoPair : transferMap)
   {
     ExecutorInfo& exeInfo  = exeInfoPair.second;
@@ -1382,7 +1385,7 @@ void Transfer::PrepareReference(EnvVars const& ev, std::vector<float>& buffer, i
     else
     {
       for (size_t i = 0; i < N; ++i)
-        buffer[i] = (i % 383 + 31) * (bufferIdx + 1);
+        buffer[i] = PrepSrcValue(bufferIdx, i);
     }
   }
   else // Destination buffer
@@ -1412,9 +1415,9 @@ void Transfer::PrepareReference(EnvVars const& ev, std::vector<float>& buffer, i
   }
 }
 
-void Transfer::PrepareSrc(EnvVars const& ev)
+bool Transfer::PrepareSrc(EnvVars const& ev)
 {
-  if (this->numSrcs == 0) return;
+  if (this->numSrcs == 0) return true;
   size_t const N = this->numBytesActual / sizeof(float);
   int const initOffset = ev.byteOffset / sizeof(float);
 
@@ -1422,7 +1425,17 @@ void Transfer::PrepareSrc(EnvVars const& ev)
   for (int srcIdx = 0; srcIdx < this->numSrcs; ++srcIdx)
   {
     PrepareReference(ev, reference, srcIdx);
-    HIP_CALL(hipMemcpy(this->srcMem[srcIdx] + initOffset, reference.data(), this->numBytesActual, hipMemcpyDefault));
+    if (ev.usePrepSrcKernel && IsGpuType(this->srcType[srcIdx]))
+    {
+      int const srcIndex = RemappedIndex(this->srcIndex[srcIdx], false);
+      HIP_CALL(hipSetDevice(srcIndex));
+      PrepSrcDataKernel<<<32, BLOCKSIZE>>>(this->srcMem[srcIdx] + initOffset, N, srcIdx);
+      HIP_CALL(hipDeviceSynchronize());
+    }
+    else
+    {
+      HIP_CALL(hipMemcpy(this->srcMem[srcIdx] + initOffset, reference.data(), this->numBytesActual, hipMemcpyDefault));
+    }
 
     // Perform check just to make sure that data has been copied properly
     std::vector<float> srcCopy(N);
@@ -1433,7 +1446,13 @@ void Transfer::PrepareSrc(EnvVars const& ev)
       if (reference[i] != srcCopy[i])
       {
         printf("\n[ERROR] Unexpected mismatch at index %lu of source array %d:\n", i, srcIdx);
+#if !defined(__NVCC__)
+        float const val = this->srcMem[srcIdx][initOffset + i];
+        printf("[ERROR] SRC %02d   value: %10.5f [%08X] Direct: %10.5f [%08X]\n",
+               srcIdx, srcCopy[i], *(unsigned int*)&srcCopy[i], val, *(unsigned int*)&val);
+#else
         printf("[ERROR] SRC %02d   value: %10.5f [%08X]\n", srcIdx, srcCopy[i], *(unsigned int*)&srcCopy[i]);
+#endif
         printf("[ERROR] EXPECTED value: %10.5f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
@@ -1443,9 +1462,11 @@ void Transfer::PrepareSrc(EnvVars const& ev)
                this->DstToStr().c_str());
         if (!ev.continueOnError)
           exit(1);
+        return false;
       }
     }
   }
+  return true;
 }
 
 void Transfer::ValidateDst(EnvVars const& ev)
@@ -1480,10 +1501,22 @@ void Transfer::ValidateDst(EnvVars const& ev)
         {
           float srcVal;
           HIP_CALL(hipMemcpy(&srcVal, this->srcMem[srcIdx] + initOffset + i, sizeof(float), hipMemcpyDefault));
+#if !defined(__NVCC__)
+          float val = this->srcMem[srcIdx][initOffset + i];
+          printf("[ERROR] SRC %02dD  value: %10.5f [%08X] Direct: %10.5f [%08X]\n",
+                 srcIdx, srcVal, *(unsigned int*)&srcVal, val, *(unsigned int*)&val);
+#else
           printf("[ERROR] SRC %02d   value: %10.5f [%08X]\n", srcIdx, srcVal, *(unsigned int*)&srcVal);
+#endif
         }
         printf("[ERROR] EXPECTED value: %10.5f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
+#if !defined(__NVCC__)
+        float dstVal = this->dstMem[dstIdx][initOffset + i];
+        printf("[ERROR] DST %02d   value: %10.5f [%08X] Direct: %10.5f [%08X]\n",
+               dstIdx, output[i], *(unsigned int*)&output[i], dstVal, *(unsigned int*)&dstVal);
+#else
         printf("[ERROR] DST %02d   value: %10.5f [%08X]\n", dstIdx, output[i], *(unsigned int*)&output[i]);
+#endif
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
                this->SrcToStr().c_str(),
@@ -1526,9 +1559,14 @@ int GetWallClockRate(int deviceId)
     HIP_CALL(hipGetDeviceCount(&numGpuDevices));
     wallClockPerDeviceMhz.resize(numGpuDevices);
 
-    hipDeviceProp_t prop;
     for (int i = 0; i < numGpuDevices; i++)
     {
+#if defined(__NVCC__)
+      int value = 1410000;
+      //HIP_CALL(hipDeviceGetAttribute(&value, hipDeviceAttributeClockRate, i));
+      //value *= 1000;
+#else
+      hipDeviceProp_t prop;
       HIP_CALL(hipGetDeviceProperties(&prop, i));
       int value = 25000;
       switch (prop.gcnArch)
@@ -1537,6 +1575,7 @@ int GetWallClockRate(int deviceId)
       default:
         printf("Unrecognized GCN arch %d\n", prop.gcnArch);
       }
+#endif
       wallClockPerDeviceMhz[i] = value;
     }
   }

@@ -32,15 +32,7 @@ THE SOFTWARE.
 #include <iostream>
 #include <sstream>
 
-#if defined(__NVCC__)
-#include <cuda_runtime.h>
-#define __builtin_amdgcn_s_memrealtime clock64
-#else
-#include <hip/hip_ext.h>
-
-#endif
-#include <hip/hip_runtime.h>
-#include <hsa/hsa_ext_amd.h>
+#include "Compatibility.hpp"
 
 // Helper macro for catching HIP errors
 #define HIP_CALL(cmd)                                                                   \
@@ -131,7 +123,7 @@ struct Transfer
   void PrepareSubExecParams(EnvVars const& ev);
 
   // Prepare source arrays with input data
-  void PrepareSrc(EnvVars const& ev);
+  bool PrepareSrc(EnvVars const& ev);
 
   // Validate that destination data contains expected results
   void ValidateDst(EnvVars const& ev);

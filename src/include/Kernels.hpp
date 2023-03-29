@@ -29,19 +29,6 @@ THE SOFTWARE.
 #define MEMSET_CHAR     75
 #define MEMSET_VAL      13323083.0f
 
-
-#if defined(__NVCC__)
-// Define float4 addition operator for NVIDIA platform
-__device__ inline float4& operator +=(float4& a, const float4& b)
-{
-  a.x += b.x;
-  a.y += b.y;
-  a.z += b.z;
-  a.w += b.w;
-  return a;
-}
-#endif
-
 // Each subExecutor is provided with subarrays to work on
 #define MAX_SRCS 16
 #define MAX_DSTS 16
@@ -82,6 +69,28 @@ void CpuReduceKernel(SubExecParam const& p)
       for (int i = 1; i < numSrcs; i++) sum += p.src[i][j];
       for (int i = 0; i < numDsts; i++) p.dst[i][j] = sum;
     }
+  }
+}
+
+std::string PrepSrcValueString()
+{
+  return "Element i = ((i * 517) modulo 383 + 31) * (srcBufferIdx + 1)";
+}
+
+__host__ __device__ float PrepSrcValue(int srcBufferIdx, size_t idx)
+{
+  return (((idx % 383) * 517) % 383 + 31) * (srcBufferIdx + 1);
+}
+
+// GPU kernel to prepare src buffer data
+__global__ void
+PrepSrcDataKernel(float* ptr, size_t N, int srcBufferIdx)
+{
+  for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+       idx < N;
+       idx += blockDim.x * gridDim.x)
+  {
+    ptr[idx] = PrepSrcValue(srcBufferIdx, idx);
   }
 }
 
