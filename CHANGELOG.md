@@ -1,5 +1,13 @@
 # Changelog for TransferBench
 
+## v1.18
+### Added
+- Adding ability to validate GPU destination memory directly without going through CPU staging buffer (VALIDATE_DIRECT)
+  - NOTE: This will only work on AMD devices with large-bar access enable and may slow things down considerably
+### Changed
+- Refactored how environment variables are displayed
+- Mismatch stops after first detected error within an array instead of list all mismatched elements
+
 ## v1.17
 ### Added
 - Allow switch to GFX kernel for source array initialization (USE_PREP_KERNEL)

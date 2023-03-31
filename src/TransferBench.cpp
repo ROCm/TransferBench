@@ -1215,7 +1215,17 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
              ev.useRemoteRead ? "Local" : "Remote",
              ev.useDmaCopy    ? "DMA"   : "GFX");
 
-      printf("%10s", "SRC\\DST");
+      if (isBidirectional)
+      {
+        printf("%12s", "SRC\\DST");
+      }
+      else
+      {
+        if (ev.useRemoteRead)
+          printf("%12s", "SRC\\EXE+DST");
+        else
+          printf("%12s", "SRC+EXE\\DST");
+      }
       for (int i = 0; i < numCpus; i++) printf("%7s %02d", "CPU", i);
       for (int i = 0; i < numGpus; i++) printf("%7s %02d", "GPU", i);
       printf("\n");
@@ -1228,7 +1238,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
       int     const srcIndex = (srcType == MEM_CPU ? src : src - numCpus);
 
       if (!ev.outputToCsv)
-        printf("%7s %02d", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex);
+        printf("%9s %02d", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex);
 
       for (int dst = 0; dst < numDevices; dst++)
       {
@@ -1482,7 +1492,7 @@ void Transfer::ValidateDst(EnvVars const& ev)
   for (int dstIdx = 0; dstIdx < this->numDsts; ++dstIdx)
   {
     float* output;
-    if (IsCpuType(this->dstType[dstIdx]))
+    if (IsCpuType(this->dstType[dstIdx]) || ev.validateDirect)
     {
       output = this->dstMem[dstIdx] + initOffset;
     }
@@ -1525,6 +1535,8 @@ void Transfer::ValidateDst(EnvVars const& ev)
                this->DstToStr().c_str());
         if (!ev.continueOnError)
           exit(1);
+        else
+          break;
       }
     }
   }

@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.17"
+#define TB_VERSION "1.18"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -77,6 +77,7 @@ public:
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
   int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
   int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
+  int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
 
@@ -156,6 +157,7 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
+    validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
     gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
 
@@ -382,218 +384,112 @@ public:
     printf(" USE_PCIE_INDEX         - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
     printf(" USE_PREP_KERNEL        - Use GPU kernel to initialize source data array pattern\n");
     printf(" USE_SINGLE_STREAM      - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
+    printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
   }
+
+  // Helper macro to switch between CSV and terminal output
+#define PRINT_EV(NAME, VALUE, DESCRIPTION)                              \
+  printf("%-20s%s%12d%s%s\n", NAME, outputToCsv ? "," : " = ", VALUE, outputToCsv ? "," : " : ",  (DESCRIPTION).c_str())
+
+#define PRINT_ES(NAME, VALUE, DESCRIPTION)                           \
+  printf("%-20s%s%12s%s%s\n", NAME, outputToCsv ? "," : " = ", VALUE, outputToCsv ? "," : " : ",  (DESCRIPTION).c_str())
 
   // Display env var settings
   void DisplayEnvVars() const
   {
     if (!outputToCsv)
     {
-      printf("Run configuration (TransferBench v%s)\n", TB_VERSION);
+      printf("TransferBench v%s\n", TB_VERSION);
       printf("=====================================================\n");
-      printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
-      printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
-      printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
-      printf("%-20s = %12s : ", "FILL_PATTERN", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
-      if (fillPattern.size())
-        printf("Pattern: %s", getenv("FILL_PATTERN"));
-      else
-        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
-      printf("\n");
-      printf("%-20s = %12d : Using GPU kernel %d [%s]\n" , "GPU_KERNEL", gpuKernel, gpuKernel, GpuKernelNames[gpuKernel].c_str());
-      printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
-      printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
-      printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
-             numIterations > 0 ? numIterations : -numIterations,
-             numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("%-20s = %12d : Running %d warmup iteration(s) per Test\n", "NUM_WARMUPS", numWarmups, numWarmups);
-      printf("%-20s = %12d : Output to %s\n", "OUTPUT_TO_CSV", outputToCsv,
-             outputToCsv ? "CSV" : "console");
-      printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
-             getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
-      printf("%-20s = %12d : Running in %s mode\n", "USE_INTERACTIVE", useInteractive,
-             useInteractive ? "interactive" : "non-interactive");
-      printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
-             usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
-      printf("%-20s = %12d : Using %s to initialize source data\n", "USE_PREP_KERNEL",
-             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
-      printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
-             useSingleStream, (useSingleStream ? "device" : "Transfer"));
-      printf("\n");
+      printf("[Common]\n");
     }
     else
-    {
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
-      printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
-      printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
-      printf("CONTINUE_ON_ERROR,%d,Continue test on mismatch error\n", continueOnError);
-      printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
-      if (fillPattern.size())
-        printf("Pattern: %s", getenv("FILL_PATTERN"));
-      else
-        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
-      printf("\n");
-      printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
-      printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
-      printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
-             numIterations > 0 ? numIterations : -numIterations,
-             numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
-      printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
-      printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
-      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
-             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
-      printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
-    }
+
+    PRINT_EV("BLOCK_BYTES", blockBytes,
+             std::string("Each CU gets a multiple of " + std::to_string(blockBytes) + " bytes to copy"));
+    PRINT_EV("BYTE_OFFSET", byteOffset,
+             std::string("Using byte offset of " + std::to_string(byteOffset)));
+    PRINT_EV("CONTINUE_ON_ERROR", continueOnError,
+             std::string(continueOnError ? "Continue on mismatch error" : "Stop after first error"));
+    PRINT_EV("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
+             (fillPattern.size() ? std::string(getenv("FILL_PATTERN")) : PrepSrcValueString()));
+    PRINT_EV("GPU_KERNEL", gpuKernel,
+             std::string("Using GPU kernel ") + std::to_string(gpuKernel) + " [" + std::string(GpuKernelNames[gpuKernel]) + "]");
+    PRINT_EV("NUM_CPU_DEVICES", numCpuDevices,
+             std::string("Using ") + std::to_string(numCpuDevices) + " CPU devices");
+    PRINT_EV("NUM_GPU_DEVICES", numGpuDevices,
+             std::string("Using ") + std::to_string(numGpuDevices) + " GPU devices");
+    PRINT_EV("NUM_ITERATIONS", numIterations,
+             std::string("Running ") + std::to_string(numIterations > 0 ? numIterations : -numIterations) + " "
+             + (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
+    PRINT_EV("NUM_WARMUPS", numWarmups,
+             std::string("Running " + std::to_string(numWarmups) + " warmup iteration(s) per Test"));
+    PRINT_EV("SHARED_MEM_BYTES", sharedMemBytes,
+             std::string("Using " + std::to_string(sharedMemBytes) + " shared mem per threadblock"));
+    PRINT_EV("USE_INTERACTIVE", useInteractive,
+             std::string("Running in ") + (useInteractive ? "interactive" : "non-interactive") + " mode");
+    PRINT_EV("USE_PCIE_INDEX", usePcieIndexing,
+             std::string("Use ") + (usePcieIndexing ? "PCIe" : "HIP") + " GPU device indexing");
+    PRINT_EV("USE_PREP_KERNEL", usePrepSrcKernel,
+             std::string("Using ") + (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy") + " to initialize source data");
+    PRINT_EV("USE_SINGLE_STREAM", useSingleStream,
+             std::string("Using single stream per ") + (useSingleStream ? "device" : "Transfer"));
+    PRINT_EV("VALIDATE_DIRECT", validateDirect,
+             std::string("Validate GPU destination memory ") + (validateDirect ? "directly" : "via CPU staging buffer"));
+    printf("\n");
   };
 
   // Display env var for P2P Benchmark preset
   void DisplayP2PBenchmarkEnvVars() const
   {
-    if (!outputToCsv)
-    {
-      printf("Peer-to-peer Benchmark configuration (TransferBench v%s)\n", TB_VERSION);
-      printf("=====================================================\n");
-      printf("%-20s = %12d : Using %s as executor\n",         "USE_REMOTE_READ", useRemoteRead , useRemoteRead ? "DST" : "SRC");
-      printf("%-20s = %12d : Using GPU-%s as GPU executor\n", "USE_GPU_DMA"    , useDmaCopy    , useDmaCopy ? "DMA" : "GFX");
-      printf("%-20s = %12d : Using %d CPU subexecutors\n",    "NUM_CPU_SE"     , numCpuSubExecs, numCpuSubExecs);
-      printf("%-20s = %12d : Using %d GPU subexecutors\n",    "NUM_GPU_SE"     , numGpuSubExecs, numGpuSubExecs);
+    DisplayEnvVars();
 
-      printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
-      printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
-      printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
-      printf("%-20s = %12s : ", "FILL_PATTERN", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
-      if (fillPattern.size())
-        printf("Pattern: %s", getenv("FILL_PATTERN"));
-      else
-        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
-      printf("\n");
-      printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
-      printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
-      printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
-             numIterations > 0 ? numIterations : -numIterations,
-             numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("%-20s = %12d : Running %d warmup iteration(s) per Test\n", "NUM_WARMUPS", numWarmups, numWarmups);
-      printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
-             getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
-      printf("%-20s = %12d : Running in %s mode\n", "USE_INTERACTIVE", useInteractive,
-             useInteractive ? "interactive" : "non-interactive");
-      printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
-             usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
-      printf("%-20s = %12d : Using %s to initialize source data\n", "USE_PREP_KERNEL",
-             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
-      printf("\n");
-    }
-    else
-    {
-      printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
-      printf("USE_REMOTE_READ,%d,Using %s as executor\n", useRemoteRead, useRemoteRead ? "DST" : "SRC");
-      printf("USE_GPU_DMA,%d,Using GPU-%s as GPU executor\n", useDmaCopy    , useDmaCopy ? "DMA" : "GFX");
-      printf("NUM_CPU_SE,%d,Using %d CPU subexecutors\n", numCpuSubExecs, numCpuSubExecs);
-      printf("NUM_GPU_SE,%d,Using %d GPU subexecutors\n", numGpuSubExecs, numGpuSubExecs);
-      printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
-      printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
-      printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
-      if (fillPattern.size())
-        printf("Pattern: %s", getenv("FILL_PATTERN"));
-      else
-        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
-      printf("\n");
-      printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
-      printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
-      printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
-             numIterations > 0 ? numIterations : -numIterations,
-             numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
-      printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
-      printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
-      printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
-      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
-             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
-      printf("\n");
-    }
+    if (!outputToCsv)
+      printf("[P2P Related]\n");
+
+    PRINT_EV("NUM_CPU_SE", numCpuSubExecs,
+             std::string("Using ") + std::to_string(numCpuSubExecs) + " CPU subexecutors");
+    PRINT_EV("NUM_GPU_SE", numGpuSubExecs,
+             std::string("Using ") + std::to_string(numGpuSubExecs) + " GPU subexecutors");
+    PRINT_EV("USE_GPU_DMA", useDmaCopy,
+             std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
+    PRINT_EV("USE_REMOTE_READ", useRemoteRead,
+             std::string("Using ") + (useRemoteRead ? "DST" : "SRC") + " as executor");
+    printf("\n");
   }
 
   // Display env var settings
   void DisplaySweepEnvVars() const
   {
+    DisplayEnvVars();
+
     if (!outputToCsv)
-    {
-      printf("Sweep configuration (TransferBench v%s)\n", TB_VERSION);
-      printf("=====================================================\n");
-      printf("%-20s = %12d : Random seed\n", "SWEEP_SEED", sweepSeed);
-      printf("%-20s = %12s : Source Memory Types to sweep\n", "SWEEP_SRC", sweepSrc.c_str());
-      printf("%-20s = %12s : Executor Types to sweep\n", "SWEEP_EXE", sweepExe.c_str());
-      printf("%-20s = %12s : Destination Memory Types to sweep\n", "SWEEP_DST", sweepDst.c_str());
-      printf("%-20s = %12d : Min simultaneous Transfers\n", "SWEEP_MIN", sweepMin);
-      printf("%-20s = %12d : Max simultaneous Transfers              (0 = no limit)\n", "SWEEP_MAX", sweepMax);
-      printf("%-20s = %12d : Max number of tests to run during sweep (0 = no limit)\n", "SWEEP_TEST_LIMIT", sweepTestLimit);
-      printf("%-20s = %12d : Max number of seconds to run sweep for  (0 = no limit)\n", "SWEEP_TIME_LIMIT", sweepTimeLimit);
-      printf("%-20s = %12d : Min number of XGMI hops for Transfers\n", "SWEEP_XGMI_MIN", sweepXgmiMin);
-      printf("%-20s = %12d : Max number of XGMI hops for Transfers (-1 = no limit)\n", "SWEEP_XGMI_MAX", sweepXgmiMax);
-      printf("%-20s = %12d : Using %s number of bytes per Transfer\n", "SWEEP_RAND_BYTES", sweepRandBytes, sweepRandBytes ? "random" : "constant");
-      printf("%-20s = %12d : Using %d CPU devices\n" , "NUM_CPU_DEVICES", numCpuDevices, numCpuDevices);
-      printf("%-20s = %12d : Using %d GPU devices\n", "NUM_GPU_DEVICES", numGpuDevices, numGpuDevices);
-      printf("%-20s = %12d : Each CU gets a multiple of %d bytes to copy\n", "BLOCK_BYTES", blockBytes, blockBytes);
-      printf("%-20s = %12d : Using byte offset of %d\n", "BYTE_OFFSET", byteOffset, byteOffset);
-      printf("%-20s = %12s : ", "FILL_PATTERN", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
-      if (fillPattern.size())
-        printf("Pattern: %s", getenv("FILL_PATTERN"));
-      else
-        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
-      printf("\n");
-      printf("%-20s = %12d : Running %d %s per Test\n", "NUM_ITERATIONS", numIterations,
-             numIterations > 0 ? numIterations : -numIterations,
-             numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("%-20s = %12d : Running %d warmup iteration(s) per Test\n", "NUM_WARMUPS", numWarmups, numWarmups);
-      printf("%-20s = %12d : Output to %s\n", "OUTPUT_TO_CSV", outputToCsv,
-             outputToCsv ? "CSV" : "console");
-      printf("%-20s = %12s : Using %d shared mem per threadblock\n", "SHARED_MEM_BYTES",
-             getenv("SHARED_MEM_BYTES") ? "(specified)" : "(unset)", sharedMemBytes);
-      printf("%-20s = %12d : Using %s-based GPU indexing\n", "USE_PCIE_INDEX",
-             usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
-      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
-             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
-      printf("%-20s = %12d : Using single stream per %s\n", "USE_SINGLE_STREAM",
-             useSingleStream, (useSingleStream ? "device" : "Transfer"));
-      printf("%-20s = %12d : Continue on error\n", "CONTINUE_ON_ERROR", continueOnError);
-      printf("\n");
-    }
-    else
-    {
-      printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
-      printf("SWEEP_SRC,%s,Source Memory Types to sweep\n", sweepSrc.c_str());
-      printf("SWEEP_EXE,%s,Executor Types to sweep\n", sweepExe.c_str());
-      printf("SWEEP_DST,%s,Destination Memory Types to sweep\n", sweepDst.c_str());
-      printf("SWEEP_SEED,%d,Random seed\n", sweepSeed);
-      printf("SWEEP_MIN,%d,Min simultaneous Transfers\n", sweepMin);
-      printf("SWEEP_MAX,%d,Max simultaneous Transfers (0 = no limit)\n", sweepMax);
-      printf("SWEEP_TEST_LIMIT,%d,Max number of tests to run during sweep (0 = no limit)\n", sweepTestLimit);
-      printf("SWEEP_TIME_LIMIT,%d,Max number of seconds to run sweep for (0 = no limit)\n", sweepTimeLimit);
-      printf("SWEEP_XGMI_MIN,%d,Min number of XGMI hops for Transfers\n", sweepXgmiMin);
-      printf("SWEEP_XGMI_MAX,%d,Max number of XGMI hops for Transfers (-1 = no limit)\n", sweepXgmiMax);
-      printf("SWEEP_RAND_BYTES,%d,Using %s number of bytes per Transfer\n", sweepRandBytes, sweepRandBytes ? "random" : "constant");
-      printf("NUM_CPU_DEVICES,%d,Using %d CPU devices\n" , numCpuDevices, numCpuDevices);
-      printf("NUM_GPU_DEVICES,%d,Using %d GPU devices\n", numGpuDevices, numGpuDevices);
-      printf("BLOCK_BYTES,%d,Each CU gets a multiple of %d bytes to copy\n", blockBytes, blockBytes);
-      printf("BYTE_OFFSET,%d,Using byte offset of %d\n", byteOffset, byteOffset);
-      printf("FILL_PATTERN,%s,", getenv("FILL_PATTERN") ? "(specified)" : "(unset)");
-      if (fillPattern.size())
-        printf("Pattern: %s", getenv("FILL_PATTERN"));
-      else
-        printf("Pseudo-random: %s", PrepSrcValueString().c_str());
-      printf("\n");
-      printf("NUM_ITERATIONS,%d,Running %d %s per Test\n", numIterations,
-             numIterations > 0 ? numIterations : -numIterations,
-             numIterations > 0 ? "timed iteration(s)" : "second(s)");
-      printf("NUM_WARMUPS,%d,Running %d warmup iteration(s) per Test\n", numWarmups, numWarmups);
-      printf("SHARED_MEM_BYTES,%d,Using %d shared mem per threadblock\n", sharedMemBytes, sharedMemBytes);
-      printf("USE_PCIE_INDEX,%d,Using %s-based GPU indexing\n", usePcieIndexing, (usePcieIndexing ? "PCIe" : "HIP"));
-      printf("USE_PREP_KERNEL,%d,Using %s to initialize source data\n",
-             usePrepSrcKernel, (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy"));
-      printf("USE_SINGLE_STREAM,%d,Using single stream per %s\n", useSingleStream, (useSingleStream ? "device" : "Transfer"));
-    }
-  };
+      printf("[Sweep Related]\n");
+    PRINT_ES("SWEEP_DST", sweepDst.c_str(),
+             std::string("Destination Memory Types to sweep"));
+    PRINT_ES("SWEEP_EXE", sweepExe.c_str(),
+             std::string("Executor Types to sweep"));
+    PRINT_EV("SWEEP_MAX", sweepMax,
+             std::string("Max simultaneous transfers (0 = no limit)"));
+    PRINT_EV("SWEEP_MIN", sweepMin,
+             std::string("Min simultaenous transfers"));
+    PRINT_EV("SWEEP_RAND_BYTES", sweepRandBytes,
+             std::string("Using ") + (sweepRandBytes ? "random" : "constant") + " number of bytes per Transfer");
+    PRINT_EV("SWEEP_SEED", sweepSeed,
+             std::string("Random seed set to ") + std::to_string(sweepSeed));
+    PRINT_ES("SWEEP_SRC", sweepSrc.c_str(),
+             std::string("Source Memory Types to sweep"));
+    PRINT_EV("SWEEP_TEST_LIMIT", sweepTestLimit,
+             std::string("Max number of tests to run during sweep (0 = no limit)"));
+    PRINT_EV("SWEEP_TIME_LIMIT", sweepTimeLimit,
+             std::string("Max number of seconds to run sweep for  (0 = no limit)"));
+    PRINT_EV("SWEEP_XGMI_MAX", sweepXgmiMax,
+             std::string("Max number of XGMI hops for Transfers (-1 = no limit)"));
+    PRINT_EV("SWEEP_XGMI_MIN", sweepXgmiMin,
+             std::string("Min number of XGMI hops for Transfers"));
+    printf("\n");
+  }
 
   // Helper function that gets parses environment variable or sets to default value
   static int GetEnvVar(std::string const& varname, int defaultValue)
