@@ -1534,10 +1534,10 @@ void Transfer::ValidateDst(EnvVars const& ev)
     }
     else
     {
-      //int const deviceIdx = RemappedIndex(this->dstIndex[dstIdx], false);
-      //HIP_CALL(hipSetDevice(deviceIdx));
+      int const deviceIdx = RemappedIndex(this->dstIndex[dstIdx], false);
+      HIP_CALL(hipSetDevice(deviceIdx));
       HIP_CALL(hipMemcpy(hostBuffer.data(), this->dstMem[dstIdx] + initOffset, this->numBytesActual, hipMemcpyDefault));
-      //HIP_CALL(hipDeviceSynchronize());
+      HIP_CALL(hipDeviceSynchronize());
       output = hostBuffer.data();
     }
 
