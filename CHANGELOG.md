@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.19
+### Added
+- VALIDATE_DIRECT now also applies to source memory array checking
+- Adding null memory pointer check prior to deallocation
+
 ## v1.18
 ### Added
 - Adding ability to validate GPU destination memory directly without going through CPU staging buffer (VALIDATE_DIRECT)
