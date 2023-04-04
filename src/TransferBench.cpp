@@ -940,7 +940,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
     printf("[ERROR] Unable to allocate 0 bytes\n");
     exit(1);
   }
-
+  *memPtr = nullptr;
   if (IsCpuType(memType))
   {
     // Set numa policy prior to call to hipHostMalloc
@@ -1000,6 +1000,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
 #endif
     }
     HIP_CALL(hipMemset(*memPtr, 0, numBytes));
+    HIP_CALL(hipDeviceSynchronize());
   }
   else
   {
@@ -1012,14 +1013,29 @@ void DeallocateMemory(MemType memType, void* memPtr, size_t const bytes)
 {
   if (memType == MEM_CPU || memType == MEM_CPU_FINE)
   {
+    if (memPtr == nullptr)
+    {
+      printf("[ERROR] Attempting to free null CPU pointer for %lu bytes.  Skipping hipHostFree\n", bytes);
+      return;
+    }
     HIP_CALL(hipHostFree(memPtr));
   }
   else if (memType == MEM_CPU_UNPINNED)
   {
+    if (memPtr == nullptr)
+    {
+      printf("[ERROR] Attempting to free null unpinned CPU pointer for %lu bytes.  Skipping numa_free\n", bytes);
+      return;
+    }
     numa_free(memPtr, bytes);
   }
   else if (memType == MEM_GPU || memType == MEM_GPU_FINE)
   {
+    if (memPtr == nullptr)
+    {
+      printf("[ERROR] Attempting to free null GPU pointer for %lu bytes. Skipping hipFree\n", bytes);
+      return;
+    }
     HIP_CALL(hipFree(memPtr));
   }
 }
@@ -1434,34 +1450,54 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
   std::vector<float> reference(N);
   for (int srcIdx = 0; srcIdx < this->numSrcs; ++srcIdx)
   {
-    PrepareReference(ev, reference, srcIdx);
-    if (ev.usePrepSrcKernel && IsGpuType(this->srcType[srcIdx]))
+    float* srcPtr = this->srcMem[srcIdx] + initOffset;
+
+    // Initialize source memory array with reference pattern
+    if (IsGpuType(this->srcType[srcIdx]))
     {
-      int const srcIndex = RemappedIndex(this->srcIndex[srcIdx], false);
-      HIP_CALL(hipSetDevice(srcIndex));
-      PrepSrcDataKernel<<<32, BLOCKSIZE>>>(this->srcMem[srcIdx] + initOffset, N, srcIdx);
+      int const deviceIdx = RemappedIndex(this->srcIndex[srcIdx], false);
+      HIP_CALL(hipSetDevice(deviceIdx));
+      if (ev.usePrepSrcKernel)
+      {
+        PrepSrcDataKernel<<<32, BLOCKSIZE>>>(srcPtr, N, srcIdx);
+      }
+      else
+      {
+        PrepareReference(ev, reference, srcIdx);
+        HIP_CALL(hipMemcpy(srcPtr, reference.data(), this->numBytesActual, hipMemcpyDefault));
+      }
       HIP_CALL(hipDeviceSynchronize());
     }
-    else
+    else if (IsCpuType(this->srcType[srcIdx]))
     {
-      HIP_CALL(hipMemcpy(this->srcMem[srcIdx] + initOffset, reference.data(), this->numBytesActual, hipMemcpyDefault));
+      PrepareReference(ev, reference, srcIdx);
+      memcpy(srcPtr, reference.data(), this->numBytesActual);
     }
 
     // Perform check just to make sure that data has been copied properly
+    float* srcCheckPtr = srcPtr;
     std::vector<float> srcCopy(N);
-    HIP_CALL(hipMemcpy(srcCopy.data(), this->srcMem[srcIdx] + initOffset, this->numBytesActual, hipMemcpyDefault));
+    if (IsGpuType(this->srcType[srcIdx]))
+    {
+      if (!ev.validateDirect)
+      {
+        HIP_CALL(hipMemcpy(srcCopy.data(), srcPtr, this->numBytesActual, hipMemcpyDefault));
+        HIP_CALL(hipDeviceSynchronize());
+        srcCheckPtr = srcCopy.data();
+      }
+    }
 
     for (size_t i = 0; i < N; ++i)
     {
-      if (reference[i] != srcCopy[i])
+      if (reference[i] != srcCheckPtr[i])
       {
         printf("\n[ERROR] Unexpected mismatch at index %lu of source array %d:\n", i, srcIdx);
 #if !defined(__NVCC__)
         float const val = this->srcMem[srcIdx][initOffset + i];
         printf("[ERROR] SRC %02d   value: %10.5f [%08X] Direct: %10.5f [%08X]\n",
-               srcIdx, srcCopy[i], *(unsigned int*)&srcCopy[i], val, *(unsigned int*)&val);
+               srcIdx, srcCheckPtr[i], *(unsigned int*)&srcCheckPtr[i], val, *(unsigned int*)&val);
 #else
-        printf("[ERROR] SRC %02d   value: %10.5f [%08X]\n", srcIdx, srcCopy[i], *(unsigned int*)&srcCopy[i]);
+        printf("[ERROR] SRC %02d   value: %10.5f [%08X]\n", srcIdx, srcCheckPtr[i], *(unsigned int*)&srcCheckPtr[i]);
 #endif
         printf("[ERROR] EXPECTED value: %10.5f [%08X]\n", reference[i], *(unsigned int*)&reference[i]);
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
@@ -1498,7 +1534,10 @@ void Transfer::ValidateDst(EnvVars const& ev)
     }
     else
     {
+      //int const deviceIdx = RemappedIndex(this->dstIndex[dstIdx], false);
+      //HIP_CALL(hipSetDevice(deviceIdx));
       HIP_CALL(hipMemcpy(hostBuffer.data(), this->dstMem[dstIdx] + initOffset, this->numBytesActual, hipMemcpyDefault));
+      //HIP_CALL(hipDeviceSynchronize());
       output = hostBuffer.data();
     }
 
