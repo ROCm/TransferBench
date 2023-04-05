@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.20
+### Fixed
+- VALIDATE_DIRECT can now be used with USE_PREP_KERNEL
+- Switch to local GPU for validating GPU memory
+
 ## v1.19
 ### Added
 - VALIDATE_DIRECT now also applies to source memory array checking
