@@ -214,6 +214,8 @@ void ExecuteTransfers(EnvVars const& ev,
     // Prepare additional requirement for GPU-based executors
     if (IsGpuType(exeType))
     {
+      HIP_CALL(hipSetDevice(exeIndex));
+
       // Single-stream is only supported for GFX-based executors
       int const numStreamsToUse = (exeType == EXE_GPU_DMA || !ev.useSingleStream) ? exeInfo.transfers.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
@@ -221,7 +223,6 @@ void ExecuteTransfers(EnvVars const& ev,
       exeInfo.stopEvents.resize(numStreamsToUse);
       for (int i = 0; i < numStreamsToUse; ++i)
       {
-        HIP_CALL(hipSetDevice(exeIndex));
         HIP_CALL(hipStreamCreate(&exeInfo.streams[i]));
         HIP_CALL(hipEventCreate(&exeInfo.startEvents[i]));
         HIP_CALL(hipEventCreate(&exeInfo.stopEvents[i]));
@@ -243,7 +244,11 @@ void ExecuteTransfers(EnvVars const& ev,
   bool isSrcCorrect = true;
   for (auto& exeInfoPair : transferMap)
   {
-    ExecutorInfo& exeInfo = exeInfoPair.second;
+    Executor const& executor = exeInfoPair.first;
+    ExecutorInfo& exeInfo    = exeInfoPair.second;
+    ExeType const exeType    = executor.first;
+    int     const exeIndex   = RemappedIndex(executor.second, IsCpuType(exeType));
+
     exeInfo.totalBytes = 0;
 
     int transferOffset = 0;
@@ -259,10 +264,13 @@ void ExecuteTransfers(EnvVars const& ev,
       if (transfer->exeType == EXE_GPU_GFX)
       {
         exeInfo.transfers[i]->subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
+        HIP_CALL(hipSetDevice(exeIndex));
         HIP_CALL(hipMemcpy(&exeInfo.subExecParamGpu[transferOffset],
                            transfer->subExecParam.data(),
                            transfer->subExecParam.size() * sizeof(SubExecParam),
                            hipMemcpyHostToDevice));
+        HIP_CALL(hipDeviceSynchronize());
+
         transferOffset += transfer->subExecParam.size();
       }
     }
@@ -1451,6 +1459,7 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
   for (int srcIdx = 0; srcIdx < this->numSrcs; ++srcIdx)
   {
     float* srcPtr = this->srcMem[srcIdx] + initOffset;
+    PrepareReference(ev, reference, srcIdx);
 
     // Initialize source memory array with reference pattern
     if (IsGpuType(this->srcType[srcIdx]))
@@ -1458,19 +1467,13 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
       int const deviceIdx = RemappedIndex(this->srcIndex[srcIdx], false);
       HIP_CALL(hipSetDevice(deviceIdx));
       if (ev.usePrepSrcKernel)
-      {
         PrepSrcDataKernel<<<32, BLOCKSIZE>>>(srcPtr, N, srcIdx);
-      }
       else
-      {
-        PrepareReference(ev, reference, srcIdx);
         HIP_CALL(hipMemcpy(srcPtr, reference.data(), this->numBytesActual, hipMemcpyDefault));
-      }
       HIP_CALL(hipDeviceSynchronize());
     }
     else if (IsCpuType(this->srcType[srcIdx]))
     {
-      PrepareReference(ev, reference, srcIdx);
       memcpy(srcPtr, reference.data(), this->numBytesActual);
     }
 
