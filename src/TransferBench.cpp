@@ -129,11 +129,11 @@ int main(int argc, char **argv)
       // Otherwise generate a range of values
       for (int N = 256; N <= (1<<27); N *= 2)
       {
-        int delta = std::max(32, N / ev.samplingFactor);
+        int delta = std::max(1, N / ev.samplingFactor);
         int curr = N;
         while (curr < N * 2)
         {
-          ExecuteTransfers(ev, ++testNum, N, transfers);
+          ExecuteTransfers(ev, ++testNum, curr, transfers);
           curr += delta;
         }
       }
