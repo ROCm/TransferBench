@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.21
+### Fixed
+- Fixed bug with SAMPLING_FACTOR
+
 ## v1.20
 ### Fixed
 - VALIDATE_DIRECT can now be used with USE_PREP_KERNEL
