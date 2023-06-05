@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.22
+### Modified
+- Switching kernel timing function to wall_clock64
+
 ## v1.21
 ### Fixed
 - Fixed bug with SAMPLING_FACTOR
