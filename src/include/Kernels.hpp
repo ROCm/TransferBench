@@ -104,7 +104,7 @@ template <int LOOP1_UNROLL>
 __global__ void __launch_bounds__(BLOCKSIZE)
 GpuReduceKernel(SubExecParam* params)
 {
-  int64_t startCycle = __builtin_amdgcn_s_memrealtime();
+  int64_t startCycle = wall_clock64();
 
   // Operate on wavefront granularity
   SubExecParam& p    = params[blockIdx.x];
@@ -210,7 +210,7 @@ GpuReduceKernel(SubExecParam* params)
   if (threadIdx.x == 0)
   {
     p.startCycle = startCycle;
-    p.stopCycle  = __builtin_amdgcn_s_memrealtime();
+    p.stopCycle  = wall_clock64();
   }
 }
 
@@ -343,7 +343,7 @@ __device__ size_t GpuReduceFunc(SubExecParam const &p, size_t const offset, size
 __global__ void __launch_bounds__(BLOCKSIZE)
 GpuReduceKernel2(SubExecParam* params)
 {
-  int64_t startCycle = __builtin_amdgcn_s_memrealtime();
+  int64_t startCycle = wall_clock64();
   SubExecParam& p = params[blockIdx.x];
 
   size_t numFloatsLeft = GpuReduceFunc<float4>(p, 0, p.N, 8);
@@ -357,7 +357,7 @@ GpuReduceKernel2(SubExecParam* params)
   if (threadIdx.x == 0)
   {
     p.startCycle = startCycle;
-    p.stopCycle  = __builtin_amdgcn_s_memrealtime();
+    p.stopCycle  = wall_clock64();
   }
 }
 
