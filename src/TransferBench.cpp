@@ -89,6 +89,21 @@ int main(int argc, char **argv)
     RunPeerToPeerBenchmarks(ev, numBytesPerTransfer / sizeof(float));
     exit(0);
   }
+  // - Test SubExecutor scaling
+  else if (!strcmp(argv[1], "scaling"))
+  {
+    int maxSubExecs = (argc > 3 ? atoi(argv[3]) : 32);
+    int exeIndex    = (argc > 4 ? atoi(argv[4]) : 0);
+
+    if (exeIndex >= ev.numGpuDevices)
+    {
+      printf("[ERROR] Cannot execute scaling test with GPU device %d\n", exeIndex);
+      exit(1);
+    }
+    ev.configMode = CFG_SCALE;
+    RunScalingBenchmark(ev, numBytesPerTransfer / sizeof(float), exeIndex, maxSubExecs);
+    exit(0);
+  }
 
   // Check that Transfer configuration file can be opened
   ev.configMode = CFG_FILE;
@@ -548,7 +563,11 @@ void DisplayUsage(char const* cmdName)
   printf("          - Name of preset config:\n");
   printf("              p2p          - Peer-to-peer benchmark tests\n");
   printf("              sweep/rsweep - Sweep/random sweep across possible sets of Transfers\n");
-  printf("                             - 3rd/4th optional args for # GPU SubExecs / # CPU SubExecs per Transfer\n");
+  printf("                             - 3rd optional arg: # GPU SubExecs per Transfer\n");
+  printf("                             - 4th optional arg: # CPU SubExecs per Transfer\n");
+  printf("              scaling      - GPU SubExec scaling copy test\n");
+  printf("                             - 3th optional arg: Max # of SubExecs to use\n");
+  printf("                             - 4rd optional arg: GPU index to use as executor\n");
   printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
   printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
          DEFAULT_BYTES_PER_TRANSFER);
@@ -1294,6 +1313,76 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
     }
     if (!ev.outputToCsv) printf("\n");
   }
+}
+
+void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int const maxSubExecs)
+{
+  ev.DisplayEnvVars();
+
+  // Collect the number of available CPUs/GPUs on this machine
+  int const numCpus    = ev.numCpuDevices;
+  int const numGpus    = ev.numGpuDevices;
+  int const numDevices = numCpus + numGpus;
+
+  // Enable peer to peer for each GPU
+  for (int i = 0; i < numGpus; i++)
+    for (int j = 0; j < numGpus; j++)
+      if (i != j) EnablePeerAccess(i, j);
+
+  char separator = (ev.outputToCsv ? ',' : ' ');
+
+  std::vector<Transfer> transfers(1);
+  transfers[0].numBytes = N * sizeof(float);
+  transfers[0].numSrcs  = 1;
+  transfers[0].numDsts  = 1;
+  transfers[0].exeType  = EXE_GPU_GFX;
+  transfers[0].exeIndex = exeIndex;
+  transfers[0].srcType.resize(1, MEM_GPU);
+  transfers[0].dstType.resize(1, MEM_GPU);
+  transfers[0].srcIndex.resize(1);
+  transfers[0].dstIndex.resize(1);
+
+  printf("GPU-GFX Scaling benchmark:\n");
+  printf("==========================\n");
+  printf("- Copying %lu bytes from GPU %d to other devices\n", transfers[0].numBytes, exeIndex);
+  printf("- All numbers reported as GB/sec\n\n");
+
+  printf("NumCUs");
+  for (int i = 0; i < numDevices; i++)
+    printf("%c  %s%02d     ", separator, i < numCpus ? "CPU" : "GPU", i < numCpus ? i : i - numCpus);
+  printf("\n");
+
+  std::vector<std::pair<double, int>> bestResult(numDevices);
+  for (int numSubExec = 1; numSubExec <= maxSubExecs; numSubExec++)
+  {
+    transfers[0].numSubExecs = numSubExec;
+    printf("%4d  ", numSubExec);
+
+    for (int i = 0; i < numDevices; i++)
+    {
+      transfers[0].dstType[0]  = i < numCpus ? MEM_CPU : MEM_GPU;
+      transfers[0].dstIndex[0] = i < numCpus ? i : i - numCpus;
+
+      ExecuteTransfers(ev, 0, N, transfers, false);
+      double transferDurationMsec = transfers[0].transferTime / (1.0 * ev.numIterations);
+      double transferBandwidthGbs = (transfers[0].numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
+      printf("%c%7.2f     ", separator, transferBandwidthGbs);
+
+      if (transferBandwidthGbs > bestResult[i].first)
+      {
+        bestResult[i].first  = transferBandwidthGbs;
+        bestResult[i].second = numSubExec;
+      }
+    }
+    printf("\n");
+  }
+
+  printf(" Best ");
+  for (int i = 0; i < numDevices; i++)
+  {
+    printf("%c%7.2f(%3d)", separator, bestResult[i].first, bestResult[i].second);
+  }
+  printf("\n");
 }
 
 double GetPeakBandwidth(EnvVars const& ev, size_t const N,

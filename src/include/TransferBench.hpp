@@ -182,6 +182,7 @@ void DeallocateMemory(MemType memType, void* memPtr, size_t const size = 0);
 void CheckPages(char* byteArray, size_t numBytes, int targetId);
 void RunTransfer(EnvVars const& ev, int const iteration, ExecutorInfo& exeInfo, int const transferIdx);
 void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N);
+void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int const maxSubExecs);
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExec, int const numCpuSubExec, bool const isRandom);
 
 // Return the maximum bandwidth measured for given (src/dst) pair

@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.23
+### Added
+- New GPU subexec scaling benchmark accessed by preset "scaling"
+  - Tests GPU-GFX copy performance based on # of CUs used
+
 ## v1.22
 ### Modified
 - Switching kernel timing function to wall_clock64
