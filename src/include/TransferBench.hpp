@@ -174,7 +174,8 @@ void ParseTransfers(char* line, int numCpus, int numGpus,
                     std::vector<Transfer>& transfers);
 
 void ExecuteTransfers(EnvVars const& ev, int const testNum, size_t const N,
-                      std::vector<Transfer>& transfers, bool verbose = true);
+                      std::vector<Transfer>& transfers, bool verbose = true,
+                      double* totalBandwidthCpu = nullptr);
 
 void EnablePeerAccess(int const deviceId, int const peerDeviceId);
 void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPtr);
@@ -184,6 +185,7 @@ void RunTransfer(EnvVars const& ev, int const iteration, ExecutorInfo& exeInfo, 
 void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N);
 void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int const maxSubExecs);
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExec, int const numCpuSubExec, bool const isRandom);
+void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const numSubExecs);
 
 // Return the maximum bandwidth measured for given (src/dst) pair
 double GetPeakBandwidth(EnvVars const& ev, size_t  const  N,

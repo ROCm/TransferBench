@@ -104,6 +104,17 @@ int main(int argc, char **argv)
     RunScalingBenchmark(ev, numBytesPerTransfer / sizeof(float), exeIndex, maxSubExecs);
     exit(0);
   }
+  // - Test all2all benchmark
+  else if (!strcmp(argv[1], "a2a"))
+  {
+    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 4);
+
+    // Force single-stream mode for all-to-all benchmark
+    ev.useSingleStream = 1;
+    ev.configMode = CFG_A2A;
+    RunAllToAllBenchmark(ev, numBytesPerTransfer, numSubExecs);
+    exit(0);
+  }
 
   // Check that Transfer configuration file can be opened
   ev.configMode = CFG_FILE;
@@ -163,14 +174,17 @@ void ExecuteTransfers(EnvVars const& ev,
                       int const testNum,
                       size_t const N,
                       std::vector<Transfer>& transfers,
-                      bool verbose)
+                      bool verbose,
+                      double* totalBandwidthCpu)
 {
   int const initOffset = ev.byteOffset / sizeof(float);
 
   // Map transfers by executor
   TransferMap transferMap;
-  for (Transfer& transfer : transfers)
+  for (int i = 0; i < transfers.size(); i++)
   {
+    Transfer& transfer = transfers[i];
+    transfer.transferIndex = i;
     Executor executor(transfer.exeType, transfer.exeIndex);
     ExecutorInfo& executorInfo = transferMap[executor];
     executorInfo.transfers.push_back(&transfer);
@@ -370,6 +384,7 @@ void ExecuteTransfers(EnvVars const& ev,
   // Validate that each transfer has transferred correctly
   size_t totalBytesTransferred = 0;
   int const numTransfers = transferList.size();
+
   for (auto transferPair : transferList)
   {
     Transfer* transfer = transferPair.second;
@@ -380,6 +395,8 @@ void ExecuteTransfers(EnvVars const& ev,
   // Report timings
   totalCpuTime = totalCpuTime / (1.0 * numTimedIterations) * 1000;
   double totalBandwidthGbs = (totalBytesTransferred / 1.0E6) / totalCpuTime;
+  if (totalBandwidthCpu) *totalBandwidthCpu = totalBandwidthGbs;
+
   double maxGpuTime = 0;
 
   if (!isSrcCorrect) goto cleanup;
@@ -882,7 +899,6 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
   for (int i = 0; i < numTransfers; i++)
   {
     Transfer transfer;
-    transfer.transferIndex = i;
     transfer.numBytes = 0;
     transfer.numBytesActual = 0;
     if (!advancedMode)
@@ -1022,8 +1038,13 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
       exit(1);
 #else
       HIP_CALL(hipSetDevice(devIndex));
-      HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, hipDeviceMallocFinegrained));
 
+      // NOTE: hipDeviceMallocFinegrained will be replaced by hipDeviceMallocUncached eventually
+      //       Until then, this workaround is required
+      hipDeviceProp_t prop;
+      HIP_CALL(hipGetDeviceProperties(&prop, 0));
+      int flag = (prop.gcnArch / 10 == 94) ? 0x3 : hipDeviceMallocFinegrained;
+      HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
 #endif
     }
     HIP_CALL(hipMemset(*memPtr, 0, numBytes));
@@ -1385,6 +1406,73 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
   printf("\n");
 }
 
+void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const numSubExecs)
+{
+  ev.DisplayEnvVars();
+
+  // Collect the number of GPU devices to use
+  int const numGpus = ev.numGpuDevices;
+
+  // Enable peer to peer for each GPU
+  for (int i = 0; i < numGpus; i++)
+    for (int j = 0; j < numGpus; j++)
+      if (i != j) EnablePeerAccess(i, j);
+
+  char separator = (ev.outputToCsv ? ',' : ' ');
+
+  Transfer transfer;
+  transfer.numBytes    = numBytesPerTransfer;
+  transfer.numSubExecs = numSubExecs;
+  transfer.numSrcs     = 1;
+  transfer.numDsts     = 1;
+  transfer.exeType     = EXE_GPU_GFX;
+  transfer.srcType.resize(1, MEM_GPU);
+  transfer.dstType.resize(1, MEM_GPU);
+  transfer.srcIndex.resize(1);
+  transfer.dstIndex.resize(1);
+
+  std::vector<Transfer> transfers;
+  for (int i = 0; i < numGpus; i++)
+  {
+    transfer.srcIndex[0] = i;
+    transfer.exeIndex    = i;
+    for (int j = 0; j < numGpus; j++)
+    {
+      transfer.dstIndex[0] = j;
+      transfers.push_back(transfer);
+    }
+  }
+
+  printf("GPU-GFX All-To-All benchmark:\n");
+  printf("==========================\n");
+  printf("- Copying %lu bytes between every pair of GPUs using %d CUs\n", numBytesPerTransfer, numSubExecs);
+  printf("- All numbers reported as GB/sec\n\n");
+
+  double totalBandwidthCpu = 0;
+  ExecuteTransfers(ev, 0, numBytesPerTransfer / sizeof(float), transfers, true, &totalBandwidthCpu);
+
+  printf("\nSummary:\n");
+  printf("==========================================================\n");
+  printf("SRC\\DST");
+  for (int dst = 0; dst < numGpus; dst++)
+    printf("%cGPU %02d   ", separator, dst);
+  printf("\n");
+
+  for (int src = 0; src < numGpus; src++)
+  {
+    printf("GPU %02d", src);
+    for (int dst = 0; dst < numGpus; dst++)
+    {
+      Transfer const& transfer = transfers[src * numGpus + dst];
+      double transferDurationMsec = transfer.transferTime / (1.0 * ev.numIterations);
+      double transferBandwidthGbs = (transfer.numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
+      printf("%c%7.2f  ", separator, transferBandwidthGbs);
+    }
+    printf("\n");
+  }
+  printf("Aggregate bandwidth (CPU Timed): %7.2f\n", totalBandwidthCpu);
+}
+
 double GetPeakBandwidth(EnvVars const& ev, size_t const N,
                         int     const  isBidirectional,
                         MemType const  srcType, int const srcIndex,
@@ -1715,6 +1803,7 @@ int GetWallClockRate(int deviceId)
       switch (prop.gcnArch)
       {
       case 906: case 910: value = 25000; break;
+      case 941: value = 100000; break;
       default:
         printf("Unrecognized GCN arch %d\n", prop.gcnArch);
       }
@@ -1943,7 +2032,6 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
         transfer.dstType        = {possibleTransfers[value].dstType};
         transfer.dstIndex       = {possibleTransfers[value].dstIndex};
         transfer.numSubExecs    = IsGpuType(transfer.exeType) ? numGpuSubExecs : numCpuSubExecs;
-        transfer.transferIndex  = transfers.size();
         transfer.numBytes       = ev.sweepRandBytes ? randSize(*ev.generator) * sizeof(float) : 0;
         transfers.push_back(transfer);
       }
