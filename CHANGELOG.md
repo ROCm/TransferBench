@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.24
+### Added
+- New All-To-All GPU benchmark accessed by preset "a2a"
+- Adding gfx941 wall clock frequency
+
 ## v1.23
 ### Added
 - New GPU subexec scaling benchmark accessed by preset "scaling"

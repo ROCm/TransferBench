@@ -585,6 +585,8 @@ void DisplayUsage(char const* cmdName)
   printf("              scaling      - GPU SubExec scaling copy test\n");
   printf("                             - 3th optional arg: Max # of SubExecs to use\n");
   printf("                             - 4rd optional arg: GPU index to use as executor\n");
+  printf("              a2a          - GPU All-To-All benchmark\n");
+  printf("                             - 3rd optional arg: # of SubExecs to use\n");
   printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
   printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
          DEFAULT_BYTES_PER_TRANSFER);
