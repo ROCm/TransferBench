@@ -1805,7 +1805,7 @@ int GetWallClockRate(int deviceId)
       switch (prop.gcnArch)
       {
       case 906: case 910: value = 25000; break;
-      case 941: value = 100000; break;
+      case 940: case 941: case 942: value = 100000; break;
       default:
         printf("Unrecognized GCN arch %d\n", prop.gcnArch);
       }
