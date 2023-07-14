@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.23"
+#define TB_VERSION "1.24"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -39,7 +39,8 @@ enum ConfigModeEnum
   CFG_FILE  = 0,
   CFG_P2P   = 1,
   CFG_SWEEP = 2,
-  CFG_SCALE = 3
+  CFG_SCALE = 3,
+  CFG_A2A   = 4
 };
 
 // This class manages environment variable that affect TransferBench
