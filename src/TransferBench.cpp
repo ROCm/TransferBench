@@ -1508,7 +1508,7 @@ double GetPeakBandwidth(EnvVars const& ev, size_t const N,
   transfers[0].exeIndex = (ev.useRemoteRead ? dstIndex : srcIndex);
   transfers[1].exeIndex = (ev.useRemoteRead ? srcIndex : dstIndex);
   transfers[0].numSubExecs = IsGpuType(transfers[0].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
-  transfers[1].numSubExecs = IsGpuType(transfers[0].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
+  transfers[1].numSubExecs = IsGpuType(transfers[1].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
 
   // Remove (DST->SRC) if not bidirectional
   transfers.resize(isBidirectional + 1);

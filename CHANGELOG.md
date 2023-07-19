@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.25
+### Fixed
+- Fixed bug in P2P bidirectional benchmark using incorrect number of subExecutors for CPU<->GPU tests
+
 ## v1.24
 ### Added
 - New All-To-All GPU benchmark accessed by preset "a2a"
