@@ -119,6 +119,9 @@ struct Transfer
   std::vector<SubExecParam> subExecParam;       // Defines subarrays assigned to each threadblock
   SubExecParam*             subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
 
+  std::vector<double>       perIterationTiming; // Per-iteration timing
+  double                    stdDev;             // Standard deviation in timing
+
   // Prepares src/dst subarray pointers for each SubExecutor
   void PrepareSubExecParams(EnvVars const& ev);
 
@@ -191,7 +194,8 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
 double GetPeakBandwidth(EnvVars const& ev, size_t  const  N,
                         int     const  isBidirectional,
                         MemType const  srcType, int const srcIndex,
-                        MemType const  dstType, int const dstIndex);
+                        MemType const  dstType, int const dstIndex,
+                        double* stdDev = nullptr);
 
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
 

@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.26
+### Added
+- Showing per-iteration timing standard deviation for config-file based tests
+- Added SHOW_STDDEV for p2p preset to show per-iteration timing standard deviations
+
 ## v1.25
 ### Fixed
 - Fixed bug in P2P bidirectional benchmark using incorrect number of subExecutors for CPU<->GPU tests

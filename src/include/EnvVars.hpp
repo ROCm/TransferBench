@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.25"
+#define TB_VERSION "1.26"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -83,11 +83,12 @@ public:
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
 
-  // Environment variables only for Benchmark-preset
+  // Environment variables only for p2p-preset
   int useRemoteRead;     // Use destination memory type as executor instead of source memory type
   int useDmaCopy;        // Use DMA copy instead of GPU copy
   int numGpuSubExecs;    // Number of GPU subexecutors to use
   int numCpuSubExecs;    // Number of CPU subexecttors to use
+  int showStdDev;        // Show timing standard deviation
 
   // Environment variables only for Sweep-preset
   int sweepMin;          // Min number of simultaneous Transfers to be executed per test
@@ -168,6 +169,7 @@ public:
     useDmaCopy       = GetEnvVar("USE_GPU_DMA"          , 0);
     numGpuSubExecs   = GetEnvVar("NUM_GPU_SE"           , useDmaCopy ? 1 : numDeviceCUs);
     numCpuSubExecs   = GetEnvVar("NUM_CPU_SE"           , DEFAULT_P2P_NUM_CPU_SE);
+    showStdDev       = GetEnvVar("SHOW_STDDEV"          , 0);
 
     // Sweep related
     sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
@@ -454,6 +456,8 @@ public:
              std::string("Using ") + std::to_string(numCpuSubExecs) + " CPU subexecutors");
     PRINT_EV("NUM_GPU_SE", numGpuSubExecs,
              std::string("Using ") + std::to_string(numGpuSubExecs) + " GPU subexecutors");
+    PRINT_EV("SHOW_STDDEV", showStdDev,
+             std::string(showStdDev ? "Showing" : "Hiding") + " per-iteration timing standard deviations");
     PRINT_EV("USE_GPU_DMA", useDmaCopy,
              std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
