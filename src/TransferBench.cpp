@@ -445,6 +445,27 @@ void ExecuteTransfers(EnvVars const& ev,
                  ExeTypeName[transfer->exeType], transfer->exeIndex,
                  transfer->numSubExecs,
                  transfer->DstToStr().c_str());
+
+          if (ev.showIterations)
+          {
+            std::set<std::pair<double, int>> times;
+            double deltaSum = 0;
+            for (int i = 0; i < numTimedIterations; i++)
+            {
+              times.insert(std::make_pair(transfer->perIterationTime[i], i+1));
+              double const variance = fabs(transferDurationMsec - transfer->perIterationTime[i]);
+              deltaSum += variance * variance;
+            }
+            double const stdDev = sqrt(deltaSum / numTimedIterations);
+
+            for (auto t : times)
+            {
+              double iterDurationMsec = t.first;
+              double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
+              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |\n", t.second, iterBandwidthGbs, iterDurationMsec);
+            }
+            printf("      StandardDev | %12.3e |\n", stdDev);
+          }
         }
         else
         {
@@ -488,6 +509,27 @@ void ExecuteTransfers(EnvVars const& ev,
                ExeTypeName[transfer->exeType], transfer->exeIndex,
                transfer->numSubExecs,
                transfer->DstToStr().c_str());
+
+        if (ev.showIterations)
+        {
+          std::set<std::pair<double, int>> times;
+          double deltaSum = 0;
+          for (int i = 0; i < numTimedIterations; i++)
+          {
+            times.insert(std::make_pair(transfer->perIterationTime[i], i+1));
+            double const variance = fabs(transferDurationMsec - transfer->perIterationTime[i]);
+            deltaSum += variance * variance;
+          }
+          double const stdDev = sqrt(deltaSum / numTimedIterations);
+
+          for (auto t : times)
+          {
+            double iterDurationMsec = t.first;
+            double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
+            printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |\n", t.second, iterBandwidthGbs, iterDurationMsec);
+          }
+          printf("      StandardDev | %12.3e |\n", stdDev);
+        }
       }
       else
       {
@@ -1184,12 +1226,16 @@ void RunTransfer(EnvVars const& ev, int const iteration,
           int const wallClockRate = GetWallClockRate(exeIndex);
           double iterationTimeMs = (maxStopCycle - minStartCycle) / (double)(wallClockRate);
           currTransfer->transferTime += iterationTimeMs;
+          if (ev.showIterations)
+            currTransfer->perIterationTime.push_back(iterationTimeMs);
         }
         exeInfo.totalTime += gpuDeltaMsec;
       }
       else
       {
         transfer->transferTime += gpuDeltaMsec;
+        if (ev.showIterations)
+          transfer->perIterationTime.push_back(gpuDeltaMsec);
       }
     }
   }
@@ -1224,6 +1270,8 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       float gpuDeltaMsec;
       HIP_CALL(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
       transfer->transferTime += gpuDeltaMsec;
+      if (ev.showIterations)
+        transfer->perIterationTime.push_back(gpuDeltaMsec);
     }
   }
   else if (transfer->exeType == EXE_CPU) // CPU execution agent
@@ -1252,7 +1300,12 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
     // Record time if not a warmup iteration
     if (iteration >= 0)
-      transfer->transferTime += (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0);
+    {
+      double const delta = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0);
+      transfer->transferTime += delta;
+      if (ev.showIterations)
+        transfer->perIterationTime.push_back(delta);
+    }
   }
 }
 
@@ -1271,6 +1324,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
       if (i != j) EnablePeerAccess(i, j);
 
   // Perform unidirectional / bidirectional
+
   for (int isBidirectional = 0; isBidirectional <= 1; isBidirectional++)
   {
     // Print header
@@ -1297,42 +1351,205 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
       printf("\n");
     }
 
+    ExeType const gpuExeType = ev.useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
+
     // Loop over all possible src/dst pairs
     for (int src = 0; src < numDevices; src++)
     {
       MemType const srcType  = (src < numCpus ? MEM_CPU : MEM_GPU);
       int     const srcIndex = (srcType == MEM_CPU ? src : src - numCpus);
 
-      if (!ev.outputToCsv)
-        printf("%9s %02d", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex);
+      std::vector<std::vector<double>> avgBandwidth(isBidirectional + 1);
+      std::vector<std::vector<double>> minBandwidth(isBidirectional + 1);
+      std::vector<std::vector<double>> maxBandwidth(isBidirectional + 1);
+      std::vector<std::vector<double>> stdDev(isBidirectional + 1);
 
       for (int dst = 0; dst < numDevices; dst++)
       {
         MemType const dstType  = (dst < numCpus ? MEM_CPU : MEM_GPU);
         int     const dstIndex = (dstType == MEM_CPU ? dst : dst - numCpus);
 
-        double bandwidth = GetPeakBandwidth(ev, N, isBidirectional, srcType, srcIndex, dstType, dstIndex);
-        if (!ev.outputToCsv)
+        // Prepare Transfers
+        std::vector<Transfer> transfers(isBidirectional + 1);
+
+        // SRC -> DST
+        transfers[0].numBytes = N * sizeof(float);
+        transfers[0].srcType.push_back(srcType);
+        transfers[0].dstType.push_back(dstType);
+        transfers[0].srcIndex.push_back(srcIndex);
+        transfers[0].dstIndex.push_back(dstIndex);
+        transfers[0].numSrcs = transfers[0].numDsts = 1;
+        transfers[0].exeType = IsGpuType(ev.useRemoteRead ? dstType : srcType) ? gpuExeType : EXE_CPU;
+        transfers[0].exeIndex = (ev.useRemoteRead ? dstIndex : srcIndex);
+        transfers[0].numSubExecs = IsGpuType(transfers[0].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
+
+        // DST -> SRC
+        if (isBidirectional)
         {
-          if (bandwidth == 0)
-            printf("%10s", "N/A");
-          else
-            printf("%10.2f", bandwidth);
+          transfers[1].numBytes = N * sizeof(float);
+          transfers[1].numSrcs = transfers[1].numDsts = 1;
+          transfers[1].srcType.push_back(dstType);
+          transfers[1].dstType.push_back(srcType);
+          transfers[1].srcIndex.push_back(dstIndex);
+          transfers[1].dstIndex.push_back(srcIndex);
+          transfers[1].exeType = IsGpuType(ev.useRemoteRead ? srcType : dstType) ? gpuExeType : EXE_CPU;
+          transfers[1].exeIndex = (ev.useRemoteRead ? srcIndex : dstIndex);
+          transfers[1].numSubExecs = IsGpuType(transfers[1].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
+        }
+
+        bool skipTest = false;
+
+        // Abort if executing on NUMA node with no CPUs
+        for (int i = 0; i <= isBidirectional; i++)
+        {
+          if (transfers[i].exeType == EXE_CPU && ev.numCpusPerNuma[transfers[i].exeIndex] == 0)
+          {
+            skipTest = true;
+            break;
+          }
+
+#if defined(__NVCC__)
+          // NVIDIA platform cannot access GPU memory directly from CPU executors
+          if (transfers[i].exeType == EXE_CPU && (IsGpuType(srcType) || IsGpuType(dstType)))
+          {
+            skipTest = true;
+            break;
+          }
+#endif
+        }
+
+        if (isBidirectional && srcType == dstType && srcIndex == dstIndex) skipTest = true;
+
+        if (!skipTest)
+        {
+          ExecuteTransfers(ev, 0, N, transfers, false);
+
+          for (int dir = 0; dir <= isBidirectional; dir++)
+          {
+            double const avgTime = transfers[dir].transferTime / ev.numIterations;
+            double const avgBw   = (transfers[dir].numBytesActual / 1.0E9) / avgTime * 1000.0f;
+            avgBandwidth[dir].push_back(avgBw);
+
+            if (ev.showIterations)
+            {
+              double minTime = transfers[dir].perIterationTime[0];
+              double maxTime = transfers[dir].perIterationTime[0];
+              double varSum  = 0;
+              for (int i = 1; i < transfers[dir].perIterationTime.size(); i++)
+              {
+                minTime = std::min(minTime, transfers[dir].perIterationTime[i]);
+                maxTime = std::max(maxTime, transfers[dir].perIterationTime[i]);
+                double const delta = (avgTime - transfers[dir].perIterationTime[i]);
+                varSum += delta * delta;
+              }
+              double const minBw = (transfers[dir].numBytesActual / 1.0E9) / maxTime * 1000.0f;
+              double const maxBw = (transfers[dir].numBytesActual / 1.0E9) / minTime * 1000.0f;
+              double const stdev = sqrt(varSum / transfers[dir].perIterationTime.size());
+              minBandwidth[dir].push_back(minBw);
+              maxBandwidth[dir].push_back(maxBw);
+              stdDev[dir].push_back(stdev);
+            }
+          }
         }
         else
         {
-          printf("%s %02d,%s %02d,%s,%s,%s,%.2f,%lu\n",
-                 srcType == MEM_CPU ? "CPU" : "GPU", srcIndex,
-                 dstType == MEM_CPU ? "CPU" : "GPU", dstIndex,
-                 isBidirectional ? "bidirectional" : "unidirectional",
-                 ev.useRemoteRead ? "Remote" : "Local",
-                 ev.useDmaCopy ? "DMA" : "GFX",
-                 bandwidth,
-                 N * sizeof(float));
+          for (int dir = 0; dir <= isBidirectional; dir++)
+          {
+            avgBandwidth[dir].push_back(0);
+            minBandwidth[dir].push_back(0);
+            maxBandwidth[dir].push_back(0);
+            stdDev[dir].push_back(-1.0);
+          }
+        }
+      }
+
+      for (int dir = 0; dir <= isBidirectional; dir++)
+      {
+        if (!ev.outputToCsv)
+          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, dir ? "<- " : " ->");
+
+        for (int dst = 0; dst < numDevices; dst++)
+        {
+          double const avgBw = avgBandwidth[dir][dst];
+
+          if (!ev.outputToCsv)
+          {
+            if (avgBw == 0.0)
+              printf("%10s", "N/A");
+            else
+              printf("%10.2f", avgBw);
+          }
+          else
+          {
+            MemType const dstType  = (dst < numCpus ? MEM_CPU : MEM_GPU);
+            int     const dstIndex = (dstType == MEM_CPU ? dst : dst - numCpus);
+
+            printf("%s %02d,%s %02d,%s,%s,%s,%.2f,%lu\n",
+                   srcType == MEM_CPU ? "CPU" : "GPU", srcIndex,
+                   dstType == MEM_CPU ? "CPU" : "GPU", dstIndex,
+                   dir ? "DST->SRC" : "SRC->DST",
+                   ev.useRemoteRead ? "Remote" : "Local",
+                   ev.useDmaCopy ? "DMA" : "GFX",
+                   avgBandwidth[dir][dst],
+                   N * sizeof(float));
+          }
+        }
+        printf("\n");
+
+        if (ev.showIterations && !ev.outputToCsv)
+        {
+          // minBw
+          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "min");
+          for (int i = 0; i < numDevices; i++)
+          {
+            double const minBw = minBandwidth[dir][i];
+            if (minBw == 0.0)
+              printf("%10s", "N/A");
+            else
+              printf("%10.2f", minBw);
+          }
+          printf("\n");
+
+          // maxBw
+          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "max");
+          for (int i = 0; i < numDevices; i++)
+          {
+            double const maxBw = maxBandwidth[dir][i];
+            if (maxBw == 0.0)
+              printf("%10s", "N/A");
+            else
+              printf("%10.2f", maxBw);
+          }
+          printf("\n");
+
+          // stddev
+          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, " sd");
+          for (int i = 0; i < numDevices; i++)
+          {
+            double const sd = stdDev[dir][i];
+            if (sd == -1.0)
+              printf("%10s", "N/A");
+            else
+              printf("%10.1e", sd);
+          }
+          printf("\n");
         }
         fflush(stdout);
       }
-      if (!ev.outputToCsv) printf("\n");
+
+      if (isBidirectional && !ev.outputToCsv)
+      {
+        printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "<->");
+        for (int dst = 0; dst < numDevices; dst++)
+        {
+          double const sumBw = avgBandwidth[0][dst] + avgBandwidth[1][dst];
+          if (sumBw == 0.0)
+            printf("%10s", "N/A");
+          else
+            printf("%10.2f", sumBw);
+        }
+        if (src < numDevices - 1) printf("\n\n");
+      }
     }
     if (!ev.outputToCsv) printf("\n");
   }
@@ -1582,6 +1799,7 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
   }
 
   this->transferTime = 0.0;
+  this->perIterationTime.clear();
 }
 
 void Transfer::PrepareReference(EnvVars const& ev, std::vector<float>& buffer, int bufferIdx)
