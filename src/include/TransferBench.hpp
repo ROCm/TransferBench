@@ -189,12 +189,6 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExec, int const numCpuSubExec, bool const isRandom);
 void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const numSubExecs);
 
-// Return the maximum bandwidth measured for given (src/dst) pair
-double GetPeakBandwidth(EnvVars const& ev, size_t  const  N,
-                        int     const  isBidirectional,
-                        MemType const  srcType, int const srcIndex,
-                        MemType const  dstType, int const dstIndex);
-
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
 
 int RemappedIndex(int const origIdx, bool const isCpuType);
