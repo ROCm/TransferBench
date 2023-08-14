@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.25"
+#define TB_VERSION "1.26"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -75,6 +75,7 @@ public:
   int outputToCsv;       // Output in CSV format
   int samplingFactor;    // Affects how many different values of N are generated (when N set to 0)
   int sharedMemBytes;    // Amount of shared memory to use per threadblock
+  int showIterations;    // Show per-iteration timing info
   int useInteractive;    // Pause for user-input before starting transfer loop
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
   int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
@@ -155,6 +156,7 @@ public:
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , DEFAULT_SAMPLING_FACTOR);
     sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , defaultSharedMemBytes);
+    showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
@@ -164,10 +166,10 @@ public:
     gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
 
     // P2P Benchmark related
-    useRemoteRead    = GetEnvVar("USE_REMOTE_READ"      , 0);
-    useDmaCopy       = GetEnvVar("USE_GPU_DMA"          , 0);
-    numGpuSubExecs   = GetEnvVar("NUM_GPU_SE"           , useDmaCopy ? 1 : numDeviceCUs);
-    numCpuSubExecs   = GetEnvVar("NUM_CPU_SE"           , DEFAULT_P2P_NUM_CPU_SE);
+    useRemoteRead     = GetEnvVar("USE_REMOTE_READ"     , 0);
+    useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0);
+    numGpuSubExecs    = GetEnvVar("NUM_GPU_SE"          , useDmaCopy ? 1 : numDeviceCUs);
+    numCpuSubExecs    = GetEnvVar("NUM_CPU_SE"          , DEFAULT_P2P_NUM_CPU_SE);
 
     // Sweep related
     sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
@@ -382,6 +384,7 @@ public:
     printf(" OUTPUT_TO_CSV          - Outputs to CSV format if set\n");
     printf(" SAMPLING_FACTOR=F      - Add F samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHARED_MEM_BYTES=X     - Use X shared mem bytes per threadblock, potentially to avoid multiple threadblocks per CU\n");
+    printf(" SHOW_ITERATIONS        - Show per-iteration timing info\n");
     printf(" USE_INTERACTIVE        - Pause for user-input before starting transfer loop\n");
     printf(" USE_PCIE_INDEX         - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
     printf(" USE_PREP_KERNEL        - Use GPU kernel to initialize source data array pattern\n");
@@ -429,6 +432,8 @@ public:
              std::string("Running " + std::to_string(numWarmups) + " warmup iteration(s) per Test"));
     PRINT_EV("SHARED_MEM_BYTES", sharedMemBytes,
              std::string("Using " + std::to_string(sharedMemBytes) + " shared mem per threadblock"));
+    PRINT_EV("SHOW_ITERATIONS", showIterations,
+             std::string(showIterations ? "Showing" : "Hiding") + " per-iteration timing");
     PRINT_EV("USE_INTERACTIVE", useInteractive,
              std::string("Running in ") + (useInteractive ? "interactive" : "non-interactive") + " mode");
     PRINT_EV("USE_PCIE_INDEX", usePcieIndexing,

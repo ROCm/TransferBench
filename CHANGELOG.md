@@ -1,5 +1,14 @@
 # Changelog for TransferBench
 
+## v1.26
+### Added
+- Setting SHOW_ITERATIONS=1 provides additional information about per-iteration timing for file and p2p configs
+  - For file configs, iterations are sorted from min to max bandwidth and displayed with standard deviation
+  - For p2p, min/max/standard deviation is shown for each direction.
+
+### Changed
+- P2P benchmark formatting changed.  Now reports bidirectional bandwidth in each direction (as well as sum) for clarity
+
 ## v1.25
 ### Fixed
 - Fixed bug in P2P bidirectional benchmark using incorrect number of subExecutors for CPU<->GPU tests
