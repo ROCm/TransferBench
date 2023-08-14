@@ -1372,7 +1372,6 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
     printf("\n");
 
     ExeType const gpuExeType = ev.useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
-
     // Loop over all possible src/dst pairs
     for (int src = 0; src < numDevices; src++)
     {
@@ -1506,7 +1505,6 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
           // minBw
           printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "min");
           if (ev.outputToCsv) printf(",");
-
           for (int i = 0; i < numDevices; i++)
           {
             double const minBw = minBandwidth[dir][i];
