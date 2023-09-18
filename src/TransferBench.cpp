@@ -22,7 +22,8 @@ THE SOFTWARE.
 
 // This program measures simultaneous copy performance across multiple GPUs
 // on the same node
-#include <numa.h>
+#include <numa.h>     // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
+#include <cmath>      // If not found, try installing g++-12      (e.g apt-get install g++-12)
 #include <numaif.h>
 #include <random>
 #include <stack>
@@ -113,6 +114,48 @@ int main(int argc, char **argv)
     ev.useSingleStream = 1;
     ev.configMode = CFG_A2A;
     RunAllToAllBenchmark(ev, numBytesPerTransfer, numSubExecs);
+    exit(0);
+  }
+  else if (!strcmp(argv[1], "cmdline"))
+  {
+    // Print environment variables and CSV header
+    ev.DisplayEnvVars();
+    if (ev.outputToCsv)
+    {
+      printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
+    }
+
+    // Read Transfer from command line
+    std::string cmdlineTransfer;
+    for (int i = 3; i < argc; i++)
+      cmdlineTransfer += std::string(argv[i]) + " ";
+
+    char line[2048];
+    sprintf(line, "%s", cmdlineTransfer.c_str());
+    std::vector<Transfer> transfers;
+    ParseTransfers(line, ev.numCpuDevices, ev.numGpuDevices, transfers);
+    if (transfers.empty()) exit(0);
+
+    // If the number of bytes is specified, use it
+    if (numBytesPerTransfer != 0)
+    {
+      size_t N = numBytesPerTransfer / sizeof(float);
+      ExecuteTransfers(ev, 1, N, transfers);
+    }
+    else
+    {
+      // Otherwise generate a range of values
+      for (int N = 256; N <= (1<<27); N *= 2)
+      {
+        int delta = std::max(1, N / ev.samplingFactor);
+        int curr = N;
+        while (curr < N * 2)
+        {
+          ExecuteTransfers(ev, 1, curr, transfers);
+          curr += delta;
+        }
+      }
+    }
     exit(0);
   }
 
@@ -252,7 +295,14 @@ void ExecuteTransfers(EnvVars const& ev,
       exeInfo.stopEvents.resize(numStreamsToUse);
       for (int i = 0; i < numStreamsToUse; ++i)
       {
-        HIP_CALL(hipStreamCreate(&exeInfo.streams[i]));
+        if (ev.cuMask.size())
+        {
+          HIP_CALL(hipExtStreamCreateWithCUMask(&exeInfo.streams[i], ev.cuMask.size(), ev.cuMask.data()));
+        }
+        else
+        {
+          HIP_CALL(hipStreamCreate(&exeInfo.streams[i]));
+        }
         HIP_CALL(hipEventCreate(&exeInfo.startEvents[i]));
         HIP_CALL(hipEventCreate(&exeInfo.stopEvents[i]));
       }
@@ -538,7 +588,10 @@ void ExecuteTransfers(EnvVars const& ev,
             {
               double iterDurationMsec = t.first;
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
-              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |\n", t.second, iterBandwidthGbs, iterDurationMsec);
+              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms | CUs:", t.second, iterBandwidthGbs, iterDurationMsec);
+              for (auto x : transfer->perIterationCUs[t.second - 1])
+                printf(" %2d", x);
+              printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
         }
@@ -641,6 +694,7 @@ void DisplayUsage(char const* cmdName)
   printf("                             - 4rd optional arg: GPU index to use as executor\n");
   printf("              a2a          - GPU All-To-All benchmark\n");
   printf("                             - 3rd optional arg: # of SubExecs to use\n");
+  printf("              cmdline      - Read Transfers from command line arguments (after N)\n");
   printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
   printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
          DEFAULT_BYTES_PER_TRANSFER);
@@ -1182,6 +1236,15 @@ void CheckPages(char* array, size_t numBytes, int targetId)
   }
 }
 
+uint32_t GetId(uint32_t hwId)
+{
+  // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
+  int const shId = (hwId >> 12) & 1;
+  int const cuId = (hwId >>  8) & 7;
+  int const seId = (hwId >> 13) & 3;
+  return (shId << 5) + (cuId << 2) + seId;
+}
+
 void RunTransfer(EnvVars const& ev, int const iteration,
                  ExecutorInfo& exeInfo, int const transferIdx)
 {
@@ -1239,7 +1302,13 @@ void RunTransfer(EnvVars const& ev, int const iteration,
           double iterationTimeMs = (maxStopCycle - minStartCycle) / (double)(wallClockRate);
           currTransfer->transferTime += iterationTimeMs;
           if (ev.showIterations)
+          {
             currTransfer->perIterationTime.push_back(iterationTimeMs);
+            std::set<int> CUs;
+            for (int i = 0; i < currTransfer->numSubExecs; i++)
+              CUs.insert(GetId(currTransfer->subExecParamGpuPtr[i].hwId));
+            currTransfer->perIterationCUs.push_back(CUs);
+          }
         }
         exeInfo.totalTime += gpuDeltaMsec;
       }
@@ -1247,7 +1316,13 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       {
         transfer->transferTime += gpuDeltaMsec;
         if (ev.showIterations)
+        {
           transfer->perIterationTime.push_back(gpuDeltaMsec);
+          std::set<int> CUs;
+          for (int i = 0; i < transfer->numSubExecs; i++)
+            CUs.insert(GetId(transfer->subExecParamGpuPtr[i].hwId));
+          transfer->perIterationCUs.push_back(CUs);
+        }
       }
     }
   }
@@ -1341,6 +1416,9 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
   // Perform unidirectional / bidirectional
   for (int isBidirectional = 0; isBidirectional <= 1; isBidirectional++)
   {
+    if (ev.p2pMode == 1 && isBidirectional == 1 ||
+        ev.p2pMode == 2 && isBidirectional == 0) continue;
+
     printf("%sdirectional copy peak bandwidth GB/s [%s read / %s write] (GPU-Executor: %s)\n", isBidirectional ? "Bi" : "Uni",
            ev.useRemoteRead ? "Remote" : "Local",
            ev.useRemoteRead ? "Local" : "Remote",

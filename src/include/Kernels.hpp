@@ -41,7 +41,17 @@ struct SubExecParam
   float*    dst[MAX_DSTS];                      // Destination array pointers
   long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
   long long stopCycle;                          // Stop  timestamp for in-kernel timing (GPU-GFX executor)
+  uint32_t  hwId;                               // Hardware ID
 };
+
+// Macro for collecting HW_REG_HW_ID
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__NVCC__)
+#define __trace_hwreg() \
+  p.hwId = 0
+#else
+#define __trace_hwreg() \
+  asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (p.hwId));
+#endif
 
 void CpuReduceKernel(SubExecParam const& p)
 {
@@ -211,6 +221,7 @@ GpuReduceKernel(SubExecParam* params)
   {
     p.startCycle = startCycle;
     p.stopCycle  = wall_clock64();
+    __trace_hwreg();
   }
 }
 

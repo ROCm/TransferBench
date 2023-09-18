@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.26"
+#define TB_VERSION "1.27"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -68,6 +68,7 @@ public:
   int blockBytes;        // Each CU, except the last, gets a multiple of this many bytes to copy
   int byteOffset;        // Byte-offset for memory allocations
   int continueOnError;   // Continue tests even after mismatch detected
+  int hideEnv;           // Skip printing environment variable
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
@@ -83,12 +84,14 @@ public:
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
+  std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
 
-  // Environment variables only for Benchmark-preset
-  int useRemoteRead;     // Use destination memory type as executor instead of source memory type
-  int useDmaCopy;        // Use DMA copy instead of GPU copy
-  int numGpuSubExecs;    // Number of GPU subexecutors to use
+  // Environment variables only for P2P preset
   int numCpuSubExecs;    // Number of CPU subexecttors to use
+  int numGpuSubExecs;    // Number of GPU subexecutors to use
+  int p2pMode;           // Both = 0, Unidirectional = 1, Bidirectional = 2
+  int useDmaCopy;        // Use DMA copy instead of GPU copy
+  int useRemoteRead;     // Use destination memory type as executor instead of source memory type
 
   // Environment variables only for Sweep-preset
   int sweepMin;          // Min number of simultaneous Transfers to be executed per test
@@ -149,6 +152,7 @@ public:
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     continueOnError   = GetEnvVar("CONTINUE_ON_ERROR"   , 0);
+    hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
@@ -170,6 +174,7 @@ public:
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0);
     numGpuSubExecs    = GetEnvVar("NUM_GPU_SE"          , useDmaCopy ? 1 : numDeviceCUs);
     numCpuSubExecs    = GetEnvVar("NUM_CPU_SE"          , DEFAULT_P2P_NUM_CPU_SE);
+    p2pMode           = GetEnvVar("P2P_MODE"            , 0);
 
     // Sweep related
     sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
@@ -251,6 +256,45 @@ public:
         rawData[i] = bytes[i % bytes.size()];
     }
     else fillPattern.clear();
+
+    // Check for CU mask
+    cuMask.clear();
+    char* cuMaskStr = getenv("CU_MASK");
+    if (cuMaskStr != NULL)
+    {
+      std::vector<std::pair<int, int>> ranges;
+      int maxCU = 0;
+      char* token = strtok(cuMaskStr, ",");
+      while (token)
+      {
+        int start, end;
+        if (sscanf(token, "%d-%d", &start, &end) == 2)
+        {
+          ranges.push_back(std::make_pair(std::min(start, end), std::max(start, end)));
+          maxCU = std::max(maxCU, std::max(start, end));
+        }
+        else if (sscanf(token, "%d", &start) == 1)
+        {
+          ranges.push_back(std::make_pair(start, start));
+          maxCU = std::max(maxCU, start);
+        }
+        else
+        {
+          printf("[ERROR] Unrecognized token [%s]\n", token);
+          exit(1);
+        }
+        token = strtok(NULL, ",");
+      }
+      cuMask.resize(maxCU / 32 + 1, 0);
+
+      for (auto range : ranges)
+      {
+        for (int i = range.first; i <= range.second; i++)
+        {
+          cuMask[i / 32] |= (1 << (i % 32));
+        }
+      }
+    }
 
     // Perform some basic validation
     if (numCpuDevices > numDetectedCpus)
@@ -376,7 +420,9 @@ public:
     printf(" BLOCK_BYTES=B          - Each CU (except the last) receives a multiple of BLOCK_BYTES to copy\n");
     printf(" BYTE_OFFSET            - Initial byte-offset for memory allocations.  Must be multiple of 4. Defaults to 0\n");
     printf(" CONTINUE_ON_ERROR      - Continue tests even after mismatch detected\n");
+    printf(" CU_MASK                - CU mask for streams specified in hex digits (0-0,a-f,A-F)\n");
     printf(" FILL_PATTERN=STR       - Fill input buffer with pattern specified in hex digits (0-9,a-f,A-F).  Must be even number of digits, (byte-level big-endian)\n");
+    printf(" HIDE_ENV               - Hide environment variable value listing\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
     printf(" NUM_ITERATIONS=I       - Perform I timed iteration(s) per test\n");
@@ -406,10 +452,11 @@ public:
     {
       printf("TransferBench v%s\n", TB_VERSION);
       printf("=====================================================\n");
-      printf("[Common]\n");
+      if (!hideEnv) printf("[Common]\n");
     }
-    else
+    else if (!hideEnv)
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
+    if (hideEnv) return;
 
     PRINT_EV("BLOCK_BYTES", blockBytes,
              std::string("Each CU gets a multiple of " + std::to_string(blockBytes) + " bytes to copy"));
@@ -417,6 +464,8 @@ public:
              std::string("Using byte offset of " + std::to_string(byteOffset)));
     PRINT_EV("CONTINUE_ON_ERROR", continueOnError,
              std::string(continueOnError ? "Continue on mismatch error" : "Stop after first error"));
+    PRINT_EV("CU_MASK", getenv("CU_MASK") ? 1 : 0,
+             (cuMask.size() ? GetCuMaskDesc() : "All"));
     PRINT_EV("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
              (fillPattern.size() ? std::string(getenv("FILL_PATTERN")) : PrepSrcValueString()));
     PRINT_EV("GPU_KERNEL", gpuKernel,
@@ -451,6 +500,7 @@ public:
   void DisplayP2PBenchmarkEnvVars() const
   {
     DisplayEnvVars();
+    if (hideEnv) return;
 
     if (!outputToCsv)
       printf("[P2P Related]\n");
@@ -459,6 +509,10 @@ public:
              std::string("Using ") + std::to_string(numCpuSubExecs) + " CPU subexecutors");
     PRINT_EV("NUM_GPU_SE", numGpuSubExecs,
              std::string("Using ") + std::to_string(numGpuSubExecs) + " GPU subexecutors");
+    PRINT_EV("P2P_MODE", p2pMode,
+             std::string("Running ") + (p2pMode == 1 ? "Unidirectional" :
+                                        p2pMode == 2 ? "Bidirectional"  :
+                                                       "Unidirectional + Bidirectional"));
     PRINT_EV("USE_GPU_DMA", useDmaCopy,
              std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
@@ -470,6 +524,7 @@ public:
   void DisplaySweepEnvVars() const
   {
     DisplayEnvVars();
+    if (hideEnv) return;
 
     if (!outputToCsv)
       printf("[Sweep Related]\n");
@@ -511,6 +566,50 @@ public:
     if (getenv(varname.c_str()))
       return getenv(varname.c_str());
     return defaultValue;
+  }
+
+  std::string GetCuMaskDesc() const
+  {
+    std::vector<std::pair<int, int>> runs;
+
+    bool inRun = false;
+    std::pair<int, int> curr;
+    int used = 0;
+    for (int i = 0; i < cuMask.size(); i++)
+    {
+      for (int j = 0; j < 32; j++)
+      {
+        if (cuMask[i] & (1 << j))
+        {
+          used++;
+          if (!inRun)
+          {
+            inRun = true;
+            curr.first = i * 32 + j;
+          }
+        }
+        else
+        {
+          if (inRun)
+          {
+            inRun = false;
+            curr.second = i * 32 + j - 1;
+            runs.push_back(curr);
+          }
+        }
+      }
+    }
+    if (inRun)
+      curr.second = cuMask.size() * 32 - 1;
+
+    std::string result = "CUs used: (" + std::to_string(used) + ") ";
+    for (int i = 0; i < runs.size(); i++)
+    {
+      if (i) result += ",";
+      if (runs[i].first == runs[i].second) result += std::to_string(runs[i].first);
+      else result += std::to_string(runs[i].first) + "-" + std::to_string(runs[i].second);
+    }
+    return result;
   }
 };
 

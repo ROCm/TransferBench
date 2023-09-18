@@ -1,5 +1,20 @@
 # Changelog for TransferBench
 
+## v1.27
+### Added
+- Adding cmdline preset to allow specify simple tests on command line
+- E.g. ./TransferBench cmdline 64M "1 4 G0->G0->G1"
+- Adding environment variable HIDE_ENV, which skips printing of environment variable values
+- Adding environment variable CU_MASK, which allows selection of which CUs to execute on
+- CU_MASK is specified in CU indices (0-#CUs-1), and '-' can be used to denote ranges of values
+  - E.g.: CU_MASK=3-8,16 would request Transfer be executed only CUs 3,4,5,6,7,8,16
+  - NOTE: This is somewhat experimental and may not work on all hardware
+- SHOW_ITERATIONS now shows CU usage for that iteration (experimental)
+### Modified
+- Adding extra comments on commonly missing includes with details on how to install them
+### Fixed
+- CUDA compilation should work again (wall_clock64 CUDA alias was not defined)
+
 ## v1.26
 ### Added
 - Setting SHOW_ITERATIONS=1 provides additional information about per-iteration timing for file and p2p configs
