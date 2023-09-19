@@ -297,7 +297,9 @@ void ExecuteTransfers(EnvVars const& ev,
       {
         if (ev.cuMask.size())
         {
+#if !defined(__NVCC__)
           HIP_CALL(hipExtStreamCreateWithCUMask(&exeInfo.streams[i], ev.cuMask.size(), ev.cuMask.data()));
+#endif
         }
         else
         {

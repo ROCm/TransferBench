@@ -262,6 +262,9 @@ public:
     char* cuMaskStr = getenv("CU_MASK");
     if (cuMaskStr != NULL)
     {
+#if defined(__NVCC__)
+      printf("[WARN] CU_MASK is not supported in CUDA\n");
+#else
       std::vector<std::pair<int, int>> ranges;
       int maxCU = 0;
       char* token = strtok(cuMaskStr, ",");
@@ -294,6 +297,7 @@ public:
           cuMask[i / 32] |= (1 << (i % 32));
         }
       }
+#endif
     }
 
     // Perform some basic validation
