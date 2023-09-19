@@ -313,8 +313,13 @@ void ExecuteTransfers(EnvVars const& ev,
       {
         // Allocate one contiguous chunk of GPU memory for threadblock parameters
         // This allows support for executing one transfer per stream, or all transfers in a single stream
+#if !defined(__NVCC__)
         AllocateMemory(MEM_GPU, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
                        (void**)&exeInfo.subExecParamGpu);
+#else
+        AllocateMemory(MEM_CPU, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
+                       (void**)&exeInfo.subExecParamGpu);
+#endif
       }
     }
   }
@@ -663,7 +668,11 @@ cleanup:
 
       if (exeType == EXE_GPU_GFX)
       {
+#if !defined(__NVCC__)
         DeallocateMemory(MEM_GPU, exeInfo.subExecParamGpu);
+#else
+        DeallocateMemory(MEM_CPU, exeInfo.subExecParamGpu);
+#endif
       }
     }
   }
