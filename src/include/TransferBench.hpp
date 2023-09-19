@@ -81,7 +81,7 @@ char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
 MemType inline CharToMemType(char const c)
 {
   char const* val = strchr(MemTypeStr, toupper(c));
-  if (*val) return (MemType)(val - MemTypeStr);
+  if (val) return (MemType)(val - MemTypeStr);
   printf("[ERROR] Unexpected memory type (%c)\n", c);
   exit(1);
 }
@@ -89,7 +89,7 @@ MemType inline CharToMemType(char const c)
 ExeType inline CharToExeType(char const c)
 {
   char const* val = strchr(ExeTypeStr, toupper(c));
-  if (*val) return (ExeType)(val - ExeTypeStr);
+  if (val) return (ExeType)(val - ExeTypeStr);
   printf("[ERROR] Unexpected executor type (%c)\n", c);
   exit(1);
 }
@@ -98,28 +98,29 @@ ExeType inline CharToExeType(char const c)
 // then writes the summation to each of the specified destination memory location(s)
 struct Transfer
 {
-  int                       transferIndex;      // Transfer identifier (within a Test)
-  ExeType                   exeType;            // Transfer executor type
-  int                       exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
-  int                       numSubExecs;        // Number of subExecutors to use for this Transfer
-  size_t                    numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
-  size_t                    numBytesActual;     // Actual number of bytes to copy
-  double                    transferTime;       // Time taken in milliseconds
+  int                        transferIndex;      // Transfer identifier (within a Test)
+  ExeType                    exeType;            // Transfer executor type
+  int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
+  int                        numSubExecs;        // Number of subExecutors to use for this Transfer
+  size_t                     numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
+  size_t                     numBytesActual;     // Actual number of bytes to copy
+  double                     transferTime;       // Time taken in milliseconds
 
-  int                       numSrcs;            // Number of sources
-  std::vector<MemType>      srcType;            // Source memory types
-  std::vector<int>          srcIndex;           // Source device indice
-  std::vector<float*>       srcMem;             // Source memory
+  int                        numSrcs;            // Number of sources
+  std::vector<MemType>       srcType;            // Source memory types
+  std::vector<int>           srcIndex;           // Source device indice
+  std::vector<float*>        srcMem;             // Source memory
 
-  int                       numDsts;            // Number of destinations
-  std::vector<MemType>      dstType;            // Destination memory type
-  std::vector<int>          dstIndex;           // Destination device index
-  std::vector<float*>       dstMem;             // Destination memory
+  int                        numDsts;            // Number of destinations
+  std::vector<MemType>       dstType;            // Destination memory type
+  std::vector<int>           dstIndex;           // Destination device index
+  std::vector<float*>        dstMem;             // Destination memory
 
-  std::vector<SubExecParam> subExecParam;       // Defines subarrays assigned to each threadblock
-  SubExecParam*             subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
+  std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock
+  SubExecParam*              subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
 
-  std::vector<double>       perIterationTime;   // Per-iteration timing
+  std::vector<double>        perIterationTime;   // Per-iteration timing
+  std::vector<std::set<int>> perIterationCUs;    // Per-iteration CU usage
 
   // Prepares src/dst subarray pointers for each SubExecutor
   void PrepareSubExecParams(EnvVars const& ev);

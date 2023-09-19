@@ -27,7 +27,7 @@ THE SOFTWARE.
 #include <cuda_runtime.h>
 
 // ROCm specific
-#define __builtin_amdgcn_s_memrealtime                     clock64
+#define wall_clock64                                       clock64
 #define gcnArchName                                        name
 
 // Datatypes
