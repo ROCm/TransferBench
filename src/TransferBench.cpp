@@ -595,10 +595,14 @@ void ExecuteTransfers(EnvVars const& ev,
             {
               double iterDurationMsec = t.first;
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
-              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms | CUs:", t.second, iterBandwidthGbs, iterDurationMsec);
-              for (auto x : transfer->perIterationCUs[t.second - 1])
-                printf(" %2d", x);
-              printf("\n");
+              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
+              if (t.second - 1 < transfer->perIterationCUs.size())
+              {
+                printf(" CUs:");
+                for (auto x : transfer->perIterationCUs[t.second - 1])
+                  printf(" %2d", x);
+              }
+                printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
         }
