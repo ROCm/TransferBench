@@ -7,9 +7,9 @@ NVCC=$(CUDA_PATH)/bin/nvcc
 
 # Compile TransferBenchCuda if nvcc detected
 ifeq ("$(shell test -e $(NVCC) && echo found)", "found")
-	EXE=TransferBenchCuda
+	EXE=../TransferBenchCuda
 else
-	EXE=TransferBench
+	EXE=../TransferBench
 endif
 
 CXXFLAGS = -O3 -Iinclude -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
@@ -17,11 +17,11 @@ NVFLAGS = -O3 -g -Iinclude -x cu -lnuma -gencode=arch=compute_80,code=sm_80 -gen
 LDFLAGS    += -lpthread
 all: $(EXE)
 
-TransferBench: TransferBench.cpp $(shell find -regex ".*\.\hpp")
-	$(HIPCC) $(CXXFLAGS) $< -o ../$@ $(LDFLAGS)
+../TransferBench: TransferBench.cpp $(shell find -regex ".*\.\hpp")
+	$(HIPCC) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-TransferBenchCuda: TransferBench.cpp $(shell find -regex ".*\.\hpp")
-	$(NVCC) $(NVFLAGS) $< -o ../$@ $(LDFLAGS)
+../TransferBenchCuda: TransferBench.cpp $(shell find -regex ".*\.\hpp")
+	$(NVCC) $(NVFLAGS) $< -o $@ $(LDFLAGS)
 
 clean:
 	rm -f *.o ../TransferBench ../TransferBenchCuda

@@ -1457,6 +1457,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
       printf("%7s %02d", "CPU", i);
       if (ev.outputToCsv) printf(",");
     }
+    if (numCpus > 0) printf("   ");
     for (int i = 0; i < numGpus; i++)
     {
       printf("%7s %02d", "GPU", i);
@@ -1464,30 +1465,38 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
     }
     printf("\n");
 
+    double avgBwSum[2][2] = {};
+    int    avgCount[2][2] = {};
+
     ExeType const gpuExeType = ev.useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
     // Loop over all possible src/dst pairs
     for (int src = 0; src < numDevices; src++)
     {
       MemType const srcType  = (src < numCpus ? MEM_CPU : MEM_GPU);
       int     const srcIndex = (srcType == MEM_CPU ? src : src - numCpus);
-
+      MemType const srcTypeActual = ((ev.useFineGrain && srcType == MEM_CPU) ? MEM_CPU_FINE :
+                                     (ev.useFineGrain && srcType == MEM_GPU) ? MEM_GPU_FINE :
+                                                                               srcType);
       std::vector<std::vector<double>> avgBandwidth(isBidirectional + 1);
       std::vector<std::vector<double>> minBandwidth(isBidirectional + 1);
       std::vector<std::vector<double>> maxBandwidth(isBidirectional + 1);
       std::vector<std::vector<double>> stdDev(isBidirectional + 1);
 
+      if (src == numCpus && src != 0) printf("\n");
       for (int dst = 0; dst < numDevices; dst++)
       {
         MemType const dstType  = (dst < numCpus ? MEM_CPU : MEM_GPU);
         int     const dstIndex = (dstType == MEM_CPU ? dst : dst - numCpus);
-
+        MemType const dstTypeActual = ((ev.useFineGrain && dstType == MEM_CPU) ? MEM_CPU_FINE :
+                                       (ev.useFineGrain && dstType == MEM_GPU) ? MEM_GPU_FINE :
+                                                                                 dstType);
         // Prepare Transfers
         std::vector<Transfer> transfers(isBidirectional + 1);
 
         // SRC -> DST
         transfers[0].numBytes = N * sizeof(float);
-        transfers[0].srcType.push_back(srcType);
-        transfers[0].dstType.push_back(dstType);
+        transfers[0].srcType.push_back(srcTypeActual);
+        transfers[0].dstType.push_back(dstTypeActual);
         transfers[0].srcIndex.push_back(srcIndex);
         transfers[0].dstIndex.push_back(dstIndex);
         transfers[0].numSrcs = transfers[0].numDsts = 1;
@@ -1500,8 +1509,8 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
         {
           transfers[1].numBytes = N * sizeof(float);
           transfers[1].numSrcs = transfers[1].numDsts = 1;
-          transfers[1].srcType.push_back(dstType);
-          transfers[1].dstType.push_back(srcType);
+          transfers[1].srcType.push_back(dstTypeActual);
+          transfers[1].dstType.push_back(srcTypeActual);
           transfers[1].srcIndex.push_back(dstIndex);
           transfers[1].dstIndex.push_back(srcIndex);
           transfers[1].exeType = IsGpuType(ev.useRemoteRead ? srcType : dstType) ? gpuExeType : EXE_CPU;
@@ -1541,6 +1550,12 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
             double const avgTime = transfers[dir].transferTime / ev.numIterations;
             double const avgBw   = (transfers[dir].numBytesActual / 1.0E9) / avgTime * 1000.0f;
             avgBandwidth[dir].push_back(avgBw);
+
+            if (!(srcType == dstType && srcIndex == dstIndex))
+            {
+              avgBwSum[srcType][dstType] += avgBw;
+              avgCount[srcType][dstType]++;
+            }
 
             if (ev.showIterations)
             {
@@ -1583,6 +1598,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
 
         for (int dst = 0; dst < numDevices; dst++)
         {
+          if (dst == numCpus && dst != 0) printf("   ");
           double const avgBw = avgBandwidth[dir][dst];
 
           if (avgBw == 0.0)
@@ -1601,6 +1617,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
           for (int i = 0; i < numDevices; i++)
           {
             double const minBw = minBandwidth[dir][i];
+            if (i == numCpus && i != 0) printf("   ");
             if (minBw == 0.0)
               printf("%10s", "N/A");
             else
@@ -1615,6 +1632,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
           for (int i = 0; i < numDevices; i++)
           {
             double const maxBw = maxBandwidth[dir][i];
+            if (i == numCpus && i != 0) printf("   ");
             if (maxBw == 0.0)
               printf("%10s", "N/A");
             else
@@ -1629,6 +1647,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
           for (int i = 0; i < numDevices; i++)
           {
             double const sd = stdDev[dir][i];
+            if (i == numCpus && i != 0) printf("   ");
             if (sd == -1.0)
               printf("%10s", "N/A");
             else
@@ -1647,16 +1666,37 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
         for (int dst = 0; dst < numDevices; dst++)
         {
           double const sumBw = avgBandwidth[0][dst] + avgBandwidth[1][dst];
+          if (dst == numCpus && dst != 0) printf("   ");
           if (sumBw == 0.0)
             printf("%10s", "N/A");
           else
             printf("%10.2f", sumBw);
           if (ev.outputToCsv) printf(",");
         }
-        if (src < numDevices - 1) printf("\n\n");
+        printf("\n");
+        if (src < numDevices - 1) printf("\n");
       }
     }
-    printf("\n");
+
+    if (!ev.outputToCsv)
+    {
+      printf("                         ");
+      for (int srcType : {MEM_CPU, MEM_GPU})
+        for (int dstType : {MEM_CPU, MEM_GPU})
+          printf("  %cPU->%cPU", srcType == MEM_CPU ? 'C' : 'G', dstType == MEM_CPU ? 'C' : 'G');
+      printf("\n");
+
+      printf("Averages (During %s):",  isBidirectional ? " BiDir" : "UniDir");
+      for (int srcType : {MEM_CPU, MEM_GPU})
+        for (int dstType : {MEM_CPU, MEM_GPU})
+        {
+          if (avgCount[srcType][dstType])
+            printf("%10.2f", avgBwSum[srcType][dstType] / avgCount[srcType][dstType]);
+          else
+            printf("%10s", "N/A");
+        }
+      printf("\n\n");
+    }
   }
 }
 
@@ -1732,7 +1772,7 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
 
 void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const numSubExecs)
 {
-  ev.DisplayEnvVars();
+  ev.DisplayA2AEnvVars();
 
   // Collect the number of GPU devices to use
   int const numGpus = ev.numGpuDevices;
@@ -1763,14 +1803,27 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
     for (int j = 0; j < numGpus; j++)
     {
       transfer.dstIndex[0] = j;
+      if (ev.a2aDirect)
+      {
+#if !defined(__NVCC__)
+        if (i == j) continue;
+
+        uint32_t linkType, hopCount;
+        HIP_CALL(hipExtGetLinkTypeAndHopCount(RemappedIndex(i, false),
+                                              RemappedIndex(j, false),
+                                              &linkType, &hopCount));
+        if (hopCount != 1) continue;
+#endif
+      }
       transfers.push_back(transfer);
     }
   }
 
   printf("GPU-GFX All-To-All benchmark:\n");
   printf("==========================\n");
-  printf("- Copying %lu bytes between every pair of GPUs using %d CUs\n", numBytesPerTransfer, numSubExecs);
-  printf("- All numbers reported as GB/sec\n\n");
+  printf("- Copying %lu bytes between %s pairs of GPUs using %d CUs (%lu Transfers)\n",
+         numBytesPerTransfer, ev.a2aDirect ? "directly connected" : "all", numSubExecs, transfers.size());
+  if (transfers.size() == 0) return;
 
   double totalBandwidthCpu = 0;
   ExecuteTransfers(ev, 0, numBytesPerTransfer / sizeof(float), transfers, true, &totalBandwidthCpu);
@@ -1780,21 +1833,52 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   printf("SRC\\DST");
   for (int dst = 0; dst < numGpus; dst++)
     printf("%cGPU %02d   ", separator, dst);
-  printf("\n");
+  printf("   %cSTotal\n", separator);
 
+  std::map<std::pair<int, int>, int> reIndex;
+  for (int i = 0; i < transfers.size(); i++)
+  {
+    Transfer const& t = transfers[i];
+    reIndex[std::make_pair(t.srcIndex[0], t.dstIndex[0])] = i;
+  }
+
+  double totalBandwidthGpu = 0.0;
+  std::vector<double> colTotalBandwidth(numGpus+1, 0.0);
   for (int src = 0; src < numGpus; src++)
   {
+    double rowTotalBandwidth = 0;
     printf("GPU %02d", src);
     for (int dst = 0; dst < numGpus; dst++)
     {
-      Transfer const& transfer = transfers[src * numGpus + dst];
-      double transferDurationMsec = transfer.transferTime / (1.0 * ev.numIterations);
-      double transferBandwidthGbs = (transfer.numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
-      printf("%c%7.2f  ", separator, transferBandwidthGbs);
+      if (reIndex.count(std::make_pair(src, dst)))
+      {
+        Transfer const& transfer = transfers[reIndex[std::make_pair(src,dst)]];
+        double transferDurationMsec = transfer.transferTime / (1.0 * ev.numIterations);
+        double transferBandwidthGbs = (transfer.numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
+        colTotalBandwidth[dst] += transferBandwidthGbs;
+        rowTotalBandwidth += transferBandwidthGbs;
+        totalBandwidthGpu += transferBandwidthGbs;
+        printf("%c%7.2f  ", separator, transferBandwidthGbs);
+      }
+      else
+      {
+        printf("%c%7s  ", separator, "N/A");
+      }
     }
-    printf("\n");
+    printf("   %c%7.2f\n", separator, rowTotalBandwidth);
+    colTotalBandwidth[numGpus] += rowTotalBandwidth;
   }
-  printf("Aggregate bandwidth (CPU Timed): %7.2f\n", totalBandwidthCpu);
+  printf("\nRTotal");
+  for (int dst = 0; dst < numGpus; dst++)
+  {
+    printf("%c%7.2f  ", separator, colTotalBandwidth[dst]);
+  }
+  printf("   %c%7.2f\n", separator, colTotalBandwidth[numGpus]);
+  printf("\n");
+
+  printf("Average   bandwidth (GPU Timed): %7.2f GB/s\n", totalBandwidthGpu / transfers.size());
+  printf("Aggregate bandwidth (GPU Timed): %7.2f GB/s\n", totalBandwidthGpu);
+  printf("Aggregate bandwidth (CPU Timed): %7.2f GB/s\n", totalBandwidthCpu);
 }
 
 void Transfer::PrepareSubExecParams(EnvVars const& ev)
