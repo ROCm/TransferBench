@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.27"
+#define TB_VERSION "1.28"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -92,6 +92,7 @@ public:
   int p2pMode;           // Both = 0, Unidirectional = 1, Bidirectional = 2
   int useDmaCopy;        // Use DMA copy instead of GPU copy
   int useRemoteRead;     // Use destination memory type as executor instead of source memory type
+  int useFineGrain;      // Use fine-grained memory
 
   // Environment variables only for Sweep-preset
   int sweepMin;          // Min number of simultaneous Transfers to be executed per test
@@ -105,6 +106,9 @@ public:
   std::string sweepSrc;  // Set of src memory types to be swept
   std::string sweepExe;  // Set of executors to be swept
   std::string sweepDst;  // Set of dst memory types to be swept
+
+  // Enviroment variables only for A2A preset
+  int a2aDirect;         // Only execute on links that are directly connected
 
   // Developer features
   int enableDebug;       // Enable debug output
@@ -170,11 +174,13 @@ public:
     gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
 
     // P2P Benchmark related
-    useRemoteRead     = GetEnvVar("USE_REMOTE_READ"     , 0);
-    useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0);
-    numGpuSubExecs    = GetEnvVar("NUM_GPU_SE"          , useDmaCopy ? 1 : numDeviceCUs);
+    useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
+
     numCpuSubExecs    = GetEnvVar("NUM_CPU_SE"          , DEFAULT_P2P_NUM_CPU_SE);
+    numGpuSubExecs    = GetEnvVar("NUM_GPU_SE"          , useDmaCopy ? 1 : numDeviceCUs);
     p2pMode           = GetEnvVar("P2P_MODE"            , 0);
+    useRemoteRead     = GetEnvVar("USE_REMOTE_READ"     , 0);
+    useFineGrain      = GetEnvVar("USE_FINE_GRAIN"      , 0);
 
     // Sweep related
     sweepMin          = GetEnvVar("SWEEP_MIN"           , DEFAULT_SWEEP_MIN);
@@ -187,6 +193,9 @@ public:
     sweepXgmiMin      = GetEnvVar("SWEEP_XGMI_MIN"      , 0);
     sweepXgmiMax      = GetEnvVar("SWEEP_XGMI_MAX"      , -1);
     sweepRandBytes    = GetEnvVar("SWEEP_RAND_BYTES"    , 0);
+
+    // A2A Benchmark related
+    a2aDirect         = GetEnvVar("A2A_DIRECT"          , 1);
 
     // Determine random seed
     char *sweepSeedStr = getenv("SWEEP_SEED");
@@ -517,6 +526,9 @@ public:
              std::string("Running ") + (p2pMode == 1 ? "Unidirectional" :
                                         p2pMode == 2 ? "Bidirectional"  :
                                                        "Unidirectional + Bidirectional"));
+    PRINT_EV("USE_FINE_GRAIN", useFineGrain,
+             std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
+
     PRINT_EV("USE_GPU_DMA", useDmaCopy,
              std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
@@ -554,6 +566,17 @@ public:
              std::string("Max number of XGMI hops for Transfers (-1 = no limit)"));
     PRINT_EV("SWEEP_XGMI_MIN", sweepXgmiMin,
              std::string("Min number of XGMI hops for Transfers"));
+    printf("\n");
+  }
+
+  void DisplayA2AEnvVars() const
+  {
+    DisplayEnvVars();
+    if (hideEnv) return;
+    if (!outputToCsv)
+      printf("[AllToAll Related]\n");
+    PRINT_EV("A2A_DIRECT", a2aDirect,
+             std::string(a2aDirect ? "Only using direct links" : "Full all-to-all"));
     printf("\n");
   }
 

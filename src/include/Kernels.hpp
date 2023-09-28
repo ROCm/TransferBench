@@ -219,8 +219,8 @@ GpuReduceKernel(SubExecParam* params)
   __syncthreads();
   if (threadIdx.x == 0)
   {
-    p.startCycle = startCycle;
     p.stopCycle  = wall_clock64();
+    p.startCycle = startCycle;
     __trace_hwreg();
   }
 }

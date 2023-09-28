@@ -1,5 +1,17 @@
 # Changelog for TransferBench
 
+## v1.28
+### Added
+- Added A2A_DIRECT which only executes all-to-all only directly connected GPUs (on by default now)
+- Added average statistics for p2p and a2a benchmarks
+- Added USE_FINE_GRAIN for p2p benchmark.
+  - With older devices, p2p performance with default coarse grain device memory stops timing as soon as request sent to data fabric,
+    not actually when it arrives remotely, which may artificially inflate bandwidth numbers, especially when sending small amounts of data
+### Modified
+- Modified P2P output to help distinguish between CPU / GPU devices
+### Fixed
+- Fixed Makefile target to prevent unnecessary re-compilation
+
 ## v1.27
 ### Added
 - Adding cmdline preset to allow specify simple tests on command line
