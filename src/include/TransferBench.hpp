@@ -193,6 +193,5 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
 
 int RemappedIndex(int const origIdx, bool const isCpuType);
-int GetWallClockRate(int deviceId);
 void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& transfers);
 std::string PtrVectorToStr(std::vector<float*> const& strVector, int const initOffset);

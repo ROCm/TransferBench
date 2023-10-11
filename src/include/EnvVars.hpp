@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.28"
+#define TB_VERSION "1.29"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -48,7 +48,7 @@ class EnvVars
 {
 public:
   // Default configuration values
-  int const DEFAULT_NUM_WARMUPS          =  1;
+  int const DEFAULT_NUM_WARMUPS          =  3;
   int const DEFAULT_NUM_ITERATIONS       = 10;
   int const DEFAULT_SAMPLING_FACTOR      =  1;
 
@@ -123,6 +123,8 @@ public:
   // Track how many CPUs are available per NUMA node
   std::vector<int> numCpusPerNuma;
 
+  std::vector<int> wallClockPerDeviceMhz;
+
   // Constructor that collects values
   EnvVars()
   {
@@ -152,6 +154,8 @@ public:
     int defaultGpuKernel = 0;
     if      (archName == "gfx906") defaultGpuKernel = 13;
     else if (archName == "gfx90a") defaultGpuKernel = 9;
+    else if (archName == "gfx940") defaultGpuKernel = 6;
+    else if (archName == "gfx941") defaultGpuKernel = 6;
 
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
@@ -411,6 +415,26 @@ public:
     for (int i = 0; i < totalCpus; i++)
       numCpusPerNuma[numa_node_of_cpu(i)]++;
 
+    // Build array of wall clock rates per GPU device
+    wallClockPerDeviceMhz.resize(numDetectedGpus);
+    for (int i = 0; i < numDetectedGpus; i++)
+    {
+#if defined(__NVCC__)
+      // NOTE: wallClock doesn't exist in CUDA.  This may need to be adjusted / run with fixed clocks
+      wallClockPerDeviceMhz[i] = 1410000;
+#else
+      hipDeviceProp_t prop;
+      HIP_CALL(hipGetDeviceProperties(&prop, i));
+      int value = 25000;
+      std::string fullName = prop.gcnArchName;
+      std::string archName = fullName.substr(0, fullName.find(':'));
+      if (archName == "gfx940" || archName == "gfx941" || archName == "gfx942")
+        wallClockPerDeviceMhz[i] = 100000;
+      else
+        wallClockPerDeviceMhz[i] = 25000;
+#endif
+    }
+
     // Check for deprecated env vars
     if (getenv("USE_HIP_CALL"))
     {
@@ -577,6 +601,9 @@ public:
       printf("[AllToAll Related]\n");
     PRINT_EV("A2A_DIRECT", a2aDirect,
              std::string(a2aDirect ? "Only using direct links" : "Full all-to-all"));
+    PRINT_EV("USE_REMOTE_READ", useRemoteRead,
+             std::string("Using ") + (useRemoteRead ? "DST" : "SRC") + " as executor");
+
     printf("\n");
   }
 
