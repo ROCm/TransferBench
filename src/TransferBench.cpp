@@ -1254,9 +1254,9 @@ void CheckPages(char* array, size_t numBytes, int targetId)
 uint32_t GetId(uint32_t hwId)
 {
   // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
-  int const shId = (hwId >> 12) & 1;
-  int const cuId = (hwId >>  8) & 7;
-  int const seId = (hwId >> 13) & 3;
+  int const shId = (hwId >> 12) &  1;
+  int const cuId = (hwId >>  8) & 15;
+  int const seId = (hwId >> 13) &  3;
   return (shId << 5) + (cuId << 2) + seId;
 }
 
@@ -1313,7 +1313,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
             minStartCycle = std::min(minStartCycle, currTransfer->subExecParamGpuPtr[i].startCycle);
             maxStopCycle  = std::max(maxStopCycle,  currTransfer->subExecParamGpuPtr[i].stopCycle);
           }
-          int const wallClockRate = GetWallClockRate(exeIndex);
+          int const wallClockRate = ev.wallClockPerDeviceMhz[exeIndex];
           double iterationTimeMs = (maxStopCycle - minStartCycle) / (double)(wallClockRate);
           currTransfer->transferTime += iterationTimeMs;
           if (ev.showIterations)
@@ -1799,10 +1799,11 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   for (int i = 0; i < numGpus; i++)
   {
     transfer.srcIndex[0] = i;
-    transfer.exeIndex    = i;
     for (int j = 0; j < numGpus; j++)
     {
       transfer.dstIndex[0] = j;
+      transfer.exeIndex    = (ev.useRemoteRead ? j : i);
+
       if (ev.a2aDirect)
       {
 #if !defined(__NVCC__)
@@ -2122,41 +2123,6 @@ std::string Transfer::DstToStr() const
   for (int i = 0; i < numDsts; ++i)
     ss << MemTypeStr[dstType[i]] << dstIndex[i];
   return ss.str();
-}
-
-// NOTE: This is a stop-gap solution until HIP provides wallclock values
-int GetWallClockRate(int deviceId)
-{
-  static std::vector<int> wallClockPerDeviceMhz;
-
-  if (wallClockPerDeviceMhz.size() == 0)
-  {
-    int numGpuDevices;
-    HIP_CALL(hipGetDeviceCount(&numGpuDevices));
-    wallClockPerDeviceMhz.resize(numGpuDevices);
-
-    for (int i = 0; i < numGpuDevices; i++)
-    {
-#if defined(__NVCC__)
-      int value = 1410000;
-      //HIP_CALL(hipDeviceGetAttribute(&value, hipDeviceAttributeClockRate, i));
-      //value *= 1000;
-#else
-      hipDeviceProp_t prop;
-      HIP_CALL(hipGetDeviceProperties(&prop, i));
-      int value = 25000;
-      switch (prop.gcnArch)
-      {
-      case 906: case 910: value = 25000; break;
-      case 940: case 941: case 942: value = 100000; break;
-      default:
-        printf("Unrecognized GCN arch %d\n", prop.gcnArch);
-      }
-#endif
-      wallClockPerDeviceMhz[i] = value;
-    }
-  }
-  return wallClockPerDeviceMhz[deviceId];
 }
 
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExecs, int const numCpuSubExecs, bool const isRandom)

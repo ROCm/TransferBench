@@ -1,5 +1,15 @@
 # Changelog for TransferBench
 
+## v1.29
+### Added
+- a2a preset config now responds to USE_REMOTE_READ
+### Fixed
+- Race-condition during wall-clock initialization caused "inf" during single stream runs
+- CU numbering output after CU masking
+### Modified
+- Default number of warmups reverted to 3
+- Default unroll factor for gfx940/941 set to 6
+
 ## v1.28
 ### Added
 - Added A2A_DIRECT which only executes all-to-all only directly connected GPUs (on by default now)
