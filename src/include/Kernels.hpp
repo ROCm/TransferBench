@@ -24,7 +24,7 @@ THE SOFTWARE.
 
 #define PackedFloat_t   float4
 #define WARP_SIZE       64
-#define BLOCKSIZE       256
+#define MAX_BLOCKSIZE   512
 #define FLOATS_PER_PACK (sizeof(PackedFloat_t) / sizeof(float))
 #define MEMSET_CHAR     75
 #define MEMSET_VAL      13323083.0f
@@ -34,11 +34,14 @@ THE SOFTWARE.
 #define MAX_DSTS 16
 struct SubExecParam
 {
+  // Inputs
   size_t    N;                                  // Number of floats this subExecutor works on
   int       numSrcs;                            // Number of source arrays
   int       numDsts;                            // Number of destination arrays
   float*    src[MAX_SRCS];                      // Source array pointers
   float*    dst[MAX_DSTS];                      // Destination array pointers
+
+  // Outputs
   long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
   long long stopCycle;                          // Stop  timestamp for in-kernel timing (GPU-GFX executor)
   uint32_t  hwId;                               // Hardware ID
@@ -111,7 +114,7 @@ template <>           __device__ __forceinline__ float4 MemsetVal(){ return make
 
 // GPU copy kernel 0: 3 loops: unroll float 4, float4s, floats
 template <int LOOP1_UNROLL>
-__global__ void __launch_bounds__(BLOCKSIZE)
+__global__ void __launch_bounds__(MAX_BLOCKSIZE)
 GpuReduceKernel(SubExecParam* params)
 {
   int64_t startCycle = wall_clock64();
@@ -128,7 +131,7 @@ GpuReduceKernel(SubExecParam* params)
   size_t       Nrem        = p.N;
   size_t const loop1Npack  = (Nrem / (FLOATS_PER_PACK * LOOP1_UNROLL * WARP_SIZE)) * (LOOP1_UNROLL * WARP_SIZE);
   size_t const loop1Nelem  = loop1Npack * FLOATS_PER_PACK;
-  size_t const loop1Inc    = BLOCKSIZE * LOOP1_UNROLL;
+  size_t const loop1Inc    = blockDim.x * LOOP1_UNROLL;
   size_t       loop1Offset = waveId * LOOP1_UNROLL * WARP_SIZE + threadId;
 
   while (loop1Offset < loop1Npack)
@@ -167,7 +170,7 @@ GpuReduceKernel(SubExecParam* params)
     // NOTE: Using int32_t due to smaller size requirements
     int32_t const loop2Npack  = Nrem / FLOATS_PER_PACK;
     int32_t const loop2Nelem  = loop2Npack * FLOATS_PER_PACK;
-    int32_t const loop2Inc    = BLOCKSIZE;
+    int32_t const loop2Inc    = blockDim.x;
     int32_t       loop2Offset = threadIdx.x;
 
     while (loop2Offset < loop2Npack)
@@ -229,7 +232,7 @@ template <typename FLOAT_TYPE, int UNROLL_FACTOR>
 __device__ size_t GpuReduceFuncImpl2(SubExecParam const &p, size_t const offset, size_t const N)
 {
   int    constexpr numFloatsPerPack = sizeof(FLOAT_TYPE) / sizeof(float); // Number of floats handled at a time per thread
-  size_t constexpr loopPackInc      = BLOCKSIZE * UNROLL_FACTOR;
+  size_t constexpr loopPackInc      = blockDim.x * UNROLL_FACTOR;
   size_t constexpr numPacksPerWave  = WARP_SIZE * UNROLL_FACTOR;
   int    const     waveId           = threadIdx.x / WARP_SIZE;            // Wavefront number
   int    const     threadId         = threadIdx.x % WARP_SIZE;            // Thread index within wavefront
@@ -283,8 +286,8 @@ __device__ size_t GpuReduceFuncImpl(SubExecParam const &p, size_t const offset, 
 {
   // Each thread in the block works on UNROLL_FACTOR FLOAT_TYPEs during each iteration of the loop
   int    constexpr numFloatsPerRead      = sizeof(FLOAT_TYPE) / sizeof(float);
-  size_t constexpr numFloatsPerInnerLoop = BLOCKSIZE * numFloatsPerRead;
-  size_t constexpr numFloatsPerOuterLoop = numFloatsPerInnerLoop * UNROLL_FACTOR;
+  size_t const     numFloatsPerInnerLoop = blockDim.x * numFloatsPerRead;
+  size_t const     numFloatsPerOuterLoop = numFloatsPerInnerLoop * UNROLL_FACTOR;
   size_t const     numFloatsLeft         = (numFloatsPerRead == 1 && UNROLL_FACTOR == 1) ? 0 : N % numFloatsPerOuterLoop;
   size_t const     numFloatsDone         = N - numFloatsLeft;
   int    const     numSrcs               = p.numSrcs;
@@ -351,7 +354,7 @@ __device__ size_t GpuReduceFunc(SubExecParam const &p, size_t const offset, size
 }
 
 // GPU copy kernel
-__global__ void __launch_bounds__(BLOCKSIZE)
+__global__ void __launch_bounds__(MAX_BLOCKSIZE)
 GpuReduceKernel2(SubExecParam* params)
 {
   int64_t startCycle = wall_clock64();

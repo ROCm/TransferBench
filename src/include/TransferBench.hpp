@@ -118,6 +118,7 @@ struct Transfer
 
   std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock
   SubExecParam*              subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
+  std::vector<int>           subExecIdx;         // Indicies into subExecParamGpu
 
   std::vector<double>        perIterationTime;   // Per-iteration timing
   std::vector<std::set<int>> perIterationCUs;    // Per-iteration CU usage
