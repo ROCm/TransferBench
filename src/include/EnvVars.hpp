@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.29"
+#define TB_VERSION "1.30"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -41,6 +41,13 @@ enum ConfigModeEnum
   CFG_SWEEP = 2,
   CFG_SCALE = 3,
   CFG_A2A   = 4
+};
+
+enum BlockOrderEnum
+{
+  ORDER_SEQUENTIAL  = 0,
+  ORDER_INTERLEAVED = 1,
+  ORDER_RANDOM      = 2
 };
 
 // This class manages environment variable that affect TransferBench
@@ -65,7 +72,9 @@ public:
   int const DEFAULT_SWEEP_TIME_LIMIT  = 0;
 
   // Environment variables
+  int blockSize;         // Size of each threadblock (must be multiple of 64)
   int blockBytes;        // Each CU, except the last, gets a multiple of this many bytes to copy
+  int blockOrder;        // How blocks are ordered in single-stream mode (0=Sequential, 1=Interleaved, 2=Random)
   int byteOffset;        // Byte-offset for memory allocations
   int continueOnError;   // Continue tests even after mismatch detected
   int hideEnv;           // Skip printing environment variable
@@ -157,7 +166,9 @@ public:
     else if (archName == "gfx940") defaultGpuKernel = 6;
     else if (archName == "gfx941") defaultGpuKernel = 6;
 
+    blockSize         = GetEnvVar("BLOCK_SIZE"          , 256);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
+    blockOrder        = GetEnvVar("BLOCK_ORDER"         , 0);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     continueOnError   = GetEnvVar("CONTINUE_ON_ERROR"   , 0);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
@@ -324,9 +335,24 @@ public:
       printf("[ERROR] Number of GPUs to use (%d) cannot exceed number of detected GPUs (%d)\n", numGpuDevices, numDetectedGpus);
       exit(1);
     }
+    if (blockSize % 64)
+    {
+      printf("[ERROR] BLOCK_SIZE (%d) must be a multiple of 64\n", blockSize);
+      exit(1);
+    }
+    if (blockSize > MAX_BLOCKSIZE)
+    {
+      printf("[ERROR] BLOCK_SIZE (%d) must be less than %d\n", blockSize, MAX_BLOCKSIZE);
+      exit(1);
+    }
     if (byteOffset % sizeof(float))
     {
       printf("[ERROR] BYTE_OFFSET must be set to multiple of %lu\n", sizeof(float));
+      exit(1);
+    }
+    if (blockOrder < 0 || blockOrder > 2)
+    {
+      printf("[ERROR] BLOCK_ORDER must be 0 (Sequential), 1 (Interleaved), or 2 (Random)\n");
       exit(1);
     }
     if (numWarmups < 0)
@@ -349,7 +375,6 @@ public:
       printf("[ERROR] BLOCK_BYTES must be a positive multiple of 4\n");
       exit(1);
     }
-
     if (numGpuSubExecs <= 0)
     {
       printf("[ERROR] NUM_GPU_SE must be greater than 0\n");
@@ -454,7 +479,9 @@ public:
   {
     printf("Environment variables:\n");
     printf("======================\n");
-    printf(" BLOCK_BYTES=B          - Each CU (except the last) receives a multiple of BLOCK_BYTES to copy\n");
+    printf(" BLOCK_SIZE             - # of threads per threadblock (Must be multiple of 64). Defaults to 256\n");
+    printf(" BLOCK_BYTES            - Each CU (except the last) receives a multiple of BLOCK_BYTES to copy\n");
+    printf(" BLOCK_ORDER            - Threadblock ordering in single-stream mode (0=Serial, 1=Interleaved, 2=Random)\n");
     printf(" BYTE_OFFSET            - Initial byte-offset for memory allocations.  Must be multiple of 4. Defaults to 0\n");
     printf(" CONTINUE_ON_ERROR      - Continue tests even after mismatch detected\n");
     printf(" CU_MASK                - CU mask for streams specified in hex digits (0-0,a-f,A-F)\n");
@@ -495,8 +522,14 @@ public:
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
     if (hideEnv) return;
 
+    PRINT_EV("BLOCK_SIZE", blockSize,
+             std::string("Threadblock size of " + std::to_string(blockSize)));
     PRINT_EV("BLOCK_BYTES", blockBytes,
              std::string("Each CU gets a multiple of " + std::to_string(blockBytes) + " bytes to copy"));
+    PRINT_EV("BLOCK_ORDER", blockOrder,
+             std::string("Transfer blocks order: " + std::string((blockOrder == 0 ? "Sequential"  :
+                                                                  blockOrder == 1 ? "Interleaved" :
+                                                                                    "Random"))));
     PRINT_EV("BYTE_OFFSET", byteOffset,
              std::string("Using byte offset of " + std::to_string(byteOffset)));
     PRINT_EV("CONTINUE_ON_ERROR", continueOnError,
@@ -531,12 +564,16 @@ public:
     PRINT_EV("VALIDATE_DIRECT", validateDirect,
              std::string("Validate GPU destination memory ") + (validateDirect ? "directly" : "via CPU staging buffer"));
     printf("\n");
+
+    if (blockOrder != ORDER_SEQUENTIAL && !useSingleStream)
+      printf("[WARN] BLOCK_ORDER is ignored if USE_SINGLE_STREAM is not enabled\n");
   };
 
   // Display env var for P2P Benchmark preset
   void DisplayP2PBenchmarkEnvVars() const
   {
     DisplayEnvVars();
+
     if (hideEnv) return;
 
     if (!outputToCsv)

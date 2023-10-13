@@ -1,5 +1,13 @@
 # Changelog for TransferBench
 
+## v1.30
+### Added
+- BLOCK_SIZE added to control threadblock size (Must be multiple of 64, up to 512)
+- BLOCK_ORDER added to control how work is ordered for GFX-executors running USE_SINGLE_STREAM=1
+  - 0 - Threadblocks for Transfers are ordered sequentially (Default)
+  - 1 - Threadblocks for Transfers are interleaved
+  - 2 - Threadblocks for Transfers are ordered randomly
+
 ## v1.29
 ### Added
 - a2a preset config now responds to USE_REMOTE_READ

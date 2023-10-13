@@ -336,8 +336,6 @@ void ExecuteTransfers(EnvVars const& ev,
     int     const exeIndex   = RemappedIndex(executor.second, IsCpuType(exeType));
 
     exeInfo.totalBytes = 0;
-
-    int transferOffset = 0;
     for (int i = 0; i < exeInfo.transfers.size(); ++i)
     {
       // Prepare subarrays each threadblock works on and fill src memory with patterned data
@@ -345,20 +343,75 @@ void ExecuteTransfers(EnvVars const& ev,
       transfer->PrepareSubExecParams(ev);
       isSrcCorrect &= transfer->PrepareSrc(ev);
       exeInfo.totalBytes += transfer->numBytesActual;
+    }
 
-      // Copy block parameters to GPU for GPU executors
-      if (transfer->exeType == EXE_GPU_GFX)
+    // Copy block parameters to GPU for GPU executors
+    if (exeType == EXE_GPU_GFX)
+    {
+      std::vector<SubExecParam> tempSubExecParam;
+
+      if (!ev.useSingleStream || (ev.blockOrder == ORDER_SEQUENTIAL))
       {
-        exeInfo.transfers[i]->subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
-        HIP_CALL(hipSetDevice(exeIndex));
-        HIP_CALL(hipMemcpy(&exeInfo.subExecParamGpu[transferOffset],
-                           transfer->subExecParam.data(),
-                           transfer->subExecParam.size() * sizeof(SubExecParam),
-                           hipMemcpyHostToDevice));
-        HIP_CALL(hipDeviceSynchronize());
+        // Assign Transfers to sequentual threadblocks
+        int transferOffset = 0;
+        for (Transfer* transfer : exeInfo.transfers)
+        {
+          transfer->subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
 
-        transferOffset += transfer->subExecParam.size();
+          transfer->subExecIdx.clear();
+          for (int subExecIdx = 0; subExecIdx < transfer->subExecParam.size(); subExecIdx++)
+          {
+            transfer->subExecIdx.push_back(transferOffset + subExecIdx);
+            tempSubExecParam.push_back(transfer->subExecParam[subExecIdx]);
+          }
+          transferOffset += transfer->numSubExecs;
+        }
       }
+      else if (ev.blockOrder == ORDER_INTERLEAVED)
+      {
+        // Interleave threadblocks of different Transfers
+        exeInfo.transfers[0]->subExecParamGpuPtr = exeInfo.subExecParamGpu;
+        for (int subExecIdx = 0; tempSubExecParam.size() < exeInfo.totalSubExecs; ++subExecIdx)
+        {
+          for (Transfer* transfer : exeInfo.transfers)
+          {
+            if (subExecIdx < transfer->numSubExecs)
+            {
+              transfer->subExecIdx.push_back(tempSubExecParam.size());
+              tempSubExecParam.push_back(transfer->subExecParam[subExecIdx]);
+            }
+          }
+        }
+      }
+      else if (ev.blockOrder == ORDER_RANDOM)
+      {
+        std::vector<std::pair<int,int>> indices;
+        exeInfo.transfers[0]->subExecParamGpuPtr = exeInfo.subExecParamGpu;
+
+        // Build up a list of (transfer,subExecParam) indices, then randomly sort them
+        for (int i = 0; i < exeInfo.transfers.size(); i++)
+        {
+          Transfer* transfer = exeInfo.transfers[i];
+          for (int subExecIdx = 0; subExecIdx < transfer->numSubExecs; subExecIdx++)
+            indices.push_back(std::make_pair(i, subExecIdx));
+        }
+        std::shuffle(indices.begin(), indices.end(), *ev.generator);
+
+        // Build randomized threadblock list
+        for (auto p : indices)
+        {
+          Transfer* transfer = exeInfo.transfers[p.first];
+          transfer->subExecIdx.push_back(tempSubExecParam.size());
+          tempSubExecParam.push_back(transfer->subExecParam[p.second]);
+        }
+      }
+
+      HIP_CALL(hipSetDevice(exeIndex));
+      HIP_CALL(hipMemcpy(exeInfo.subExecParamGpu,
+                         tempSubExecParam.data(),
+                         tempSubExecParam.size() * sizeof(SubExecParam),
+                         hipMemcpyDefault));
+      HIP_CALL(hipDeviceSynchronize());
     }
   }
 
@@ -602,7 +655,7 @@ void ExecuteTransfers(EnvVars const& ev,
                 for (auto x : transfer->perIterationCUs[t.second - 1])
                   printf(" %2d", x);
               }
-                printf("\n");
+              printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
         }
@@ -1281,12 +1334,12 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalSubExecs : transfer->numSubExecs;
 #if defined(__NVCC__)
     HIP_CALL(hipEventRecord(startEvent, stream));
-    GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, BLOCKSIZE, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
+    GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, ev.blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(GpuKernelTable[ev.gpuKernel],
                           dim3(numBlocksToRun, 1, 1),
-                          dim3(BLOCKSIZE, 1, 1),
+                          dim3(ev.blockSize, 1, 1),
                           ev.sharedMemBytes, stream,
                           startEvent, stopEvent,
                           0, transfer->subExecParamGpuPtr);
@@ -1306,12 +1359,16 @@ void RunTransfer(EnvVars const& ev, int const iteration,
         // Figure out individual timings for Transfers that were all launched together
         for (Transfer* currTransfer : exeInfo.transfers)
         {
-          long long minStartCycle = currTransfer->subExecParamGpuPtr[0].startCycle;
-          long long maxStopCycle  = currTransfer->subExecParamGpuPtr[0].stopCycle;
-          for (int i = 1; i < currTransfer->numSubExecs; i++)
+          long long minStartCycle = std::numeric_limits<long long>::max();
+          long long maxStopCycle  = std::numeric_limits<long long>::min();
+
+          std::set<int> CUs;
+          for (auto subExecIdx : currTransfer->subExecIdx)
           {
-            minStartCycle = std::min(minStartCycle, currTransfer->subExecParamGpuPtr[i].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  currTransfer->subExecParamGpuPtr[i].stopCycle);
+            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+            if (ev.showIterations)
+              CUs.insert(GetId(exeInfo.subExecParamGpu[subExecIdx].hwId));
           }
           int const wallClockRate = ev.wallClockPerDeviceMhz[exeIndex];
           double iterationTimeMs = (maxStopCycle - minStartCycle) / (double)(wallClockRate);
@@ -1319,9 +1376,6 @@ void RunTransfer(EnvVars const& ev, int const iteration,
           if (ev.showIterations)
           {
             currTransfer->perIterationTime.push_back(iterationTimeMs);
-            std::set<int> CUs;
-            for (int i = 0; i < currTransfer->numSubExecs; i++)
-              CUs.insert(GetId(currTransfer->subExecParamGpuPtr[i].hwId));
             currTransfer->perIterationCUs.push_back(CUs);
           }
         }
@@ -1990,7 +2044,7 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
       int const deviceIdx = RemappedIndex(this->srcIndex[srcIdx], false);
       HIP_CALL(hipSetDevice(deviceIdx));
       if (ev.usePrepSrcKernel)
-        PrepSrcDataKernel<<<32, BLOCKSIZE>>>(srcPtr, N, srcIdx);
+        PrepSrcDataKernel<<<32, ev.blockSize>>>(srcPtr, N, srcIdx);
       else
         HIP_CALL(hipMemcpy(srcPtr, reference.data(), this->numBytesActual, hipMemcpyDefault));
       HIP_CALL(hipDeviceSynchronize());
