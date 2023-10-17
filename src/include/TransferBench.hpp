@@ -121,7 +121,7 @@ struct Transfer
   std::vector<int>           subExecIdx;         // Indicies into subExecParamGpu
 
   std::vector<double>        perIterationTime;   // Per-iteration timing
-  std::vector<std::set<int>> perIterationCUs;    // Per-iteration CU usage
+  std::vector<std::set<std::pair<int,int>>> perIterationCUs; // Per-iteration CU usage
 
   // Prepares src/dst subarray pointers for each SubExecutor
   void PrepareSubExecParams(EnvVars const& ev);

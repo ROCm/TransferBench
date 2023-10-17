@@ -45,6 +45,7 @@ struct SubExecParam
   long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
   long long stopCycle;                          // Stop  timestamp for in-kernel timing (GPU-GFX executor)
   uint32_t  hwId;                               // Hardware ID
+  uint32_t  xccId;                              // XCC ID
 };
 
 // Macro for collecting HW_REG_HW_ID
@@ -54,6 +55,15 @@ struct SubExecParam
 #else
 #define __trace_hwreg() \
   asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (p.hwId));
+#endif
+
+// Macro for collecting HW_REG_XCC_ID
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#define __trace_xccreg() \
+  asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (p.xccId));
+#else
+#define __trace_xccreg() \
+  p.xccId = 0
 #endif
 
 void CpuReduceKernel(SubExecParam const& p)
@@ -225,6 +235,7 @@ GpuReduceKernel(SubExecParam* params)
     p.stopCycle  = wall_clock64();
     p.startCycle = startCycle;
     __trace_hwreg();
+    __trace_xccreg();
   }
 }
 

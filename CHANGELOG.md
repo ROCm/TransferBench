@@ -1,5 +1,10 @@
 # Changelog for TransferBench
 
+## v1.31
+### Modified
+- SHOW_ITERATIONS now show XCC:CU instead of just CU ID
+- SHOW_ITERATIONS also printed when USE_SINGLE_STREAM=1
+
 ## v1.30
 ### Added
 - BLOCK_SIZE added to control threadblock size (Must be multiple of 64, up to 512)
