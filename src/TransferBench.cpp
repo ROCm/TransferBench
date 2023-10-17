@@ -578,7 +578,22 @@ void ExecuteTransfers(EnvVars const& ev,
             {
               double iterDurationMsec = t.first;
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
-              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |\n", t.second, iterBandwidthGbs, iterDurationMsec);
+              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
+
+              std::set<int> usedXccs;
+              if (t.second - 1 < transfer->perIterationCUs.size())
+              {
+                printf(" CUs:");
+                for (auto x : transfer->perIterationCUs[t.second - 1])
+                {
+                  printf(" %02d:%02d", x.first, x.second);
+                  usedXccs.insert(x.first);
+                }
+              }
+              printf(" XCCs:");
+              for (auto x : usedXccs)
+                printf(" %02d", x);
+              printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
           }
@@ -649,12 +664,19 @@ void ExecuteTransfers(EnvVars const& ev,
               double iterDurationMsec = t.first;
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
               printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
+              std::set<int> usedXccs;
               if (t.second - 1 < transfer->perIterationCUs.size())
               {
                 printf(" CUs:");
                 for (auto x : transfer->perIterationCUs[t.second - 1])
-                  printf(" %2d", x);
+                {
+                  printf(" %02d:%02d", x.first, x.second);
+                  usedXccs.insert(x.first);
+                }
               }
+              printf(" XCCs:");
+              for (auto x : usedXccs)
+                printf(" %d", x);
               printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
@@ -1362,13 +1384,14 @@ void RunTransfer(EnvVars const& ev, int const iteration,
           long long minStartCycle = std::numeric_limits<long long>::max();
           long long maxStopCycle  = std::numeric_limits<long long>::min();
 
-          std::set<int> CUs;
+          std::set<std::pair<int,int>> CUs;
           for (auto subExecIdx : currTransfer->subExecIdx)
           {
             minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
             maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
             if (ev.showIterations)
-              CUs.insert(GetId(exeInfo.subExecParamGpu[subExecIdx].hwId));
+              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
           }
           int const wallClockRate = ev.wallClockPerDeviceMhz[exeIndex];
           double iterationTimeMs = (maxStopCycle - minStartCycle) / (double)(wallClockRate);
@@ -1387,9 +1410,10 @@ void RunTransfer(EnvVars const& ev, int const iteration,
         if (ev.showIterations)
         {
           transfer->perIterationTime.push_back(gpuDeltaMsec);
-          std::set<int> CUs;
+          std::set<std::pair<int,int>> CUs;
           for (int i = 0; i < transfer->numSubExecs; i++)
-            CUs.insert(GetId(transfer->subExecParamGpuPtr[i].hwId));
+            CUs.insert(std::make_pair(transfer->subExecParamGpuPtr[i].xccId,
+                                      GetId(transfer->subExecParamGpuPtr[i].hwId)));
           transfer->perIterationCUs.push_back(CUs);
         }
       }
