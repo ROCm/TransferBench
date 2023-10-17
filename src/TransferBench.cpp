@@ -580,12 +580,19 @@ void ExecuteTransfers(EnvVars const& ev,
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
               printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
 
+              std::set<int> usedXccs;
               if (t.second - 1 < transfer->perIterationCUs.size())
               {
                 printf(" CUs:");
                 for (auto x : transfer->perIterationCUs[t.second - 1])
+                {
                   printf(" %02d:%02d", x.first, x.second);
+                  usedXccs.insert(x.first);
+                }
               }
+              printf(" XCCs:");
+              for (auto x : usedXccs)
+                printf(" %02d", x);
               printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
@@ -657,12 +664,19 @@ void ExecuteTransfers(EnvVars const& ev,
               double iterDurationMsec = t.first;
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
               printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
+              std::set<int> usedXccs;
               if (t.second - 1 < transfer->perIterationCUs.size())
               {
                 printf(" CUs:");
                 for (auto x : transfer->perIterationCUs[t.second - 1])
+                {
                   printf(" %02d:%02d", x.first, x.second);
+                  usedXccs.insert(x.first);
+                }
               }
+              printf(" XCCs:");
+              for (auto x : usedXccs)
+                printf(" %d", x);
               printf("\n");
             }
             printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
