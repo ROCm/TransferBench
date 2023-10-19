@@ -130,7 +130,7 @@ int main(int argc, char **argv)
     for (int i = 3; i < argc; i++)
       cmdlineTransfer += std::string(argv[i]) + " ";
 
-    char line[2048];
+    char line[MAX_LINE_LEN];
     sprintf(line, "%s", cmdlineTransfer.c_str());
     std::vector<Transfer> transfers;
     ParseTransfers(line, ev.numCpuDevices, ev.numGpuDevices, transfers);
@@ -176,8 +176,8 @@ int main(int argc, char **argv)
   }
 
   int testNum = 0;
-  char line[2048];
-  while(fgets(line, 2048, fp))
+  char line[MAX_LINE_LEN];
+  while(fgets(line, MAX_LINE_LEN, fp))
   {
     // Check if line is a comment to be echoed to output (starts with ##)
     if (!ev.outputToCsv && line[0] == '#' && line[1] == '#') printf("%s", line);

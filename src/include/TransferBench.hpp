@@ -51,6 +51,8 @@ THE SOFTWARE.
 // Simple configuration parameters
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);  // Amount of data transferred per Transfer
 
+#define MAX_LINE_LEN 32768
+
 // Different src/dst memory types supported
 typedef enum
 {

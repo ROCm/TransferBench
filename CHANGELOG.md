@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.32
+### Modified
+- Increased line limit from 2048 to 32768
+
 ## v1.31
 ### Modified
 - SHOW_ITERATIONS now show XCC:CU instead of just CU ID
