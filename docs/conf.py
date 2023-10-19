@@ -8,7 +8,7 @@ import re
 
 from rocm_docs import ROCmDocs
 
-with open('../CMakeLists.txt', encoding='utf-8') as f:
+with open('../src/include/EnvVars.hpp', encoding='utf-8') as f:
     match = re.search(r'#define TB_VERSION "([0-9.]+)[^0-9.]+', f.read())
     if not match:
         raise ValueError("VERSION not found!")
