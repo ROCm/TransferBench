@@ -4,6 +4,8 @@
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
+import re
+
 from rocm_docs import ROCmDocs
 
 with open('../CMakeLists.txt', encoding='utf-8') as f:
