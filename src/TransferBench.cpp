@@ -472,6 +472,15 @@ void ExecuteTransfers(EnvVars const& ev,
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
 
+    if (ev.alwaysValidate)
+    {
+      for (auto transferPair : transferList)
+      {
+        Transfer* transfer = transferPair.second;
+        transfer->ValidateDst(ev);
+      }
+    }
+
     if (iteration >= 0)
     {
       ++numTimedIterations;
@@ -494,7 +503,6 @@ void ExecuteTransfers(EnvVars const& ev,
   // Validate that each transfer has transferred correctly
   size_t totalBytesTransferred = 0;
   int const numTransfers = transferList.size();
-
   for (auto transferPair : transferList)
   {
     Transfer* transfer = transferPair.second;

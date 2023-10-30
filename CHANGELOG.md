@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.33
+### Added
+- Adding ALWAYS_VALIDATE env var to allow for validation after every iteration instead of just once at end of all iterations
+
 ## v1.32
 ### Modified
 - Increased line limit from 2048 to 32768
