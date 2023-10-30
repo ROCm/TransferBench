@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.32"
+#define TB_VERSION "1.33"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -72,6 +72,7 @@ public:
   int const DEFAULT_SWEEP_TIME_LIMIT  = 0;
 
   // Environment variables
+  int alwaysValidate;    // Validate after each iteration instead of once after all iterations
   int blockSize;         // Size of each threadblock (must be multiple of 64)
   int blockBytes;        // Each CU, except the last, gets a multiple of this many bytes to copy
   int blockOrder;        // How blocks are ordered in single-stream mode (0=Sequential, 1=Interleaved, 2=Random)
@@ -166,6 +167,7 @@ public:
     else if (archName == "gfx940") defaultGpuKernel = 6;
     else if (archName == "gfx941") defaultGpuKernel = 6;
 
+    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockSize         = GetEnvVar("BLOCK_SIZE"          , 256);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     blockOrder        = GetEnvVar("BLOCK_ORDER"         , 0);
@@ -479,6 +481,7 @@ public:
   {
     printf("Environment variables:\n");
     printf("======================\n");
+    printf(" ALWAYS_VALIDATE        - Validate after each iteration instead of once after all iterations\n");
     printf(" BLOCK_SIZE             - # of threads per threadblock (Must be multiple of 64). Defaults to 256\n");
     printf(" BLOCK_BYTES            - Each CU (except the last) receives a multiple of BLOCK_BYTES to copy\n");
     printf(" BLOCK_ORDER            - Threadblock ordering in single-stream mode (0=Serial, 1=Interleaved, 2=Random)\n");
@@ -521,7 +524,8 @@ public:
     else if (!hideEnv)
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
     if (hideEnv) return;
-
+    PRINT_EV("ALWAYS_VALIDATE", alwaysValidate,
+             std::string("Validating after ") + (alwaysValidate ? "each iteration" : "all iterations"));
     PRINT_EV("BLOCK_SIZE", blockSize,
              std::string("Threadblock size of " + std::to_string(blockSize)));
     PRINT_EV("BLOCK_BYTES", blockBytes,
