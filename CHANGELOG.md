@@ -1,280 +1,418 @@
 # Changelog for TransferBench
 
+Full documentation for TransferBench is available at
+[https://rocm.docs.amd.com/projects/TransferBench/en/latest/index.html](https://rocm.docs.amd.com/projects/TransferBench/en/latest/index.html).
+
 ## v1.33
-### Added
-- Adding ALWAYS_VALIDATE env var to allow for validation after every iteration instead of just once at end of all iterations
+
+### Additions
+
+* Added the `ALWAYS_VALIDATE` environment variable to allow for validation after every iteration, instead
+  of only once at the end of all iterations
 
 ## v1.32
-### Modified
-- Increased line limit from 2048 to 32768
+
+### Changes
+
+* Increased the line limit from 2048 to 32768
 
 ## v1.31
-### Modified
-- SHOW_ITERATIONS now show XCC:CU instead of just CU ID
-- SHOW_ITERATIONS also printed when USE_SINGLE_STREAM=1
+
+### Changes
+
+* `SHOW_ITERATIONS` now shows XCC:CU instead of just CU ID
+* `SHOW_ITERATIONS` is printed when `USE_SINGLE_STREAM`=1
 
 ## v1.30
-### Added
-- BLOCK_SIZE added to control threadblock size (Must be multiple of 64, up to 512)
-- BLOCK_ORDER added to control how work is ordered for GFX-executors running USE_SINGLE_STREAM=1
-  - 0 - Threadblocks for Transfers are ordered sequentially (Default)
-  - 1 - Threadblocks for Transfers are interleaved
-  - 2 - Threadblocks for Transfers are ordered randomly
+
+### Additions
+
+* `BLOCK_SIZE` has been added to control the threadblock size (must be a multiple of 64, up to 512)
+* `BLOCK_ORDER` has been added to control how work is ordered for GFX-executors running
+  `USE_SINGLE_STREAM`=1
+  * 0 - Threadblocks for transfers are ordered sequentially (default)
+  * 1 - Threadblocks for transfers are interleaved
+  * 2 - Threadblocks for transfers are ordered randomly
 
 ## v1.29
-### Added
-- a2a preset config now responds to USE_REMOTE_READ
-### Fixed
-- Race-condition during wall-clock initialization caused "inf" during single stream runs
-- CU numbering output after CU masking
-### Modified
-- Default number of warmups reverted to 3
-- Default unroll factor for gfx940/941 set to 6
+
+### Additions
+
+* A2A preset config now responds to `USE_REMOTE_READ`
+
+### Fixes
+
+* Race-condition during wall-clock initialization caused "inf" during single-stream runs
+* CU numbering output after CU masking
+
+### Changes
+
+* The default number of warmups has been reverted to 3
+* The default unroll factor for gfx940/941 has been set to 6
 
 ## v1.28
-### Added
-- Added A2A_DIRECT which only executes all-to-all only directly connected GPUs (on by default now)
-- Added average statistics for p2p and a2a benchmarks
-- Added USE_FINE_GRAIN for p2p benchmark.
-  - With older devices, p2p performance with default coarse grain device memory stops timing as soon as request sent to data fabric,
-    not actually when it arrives remotely, which may artificially inflate bandwidth numbers, especially when sending small amounts of data
-### Modified
-- Modified P2P output to help distinguish between CPU / GPU devices
-### Fixed
-- Fixed Makefile target to prevent unnecessary re-compilation
+
+### Additions
+
+* Added `A2A_DIRECT`, which only runs all-to-all on directly connected GPUs (now on by default)
+* Added average statistics for P2P and A2A benchmarks
+* Added `USE_FINE_GRAIN` for P2P benchmark
+  * With older devices, P2P performance with default coarse-grain device memory stops timing as soon
+    as a request is sent to data fabric, and not actually when it arrives remotely. This can artificially
+    inflate bandwidth numbers, especially when sending small amounts of data.
+
+### Changes
+
+* Modified P2P output to help distinguish between CPU and GPU devices
+
+### Fixes
+
+* Fixed Makefile target to prevent unnecessary re-compilation
 
 ## v1.27
-### Added
-- Adding cmdline preset to allow specify simple tests on command line
-- E.g. ./TransferBench cmdline 64M "1 4 G0->G0->G1"
-- Adding environment variable HIDE_ENV, which skips printing of environment variable values
-- Adding environment variable CU_MASK, which allows selection of which CUs to execute on
-- CU_MASK is specified in CU indices (0-#CUs-1), and '-' can be used to denote ranges of values
-  - E.g.: CU_MASK=3-8,16 would request Transfer be executed only CUs 3,4,5,6,7,8,16
-  - NOTE: This is somewhat experimental and may not work on all hardware
-- SHOW_ITERATIONS now shows CU usage for that iteration (experimental)
-### Modified
-- Adding extra comments on commonly missing includes with details on how to install them
-### Fixed
-- CUDA compilation should work again (wall_clock64 CUDA alias was not defined)
+
+### Additions
+
+* Added cmdline preset to allow specification of  simple tests on command line (e.g.,
+  `./TransferBench cmdline 64M "1 4 G0->G0->G1"`)
+* Adding the `HIDE_ENV` environment variable, which stops environment variable values from printing
+* Adding the `CU_MASK` environment variable, which allows you to select the CUs to run on
+* `CU_MASK` is specified in CU indices (0-#CUs-1), where ' - ' can be used to denote ranges of values
+  (e.g., `CU_MASK`=3-8,16 requests that transfer be run only on CUs 3,4,5,6,7,8,16)
+  * Note that this is somewhat experimental and may not work on all hardware
+* `SHOW_ITERATIONS` now shows CU usage for that iteration (experimental)
+
+### Changes
+
+* Added extra comments on commonly missing includes with details on how to install them
+
+### Fixes
+
+* CUDA compilation works again (the `wall_clock64` CUDA alias was not defined)
 
 ## v1.26
-### Added
-- Setting SHOW_ITERATIONS=1 provides additional information about per-iteration timing for file and p2p configs
-  - For file configs, iterations are sorted from min to max bandwidth and displayed with standard deviation
-  - For p2p, min/max/standard deviation is shown for each direction.
 
-### Changed
-- P2P benchmark formatting changed.  Now reports bidirectional bandwidth in each direction (as well as sum) for clarity
+### Additions
+
+* Setting SHOW_ITERATIONS=1 provides additional information about per-iteration timing for file and
+  P2P configs
+  * For file configs, iterations are sorted from min to max bandwidth and displayed with standard
+    deviation
+  * For P2P, min/max/standard deviation is shown for each direction
+
+### Changes
+
+* P2P benchmark formatting now reports bidirectional bandwidth in each direction (as well as sum) for
+  clarity
 
 ## v1.25
-### Fixed
-- Fixed bug in P2P bidirectional benchmark using incorrect number of subExecutors for CPU<->GPU tests
+
+### Fixes
+
+* Fixed a bug in the P2P bidirectional benchmark that used the incorrect number of `subExecutors` for
+  CPU<->GPU tests
 
 ## v1.24
-### Added
-- New All-To-All GPU benchmark accessed by preset "a2a"
-- Adding gfx941 wall clock frequency
+
+### Additions
+
+* New All-To-All GPU benchmark accessed by preset "A2A"
+* Added gfx941 wall clock frequency
 
 ## v1.23
-### Added
-- New GPU subexec scaling benchmark accessed by preset "scaling"
-  - Tests GPU-GFX copy performance based on # of CUs used
+
+### Additions
+
+* New GPU subexec scaling benchmark accessed by preset "scaling"
+  * Tests GPU-GFX copy performance based on # of CUs used
 
 ## v1.22
-### Modified
-- Switching kernel timing function to wall_clock64
+
+### Changes
+
+* Switched the kernel timing function to `wall_clock64`
 
 ## v1.21
-### Fixed
-- Fixed bug with SAMPLING_FACTOR
+
+### Fixes
+
+* Fixed a bug with `SAMPLING_FACTOR`
 
 ## v1.20
-### Fixed
-- VALIDATE_DIRECT can now be used with USE_PREP_KERNEL
-- Switch to local GPU for validating GPU memory
+
+### Fixes
+
+* `VALIDATE_DIRECT` can now be used with `USE_PREP_KERNEL`
+* Switched to local GPU for validating GPU memory
 
 ## v1.19
-### Added
-- VALIDATE_DIRECT now also applies to source memory array checking
-- Adding null memory pointer check prior to deallocation
+
+### Additions
+
+* `VALIDATE_DIRECT` now also applies to source memory array checking
+* Added null memory pointer check prior to deallocation
 
 ## v1.18
-### Added
-- Adding ability to validate GPU destination memory directly without going through CPU staging buffer (VALIDATE_DIRECT)
-  - NOTE: This will only work on AMD devices with large-bar access enable and may slow things down considerably
-### Changed
-- Refactored how environment variables are displayed
-- Mismatch stops after first detected error within an array instead of list all mismatched elements
+
+### Additions
+
+* Adding the ability to validate GPU destination memory directly without going through the CPU
+  staging buffer (`VALIDATE_DIRECT`)
+  * Note that this only works on AMD devices with large-bar access enabled, and may slow things down
+    considerably
+
+### Changes
+
+* Refactored how environment variables are displayed
+* Mismatch stops after the first detected error within an array instead of listing all mismatched
+  elements
 
 ## v1.17
-### Added
-- Allow switch to GFX kernel for source array initialization (USE_PREP_KERNEL)
-  - USE_PREP_KERNEL cannot be used with FILL_PATTERN
-- Adding ability to compile with nvcc only (TransferBenchCuda)
-### Changed
-- Default pattern set to [Element i = ((i * 517) modulo 383 + 31) * (srcBufferIdx + 1)]
-### Fixed
-- Re-adding example.cfg file
+
+### Additions
+
+* Allowed switch to GFX kernel for source array initialization (`USE_PREP_KERNEL`)
+  * Note that `USE_PREP_KERNEL` can't be used with `FILL_PATTERN`
+* Added the ability to compile with nvcc only (`TransferBenchCuda`)
+
+### Changes
+
+* The default pattern was set to [Element i = ((i * 517) modulo 383 + 31) * (srcBufferIdx + 1)]
+
+### Fixes
+
+* Added the `example.cfg` file
 
 ## v1.16
-### Added
-- Additional src array validation during preparation
-- Adding new env var CONTINUE_ON_ERROR to resume tests after mis-match detection
-- Initializing GPU memory to 0 during allocation
+
+### Additions
+
+* Additional src array validation during preparation
+* Added a new environment variable (`CONTINUE_ON_ERROR`) to resume tests after a mis-match
+  detection
+* Initialized GPU memory to 0 during allocation
 
 ## v1.15
-### Fixed
-- Fixed a bug that prevented single Transfers > 8GB
-### Changed
-- Removed "check for latest ROCm" warning when allocating too much memory
-- Printing off source memory value as well when mis-match is detected
+
+### Fixes
+
+* Fixed a bug that prevented single transfers greater than 8 GB
+
+### Changes
+
+* Removed "check for latest ROCm" warning when allocating too much memory
+* Off-source memory value is now printed when a mis-match is detected
 
 ## v1.14
-### Added
-- Added documentation
-- Added pthread linking in src/Makefile and CMakeLists.txt
-- Added printing off the hex value of the floats for output and reference
+
+### Additions
+
+* Added documentation
+* Added pthread linking in src/Makefile and CMakeLists.txt
+* Added printing off the hex value of the floats for output and reference
 
 ## v1.13
-### Added
-- Added support for cmake
 
-### Changed
-- Converted to the Pitchfork layout standard
+### Additions
+
+* Added support for cmake
+
+### Changes
+
+* Converted to the Pitchfork layout standard
 
 ## v1.12
-### Added
-- Added support for TransferBench on NVIDIA platforms (via HIP_PLATFORM=nvidia)
-  - CPU executors on NVIDIA platform cannot access GPU memory (no large-bar access)
+
+### Additions
+
+* Added support for TransferBench on NVIDIA platforms (via `HIP_PLATFORM`=nvidia)
+  * Note that CPU executors on NVIDIA platform cannot access GPU memory (no large-bar access)
 
 ## v1.11
-### Added
-- New multi-input / multi-output support (MIMO).  Transfers now can reduce (element-wise summation) multiple input memory arrays
-  and write the sums to multiple outputs
-- New GPU-DMA executor 'D' (uses hipMemcpy for SDMA copies).  Previously this was done using USE_HIP_CALL, but now this allows
-  GPU-GFX kernel to run in parallel with GPU-DMA instead of applying to all GPU executors globally.
-  - GPU-DMA executor can only be used for single-input/single-output Transfers
-  - GPU-DMA executor can only be associated with one SubExecutor
-- Added new "Null" memory type 'N', which represents empty memory. This allows for read-only or write-only Transfers
-- Added new GPU_KERNEL environment variable that allows for switching between various GPU-GFX reduction kernels
 
-### Optimized
-- Slightly improved GPU-GFX kernel performance based on hardware architecture when running with fewer CUs
+### Additions
 
-### Changed
-- Updated the example.cfg file to cover the new features
-- Updated output to support MIMO
-- Changed CUs/CPUs threads naming to SubExecutors for consistency
-- Sweep Preset:
-  - Default sweep preset executors now includes DMA
-- P2P Benchmarks:
-  - Now only works via "p2p".  Removed "p2p_rr", "g2g" and "g2g_rr".
-    - Setting NUM_CPU_DEVICES=0 can be used to only benchmark GPU devices (like "g2g")
-    - New environment variable USE_REMOTE_READ replaces "_rr" presets
-  - New environment variable USE_GPU_DMA=1 replaces USE_HIP_CALL=1 for benchmarking with GPU-DMA Executor
-  - Number of GPU SubExecutors for benchmark can be specified via NUM_GPU_SE
-    - Defaults to all CUs for GPU-GFX, 1 for GPU-DMA
-  - Number of CPU SubExecutors for benchmark can be specified via NUM_CPU_SE
-- Psuedo-random input pattern has been slightly adjusted to have different patterns for each input array within same Transfer
+* Added multi-input/multi-output (MIMO) support: transfers now can reduce (element-wise summation)
+  multiple input memory arrays and write sums to multiple outputs
+* Added GPU-DMA executor 'D', which uses `hipMemcpy` for SDMA copies
+  * Previously, this was done using `USE_HIP_CALL`, but now GPU-GFX kernel can run in parallel with
+    GPU-DMA, instead of applying to all GPU executors globally
+  * GPU-DMA executor can only be used for single-input/single-output transfers
+  * GPU-DMA executor can only be associated with one SubExecutor
+* Added new "Null" memory type 'N', which represents empty memory. This allows for read-only or
+  write-only transfers
+* Added new `GPU_KERNEL` environment variable that allows switching between various GPU-GFX
+  reduction kernels
 
-### Removed
-- USE_HIP_CALL has been removed.  Use GPU-DMA executor 'D' or set USE_GPU_DMA=1 for P2P benchmark presets
-  - Currently warning will be issued if USE_HIP_CALL is set to 1 and program will terminate
-- Removed NUM_CPU_PER_TRANSFER - The number of CPU SubExecutors will be whatever is specified for the Transfer
-- Removed USE_MEMSET environment variable.  This can now be done via a Transfer using the null memory type
+### Optimizations
+
+* Improved GPU-GFX kernel performance based on hardware architecture when running with
+  fewer CUs
+
+### Changes
+
+* Updated the `example.cfg` file to cover new features
+* Updated output to support MIMO
+* Changed CU and CPU thread naming to SubExecutors for consistency
+* Sweep Preset: default sweep preset executors now includes DMA
+* P2P benchmarks:
+  * Removed `p2p_rr`, `g2g` and `g2g_rr` (now only works via P2P)
+    * Setting `NUM_CPU_DEVICES`=0 can only be used to benchmark GPU devices (like `g2g`)
+    * The new `USE_REMOTE_READ` environment variable replaces `_rr` presets
+  * New environment variable `USE_GPU_DMA`=1 replaces `USE_HIP_CALL`=1 for benchmarking with
+    GPU-DMA Executor
+  * Number of GPU SubExecutors for benchmark can be specified via `NUM_GPU_SE`
+    * Defaults to all CUs for GPU-GFX, 1 for GPU-DMA
+  * Number of CPU SubExecutors for benchmark can be specified via `NUM_CPU_SE`
+* Psuedo-random input pattern has been slightly adjusted to have different patterns for each input
+  array within same transfer
+
+### Removals
+
+* `USE_HIP_CALL`: use `GPU-DMA` executor 'D' or set `USE_GPU_DMA`=1 for P2P
+  benchmark presets
+  * Currently, a warning will be issued if `USE_HIP_CALL` is set to 1 and the program will stop
+* `NUM_CPU_PER_TRANSFER`: the number of CPU SubExecutors will be whatever is specified for the
+  transfer
+* `USE_MEMSET`: this function can now be done via a transfer using the null memory type
 
 ## v1.10
-### Fixed
-- Fix incorrect bandwidth calculation when using single stream mode and per-Transfer data sizes
+
+### Fixes
+
+* Fixed incorrect bandwidth calculation when using single stream mode and per-transfer data sizes
 
 ## v1.09
-### Added
-- Printing off src/dst memory addresses during interactive mode
-### Changed
-- Switching to numa_set_preferred instead of set_mempolicy
+
+### Additions
+
+* Printing off src/dst memory addresses during interactive mode
+
+### Changes
+
+* Switching to `numa_set_preferred` instead of `set_mempolicy`
 
 ## v1.08
-### Changed
-- Fixing handling of non-configured NUMA nodes
-- Topology detection now shows actual NUMA node indices
-- Fix for issue with NUM_GPU_DEVICES
+
+### Changes
+
+* Fixed handling of non-configured NUMA nodes
+* Topology detection now shows actual NUMA node indices
+* Fixed 'for' issue with `NUM_GPU_DEVICES`
 
 ## v1.07
-### Changed
-- Fix bug with allocations involving non-default CPU memory types
+
+### Fixes
+
+* Fixed bug with allocations involving non-default CPU memory types
 
 ## v1.06
-### Added
-- Added unpinned CPU memory type ('U').  May require HSA_XNACK=1 in order to access via GPU executors
-- Adding logging of sweep configuration to lastSweep.cfg
-- Adding ability to specify number of CUs to use for sweep-based presets
-### Changed
-- Fixing random sweep repeatibility
-- Fixing bug with CPU NUMA node memory allocation
-- Modified advanced configuration file format to accept bytes per Transfer
+
+### Additions
+
+* Unpinned CPU memory type ('U'), which may require `HSA_XNACK`=1 in order to access via
+  GPU executors
+* Added sweep configuration logging to `lastSweep.cfg`
+* Ability to specify the number of CUs to use for sweep-based presets
+
+### Changes
+
+* Modified advanced configuration file format to accept bytes-per-transfer
+
+### Fixes
+
+* Fixed random sweep repeatability
+* Fixed bug with CPU NUMA node memory allocation
 
 ## v1.05
-### Added
-- Topology output now includes NUMA node information
-- Support for NUMA nodes with no CPU cores (e.g. CXL memory)
-### Removed
-- SWEEP_SRC_IS_EXE environment variable
+
+### Additions
+
+* Topology output now includes NUMA node information
+* Support for NUMA nodes with no CPU cores (e.g., CXL memory)
+
+### Removals
+
+* The `SWEEP_SRC_IS_EXE` environment variable was removed
 
 ## v1.04
-### Added
-- New environment variables for sweep based presets
-  - SWEEP_XGMI_MIN   - Min number of XGMI hops for Transfers
-  - SWEEP_XGMI_MAX   - Max number of XGMI hops for Transfers
-  - SWEEP_SEED       - Random seed being used
-  - SWEEP_RAND_BYTES - Use random amount of bytes (up to pre-specified N) for each Transfer
-### Changed
-  - CSV output for sweep includes env vars section followed by output
-  - CSV output no longer lists env var parameters in columns
-  - Default number of warmup iterations changed from 3 to 1
-  - Splitting CSV output of link type to ExeToSrcLinkType and ExeToDstLinkType
+
+### Additions
+
+* There are new environment variables for sweep based presets:
+  * `SWEEP_XGMI_MIN`: The minumum number of XGMI hops for transfers
+  * `SWEEP_XGMI_MAX`: The maximum number of XGMI hops for transfers
+  * `SWEEP_SEED`: Uses a random seed
+  * `SWEEP_RAND_BYTES`: Uses a random amount of bytes (up to pre-specified N) for each transfer
+
+### Changes
+
+* CSV output for sweep now includes an environment variables section followed by output
+* CSV output no longer lists environment variable parameters in columns
+* We changed the default number of warmup iterations from 3 to 1
+* Split CSV output of link type to `ExeToSrcLinkType` and `ExeToDstLinkType`
 
 ## v1.03
-### Added
-- New preset modes stress-test benchmarks "sweep" and "randomsweep"
-  - sweep iterates over all possible sets of Transfers to test
-  - randomsweep iterates over random sets of Transfers
-  -  New sweep-only environment variables can modify sweep
-     - SWEEP_SRC - String containing only "B","C","F", or "G", defining possible source memory types
-     - SWEEP_EXE - String containing only "C", or "G", defining possible executors
-     - SWEEP_DST - String containing only "B","C","F", or "G", defining possible destination memory types
-     - SWEEP_SRC_IS_EXE - Restrict executor to be the same as the source if non-zero
-     - SWEEP_MIN - Minimum number of parallel transfers to test
-     - SWEEP_MAX - Maximum number of parallel transfers to test
-     - SWEEP_COUNT - Maximum number of tests to run
-     - SWEEP_TIME_LIMIT - Maximum number of seconds to run tests for
-- New environment variable to restrict number of available GPUs to test on (primarily for sweep runs)
-  - NUM_CPU_DEVICES - Number of CPU devices
-  - NUM_GPU_DEVICES - Number of GPU devices
-### Changed
-- Fixed timing display for CPU-executors when using single stream mode
+
+### Additions
+
+* There are new preset modes stress-test benchmarks: `sweep` and `randomsweep`
+  * `sweep` iterates over all possible sets of transfers to test
+  * `randomsweep` iterates over random sets of transfers
+  * New sweep-only environment variables can modify `sweep`
+    * `SWEEP_SRC`: String containing only "B","C","F", or "G" that defines possible source memory types
+    * `SWEEP_EXE`: String containing only "C" or "G" that defines possible executors
+    * `SWEEP_DST`: String containing only "B","C","F", or "G" that defines possible destination memory types
+    * `SWEEP_SRC_IS_EXE`: Restrict the executor to be the same as the source, if non-zero
+    * `SWEEP_MIN`: Minimum number of parallel transfers to test
+    * `SWEEP_MAX`: Maximum number of parallel transfers to test
+    * `SWEEP_COUNT`: Maximum number of tests to run
+    * `SWEEP_TIME_LIMIT`: Maximum number of seconds to run tests
+* New environment variables to restrict number of available devices to test on (primarily for sweep
+  runs)
+  * `NUM_CPU_DEVICES`: Number of CPU devices
+  * `NUM_GPU_DEVICES`: Number of GPU devices
+
+### Fixes
+
+* Fixed timing display for CPU executors when using single-stream mode
 
 ## v1.02
-### Added
-- Setting NUM_ITERATIONS to negative number indicates to run for -NUM_ITERATIONS seconds per Test
-### Changed
-- Copies are now refered to as Transfers instead of Links
-- Re-ordering how env vars are displayed (alphabetically now)
-### Removed
-- Combined timing is now always on for kernel-based GPU copies. COMBINED_TIMING env var has been removed
-- Use single sync is no longer supported to facility variable iterations. USE_SINGLE_SYNC env var has been removed
+
+### Additions
+
+* Setting `NUM_ITERATIONS` to a negative number indicates a run of -`NUM_ITERATIONS` seconds per
+  test
+
+### Changes
+
+* Copies are now referred to as 'transfers' instead of 'links'
+* Reordered how environment variables are displayed (alphabetically now)
+
+### Removals
+
+* Combined timing is now always on for kernel-based GPU copies; the `COMBINED_TIMING`
+  environment variable has been removed
+* Single sync is no longer supported for facility variable iterations; the `USE_SINGLE_SYNC`
+  environmental variable has been removed
 
 ## v1.01
-### Added
-- Adding USE_SINGLE_STREAM feature
-  - All Links that execute on the same GPU device are executed with a single kernel launch on a single stream
-  - Does not work with USE_HIP_CALL and forces USE_SINGLE_SYNC to collect timings
-  - Adding ability to request coherent / fine-grained host memory ('B')
-### Changed
-- Separating TransferBench from RCCL repo
-- Peer-to-peer benchmark mode now works OUTPUT_TO_CSV
-- Toplogy display now works with OUTPUT_TO_CSV
-- Moving documentation about config file into example.cfg
-### Removed
-- Removed config file generation
-- Removed show pointer address environment variable (SHOW_ADDR)
+
+### Additions
+
+* Added the `USE_SINGLE_STREAM` feature
+  * All Links that run on the same GPU device are run with a single kernel launch on a single stream
+  * This doesn't work with `USE_HIP_CALL`, and it forces `USE_SINGLE_SYNC` to collect timings
+  * Added the ability to request coherent or fine-grained host memory ('B')
+
+### Changes
+
+* Separated the TransferBench repository from the RCCL repository
+* Peer-to-peer benchmark mode now works with `OUTPUT_TO_CSV`
+* Toplogy display now works with `OUTPUT_TO_CSV`
+* Moved the documentation about the config file into `example.cfg`
+
+### Removals
+
+* Removed config file generation
+* Removed the 'show pointer address' (`SHOW_ADDR`) environment variable

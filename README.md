@@ -1,6 +1,7 @@
 # TransferBench
 
-TransferBench is a simple utility capable of benchmarking simultaneous copies between user-specified devices (CPUs/GPUs).
+TransferBench is a simple utility capable of benchmarking simultaneous copies between user-specified
+CPU and GPU devices.
 
 ## Requirements
 
@@ -20,18 +21,21 @@ python3 -m sphinx -T -E -b html -d _build/doctrees -D language=en . _build/html
 ```
 
 ## Building
-  To build TransferBench using Makefile:
- ```shell
- $ make
- ```
 
-  To build TransferBench using cmake:
- ```shell
-$ mkdir build
-$ cd build
-$ CXX=/opt/rocm/bin/hipcc cmake ..
-$ make
- ```
+  To build TransferBench using Makefile:
+
+```shell
+make
+```
+
+To build TransferBench using CMake:
+
+```shell
+mkdir build
+cd build
+CXX=/opt/rocm/bin/hipcc cmake ..
+make
+```
 
   If ROCm is installed in a folder other than `/opt/rocm/`, set ROCM_PATH appropriately
 
