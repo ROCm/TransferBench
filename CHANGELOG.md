@@ -1,7 +1,7 @@
 # Changelog for TransferBench
 
 Full documentation for TransferBench is available at
-[https://rocm.docs.amd.com/projects/TransferBench/en/latest/index.html](https://rocm.docs.amd.com/projects/TransferBench/en/latest/index.html).
+[https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
 ## v1.33
 
