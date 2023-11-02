@@ -11,3 +11,6 @@ subtrees:
     - file: instructions
     - file: examples/index
     - file: api
+  - caption: About
+    entries:
+      - file: license
