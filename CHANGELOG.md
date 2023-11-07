@@ -1,5 +1,9 @@
 # Changelog for TransferBench
 
+## v1.34
+### Added
+- Set GPU_KERNEL=3 to default for gfx942
+
 ## v1.33
 ### Added
 - Adding ALWAYS_VALIDATE env var to allow for validation after every iteration instead of just once at end of all iterations

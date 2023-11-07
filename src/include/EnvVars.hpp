@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.33"
+#define TB_VERSION "1.34"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -166,6 +166,7 @@ public:
     else if (archName == "gfx90a") defaultGpuKernel = 9;
     else if (archName == "gfx940") defaultGpuKernel = 6;
     else if (archName == "gfx941") defaultGpuKernel = 6;
+    else if (archName == "gfx942") defaultGpuKernel = 3;
 
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockSize         = GetEnvVar("BLOCK_SIZE"          , 256);
