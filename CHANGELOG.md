@@ -1,7 +1,14 @@
 # Changelog for TransferBench
 
-Full documentation for TransferBench is available at
+Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
+
+
+## v1.34
+
+### Additions
+
+* Set `GPU_KERNEL=3` as default for gfx942
 
 ## v1.33
 
