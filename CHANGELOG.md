@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.35
+
+### Additions
+
+* USE_FINE_GRAIN also applies to a2a preset
 
 ## v1.34
 
