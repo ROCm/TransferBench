@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.34"
+#define TB_VERSION "1.35"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -643,6 +643,8 @@ public:
       printf("[AllToAll Related]\n");
     PRINT_EV("A2A_DIRECT", a2aDirect,
              std::string(a2aDirect ? "Only using direct links" : "Full all-to-all"));
+    PRINT_EV("USE_FINE_GRAIN", useFineGrain,
+             std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
              std::string("Using ") + (useRemoteRead ? "DST" : "SRC") + " as executor");
 
