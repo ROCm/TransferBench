@@ -259,7 +259,7 @@ void ExecuteTransfers(EnvVars const& ev,
         int     const  srcIndex    = RemappedIndex(transfer->srcIndex[iSrc], IsCpuType(srcType));
 
         // Ensure executing GPU can access source memory
-        if (IsGpuType(exeType) == MEM_GPU && IsGpuType(srcType) && srcIndex != exeIndex)
+        if (IsGpuType(exeType) && IsGpuType(srcType) && srcIndex != exeIndex)
           EnablePeerAccess(exeIndex, srcIndex);
 
         AllocateMemory(srcType, srcIndex, transfer->numBytesActual + ev.byteOffset, (void**)&transfer->srcMem[iSrc]);
@@ -273,7 +273,7 @@ void ExecuteTransfers(EnvVars const& ev,
         int     const  dstIndex    = RemappedIndex(transfer->dstIndex[iDst], IsCpuType(dstType));
 
         // Ensure executing GPU can access destination memory
-        if (IsGpuType(exeType) == MEM_GPU && IsGpuType(dstType) && dstIndex != exeIndex)
+        if (IsGpuType(exeType) && IsGpuType(dstType) && dstIndex != exeIndex)
           EnablePeerAccess(exeIndex, dstIndex);
 
         AllocateMemory(dstType, dstIndex, transfer->numBytesActual + ev.byteOffset, (void**)&transfer->dstMem[iDst]);
@@ -1362,13 +1362,15 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     // In single stream mode, all the threadblocks for this GPU are launched
     // Otherwise, just launch the threadblocks associated with this single Transfer
     int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalSubExecs : transfer->numSubExecs;
+    int const numXCCs = (ev.useXccFilter ? ev.xccIdsPerDevice[exeIndex].size() : 1);
+
 #if defined(__NVCC__)
     HIP_CALL(hipEventRecord(startEvent, stream));
     GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, ev.blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(GpuKernelTable[ev.gpuKernel],
-                          dim3(numBlocksToRun, 1, 1),
+                          dim3(numXCCs, numBlocksToRun, 1),
                           dim3(ev.blockSize, 1, 1),
                           ev.sharedMemBytes, stream,
                           startEvent, stopEvent,
@@ -1998,6 +2000,15 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
       p.src[iSrc] = this->srcMem[iSrc] + assigned + initOffset;
     for (int iDst = 0; iDst < this->numDsts; ++iDst)
       p.dst[iDst] = this->dstMem[iDst] + assigned + initOffset;
+
+    p.preferredXccId = -1;
+    if (ev.useXccFilter)
+    {
+      if (this->exeType == EXE_GPU_GFX && this->numDsts == 1 && IsGpuType(this->dstType[0]))
+      {
+        p.preferredXccId = ev.prefXccTable[this->exeIndex][this->dstIndex[0]];
+      }
+    }
 
     if (ev.enableDebug)
     {

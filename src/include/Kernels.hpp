@@ -40,6 +40,7 @@ struct SubExecParam
   int       numDsts;                            // Number of destination arrays
   float*    src[MAX_SRCS];                      // Source array pointers
   float*    dst[MAX_DSTS];                      // Destination array pointers
+  uint32_t  preferredXccId;                     // XCC ID to execute on
 
   // Outputs
   long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
@@ -59,11 +60,11 @@ struct SubExecParam
 
 // Macro for collecting HW_REG_XCC_ID
 #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
-#define __trace_xccreg() \
-  asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (p.xccId));
+#define GetXccId(val) \
+  asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val));
 #else
-#define __trace_xccreg() \
-  p.xccId = 0
+#define GetXccId(val) \
+  val = 0
 #endif
 
 void CpuReduceKernel(SubExecParam const& p)
@@ -105,6 +106,13 @@ __host__ __device__ float PrepSrcValue(int srcBufferIdx, size_t idx)
   return (((idx % 383) * 517) % 383 + 31) * (srcBufferIdx + 1);
 }
 
+__global__ void CollectXccIdsKernel(int* xccIds)
+{
+  int xccId;
+  GetXccId(xccId);
+  xccIds[blockIdx.x] = xccId;
+}
+
 // GPU kernel to prepare src buffer data
 __global__ void
 PrepSrcDataKernel(float* ptr, size_t N, int srcBufferIdx)
@@ -127,10 +135,17 @@ template <int LOOP1_UNROLL>
 __global__ void __launch_bounds__(MAX_BLOCKSIZE)
 GpuReduceKernel(SubExecParam* params)
 {
-  int64_t startCycle = wall_clock64();
+  int64_t startCycle;
+  if (threadIdx.x == 0) startCycle = wall_clock64();
+
+  SubExecParam& p = params[blockIdx.y];
+
+  // Filter by XCC if desired
+  int xccId;
+  GetXccId(xccId);
+  if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
 
   // Operate on wavefront granularity
-  SubExecParam& p    = params[blockIdx.x];
   int const numSrcs  = p.numSrcs;
   int const numDsts  = p.numDsts;
   int const waveId   = threadIdx.x / WARP_SIZE; // Wavefront number
@@ -234,8 +249,8 @@ GpuReduceKernel(SubExecParam* params)
   {
     p.stopCycle  = wall_clock64();
     p.startCycle = startCycle;
+    p.xccId      = xccId;
     __trace_hwreg();
-    __trace_xccreg();
   }
 }
 
@@ -369,7 +384,7 @@ __global__ void __launch_bounds__(MAX_BLOCKSIZE)
 GpuReduceKernel2(SubExecParam* params)
 {
   int64_t startCycle = wall_clock64();
-  SubExecParam& p = params[blockIdx.x];
+  SubExecParam& p = params[blockIdx.y];
 
   size_t numFloatsLeft = GpuReduceFunc<float4>(p, 0, p.N, 8);
   if (numFloatsLeft)

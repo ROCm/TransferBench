@@ -3,6 +3,13 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.36
+
+### Additions
+
+* (Experimental) Adding XCC filtering - combined with XCC_PREF_TABLE, this tries to select
+  specific XCCs to use for specific (SRC->DST) Transfers
+
 ## v1.35
 
 ### Additions
