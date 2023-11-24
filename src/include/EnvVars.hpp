@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.36"
+#define TB_VERSION "1.37"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -190,7 +190,7 @@ public:
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
-    useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
+    useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
     useXccFilter      = GetEnvVar("USE_XCC_FILTER"      , 0);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
@@ -351,13 +351,15 @@ public:
     }
 
     // Parse preferred XCC table (if provided
+    prefXccTable.resize(numGpuDevices);
+    for (int i = 0; i < numGpuDevices; i++)
     {
-      prefXccTable.resize(numGpuDevices);
-      for (int i = 0; i < numGpuDevices; i++)
-      {
-        prefXccTable[i].resize(numGpuDevices, 0);
-      }
-      char* prefXccStr = getenv("XCC_PREF_TABLE");
+      prefXccTable[i].resize(numGpuDevices, 0);
+    }
+
+    char* prefXccStr = getenv("XCC_PREF_TABLE");
+    if (prefXccStr)
+    {
       char* token = strtok(prefXccStr, ",");
       int tokenCount = 0;
       while (token)
@@ -580,7 +582,7 @@ public:
     {
       printf("TransferBench v%s\n", TB_VERSION);
       printf("===============================================================\n");
-      if (!hideEnv) printf("[Common]             (Suppress by setting HIDE_ENV=1)\n");
+      if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }
     else if (!hideEnv)
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);

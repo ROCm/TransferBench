@@ -3,6 +3,14 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.37
+
+### Changes
+* USE_SINGLE_STREAM is enabled by default now.  (Disable via USE_SINGLE_STREAM=0)
+
+### Fixes
+* Fix unrecognized token error when XCC_PREF_TABLE is unspecified
+
 ## v1.36
 
 ### Additions
