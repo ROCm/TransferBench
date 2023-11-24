@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.35"
+#define TB_VERSION "1.36"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -91,10 +91,12 @@ public:
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
   int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
   int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
+  int useXccFilter;      // Use XCC filtering (experimental)
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
+  std::vector<std::vector<int>> prefXccTable;
 
   // Environment variables only for P2P preset
   int numCpuSubExecs;    // Number of CPU subexecttors to use
@@ -134,6 +136,8 @@ public:
   std::vector<int> numCpusPerNuma;
 
   std::vector<int> wallClockPerDeviceMhz;
+
+  std::vector<std::set<int>> xccIdsPerDevice;
 
   // Constructor that collects values
   EnvVars()
@@ -187,6 +191,7 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 0);
+    useXccFilter      = GetEnvVar("USE_XCC_FILTER"      , 0);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
     gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
@@ -325,6 +330,60 @@ public:
         }
       }
 #endif
+    }
+
+    // Figure out number of xccs per device
+    int maxNumXccs = 64;
+    xccIdsPerDevice.resize(numGpuDevices);
+    for (int i = 0; i < numGpuDevices; i++)
+    {
+      int* data;
+      HIP_CALL(hipSetDevice(i));
+      HIP_CALL(hipHostMalloc((void**)&data, maxNumXccs * sizeof(int)));
+      CollectXccIdsKernel<<<maxNumXccs, 1>>>(data);
+      HIP_CALL(hipDeviceSynchronize());
+
+      xccIdsPerDevice[i].clear();
+      for (int j = 0; j < maxNumXccs; j++)
+        xccIdsPerDevice[i].insert(data[j]);
+
+      HIP_CALL(hipHostFree(data));
+    }
+
+    // Parse preferred XCC table (if provided
+    {
+      prefXccTable.resize(numGpuDevices);
+      for (int i = 0; i < numGpuDevices; i++)
+      {
+        prefXccTable[i].resize(numGpuDevices, 0);
+      }
+      char* prefXccStr = getenv("XCC_PREF_TABLE");
+      char* token = strtok(prefXccStr, ",");
+      int tokenCount = 0;
+      while (token)
+      {
+        int xccId;
+        if (sscanf(token, "%d", &xccId) == 1)
+        {
+          int src = tokenCount / numGpuDevices;
+          int dst = tokenCount % numGpuDevices;
+          if (xccIdsPerDevice[src].count(xccId) == 0)
+          {
+            printf("[ERROR] GPU %d does not contain XCC %d\n", src, xccId);
+            exit(1);
+          }
+          prefXccTable[src][dst] = xccId;
+
+          tokenCount++;
+          if (tokenCount == (numGpuDevices * numGpuDevices)) break;
+        }
+        else
+        {
+          printf("[ERROR] Unrecognized token [%s]\n", token);
+          exit(1);
+        }
+        token = strtok(NULL, ",");
+      }
     }
 
     // Perform some basic validation
@@ -503,6 +562,7 @@ public:
     printf(" USE_PCIE_INDEX         - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
     printf(" USE_PREP_KERNEL        - Use GPU kernel to initialize source data array pattern\n");
     printf(" USE_SINGLE_STREAM      - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
+    printf(" USE_XCC_FILTER         - Use XCC filtering (experimental)\n");
     printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
   }
 
@@ -519,8 +579,8 @@ public:
     if (!outputToCsv)
     {
       printf("TransferBench v%s\n", TB_VERSION);
-      printf("=====================================================\n");
-      if (!hideEnv) printf("[Common]\n");
+      printf("===============================================================\n");
+      if (!hideEnv) printf("[Common]             (Suppress by setting HIDE_ENV=1)\n");
     }
     else if (!hideEnv)
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
@@ -566,6 +626,21 @@ public:
              std::string("Using ") + (usePrepSrcKernel ? "GPU kernels" : "hipMemcpy") + " to initialize source data");
     PRINT_EV("USE_SINGLE_STREAM", useSingleStream,
              std::string("Using single stream per ") + (useSingleStream ? "device" : "Transfer"));
+    PRINT_EV("USE_XCC_FILTER", useXccFilter,
+             std::string("XCC filtering ") + (useXccFilter ? "enabled" : "disabled"));
+    if (useXccFilter)
+    {
+      printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
+      printf("%36s:         ", "");
+      for (int i = 0; i < numGpuDevices; i++) printf(" %3d", i); printf(" (#XCCs)\n");
+      for (int i = 0; i < numGpuDevices; i++)
+      {
+        printf("%36s: GPU %3d ", "", i);
+        for (int j = 0; j < numGpuDevices; j++)
+          printf(" %3d", prefXccTable[i][j]);
+        printf(" %3lu\n", xccIdsPerDevice[i].size());
+      }
+    }
     PRINT_EV("VALIDATE_DIRECT", validateDirect,
              std::string("Validate GPU destination memory ") + (validateDirect ? "directly" : "via CPU staging buffer"));
     printf("\n");
