@@ -247,6 +247,7 @@ GpuReduceKernel(SubExecParam* params)
   __syncthreads();
   if (threadIdx.x == 0)
   {
+    __threadfence_system();
     p.stopCycle  = wall_clock64();
     p.startCycle = startCycle;
     p.xccId      = xccId;

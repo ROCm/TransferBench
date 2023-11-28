@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.38
+
+### Fixes
+* Adding missing threadfence which could cause non-fine-grained Transfers to report higher speeds
+
 ## v1.37
 
 ### Changes
