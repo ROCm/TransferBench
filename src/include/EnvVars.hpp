@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.37"
+#define TB_VERSION "1.38"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
