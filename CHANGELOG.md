@@ -3,6 +3,13 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.39
+
+### Additions
+* (Experimental) Adding support for Executor sub-index
+### Fixes
+- Remove deprecated gcnArch code.  ROCm version must include support for hipDeviceMallocUncached
+
 ## v1.38
 
 ### Fixes

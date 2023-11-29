@@ -103,6 +103,7 @@ struct Transfer
   int                        transferIndex;      // Transfer identifier (within a Test)
   ExeType                    exeType;            // Transfer executor type
   int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
+  int                        exeSubIndex;        // Executor subindex
   int                        numSubExecs;        // Number of subExecutors to use for this Transfer
   size_t                     numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
   size_t                     numBytesActual;     // Actual number of bytes to copy
@@ -171,13 +172,10 @@ void DisplayTopology(bool const outputToCsv);
 void PopulateTestSizes(size_t const numBytesPerTransfer, int const samplingFactor,
                        std::vector<size_t>& valuesofN);
 
-void ParseMemType(std::string const& token, int const numCpus, int const numGpus,
-                  std::vector<MemType>& memType, std::vector<int>& memIndex);
-void ParseExeType(std::string const& token, int const numCpus, int const numGpus,
-                  ExeType& exeType, int& exeIndex);
+void ParseMemType(EnvVars const& ev, std::string const& token, std::vector<MemType>& memType, std::vector<int>& memIndex);
+void ParseExeType(EnvVars const& ev, std::string const& token, ExeType& exeType, int& exeIndex, int& exeSubIndex);
 
-void ParseTransfers(char* line, int numCpus, int numGpus,
-                    std::vector<Transfer>& transfers);
+void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transfers);
 
 void ExecuteTransfers(EnvVars const& ev, int const testNum, size_t const N,
                       std::vector<Transfer>& transfers, bool verbose = true,

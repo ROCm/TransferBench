@@ -133,7 +133,7 @@ int main(int argc, char **argv)
     char line[MAX_LINE_LEN];
     sprintf(line, "%s", cmdlineTransfer.c_str());
     std::vector<Transfer> transfers;
-    ParseTransfers(line, ev.numCpuDevices, ev.numGpuDevices, transfers);
+    ParseTransfers(ev, line, transfers);
     if (transfers.empty()) exit(0);
 
     // If the number of bytes is specified, use it
@@ -184,7 +184,7 @@ int main(int argc, char **argv)
 
     // Parse set of parallel Transfers to execute
     std::vector<Transfer> transfers;
-    ParseTransfers(line, ev.numCpuDevices, ev.numGpuDevices, transfers);
+    ParseTransfers(ev, line, transfers);
     if (transfers.empty()) continue;
 
     // If the number of bytes is specified, use it
@@ -1005,7 +1005,7 @@ void DisplayTopology(bool const outputToCsv)
 #endif
 }
 
-void ParseMemType(std::string const& token, int const numCpus, int const numGpus,
+void ParseMemType(EnvVars const& ev, std::string const& token,
                   std::vector<MemType>& memTypes, std::vector<int>& memIndices)
 {
   char typeChar;
@@ -1019,14 +1019,14 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
     offset += inc;
     MemType memType = CharToMemType(typeChar);
 
-    if (IsCpuType(memType) && (devIndex < 0 || devIndex >= numCpus))
+    if (IsCpuType(memType) && (devIndex < 0 || devIndex >= ev.numCpuDevices))
     {
-      printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", numCpus-1, devIndex);
+      printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", ev.numCpuDevices-1, devIndex);
       exit(1);
     }
-    if (IsGpuType(memType) && (devIndex < 0 || devIndex >= numGpus))
+    if (IsGpuType(memType) && (devIndex < 0 || devIndex >= ev.numGpuDevices))
     {
-      printf("[ERROR] GPU index must be between 0 and %d (instead of %d)\n", numGpus-1, devIndex);
+      printf("[ERROR] GPU index must be between 0 and %d (instead of %d)\n", ev.numGpuDevices-1, devIndex);
       exit(1);
     }
 
@@ -1045,11 +1045,13 @@ void ParseMemType(std::string const& token, int const numCpus, int const numGpus
   }
 }
 
-void ParseExeType(std::string const& token, int const numCpus, int const numGpus,
-                  ExeType &exeType, int& exeIndex)
+void ParseExeType(EnvVars const& ev, std::string const& token,
+                  ExeType &exeType, int& exeIndex, int& exeSubIndex)
 {
   char typeChar;
-  if (sscanf(token.c_str(), " %c%d", &typeChar, &exeIndex) != 2)
+  exeSubIndex = -1;
+  int numTokensParsed = sscanf(token.c_str(), " %c%d.%d", &typeChar, &exeIndex, &exeSubIndex);
+  if (numTokensParsed < 2)
   {
     printf("[ERROR] Unable to parse valid executor token (%s).  Exepected one of %s followed by an index\n",
            token.c_str(), ExeTypeStr);
@@ -1057,20 +1059,29 @@ void ParseExeType(std::string const& token, int const numCpus, int const numGpus
   }
   exeType = CharToExeType(typeChar);
 
-  if (IsCpuType(exeType) && (exeIndex < 0 || exeIndex >= numCpus))
+  if (IsCpuType(exeType) && (exeIndex < 0 || exeIndex >= ev.numCpuDevices))
   {
-    printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", numCpus-1, exeIndex);
+    printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", ev.numCpuDevices-1, exeIndex);
     exit(1);
   }
-  if (IsGpuType(exeType) && (exeIndex < 0 || exeIndex >= numGpus))
+  if (IsGpuType(exeType) && (exeIndex < 0 || exeIndex >= ev.numGpuDevices))
   {
-    printf("[ERROR] GPU index must be between 0 and %d (instead of %d)\n", numGpus-1, exeIndex);
+    printf("[ERROR] GPU index must be between 0 and %d (instead of %d)\n", ev.numGpuDevices-1, exeIndex);
     exit(1);
+  }
+  if (exeType == EXE_GPU_GFX && exeSubIndex != -1)
+  {
+    int const idx = RemappedIndex(exeIndex, false);
+    if (ev.xccIdsPerDevice[idx].count(exeSubIndex) == 0)
+    {
+      printf("[ERROR] GPU %d does not have subIndex %d\n", exeIndex, exeSubIndex);
+      exit(1);
+    }
   }
 }
 
 // Helper function to parse a list of Transfer definitions
-void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>& transfers)
+void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transfers)
 {
   // Replace any round brackets or '->' with spaces,
   for (int i = 1; line[i]; i++)
@@ -1141,9 +1152,9 @@ void ParseTransfers(char* line, int numCpus, int numGpus, std::vector<Transfer>&
       }
     }
 
-    ParseMemType(srcMem, numCpus, numGpus, transfer.srcType, transfer.srcIndex);
-    ParseMemType(dstMem, numCpus, numGpus, transfer.dstType, transfer.dstIndex);
-    ParseExeType(exeMem, numCpus, numGpus, transfer.exeType, transfer.exeIndex);
+    ParseMemType(ev, srcMem, transfer.srcType, transfer.srcIndex);
+    ParseMemType(ev, dstMem, transfer.dstType, transfer.dstIndex);
+    ParseExeType(ev, exeMem, transfer.exeType, transfer.exeIndex, transfer.exeSubIndex);
 
     transfer.numSrcs = (int)transfer.srcType.size();
     transfer.numDsts = (int)transfer.dstType.size();
@@ -1247,11 +1258,9 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
 #else
       HIP_CALL(hipSetDevice(devIndex));
 
-      // NOTE: hipDeviceMallocFinegrained will be replaced by hipDeviceMallocUncached eventually
-      //       Until then, this workaround is required
       hipDeviceProp_t prop;
       HIP_CALL(hipGetDeviceProperties(&prop, 0));
-      int flag = (prop.gcnArch / 10 == 94) ? 0x3 : hipDeviceMallocFinegrained;
+      int flag = hipDeviceMallocUncached;
       HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
 #endif
     }
@@ -2002,11 +2011,24 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
       p.dst[iDst] = this->dstMem[iDst] + assigned + initOffset;
 
     p.preferredXccId = -1;
-    if (ev.useXccFilter)
+
+    if (ev.useXccFilter && this->exeType == EXE_GPU_GFX)
     {
-      if (this->exeType == EXE_GPU_GFX && this->numDsts == 1 && IsGpuType(this->dstType[0]))
+      std::uniform_int_distribution<int> distribution(0, ev.xccIdsPerDevice[this->exeIndex].size() - 1);
+
+      // Use this tranfer's executor subIndex if set
+      if (this->exeSubIndex != -1)
+      {
+        p.preferredXccId = this->exeSubIndex;
+      }
+      else if (this->numDsts >= 1 && IsGpuType(this->dstType[0]))
       {
         p.preferredXccId = ev.prefXccTable[this->exeIndex][this->dstIndex[0]];
+      }
+
+      if (p.preferredXccId == -1)
+      {
+        p.preferredXccId = distribution(*ev.generator);
       }
     }
 
