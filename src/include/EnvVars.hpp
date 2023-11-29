@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.38"
+#define TB_VERSION "1.39"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -354,7 +354,7 @@ public:
     prefXccTable.resize(numGpuDevices);
     for (int i = 0; i < numGpuDevices; i++)
     {
-      prefXccTable[i].resize(numGpuDevices, 0);
+      prefXccTable[i].resize(numGpuDevices, -1);
     }
 
     char* prefXccStr = getenv("XCC_PREF_TABLE");
