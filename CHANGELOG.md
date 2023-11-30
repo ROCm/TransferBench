@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.40
+
+### Fixes
+* Fixing XCC defaulting to 0 instead of random for preset configs, ignoring XCC_PREF_TABLE
+
 ## v1.39
 
 ### Additions
