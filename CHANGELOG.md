@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.42
+
+### Fixes
+* Fixing schmoo maxNumCus optional arg parsing
+* Schmoo output modified to be easier to copy
+
 ## v1.41
 
 ### Additions
