@@ -100,31 +100,32 @@ ExeType inline CharToExeType(char const c)
 // then writes the summation to each of the specified destination memory location(s)
 struct Transfer
 {
-  int                        transferIndex;      // Transfer identifier (within a Test)
+  // Inputs
   ExeType                    exeType;            // Transfer executor type
   int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
   int                        exeSubIndex;        // Executor subindex
   int                        numSubExecs;        // Number of subExecutors to use for this Transfer
   size_t                     numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
-  size_t                     numBytesActual;     // Actual number of bytes to copy
-  double                     transferTime;       // Time taken in milliseconds
-
   int                        numSrcs;            // Number of sources
   std::vector<MemType>       srcType;            // Source memory types
   std::vector<int>           srcIndex;           // Source device indice
-  std::vector<float*>        srcMem;             // Source memory
-
   int                        numDsts;            // Number of destinations
   std::vector<MemType>       dstType;            // Destination memory type
   std::vector<int>           dstIndex;           // Destination device index
-  std::vector<float*>        dstMem;             // Destination memory
 
+  // Outputs
+  size_t                     numBytesActual;     // Actual number of bytes to copy
+  double                     transferTime;       // Time taken in milliseconds
+  std::vector<double>        perIterationTime;   // Per-iteration timing
+  std::vector<std::set<std::pair<int,int>>> perIterationCUs; // Per-iteration CU usage
+
+  // Internal
+  int                        transferIndex;      // Transfer identifier (within a Test)
+  std::vector<float*>        srcMem;             // Source memory
+  std::vector<float*>        dstMem;             // Destination memory
   std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock
   SubExecParam*              subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
   std::vector<int>           subExecIdx;         // Indicies into subExecParamGpu
-
-  std::vector<double>        perIterationTime;   // Per-iteration timing
-  std::vector<std::set<std::pair<int,int>>> perIterationCUs; // Per-iteration CU usage
 
   // Prepares src/dst subarray pointers for each SubExecutor
   void PrepareSubExecParams(EnvVars const& ev);
@@ -190,6 +191,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N);
 void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int const maxSubExecs);
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExec, int const numCpuSubExec, bool const isRandom);
 void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const numSubExecs);
+void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const localIdx, int const remoteIdx, int const maxSubExecs);
 
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
 

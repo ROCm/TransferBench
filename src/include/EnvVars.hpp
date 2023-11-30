@@ -29,18 +29,19 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.40"
+#define TB_VERSION "1.41"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
 
 enum ConfigModeEnum
 {
-  CFG_FILE  = 0,
-  CFG_P2P   = 1,
-  CFG_SWEEP = 2,
-  CFG_SCALE = 3,
-  CFG_A2A   = 4
+  CFG_FILE   = 0,
+  CFG_P2P    = 1,
+  CFG_SWEEP  = 2,
+  CFG_SCALE  = 3,
+  CFG_A2A    = 4,
+  CFG_SCHMOO = 5
 };
 
 enum BlockOrderEnum
@@ -726,6 +727,16 @@ public:
              std::string("Using ") + (useRemoteRead ? "DST" : "SRC") + " as executor");
 
     printf("\n");
+  }
+
+  void DisplaySchmooEnvVars() const
+  {
+    DisplayEnvVars();
+    if (hideEnv) return;
+    if (!outputToCsv)
+      printf("[Schmoo Related]\n");
+    PRINT_EV("USE_FINE_GRAIN", useFineGrain,
+             std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
   }
 
   // Helper function that gets parses environment variable or sets to default value

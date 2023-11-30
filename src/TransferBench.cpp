@@ -116,6 +116,39 @@ int main(int argc, char **argv)
     RunAllToAllBenchmark(ev, numBytesPerTransfer, numSubExecs);
     exit(0);
   }
+  // - Test schmoo benchmark
+  else if (!strcmp(argv[1], "schmoo"))
+  {
+    if (ev.numGpuDevices < 2)
+    {
+      printf("[ERROR] Schmoo benchmark requires at least 2 GPUs\n");
+      exit(1);
+    }
+    ev.configMode = CFG_SCHMOO;
+
+    int localIdx    = (argc > 3 ? atoi(argv[3]) : 0);
+    int remoteIdx   = (argc > 4 ? atoi(argv[4]) : 1);
+    int maxSubExecs = (argc > 5 ? atoi(argv[3]) : 32);
+
+    if (localIdx >= ev.numGpuDevices || remoteIdx >= ev.numGpuDevices)
+    {
+      printf("[ERROR] Cannot execute schmoo test with local GPU device %d, remote GPU device %d\n", localIdx, remoteIdx);
+      exit(1);
+    }
+    ev.DisplaySchmooEnvVars();
+
+    for (int N = 256; N <= (1<<27); N *= 2)
+    {
+      int delta = std::max(1, N / ev.samplingFactor);
+      int curr = (numBytesPerTransfer == 0) ? N : numBytesPerTransfer / sizeof(float);
+      do
+      {
+        RunSchmooBenchmark(ev, curr * sizeof(float), localIdx, remoteIdx, maxSubExecs);
+        if (numBytesPerTransfer != 0) exit(0);
+        curr += delta;
+      } while (curr < N * 2);
+    }
+  }
   else if (!strcmp(argv[1], "cmdline"))
   {
     // Print environment variables and CSV header
@@ -547,8 +580,8 @@ void ExecuteTransfers(EnvVars const& ev,
       int totalCUs = 0;
       for (auto const& transfer : exeInfo.transfers)
       {
-        double transferDurationMsec = transfer->transferTime / (1.0 * numTimedIterations);
-        double transferBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
+        transfer->transferTime /= (1.0 * numTimedIterations);
+        double transferBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
         totalCUs += transfer->numSubExecs;
 
         if (!verbose) continue;
@@ -557,7 +590,7 @@ void ExecuteTransfers(EnvVars const& ev,
           printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
                  transfer->transferIndex,
                  transferBandwidthGbs,
-                 transferDurationMsec,
+                 transfer->transferTime,
                  transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
                  ExeTypeName[transfer->exeType], transfer->exeIndex,
@@ -572,7 +605,7 @@ void ExecuteTransfers(EnvVars const& ev,
             for (int i = 0; i < numTimedIterations; i++)
             {
               times.insert(std::make_pair(transfer->perIterationTime[i], i+1));
-              double const varTime = fabs(transferDurationMsec - transfer->perIterationTime[i]);
+              double const varTime = fabs(transfer->transferTime - transfer->perIterationTime[i]);
               stdDevTime += varTime * varTime;
 
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->perIterationTime[i] * 1000.0f;
@@ -614,7 +647,7 @@ void ExecuteTransfers(EnvVars const& ev,
                  MemTypeStr[transfer->exeType], transfer->exeIndex,
                  transfer->DstToStr().c_str(),
                  transfer->numSubExecs,
-                 transferBandwidthGbs, transferDurationMsec,
+                 transferBandwidthGbs, transfer->transferTime,
                  PtrVectorToStr(transfer->srcMem, initOffset).c_str(),
                  PtrVectorToStr(transfer->dstMem, initOffset).c_str());
         }
@@ -634,15 +667,15 @@ void ExecuteTransfers(EnvVars const& ev,
     for (auto const& transferPair : transferList)
     {
       Transfer* transfer = transferPair.second;
-      double transferDurationMsec = transfer->transferTime / (1.0 * numTimedIterations);
-      double transferBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
-      maxGpuTime = std::max(maxGpuTime, transferDurationMsec);
+      transfer->transferTime /= (1.0 * numTimedIterations);
+      double transferBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
+      maxGpuTime = std::max(maxGpuTime, transfer->transferTime);
       if (!verbose) continue;
       if (!ev.outputToCsv)
       {
         printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
                transfer->transferIndex,
-               transferBandwidthGbs, transferDurationMsec,
+               transferBandwidthGbs, transfer->transferTime,
                transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
                ExeTypeName[transfer->exeType], transfer->exeIndex,
@@ -657,7 +690,7 @@ void ExecuteTransfers(EnvVars const& ev,
             for (int i = 0; i < numTimedIterations; i++)
             {
               times.insert(std::make_pair(transfer->perIterationTime[i], i+1));
-              double const varTime = fabs(transferDurationMsec - transfer->perIterationTime[i]);
+              double const varTime = fabs(transfer->transferTime - transfer->perIterationTime[i]);
               stdDevTime += varTime * varTime;
 
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->perIterationTime[i] * 1000.0f;
@@ -698,7 +731,7 @@ void ExecuteTransfers(EnvVars const& ev,
                ExeTypeName[transfer->exeType], transfer->exeIndex,
                transfer->DstToStr().c_str(),
                transfer->numSubExecs,
-               transferBandwidthGbs, transferDurationMsec,
+               transferBandwidthGbs, transfer->transferTime,
                PtrVectorToStr(transfer->srcMem, initOffset).c_str(),
                PtrVectorToStr(transfer->dstMem, initOffset).c_str());
       }
@@ -1646,7 +1679,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
 
           for (int dir = 0; dir <= isBidirectional; dir++)
           {
-            double const avgTime = transfers[dir].transferTime / ev.numIterations;
+            double const avgTime = transfers[dir].transferTime;
             double const avgBw   = (transfers[dir].numBytesActual / 1.0E9) / avgTime * 1000.0f;
             avgBandwidth[dir].push_back(avgBw);
 
@@ -1849,8 +1882,7 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
       transfers[0].dstIndex[0] = i < numCpus ? i : i - numCpus;
 
       ExecuteTransfers(ev, 0, N, transfers, false);
-      double transferDurationMsec = transfers[0].transferTime / (1.0 * ev.numIterations);
-      double transferBandwidthGbs = (transfers[0].numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
+      double transferBandwidthGbs = (transfers[0].numBytesActual / 1.0E9) / transfers[0].transferTime * 1000.0f;
       printf("%c%7.2f     ", separator, transferBandwidthGbs);
 
       if (transferBandwidthGbs > bestResult[i].first)
@@ -1955,8 +1987,7 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
       if (reIndex.count(std::make_pair(src, dst)))
       {
         Transfer const& transfer = transfers[reIndex[std::make_pair(src,dst)]];
-        double transferDurationMsec = transfer.transferTime / (1.0 * ev.numIterations);
-        double transferBandwidthGbs = (transfer.numBytesActual / 1.0E9) / transferDurationMsec * 1000.0f;
+        double transferBandwidthGbs = (transfer.numBytesActual / 1.0E9) / transfer.transferTime * 1000.0f;
         colTotalBandwidth[dst] += transferBandwidthGbs;
         rowTotalBandwidth += transferBandwidthGbs;
         totalBandwidthGpu += transferBandwidthGbs;
@@ -2247,6 +2278,105 @@ std::string Transfer::DstToStr() const
     ss << MemTypeStr[dstType[i]] << dstIndex[i];
   return ss.str();
 }
+
+void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const localIdx, int const remoteIdx, int const maxSubExecs)
+{
+  printf("Bytes to transfer: %lu Local GPU: %d Remote GPU: %d\n", numBytesPerTransfer, localIdx, remoteIdx);
+  printf("| #CUs | Local Read | LocalWrite | Local Copy | RemoteRead |Remote Write| RemoteCopy |\n");
+  printf("|------|------------|------------|------------|------------|------------|------------|\n");
+
+  std::vector<Transfer> transfers(1);
+  Transfer& t   = transfers[0];
+  t.exeType     = EXE_GPU_GFX;
+  t.exeIndex    = localIdx;
+  t.exeSubIndex = -1;
+  t.numBytes    = numBytesPerTransfer;
+
+  for (int numCUs = 1; numCUs <= maxSubExecs; numCUs++)
+  {
+    t.numSubExecs = numCUs;
+
+    // Local Read
+    t.numSrcs = 1;
+    t.numDsts = 0;
+    t.srcType.resize(t.numSrcs);
+    t.dstType.resize(t.numDsts);
+    t.srcIndex.resize(t.numSrcs);
+    t.dstIndex.resize(t.numDsts);
+    t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.srcIndex[0] = localIdx;
+    ExecuteTransfers(ev, 0, 0, transfers, false);
+    double const localRead = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
+
+    // Local Write
+    t.numSrcs = 0;
+    t.numDsts = 1;
+    t.srcType.resize(t.numSrcs);
+    t.dstType.resize(t.numDsts);
+    t.srcIndex.resize(t.numSrcs);
+    t.dstIndex.resize(t.numDsts);
+    t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.dstIndex[0] = localIdx;
+    ExecuteTransfers(ev, 0, 0, transfers, false);
+    double const localWrite = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
+
+    // Local Copy
+    t.numSrcs = 1;
+    t.numDsts = 1;
+    t.srcType.resize(t.numSrcs);
+    t.dstType.resize(t.numDsts);
+    t.srcIndex.resize(t.numSrcs);
+    t.dstIndex.resize(t.numDsts);
+    t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.srcIndex[0] = localIdx;
+    t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.dstIndex[0] = localIdx;
+    ExecuteTransfers(ev, 0, 0, transfers, false);
+    double const localCopy = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
+
+    // Remote Read
+    t.numSrcs = 1;
+    t.numDsts = 0;
+    t.srcType.resize(t.numSrcs);
+    t.dstType.resize(t.numDsts);
+    t.srcIndex.resize(t.numSrcs);
+    t.dstIndex.resize(t.numDsts);
+    t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.srcIndex[0] = remoteIdx;
+    ExecuteTransfers(ev, 0, 0, transfers, false);
+    double const remoteRead = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
+
+    // Remote Write
+    t.numSrcs = 0;
+    t.numDsts = 1;
+    t.srcType.resize(t.numSrcs);
+    t.dstType.resize(t.numDsts);
+    t.srcIndex.resize(t.numSrcs);
+    t.dstIndex.resize(t.numDsts);
+    t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.dstIndex[0] = remoteIdx;
+    ExecuteTransfers(ev, 0, 0, transfers, false);
+    double const remoteWrite = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
+
+    // Remote Copy
+    t.numSrcs = 1;
+    t.numDsts = 1;
+    t.srcType.resize(t.numSrcs);
+    t.dstType.resize(t.numDsts);
+    t.srcIndex.resize(t.numSrcs);
+    t.dstIndex.resize(t.numDsts);
+    t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.srcIndex[0] = localIdx;
+    t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+    t.dstIndex[0] = remoteIdx;
+    ExecuteTransfers(ev, 0, 0, transfers, false);
+    double const remoteCopy = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
+
+    printf("|  %3d | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f |\n",
+           numCUs, localRead, localWrite, localCopy, remoteRead, remoteWrite, remoteCopy);
+  }
+}
+
 
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExecs, int const numCpuSubExecs, bool const isRandom)
 {
