@@ -1599,6 +1599,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
         transfers[0].numSrcs = transfers[0].numDsts = 1;
         transfers[0].exeType = IsGpuType(ev.useRemoteRead ? dstType : srcType) ? gpuExeType : EXE_CPU;
         transfers[0].exeIndex = (ev.useRemoteRead ? dstIndex : srcIndex);
+        transfers[0].exeSubIndex = -1;
         transfers[0].numSubExecs = IsGpuType(transfers[0].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
 
         // DST -> SRC
@@ -1612,6 +1613,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
           transfers[1].dstIndex.push_back(srcIndex);
           transfers[1].exeType = IsGpuType(ev.useRemoteRead ? srcType : dstType) ? gpuExeType : EXE_CPU;
           transfers[1].exeIndex = (ev.useRemoteRead ? srcIndex : dstIndex);
+          transfers[1].exeSubIndex = -1;
           transfers[1].numSubExecs = IsGpuType(transfers[1].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
         }
 
@@ -1819,6 +1821,7 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
   transfers[0].numDsts  = 1;
   transfers[0].exeType  = EXE_GPU_GFX;
   transfers[0].exeIndex = exeIndex;
+  transfers[0].exeSubIndex = -1;
   transfers[0].srcType.resize(1, MEM_GPU);
   transfers[0].dstType.resize(1, MEM_GPU);
   transfers[0].srcIndex.resize(1);
@@ -1887,6 +1890,7 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   transfer.numSrcs     = 1;
   transfer.numDsts     = 1;
   transfer.exeType     = EXE_GPU_GFX;
+  transfer.exeSubIndex = -1;
   transfer.srcType.resize(1, ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
   transfer.dstType.resize(1, ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
   transfer.srcIndex.resize(1);
@@ -2459,6 +2463,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
         transfer.srcIndex       = {possibleTransfers[value].srcIndex};
         transfer.exeType        = possibleTransfers[value].exeType;
         transfer.exeIndex       = possibleTransfers[value].exeIndex;
+        transfer.exeSubIndex    = -1;
         transfer.dstType        = {possibleTransfers[value].dstType};
         transfer.dstIndex       = {possibleTransfers[value].dstIndex};
         transfer.numSubExecs    = IsGpuType(transfer.exeType) ? numGpuSubExecs : numCpuSubExecs;
