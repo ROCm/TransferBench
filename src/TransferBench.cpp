@@ -581,7 +581,8 @@ void ExecuteTransfers(EnvVars const& ev,
       for (auto const& transfer : exeInfo.transfers)
       {
         transfer->transferTime /= (1.0 * numTimedIterations);
-        double transferBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
+        transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
+        transfer->executorBandwidth = exeBandwidthGbs;
         totalCUs += transfer->numSubExecs;
 
         if (!verbose) continue;
@@ -589,7 +590,7 @@ void ExecuteTransfers(EnvVars const& ev,
         {
           printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
                  transfer->transferIndex,
-                 transferBandwidthGbs,
+                 transfer->transferBandwidth,
                  transfer->transferTime,
                  transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
@@ -609,7 +610,7 @@ void ExecuteTransfers(EnvVars const& ev,
               stdDevTime += varTime * varTime;
 
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->perIterationTime[i] * 1000.0f;
-              double const varBw = fabs(iterBandwidthGbs - transferBandwidthGbs);
+              double const varBw = fabs(iterBandwidthGbs - transfer->transferBandwidth);
               stdDevBw += varBw * varBw;
             }
             stdDevTime = sqrt(stdDevTime / numTimedIterations);
@@ -647,7 +648,7 @@ void ExecuteTransfers(EnvVars const& ev,
                  MemTypeStr[transfer->exeType], transfer->exeIndex,
                  transfer->DstToStr().c_str(),
                  transfer->numSubExecs,
-                 transferBandwidthGbs, transfer->transferTime,
+                 transfer->transferBandwidth, transfer->transferTime,
                  PtrVectorToStr(transfer->srcMem, initOffset).c_str(),
                  PtrVectorToStr(transfer->dstMem, initOffset).c_str());
         }
@@ -668,14 +669,15 @@ void ExecuteTransfers(EnvVars const& ev,
     {
       Transfer* transfer = transferPair.second;
       transfer->transferTime /= (1.0 * numTimedIterations);
-      double transferBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
+      transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
+      transfer->executorBandwidth = transfer->transferBandwidth;
       maxGpuTime = std::max(maxGpuTime, transfer->transferTime);
       if (!verbose) continue;
       if (!ev.outputToCsv)
       {
         printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
                transfer->transferIndex,
-               transferBandwidthGbs, transfer->transferTime,
+               transfer->transferBandwidth, transfer->transferTime,
                transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
                ExeTypeName[transfer->exeType], transfer->exeIndex,
@@ -694,7 +696,7 @@ void ExecuteTransfers(EnvVars const& ev,
               stdDevTime += varTime * varTime;
 
               double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->perIterationTime[i] * 1000.0f;
-              double const varBw = fabs(iterBandwidthGbs - transferBandwidthGbs);
+              double const varBw = fabs(iterBandwidthGbs - transfer->transferBandwidth);
               stdDevBw += varBw * varBw;
             }
             stdDevTime = sqrt(stdDevTime / numTimedIterations);
@@ -731,7 +733,7 @@ void ExecuteTransfers(EnvVars const& ev,
                ExeTypeName[transfer->exeType], transfer->exeIndex,
                transfer->DstToStr().c_str(),
                transfer->numSubExecs,
-               transferBandwidthGbs, transfer->transferTime,
+               transfer->transferBandwidth, transfer->transferTime,
                PtrVectorToStr(transfer->srcMem, initOffset).c_str(),
                PtrVectorToStr(transfer->dstMem, initOffset).c_str());
       }
@@ -1849,20 +1851,21 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
   char separator = (ev.outputToCsv ? ',' : ' ');
 
   std::vector<Transfer> transfers(1);
-  transfers[0].numBytes = N * sizeof(float);
-  transfers[0].numSrcs  = 1;
-  transfers[0].numDsts  = 1;
-  transfers[0].exeType  = EXE_GPU_GFX;
-  transfers[0].exeIndex = exeIndex;
-  transfers[0].exeSubIndex = -1;
-  transfers[0].srcType.resize(1, MEM_GPU);
-  transfers[0].dstType.resize(1, MEM_GPU);
-  transfers[0].srcIndex.resize(1);
-  transfers[0].dstIndex.resize(1);
+  Transfer& t = transfers[0];
+  t.numBytes = N * sizeof(float);
+  t.numSrcs  = 1;
+  t.numDsts  = 1;
+  t.exeType  = EXE_GPU_GFX;
+  t.exeIndex = exeIndex;
+  t.exeSubIndex = -1;
+  t.srcType.resize(1, MEM_GPU);
+  t.dstType.resize(1, MEM_GPU);
+  t.srcIndex.resize(1);
+  t.dstIndex.resize(1);
 
   printf("GPU-GFX Scaling benchmark:\n");
   printf("==========================\n");
-  printf("- Copying %lu bytes from GPU %d to other devices\n", transfers[0].numBytes, exeIndex);
+  printf("- Copying %lu bytes from GPU %d to other devices\n", t.numBytes, exeIndex);
   printf("- All numbers reported as GB/sec\n\n");
 
   printf("NumCUs");
@@ -1873,21 +1876,20 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
   std::vector<std::pair<double, int>> bestResult(numDevices);
   for (int numSubExec = 1; numSubExec <= maxSubExecs; numSubExec++)
   {
-    transfers[0].numSubExecs = numSubExec;
+    t.numSubExecs = numSubExec;
     printf("%4d  ", numSubExec);
 
     for (int i = 0; i < numDevices; i++)
     {
-      transfers[0].dstType[0]  = i < numCpus ? MEM_CPU : MEM_GPU;
-      transfers[0].dstIndex[0] = i < numCpus ? i : i - numCpus;
+      t.dstType[0]  = i < numCpus ? MEM_CPU : MEM_GPU;
+      t.dstIndex[0] = i < numCpus ? i : i - numCpus;
 
       ExecuteTransfers(ev, 0, N, transfers, false);
-      double transferBandwidthGbs = (transfers[0].numBytesActual / 1.0E9) / transfers[0].transferTime * 1000.0f;
-      printf("%c%7.2f     ", separator, transferBandwidthGbs);
+      printf("%c%7.2f     ", separator, t.transferBandwidth);
 
-      if (transferBandwidthGbs > bestResult[i].first)
+      if (t.transferBandwidth > bestResult[i].first)
       {
-        bestResult[i].first  = transferBandwidthGbs;
+        bestResult[i].first  = t.transferBandwidth;
         bestResult[i].second = numSubExec;
       }
     }
@@ -1960,14 +1962,14 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   if (transfers.size() == 0) return;
 
   double totalBandwidthCpu = 0;
-  ExecuteTransfers(ev, 0, numBytesPerTransfer / sizeof(float), transfers, true, &totalBandwidthCpu);
+  ExecuteTransfers(ev, 0, numBytesPerTransfer / sizeof(float), transfers, !ev.hideEnv, &totalBandwidthCpu);
 
   printf("\nSummary:\n");
   printf("==========================================================\n");
-  printf("SRC\\DST");
+  printf("SRC\\DST ");
   for (int dst = 0; dst < numGpus; dst++)
-    printf("%cGPU %02d   ", separator, dst);
-  printf("   %cSTotal\n", separator);
+    printf("%cGPU %02d    ", separator, dst);
+  printf("   %cSTotal     %cActual\n", separator, separator);
 
   std::map<std::pair<int, int>, int> reIndex;
   for (int i = 0; i < transfers.size(); i++)
@@ -1977,41 +1979,47 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   }
 
   double totalBandwidthGpu = 0.0;
+  double minExecutorBandwidth = std::numeric_limits<double>::max();
+  double maxExecutorBandwidth = 0.0;
   std::vector<double> colTotalBandwidth(numGpus+1, 0.0);
   for (int src = 0; src < numGpus; src++)
   {
     double rowTotalBandwidth = 0;
+    double executorBandwidth = 0;
     printf("GPU %02d", src);
     for (int dst = 0; dst < numGpus; dst++)
     {
       if (reIndex.count(std::make_pair(src, dst)))
       {
         Transfer const& transfer = transfers[reIndex[std::make_pair(src,dst)]];
-        double transferBandwidthGbs = (transfer.numBytesActual / 1.0E9) / transfer.transferTime * 1000.0f;
-        colTotalBandwidth[dst] += transferBandwidthGbs;
-        rowTotalBandwidth += transferBandwidthGbs;
-        totalBandwidthGpu += transferBandwidthGbs;
-        printf("%c%7.2f  ", separator, transferBandwidthGbs);
+        colTotalBandwidth[dst]  += transfer.transferBandwidth;
+        rowTotalBandwidth       += transfer.transferBandwidth;
+        totalBandwidthGpu       += transfer.transferBandwidth;
+        executorBandwidth        = std::max(executorBandwidth, transfer.executorBandwidth);
+        printf("%c%8.3f  ", separator, transfer.transferBandwidth);
       }
       else
       {
-        printf("%c%7s  ", separator, "N/A");
+        printf("%c%8s  ", separator, "N/A");
       }
     }
-    printf("   %c%7.2f\n", separator, rowTotalBandwidth);
+    printf("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, executorBandwidth);
+    minExecutorBandwidth = std::min(minExecutorBandwidth, executorBandwidth);
+    maxExecutorBandwidth = std::max(maxExecutorBandwidth, executorBandwidth);
     colTotalBandwidth[numGpus] += rowTotalBandwidth;
   }
   printf("\nRTotal");
   for (int dst = 0; dst < numGpus; dst++)
   {
-    printf("%c%7.2f  ", separator, colTotalBandwidth[dst]);
+    printf("%c%8.3f  ", separator, colTotalBandwidth[dst]);
   }
-  printf("   %c%7.2f\n", separator, colTotalBandwidth[numGpus]);
+  printf("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus],
+         separator, minExecutorBandwidth, separator, maxExecutorBandwidth);
   printf("\n");
 
-  printf("Average   bandwidth (GPU Timed): %7.2f GB/s\n", totalBandwidthGpu / transfers.size());
-  printf("Aggregate bandwidth (GPU Timed): %7.2f GB/s\n", totalBandwidthGpu);
-  printf("Aggregate bandwidth (CPU Timed): %7.2f GB/s\n", totalBandwidthCpu);
+  printf("Average   bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());
+  printf("Aggregate bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu);
+  printf("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", totalBandwidthCpu);
 }
 
 void Transfer::PrepareSubExecParams(EnvVars const& ev)

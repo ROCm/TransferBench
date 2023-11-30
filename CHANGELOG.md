@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.43
+
+### Changes
+* Modifying a2a to show executor timing, as well as executor min/max bandwidth
+
 ## v1.42
 
 ### Fixes

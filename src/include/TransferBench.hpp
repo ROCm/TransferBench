@@ -115,7 +115,9 @@ struct Transfer
 
   // Outputs
   size_t                     numBytesActual;     // Actual number of bytes to copy
-  double                     transferTime;       // Time taken in milliseconds
+  double                     transferTime;       // Time taken in milliseconds for this transfer
+  double                     transferBandwidth;  // Transfer bandwidth (GB/s)
+  double                     executorBandwidth;  // Executor bandwidth (GB/s)
   std::vector<double>        perIterationTime;   // Per-iteration timing
   std::vector<std::set<std::pair<int,int>>> perIterationCUs; // Per-iteration CU usage
 
