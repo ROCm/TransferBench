@@ -128,7 +128,7 @@ int main(int argc, char **argv)
 
     int localIdx    = (argc > 3 ? atoi(argv[3]) : 0);
     int remoteIdx   = (argc > 4 ? atoi(argv[4]) : 1);
-    int maxSubExecs = (argc > 5 ? atoi(argv[3]) : 32);
+    int maxSubExecs = (argc > 5 ? atoi(argv[5]) : 32);
 
     if (localIdx >= ev.numGpuDevices || remoteIdx >= ev.numGpuDevices)
     {
@@ -2281,9 +2281,17 @@ std::string Transfer::DstToStr() const
 
 void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const localIdx, int const remoteIdx, int const maxSubExecs)
 {
+  char memType = ev.useFineGrain ? 'F' : 'G';
   printf("Bytes to transfer: %lu Local GPU: %d Remote GPU: %d\n", numBytesPerTransfer, localIdx, remoteIdx);
-  printf("| #CUs | Local Read | LocalWrite | Local Copy | RemoteRead |Remote Write| RemoteCopy |\n");
-  printf("|------|------------|------------|------------|------------|------------|------------|\n");
+  printf("       | Local Read  | Local Write | Local Copy  | Remote Read | Remote Write| Remote Copy |\n");
+  printf("  #CUs |%c%02d->G%02d->N00|N00->G%02d->%c%02d|%c%02d->G%02d->%c%02d|%c%02d->G%02d->N00|N00->G%02d->%c%02d|%c%02d->G%02d->%c%02d|\n",
+	 memType, localIdx, localIdx,
+	 localIdx, memType, localIdx,
+	 memType, localIdx, localIdx, memType, localIdx,
+	 memType, remoteIdx, localIdx,
+	 localIdx, memType, remoteIdx,
+	 memType, localIdx, localIdx, memType, remoteIdx);
+  printf("|------|-------------|-------------|-------------|-------------|-------------|-------------|\n");
 
   std::vector<Transfer> transfers(1);
   Transfer& t   = transfers[0];
@@ -2372,7 +2380,7 @@ void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int
     ExecuteTransfers(ev, 0, 0, transfers, false);
     double const remoteCopy = (t.numBytesActual / 1.0E9) / t.transferTime * 1000.0f;
 
-    printf("|  %3d | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f |\n",
+    printf("   %3d   %11.3f   %11.3f   %11.3f   %11.3f   %11.3f   %11.3f  \n",
            numCUs, localRead, localWrite, localCopy, remoteRead, remoteWrite, remoteCopy);
   }
 }
