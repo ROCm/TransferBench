@@ -3,6 +3,15 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.41
+
+### Additions
+* Adding schmoo preset config benchmarks local/remote reads/writes/copies
+  * Usage: ./TransferBench schmoo <numBytes=64M> <localIdx=0> <remoteIdx=1> <maxNumCUs=32>
+
+### Fixes
+* Fixing some misreported timings when running with non-fixed number of iterations
+
 ## v1.40
 
 ### Fixes
