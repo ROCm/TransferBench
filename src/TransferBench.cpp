@@ -149,6 +149,32 @@ int main(int argc, char **argv)
       } while (curr < N * 2);
     }
   }
+  else if (!strcmp(argv[1], "rwrite"))
+  {
+    if (ev.numGpuDevices < 2)
+    {
+      printf("[ERROR] Remote write benchmark requires at least 2 GPUs\n");
+      exit(1);
+    }
+    ev.DisplayRemoteWriteEnvVars();
+
+    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 8);
+    int srcIdx      = (argc > 4 ? atoi(argv[4]) : 0);
+    int minGpus     = (argc > 5 ? atoi(argv[5]) : 1);
+    int maxGpus     = (argc > 6 ? atoi(argv[6]) : std::min(ev.numGpuDevices - 1, 3));
+
+    for (int N = 256; N <= (1<<27); N *= 2)
+    {
+      int delta = std::max(1, N / ev.samplingFactor);
+      int curr = (numBytesPerTransfer == 0) ? N : numBytesPerTransfer / sizeof(float);
+      do
+      {
+        RunRemoteWriteBenchmark(ev, curr * sizeof(float), numSubExecs, srcIdx, minGpus, maxGpus);
+        if (numBytesPerTransfer != 0) exit(0);
+        curr += delta;
+      } while (curr < N * 2);
+    }
+  }
   else if (!strcmp(argv[1], "cmdline"))
   {
     // Print environment variables and CSV header
@@ -2293,12 +2319,12 @@ void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int
   printf("Bytes to transfer: %lu Local GPU: %d Remote GPU: %d\n", numBytesPerTransfer, localIdx, remoteIdx);
   printf("       | Local Read  | Local Write | Local Copy  | Remote Read | Remote Write| Remote Copy |\n");
   printf("  #CUs |%c%02d->G%02d->N00|N00->G%02d->%c%02d|%c%02d->G%02d->%c%02d|%c%02d->G%02d->N00|N00->G%02d->%c%02d|%c%02d->G%02d->%c%02d|\n",
-	 memType, localIdx, localIdx,
-	 localIdx, memType, localIdx,
-	 memType, localIdx, localIdx, memType, localIdx,
-	 memType, remoteIdx, localIdx,
-	 localIdx, memType, remoteIdx,
-	 memType, localIdx, localIdx, memType, remoteIdx);
+         memType, localIdx, localIdx,
+         localIdx, memType, localIdx,
+         memType, localIdx, localIdx, memType, localIdx,
+         memType, remoteIdx, localIdx,
+         localIdx, memType, remoteIdx,
+         memType, localIdx, localIdx, memType, remoteIdx);
   printf("|------|-------------|-------------|-------------|-------------|-------------|-------------|\n");
 
   std::vector<Transfer> transfers(1);
@@ -2393,6 +2419,72 @@ void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int
   }
 }
 
+void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus)
+{
+  char memType = ev.useFineGrain ? 'F' : 'G';
+  printf("Bytes to write: %lu from GPU %d using %d CUs [Sweeping %d to %d parallel writes]\n", numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
+
+  for (int i = 0; i < ev.numGpuDevices; i++)
+  {
+    if (i == srcIdx) continue;
+    printf("   GPU %3d   ", i);
+  }
+  printf("\n");
+  for (int i = 0; i < ev.numGpuDevices-1; i++)
+  {
+    printf("-------------");
+  }
+  printf("\n");
+
+  for (int p = minGpus; p <= maxGpus; p++)
+  {
+    for (int bitmask = 0; bitmask < (1<<ev.numGpuDevices); bitmask++)
+    {
+      if (bitmask & (1<<srcIdx)) continue;
+      if (__builtin_popcount(bitmask) == p)
+      {
+        std::vector<Transfer> transfers;
+        for (int i = 0; i < ev.numGpuDevices; i++)
+        {
+          if (bitmask & (1<<i))
+          {
+            Transfer t;
+            t.dstType.resize(1);
+            t.dstIndex.resize(1);
+            t.exeType     = EXE_GPU_GFX;
+            t.exeIndex    = srcIdx;
+            t.exeSubIndex = -1;
+            t.numSubExecs = numSubExecs;
+            t.numBytes    = numBytesPerTransfer;
+            t.numSrcs     = 0;
+            t.numDsts     = 1;
+            t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+            t.dstIndex[0] = i;
+            transfers.push_back(t);
+          }
+        }
+        ExecuteTransfers(ev, 0, 0, transfers, false);
+
+        int counter = 0;
+        for (int i = 0; i < ev.numGpuDevices; i++)
+        {
+          if (bitmask & (1<<i))
+            printf("  %8.3f   ", transfers[counter++].transferBandwidth);
+          else if (i != srcIdx)
+            printf("             ");
+        }
+
+        for (auto i = 0; i < transfers.size(); i++)
+        {
+          printf(" (N0 G%d %c%d)", srcIdx, MemTypeStr[transfers[i].dstType[0]], transfers[i].dstIndex[0]);
+        }
+        printf("\n");
+      }
+    }
+    printf("\n");
+  }
+
+}
 
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExecs, int const numCpuSubExecs, bool const isRandom)
 {
