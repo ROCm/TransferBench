@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.44
+
+### Additions
+* Adding rwrite preset to benchmark remote parallel writes
+ * Usage: ./TransferBench rwrite <numBytes=64M> <#CUs=8> <srcGpu=0> <minGpus=1> <maxGpus=3>
+
 ## v1.43
 
 ### Changes

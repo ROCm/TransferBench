@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.43"
+#define TB_VERSION "1.44"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -41,7 +41,8 @@ enum ConfigModeEnum
   CFG_SWEEP  = 2,
   CFG_SCALE  = 3,
   CFG_A2A    = 4,
-  CFG_SCHMOO = 5
+  CFG_SCHMOO = 5,
+  CFG_RWRITE = 6
 };
 
 enum BlockOrderEnum
@@ -738,6 +739,17 @@ public:
     PRINT_EV("USE_FINE_GRAIN", useFineGrain,
              std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
   }
+
+  void DisplayRemoteWriteEnvVars() const
+  {
+    DisplayEnvVars();
+    if (hideEnv) return;
+    if (!outputToCsv)
+      printf("[Remote-Write Related]\n");
+    PRINT_EV("USE_FINE_GRAIN", useFineGrain,
+             std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
+  }
+
 
   // Helper function that gets parses environment variable or sets to default value
   static int GetEnvVar(std::string const& varname, int defaultValue)
