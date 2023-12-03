@@ -158,7 +158,7 @@ int main(int argc, char **argv)
     }
     ev.DisplayRemoteWriteEnvVars();
 
-    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 8);
+    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 4);
     int srcIdx      = (argc > 4 ? atoi(argv[4]) : 0);
     int minGpus     = (argc > 5 ? atoi(argv[5]) : 1);
     int maxGpus     = (argc > 6 ? atoi(argv[6]) : std::min(ev.numGpuDevices - 1, 3));
@@ -611,16 +611,26 @@ void ExecuteTransfers(EnvVars const& ev,
         transfer->executorBandwidth = exeBandwidthGbs;
         totalCUs += transfer->numSubExecs;
 
+        char exeSubIndexStr[32] = "";
+        if (ev.useXccFilter)
+        {
+          if (transfer->exeSubIndex == -1)
+            sprintf(exeSubIndexStr, ".*");
+          else
+            sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
+        }
+
         if (!verbose) continue;
         if (!ev.outputToCsv)
         {
-          printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
+          printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d%s:%03d -> %s\n",
                  transfer->transferIndex,
                  transfer->transferBandwidth,
                  transfer->transferTime,
                  transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
                  ExeTypeName[transfer->exeType], transfer->exeIndex,
+                 exeSubIndexStr,
                  transfer->numSubExecs,
                  transfer->DstToStr().c_str());
 
@@ -668,10 +678,10 @@ void ExecuteTransfers(EnvVars const& ev,
         }
         else
         {
-          printf("%d,%d,%lu,%s,%c%02d,%s,%d,%.3f,%.3f,%s,%s\n",
+          printf("%d,%d,%lu,%s,%c%02d%s,%s,%d,%.3f,%.3f,%s,%s\n",
                  testNum, transfer->transferIndex, transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
-                 MemTypeStr[transfer->exeType], transfer->exeIndex,
+                 MemTypeStr[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
                  transfer->DstToStr().c_str(),
                  transfer->numSubExecs,
                  transfer->transferBandwidth, transfer->transferTime,
@@ -699,14 +709,24 @@ void ExecuteTransfers(EnvVars const& ev,
       transfer->executorBandwidth = transfer->transferBandwidth;
       maxGpuTime = std::max(maxGpuTime, transfer->transferTime);
       if (!verbose) continue;
+
+      char exeSubIndexStr[32] = "";
+      if (ev.useXccFilter)
+      {
+        if (transfer->exeSubIndex == -1)
+          sprintf(exeSubIndexStr, ".*");
+        else
+          sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
+      }
+
       if (!ev.outputToCsv)
       {
-        printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
+        printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d%s:%03d -> %s\n",
                transfer->transferIndex,
                transfer->transferBandwidth, transfer->transferTime,
                transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
-               ExeTypeName[transfer->exeType], transfer->exeIndex,
+               ExeTypeName[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
                transfer->numSubExecs,
                transfer->DstToStr().c_str());
 
@@ -753,10 +773,10 @@ void ExecuteTransfers(EnvVars const& ev,
       }
       else
       {
-        printf("%d,%d,%lu,%s,%s%02d,%s,%d,%.3f,%.3f,%s,%s\n",
+        printf("%d,%d,%lu,%s,%s%02d%s,%s,%d,%.3f,%.3f,%s,%s\n",
                testNum, transfer->transferIndex, transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
-               ExeTypeName[transfer->exeType], transfer->exeIndex,
+               ExeTypeName[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
                transfer->DstToStr().c_str(),
                transfer->numSubExecs,
                transfer->transferBandwidth, transfer->transferTime,
@@ -2424,17 +2444,22 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
   char memType = ev.useFineGrain ? 'F' : 'G';
   printf("Bytes to write: %lu from GPU %d using %d CUs [Sweeping %d to %d parallel writes]\n", numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
 
+  char sep = (ev.outputToCsv ? ',' : ' ');
+
   for (int i = 0; i < ev.numGpuDevices; i++)
   {
     if (i == srcIdx) continue;
-    printf("   GPU %3d   ", i);
+    printf("   GPU -%3d  %c", i, sep);
   }
   printf("\n");
-  for (int i = 0; i < ev.numGpuDevices-1; i++)
+  if (!ev.outputToCsv)
   {
-    printf("-------------");
+    for (int i = 0; i < ev.numGpuDevices-1; i++)
+    {
+      printf("-------------");
+    }
+    printf("\n");
   }
-  printf("\n");
 
   for (int p = minGpus; p <= maxGpus; p++)
   {
@@ -2469,11 +2494,12 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         for (int i = 0; i < ev.numGpuDevices; i++)
         {
           if (bitmask & (1<<i))
-            printf("  %8.3f   ", transfers[counter++].transferBandwidth);
+            printf("  %8.3f  %c", transfers[counter++].transferBandwidth, sep);
           else if (i != srcIdx)
-            printf("             ");
+            printf("            %c", sep);
         }
 
+        printf(" %d %d", p, numSubExecs);
         for (auto i = 0; i < transfers.size(); i++)
         {
           printf(" (N0 G%d %c%d)", srcIdx, MemTypeStr[transfers[i].dstType[0]], transfers[i].dstIndex[0]);
