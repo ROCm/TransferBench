@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.44"
+#define TB_VERSION "1.45"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -93,8 +93,10 @@ public:
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
   int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
   int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
+  int useSingleTeam;     // Team all subExecutors across the data array
   int useXccFilter;      // Use XCC filtering (experimental)
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
+  int waveOrder;         // GFX-kernel wavefront ordering
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
@@ -126,7 +128,8 @@ public:
 
   // Developer features
   int enableDebug;       // Enable debug output
-  int gpuKernel;         // Which GPU kernel to use
+  int gfxKernel;         // Which GPU kernel to use
+  int gfxUnroll;         // GFX executor kernel unroll factor
 
   // Used to track current configuration mode
   ConfigModeEnum configMode;
@@ -167,12 +170,12 @@ public:
 
     // Different hardware pick different GPU kernels
     // This performance difference is generally only noticable when executing fewer CUs
-    int defaultGpuKernel = 0;
-    if      (archName == "gfx906") defaultGpuKernel = 13;
-    else if (archName == "gfx90a") defaultGpuKernel = 9;
-    else if (archName == "gfx940") defaultGpuKernel = 6;
-    else if (archName == "gfx941") defaultGpuKernel = 6;
-    else if (archName == "gfx942") defaultGpuKernel = 3;
+    int defaultGfxUnroll = 4;
+    if      (archName == "gfx906") defaultGfxUnroll = 13;
+    else if (archName == "gfx90a") defaultGfxUnroll = 9;
+    else if (archName == "gfx940") defaultGfxUnroll = 6;
+    else if (archName == "gfx941") defaultGfxUnroll = 6;
+    else if (archName == "gfx942") defaultGfxUnroll = 3;
 
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockSize         = GetEnvVar("BLOCK_SIZE"          , 256);
@@ -193,10 +196,13 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
+    useSingleTeam     = GetEnvVar("USE_SINGLE_TEAM"     , 0);
     useXccFilter      = GetEnvVar("USE_XCC_FILTER"      , 0);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
+    waveOrder         = GetEnvVar("WAVE_ORDER"          , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
-    gpuKernel         = GetEnvVar("GPU_KERNEL"          , defaultGpuKernel);
+    gfxKernel         = GetEnvVar("GFX_KERNEL"          , 0);
+    gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -494,9 +500,9 @@ public:
         exit(1);
       }
     }
-    if (gpuKernel < 0 || gpuKernel > NUM_GPU_KERNELS)
+    if (gfxUnroll < 1 || gfxUnroll > MAX_UNROLL)
     {
-      printf("[ERROR] GPU kernel must be between 0 and %d\n", NUM_GPU_KERNELS);
+      printf("[ERROR] GFX kernel unroll factor must be between 1 and %d\n", MAX_UNROLL);
       exit(1);
     }
 
@@ -607,8 +613,8 @@ public:
              (cuMask.size() ? GetCuMaskDesc() : "All"));
     PRINT_EV("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
              (fillPattern.size() ? std::string(getenv("FILL_PATTERN")) : PrepSrcValueString()));
-    PRINT_EV("GPU_KERNEL", gpuKernel,
-             std::string("Using GPU kernel ") + std::to_string(gpuKernel) + " [" + std::string(GpuKernelNames[gpuKernel]) + "]");
+    PRINT_EV("GFX_UNROLL", gfxUnroll,
+             std::string("Using GPU unroll factor of ") + std::to_string(gfxUnroll));
     PRINT_EV("NUM_CPU_DEVICES", numCpuDevices,
              std::string("Using ") + std::to_string(numCpuDevices) + " CPU devices");
     PRINT_EV("NUM_GPU_DEVICES", numGpuDevices,

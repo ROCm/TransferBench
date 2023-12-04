@@ -1459,12 +1459,25 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, ev.blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(GpuKernelTable[ev.gpuKernel],
-                          dim3(numXCCs, numBlocksToRun, 1),
-                          dim3(ev.blockSize, 1, 1),
-                          ev.sharedMemBytes, stream,
-                          startEvent, stopEvent,
-                          0, transfer->subExecParamGpuPtr);
+    switch (ev.gfxKernel)
+    {
+    case 3:
+      hipExtLaunchKernelGGL(GpuKernel3Table[ev.blockSize/warpSize - 1][ev.gfxUnroll - 1],
+                            dim3(numXCCs, numBlocksToRun, 1),
+                            dim3(ev.blockSize, 1, 1),
+                            ev.sharedMemBytes, stream,
+                            startEvent, stopEvent,
+                            0, transfer->subExecParamGpuPtr, ev.waveOrder);
+      break;
+    default:
+      hipExtLaunchKernelGGL(GpuKernel1Table[ev.gfxUnroll],
+                            dim3(numXCCs, numBlocksToRun, 1),
+                            dim3(ev.blockSize, 1, 1),
+                            ev.sharedMemBytes, stream,
+                            startEvent, stopEvent,
+                            0, transfer->subExecParamGpuPtr);
+      break;
+    }
 #endif
     // Synchronize per iteration, unless in single sync mode, in which case
     // synchronize during last warmup / last actual iteration
@@ -2086,21 +2099,34 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
   size_t assigned = 0;
   for (int i = 0; i < this->numSubExecs; ++i)
   {
-    int    const subExecLeft = std::max(0, maxSubExecToUse - i);
-    size_t const leftover    = N - assigned;
-    size_t const roundedN    = (leftover + targetMultiple - 1) / targetMultiple;
+    SubExecParam& p  = this->subExecParam[i];
+    p.numSrcs        = this->numSrcs;
+    p.numDsts        = this->numDsts;
 
-    SubExecParam& p = this->subExecParam[i];
-    p.N             = subExecLeft ? std::min(leftover, ((roundedN / subExecLeft) * targetMultiple)) : 0;
-    p.numSrcs       = this->numSrcs;
-    p.numDsts       = this->numDsts;
-    for (int iSrc = 0; iSrc < this->numSrcs; ++iSrc)
-      p.src[iSrc] = this->srcMem[iSrc] + assigned + initOffset;
-    for (int iDst = 0; iDst < this->numDsts; ++iDst)
-      p.dst[iDst] = this->dstMem[iDst] + assigned + initOffset;
+    if (ev.useSingleTeam)
+    {
+      p.N           = N;
+      p.teamSize    = this->numSubExecs;
+      p.teamIdx     = i;
+      for (int iSrc = 0; iSrc < this->numSrcs; ++iSrc) p.src[iSrc] = this->srcMem[iSrc] + initOffset;
+      for (int iDst = 0; iDst < this->numDsts; ++iDst) p.dst[iDst] = this->dstMem[iDst] + initOffset;
+    }
+    else
+    {
+      int    const subExecLeft = std::max(0, maxSubExecToUse - i);
+      size_t const leftover    = N - assigned;
+      size_t const roundedN    = (leftover + targetMultiple - 1) / targetMultiple;
+
+      p.N           = subExecLeft ? std::min(leftover, ((roundedN / subExecLeft) * targetMultiple)) : 0;
+      p.teamSize    = 1;
+      p.teamIdx     = 0;
+      for (int iSrc = 0; iSrc < this->numSrcs; ++iSrc) p.src[iSrc] = this->srcMem[iSrc] + initOffset + assigned;
+      for (int iDst = 0; iDst < this->numDsts; ++iDst) p.dst[iDst] = this->dstMem[iDst] + initOffset + assigned;
+
+      assigned += p.N;
+    }
 
     p.preferredXccId = -1;
-
     if (ev.useXccFilter && this->exeType == EXE_GPU_GFX)
     {
       std::uniform_int_distribution<int> distribution(0, ev.xccIdsPerDevice[this->exeIndex].size() - 1);
@@ -2129,7 +2155,6 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
 
     p.startCycle = 0;
     p.stopCycle  = 0;
-    assigned += p.N;
   }
 
   this->transferTime = 0.0;
