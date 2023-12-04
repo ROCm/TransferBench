@@ -57,9 +57,9 @@ class EnvVars
 {
 public:
   // Default configuration values
-  int const DEFAULT_NUM_WARMUPS          =  3;
-  int const DEFAULT_NUM_ITERATIONS       = 10;
-  int const DEFAULT_SAMPLING_FACTOR      =  1;
+  int const DEFAULT_NUM_WARMUPS       =  3;
+  int const DEFAULT_NUM_ITERATIONS    = 10;
+  int const DEFAULT_SAMPLING_FACTOR   =  1;
 
   // Peer-to-peer Benchmark preset defaults
   int const DEFAULT_P2P_NUM_CPU_SE    = 4;
@@ -75,11 +75,14 @@ public:
 
   // Environment variables
   int alwaysValidate;    // Validate after each iteration instead of once after all iterations
-  int blockSize;         // Size of each threadblock (must be multiple of 64)
-  int blockBytes;        // Each CU, except the last, gets a multiple of this many bytes to copy
+  int blockBytes;        // Each subexecutor, except the last, gets a multiple of this many bytes to copy
   int blockOrder;        // How blocks are ordered in single-stream mode (0=Sequential, 1=Interleaved, 2=Random)
   int byteOffset;        // Byte-offset for memory allocations
   int continueOnError;   // Continue tests even after mismatch detected
+  int gfxBlockSize;      // Size of each threadblock (must be multiple of 64)
+  int gfxSingleTeam;     // Team all subExecutors across the data array
+  int gfxUnroll;         // GFX-kernel unroll factor
+  int gfxWaveOrder;      // GFX-kernel wavefront ordering
   int hideEnv;           // Skip printing environment variable
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
@@ -93,10 +96,8 @@ public:
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
   int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
   int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
-  int useSingleTeam;     // Team all subExecutors across the data array
   int useXccFilter;      // Use XCC filtering (experimental)
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
-  int waveOrder;         // GFX-kernel wavefront ordering
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
@@ -128,8 +129,6 @@ public:
 
   // Developer features
   int enableDebug;       // Enable debug output
-  int gfxKernel;         // Which GPU kernel to use
-  int gfxUnroll;         // GFX executor kernel unroll factor
 
   // Used to track current configuration mode
   ConfigModeEnum configMode;
@@ -175,14 +174,17 @@ public:
     else if (archName == "gfx90a") defaultGfxUnroll = 9;
     else if (archName == "gfx940") defaultGfxUnroll = 6;
     else if (archName == "gfx941") defaultGfxUnroll = 6;
-    else if (archName == "gfx942") defaultGfxUnroll = 3;
+    else if (archName == "gfx942") defaultGfxUnroll = 4;
 
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
-    blockSize         = GetEnvVar("BLOCK_SIZE"          , 256);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     blockOrder        = GetEnvVar("BLOCK_ORDER"         , 0);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     continueOnError   = GetEnvVar("CONTINUE_ON_ERROR"   , 0);
+    gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
+    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
+    gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
+    gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
@@ -196,13 +198,9 @@ public:
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
-    useSingleTeam     = GetEnvVar("USE_SINGLE_TEAM"     , 0);
     useXccFilter      = GetEnvVar("USE_XCC_FILTER"      , 0);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
-    waveOrder         = GetEnvVar("WAVE_ORDER"          , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
-    gfxKernel         = GetEnvVar("GFX_KERNEL"          , 0);
-    gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -407,14 +405,14 @@ public:
       printf("[ERROR] Number of GPUs to use (%d) cannot exceed number of detected GPUs (%d)\n", numGpuDevices, numDetectedGpus);
       exit(1);
     }
-    if (blockSize % 64)
+    if (gfxBlockSize % 64)
     {
-      printf("[ERROR] BLOCK_SIZE (%d) must be a multiple of 64\n", blockSize);
+      printf("[ERROR] GFX_BLOCK_SIZE (%d) must be a multiple of 64\n", gfxBlockSize);
       exit(1);
     }
-    if (blockSize > MAX_BLOCKSIZE)
+    if (gfxBlockSize > MAX_BLOCKSIZE)
     {
-      printf("[ERROR] BLOCK_SIZE (%d) must be less than %d\n", blockSize, MAX_BLOCKSIZE);
+      printf("[ERROR] BLOCK_SIZE (%d) must be less than %d\n", gfxBlockSize, MAX_BLOCKSIZE);
       exit(1);
     }
     if (byteOffset % sizeof(float))
@@ -506,6 +504,12 @@ public:
       exit(1);
     }
 
+    if (gfxWaveOrder < 0 || gfxWaveOrder >= 6)
+    {
+      printf("[ERROR] GFX wave order must be between 0 and 5\n");
+      exit(1);
+    }
+
     // Determine how many CPUs exit per NUMA node (to avoid executing on NUMA without CPUs)
     numCpusPerNuma.resize(numDetectedCpus);
     int const totalCpus = numa_num_configured_cpus();
@@ -539,6 +543,12 @@ public:
       exit(1);
     }
 
+    if (getenv("GPU_KERNEL"))
+    {
+      printf("[WARN] GPU_KERNEL has been deprecated and replaced by GFX_KERNEL and GFX_UNROLL\n");
+      exit(1);
+    }
+
     char* enableSdma = getenv("HSA_ENABLE_SDMA");
     if (enableSdma && !strcmp(enableSdma, "0"))
     {
@@ -559,6 +569,9 @@ public:
     printf(" CONTINUE_ON_ERROR      - Continue tests even after mismatch detected\n");
     printf(" CU_MASK                - CU mask for streams specified in hex digits (0-0,a-f,A-F)\n");
     printf(" FILL_PATTERN=STR       - Fill input buffer with pattern specified in hex digits (0-9,a-f,A-F).  Must be even number of digits, (byte-level big-endian)\n");
+    printf(" GFX_UNROLL             - Unroll factor for GFX kernel (0=auto), must be less than %d\n", MAX_UNROLL);
+    printf(" GFX_SINGLE_TEAM        - Have subexecutors work together on full array instead of working on individual disjoint subarrays\n");
+    printf(" GFX_WAVE_ORDER         - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
     printf(" HIDE_ENV               - Hide environment variable value listing\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
@@ -595,10 +608,9 @@ public:
     else if (!hideEnv)
       printf("EnvVar,Value,Description,(TransferBench v%s)\n", TB_VERSION);
     if (hideEnv) return;
+
     PRINT_EV("ALWAYS_VALIDATE", alwaysValidate,
              std::string("Validating after ") + (alwaysValidate ? "each iteration" : "all iterations"));
-    PRINT_EV("BLOCK_SIZE", blockSize,
-             std::string("Threadblock size of " + std::to_string(blockSize)));
     PRINT_EV("BLOCK_BYTES", blockBytes,
              std::string("Each CU gets a multiple of " + std::to_string(blockBytes) + " bytes to copy"));
     PRINT_EV("BLOCK_ORDER", blockOrder,
@@ -613,8 +625,20 @@ public:
              (cuMask.size() ? GetCuMaskDesc() : "All"));
     PRINT_EV("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
              (fillPattern.size() ? std::string(getenv("FILL_PATTERN")) : PrepSrcValueString()));
+    PRINT_EV("GFX_BLOCK_SIZE", gfxBlockSize,
+             std::string("Threadblock size of " + std::to_string(gfxBlockSize)));
+    PRINT_EV("GFX_SINGLE_TEAM", gfxSingleTeam,
+             (gfxSingleTeam ? std::string("Combining CUs to work across entire data array") :
+                              std::string("Each CUs operates on its own disjoint subarray")));
     PRINT_EV("GFX_UNROLL", gfxUnroll,
-             std::string("Using GPU unroll factor of ") + std::to_string(gfxUnroll));
+             std::string("Using GFX unroll factor of ") + std::to_string(gfxUnroll));
+    PRINT_EV("GFX_WAVE_ORDER", gfxWaveOrder,
+             std::string("Using GFX wave ordering of ") + std::string((gfxWaveOrder == 0 ? "Unroll,Wavefront,CU" :
+                                                                       gfxWaveOrder == 1 ? "Unroll,CU,Wavefront" :
+                                                                       gfxWaveOrder == 2 ? "Wavefront,Unroll,CU" :
+                                                                       gfxWaveOrder == 3 ? "Wavefront,CU,Unroll" :
+                                                                       gfxWaveOrder == 4 ? "CU,Unroll,Wavefront" :
+                                                                                           "CU,Wavefront,Unroll")));
     PRINT_EV("NUM_CPU_DEVICES", numCpuDevices,
              std::string("Using ") + std::to_string(numCpuDevices) + " CPU devices");
     PRINT_EV("NUM_GPU_DEVICES", numGpuDevices,

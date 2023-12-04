@@ -1456,28 +1456,16 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
 #if defined(__NVCC__)
     HIP_CALL(hipEventRecord(startEvent, stream));
-    GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, ev.blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
+    GpuKernelTable[ev.gfxBlockSize/warpSize - 1][ev.gfxUnroll - 1]
+      <<<numBlocksToRun, ev.gfxBlockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr, ev.waveOrder);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
-    switch (ev.gfxKernel)
-    {
-    case 3:
-      hipExtLaunchKernelGGL(GpuKernel3Table[ev.blockSize/warpSize - 1][ev.gfxUnroll - 1],
-                            dim3(numXCCs, numBlocksToRun, 1),
-                            dim3(ev.blockSize, 1, 1),
-                            ev.sharedMemBytes, stream,
-                            startEvent, stopEvent,
-                            0, transfer->subExecParamGpuPtr, ev.waveOrder);
-      break;
-    default:
-      hipExtLaunchKernelGGL(GpuKernel1Table[ev.gfxUnroll],
-                            dim3(numXCCs, numBlocksToRun, 1),
-                            dim3(ev.blockSize, 1, 1),
-                            ev.sharedMemBytes, stream,
-                            startEvent, stopEvent,
-                            0, transfer->subExecParamGpuPtr);
-      break;
-    }
+    hipExtLaunchKernelGGL(GpuKernelTable[ev.gfxBlockSize/warpSize - 1][ev.gfxUnroll - 1],
+                          dim3(numXCCs, numBlocksToRun, 1),
+                          dim3(ev.gfxBlockSize, 1, 1),
+                          ev.sharedMemBytes, stream,
+                          startEvent, stopEvent,
+                          0, transfer->subExecParamGpuPtr, ev.gfxWaveOrder);
 #endif
     // Synchronize per iteration, unless in single sync mode, in which case
     // synchronize during last warmup / last actual iteration
@@ -2103,7 +2091,7 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
     p.numSrcs        = this->numSrcs;
     p.numDsts        = this->numDsts;
 
-    if (ev.useSingleTeam)
+    if (ev.gfxSingleTeam && this->exeType == EXE_GPU_GFX)
     {
       p.N           = N;
       p.teamSize    = this->numSubExecs;
@@ -2223,7 +2211,7 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
       int const deviceIdx = RemappedIndex(this->srcIndex[srcIdx], false);
       HIP_CALL(hipSetDevice(deviceIdx));
       if (ev.usePrepSrcKernel)
-        PrepSrcDataKernel<<<32, ev.blockSize>>>(srcPtr, N, srcIdx);
+        PrepSrcDataKernel<<<32, ev.gfxBlockSize>>>(srcPtr, N, srcIdx);
       else
         HIP_CALL(hipMemcpy(srcPtr, reference.data(), this->numBytesActual, hipMemcpyDefault));
       HIP_CALL(hipDeviceSynchronize());
@@ -2474,7 +2462,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
   for (int i = 0; i < ev.numGpuDevices; i++)
   {
     if (i == srcIdx) continue;
-    printf("   GPU -%3d  %c", i, sep);
+    printf("   GPU %-3d  %c", i, sep);
   }
   printf("\n");
   if (!ev.outputToCsv)
@@ -2532,9 +2520,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         printf("\n");
       }
     }
-    printf("\n");
   }
-
 }
 
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExecs, int const numCpuSubExecs, bool const isRandom)
