@@ -23,11 +23,15 @@ THE SOFTWARE.
 #pragma once
 
 #define PackedFloat_t   float4
-#define WARP_SIZE       64
 #define MAX_BLOCKSIZE   512
 #define FLOATS_PER_PACK (sizeof(PackedFloat_t) / sizeof(float))
 #define MEMSET_CHAR     75
 #define MEMSET_VAL      13323083.0f
+
+
+#define MAX_WAVEGROUPS  MAX_BLOCKSIZE / warpSize
+#define MAX_UNROLL      8
+#define NUM_WAVEORDERS  6
 
 // Each subExecutor is provided with subarrays to work on
 #define MAX_SRCS 16
@@ -41,6 +45,10 @@ struct SubExecParam
   float*    src[MAX_SRCS];                      // Source array pointers
   float*    dst[MAX_DSTS];                      // Destination array pointers
   uint32_t  preferredXccId;                     // XCC ID to execute on
+
+  // Prepared
+  int       teamSize;                           // Index of this sub executor amongst team
+  int       teamIdx;                            // Size of team this sub executor is part of
 
   // Outputs
   long long startCycle;                         // Start timestamp for in-kernel timing (GPU-GFX executor)
@@ -130,120 +138,130 @@ template <typename T> __device__ __forceinline__ T      MemsetVal();
 template <>           __device__ __forceinline__ float  MemsetVal(){ return MEMSET_VAL; };
 template <>           __device__ __forceinline__ float4 MemsetVal(){ return make_float4(MEMSET_VAL, MEMSET_VAL, MEMSET_VAL, MEMSET_VAL); }
 
-// GPU copy kernel 0: 3 loops: unroll float 4, float4s, floats
-template <int LOOP1_UNROLL>
-__global__ void __launch_bounds__(MAX_BLOCKSIZE)
-GpuReduceKernel(SubExecParam* params)
+template <int BLOCKSIZE, int UNROLL>
+__global__ void __launch_bounds__(BLOCKSIZE)
+  GpuReduceKernel(SubExecParam* params, int waveOrder)
 {
   int64_t startCycle;
   if (threadIdx.x == 0) startCycle = wall_clock64();
 
   SubExecParam& p = params[blockIdx.y];
 
-  // Filter by XCC if desired
-  int xccId;
+  // (Experimental) Filter by XCC if desired
+  int32_t xccId;
   GetXccId(xccId);
   if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
 
+  // Collect data information
+  int32_t const  numSrcs  = p.numSrcs;
+  int32_t const  numDsts  = p.numDsts;
+  float4  const* __restrict__ srcFloat4[MAX_SRCS];
+  float4*        __restrict__ dstFloat4[MAX_DSTS];
+  for (int i = 0; i < numSrcs; i++) srcFloat4[i] = (float4*)p.src[i];
+  for (int i = 0; i < numDsts; i++) dstFloat4[i] = (float4*)p.dst[i];
+
   // Operate on wavefront granularity
-  int const numSrcs  = p.numSrcs;
-  int const numDsts  = p.numDsts;
-  int const waveId   = threadIdx.x / WARP_SIZE; // Wavefront number
-  int const threadId = threadIdx.x % WARP_SIZE; // Thread index within wavefront
+  int32_t const nTeams   = p.teamSize;             // Number of threadblocks working together on this subarray
+  int32_t const teamIdx  = p.teamIdx;              // Index of this threadblock within the team
+  int32_t const nWaves   = BLOCKSIZE   / warpSize; // Number of wavefronts within this threadblock
+  int32_t const waveIdx  = threadIdx.x / warpSize; // Index of this wavefront within the threadblock
+  int32_t const tIdx     = threadIdx.x % warpSize; // Thread index within wavefront
 
-  // 1st loop - each wavefront operates on LOOP1_UNROLL x FLOATS_PER_PACK per thread per iteration
-  // Determine the number of packed floats processed by the first loop
-  size_t       Nrem        = p.N;
-  size_t const loop1Npack  = (Nrem / (FLOATS_PER_PACK * LOOP1_UNROLL * WARP_SIZE)) * (LOOP1_UNROLL * WARP_SIZE);
-  size_t const loop1Nelem  = loop1Npack * FLOATS_PER_PACK;
-  size_t const loop1Inc    = blockDim.x * LOOP1_UNROLL;
-  size_t       loop1Offset = waveId * LOOP1_UNROLL * WARP_SIZE + threadId;
+  size_t  const numFloat4 = p.N / 4;
+  int32_t const nFlt4PerWave = warpSize * 4;
 
-  while (loop1Offset < loop1Npack)
+  int32_t teamStride, waveStride, unrlStride, teamStride2, waveStride2;
+  switch (waveOrder)
   {
-    PackedFloat_t vals[LOOP1_UNROLL] = {};
+  case 0: /* U,W,C */ unrlStride = 1; waveStride = UNROLL; teamStride = UNROLL * nWaves;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+  case 1: /* U,C,W */ unrlStride = 1; teamStride = UNROLL; waveStride = UNROLL * nTeams;  teamStride2 = 1;      waveStride2 = nTeams; break;
+  case 2: /* W,U,C */ waveStride = 1; unrlStride = nWaves; teamStride = nWaves * UNROLL;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+  case 3: /* W,C,U */ waveStride = 1; teamStride = nWaves; unrlStride = nWaves * nTeams;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+  case 4: /* C,U,W */ teamStride = 1; unrlStride = nTeams; waveStride = nTeams * UNROLL;  teamStride2 = 1;      waveStride2 = nTeams; break;
+  case 5: /* C,W,U */ teamStride = 1; waveStride = nTeams; unrlStride = nTeams * nWaves;  teamStride2 = 1;      waveStride2 = nTeams; break;
+  }
 
+  // First loop: Each wavefront in the team works on UNROLL float4s per thread
+  size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
+  size_t const loop1Limit  = numFloat4 / loop1Stride * loop1Stride;
+  {
+    float4 val[UNROLL];
     if (numSrcs == 0)
     {
       #pragma unroll
-      for (int u = 0; u < LOOP1_UNROLL; ++u) vals[u] = MemsetVal<float4>();
+      for (int u = 0; u < UNROLL; u++)
+        val[u] = MemsetVal<float4>();
     }
-    else
+
+    for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride)
     {
-      for (int i = 0; i < numSrcs; ++i)
+      // Read sources into memory and accumulate in registers
+      if (numSrcs)
       {
-        PackedFloat_t const* __restrict__ packedSrc = (PackedFloat_t const*)(p.src[i]) + loop1Offset;
+        for (int u = 0; u < UNROLL; u++)
+          val[u] = srcFloat4[0][idx + u * unrlStride * warpSize];
+        for (int s = 1; s < numSrcs; s++)
+          for (int u = 0; u < UNROLL; u++)
+            val[u] += srcFloat4[s][idx + u * unrlStride * warpSize];
+      }
+
+      // Write accumulation to all outputs
+      for (int d = 0; d < numDsts; d++)
+      {
         #pragma unroll
-        for (int u = 0; u < LOOP1_UNROLL; ++u)
-          vals[u] += *(packedSrc + u * WARP_SIZE);
+        for (int u = 0; u < UNROLL; u++)
+          dstFloat4[d][idx + u * unrlStride * warpSize] = val[u];
       }
     }
-
-    for (int i = 0; i < numDsts; ++i)
-    {
-      PackedFloat_t* __restrict__ packedDst = (PackedFloat_t*)(p.dst[i]) + loop1Offset;
-      #pragma unroll
-      for (int u = 0; u < LOOP1_UNROLL; ++u) *(packedDst + u * WARP_SIZE) = vals[u];
-    }
-    loop1Offset += loop1Inc;
   }
-  Nrem -= loop1Nelem;
 
-  if (Nrem > 0)
+  // Second loop: Deal with remaining float4s
   {
-    // 2nd loop - Each thread operates on FLOATS_PER_PACK per iteration
-    // NOTE: Using int32_t due to smaller size requirements
-    int32_t const loop2Npack  = Nrem / FLOATS_PER_PACK;
-    int32_t const loop2Nelem  = loop2Npack * FLOATS_PER_PACK;
-    int32_t const loop2Inc    = blockDim.x;
-    int32_t       loop2Offset = threadIdx.x;
-
-    while (loop2Offset < loop2Npack)
+    if (loop1Limit < numFloat4)
     {
-      PackedFloat_t val;
-      if (numSrcs == 0)
+      float4 val;
+      if (numSrcs == 0) val = MemsetVal<float4>();
+
+      size_t const loop2Stride = nTeams * nWaves * warpSize;
+      for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < numFloat4; idx += loop2Stride)
       {
-        val = MemsetVal<float4>();
-      }
-      else
-      {
-        val = {};
-        for (int i = 0; i < numSrcs; ++i)
+        if (numSrcs)
         {
-          PackedFloat_t const* __restrict__ packedSrc = (PackedFloat_t const*)(p.src[i] + loop1Nelem) + loop2Offset;
-          val += *packedSrc;
+          val = srcFloat4[0][idx];
+          for (int s = 1; s < numSrcs; s++)
+            val += srcFloat4[s][idx];
         }
-      }
 
-      for (int i = 0; i < numDsts; ++i)
-      {
-        PackedFloat_t* __restrict__ packedDst = (PackedFloat_t*)(p.dst[i] + loop1Nelem) + loop2Offset;
-        *packedDst = val;
+        for (int d = 0; d < numDsts; d++)
+          dstFloat4[d][idx] = val;
       }
-      loop2Offset += loop2Inc;
-    }
-    Nrem -= loop2Nelem;
-
-    // Deal with leftovers less than FLOATS_PER_PACK)
-    if (threadIdx.x < Nrem)
-    {
-      int offset = loop1Nelem + loop2Nelem + threadIdx.x;
-      float val = 0;
-      if (numSrcs == 0)
-      {
-        val = MEMSET_VAL;
-      }
-      else
-      {
-        for (int i = 0; i < numSrcs; ++i)
-          val += p.src[i][offset];
-      }
-
-      for (int i = 0; i < numDsts; ++i)
-        p.dst[i][offset] = val;
     }
   }
 
+  // Third loop; Deal with remaining floats
+  {
+    if (numFloat4 * 4 < p.N)
+    {
+      float val;
+      if (numSrcs == 0) val = MemsetVal<float>();
+
+      size_t const loop3Stride = nTeams * nWaves * warpSize;
+      for( size_t idx = numFloat4 * 4 + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride)
+      {
+        if (numSrcs)
+        {
+          val = p.src[0][idx];
+          for (int s = 1; s < numSrcs; s++)
+            val += p.src[s][idx];
+        }
+
+        for (int d = 0; d < numDsts; d++)
+          p.dst[d][idx] = val;
+      }
+    }
+  }
+
+  // Wait for all threads to finish
   __syncthreads();
   if (threadIdx.x == 0)
   {
@@ -255,196 +273,26 @@ GpuReduceKernel(SubExecParam* params)
   }
 }
 
-template <typename FLOAT_TYPE, int UNROLL_FACTOR>
-__device__ size_t GpuReduceFuncImpl2(SubExecParam const &p, size_t const offset, size_t const N)
+typedef void (*GpuKernelFuncPtr)(SubExecParam*, int);
+
+#define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE) \
+  {GpuReduceKernel<BLOCKSIZE, 1>,  \
+   GpuReduceKernel<BLOCKSIZE, 2>,  \
+   GpuReduceKernel<BLOCKSIZE, 3>,  \
+   GpuReduceKernel<BLOCKSIZE, 4>,  \
+   GpuReduceKernel<BLOCKSIZE, 5>,  \
+   GpuReduceKernel<BLOCKSIZE, 6>,  \
+   GpuReduceKernel<BLOCKSIZE, 7>,  \
+   GpuReduceKernel<BLOCKSIZE, 8>}
+
+GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL] =
 {
-  int    constexpr numFloatsPerPack = sizeof(FLOAT_TYPE) / sizeof(float); // Number of floats handled at a time per thread
-  size_t constexpr loopPackInc      = blockDim.x * UNROLL_FACTOR;
-  size_t constexpr numPacksPerWave  = WARP_SIZE * UNROLL_FACTOR;
-  int    const     waveId           = threadIdx.x / WARP_SIZE;            // Wavefront number
-  int    const     threadId         = threadIdx.x % WARP_SIZE;            // Thread index within wavefront
-  int    const     numSrcs          = p.numSrcs;
-  int    const     numDsts          = p.numDsts;
-  size_t const     numPacksDone     = (numFloatsPerPack == 1 && UNROLL_FACTOR == 1) ? N : (N / (FLOATS_PER_PACK * numPacksPerWave)) * numPacksPerWave;
-  size_t const     numFloatsLeft    = N - numPacksDone * numFloatsPerPack;
-  size_t           loopPackOffset   = waveId * numPacksPerWave + threadId;
-
-  while (loopPackOffset < numPacksDone)
-  {
-    FLOAT_TYPE vals[UNROLL_FACTOR];
-
-    if (numSrcs == 0)
-    {
-      #pragma unroll UNROLL_FACTOR
-      for (int u = 0; u < UNROLL_FACTOR; ++u) vals[u] = MemsetVal<FLOAT_TYPE>();
-    }
-    else
-    {
-      FLOAT_TYPE const* __restrict__ src0Ptr = ((FLOAT_TYPE const*)(p.src[0] + offset)) + loopPackOffset;
-      #pragma unroll UNROLL_FACTOR
-      for (int u = 0; u < UNROLL_FACTOR; ++u)
-        vals[u] = *(src0Ptr + u * WARP_SIZE);
-
-      for (int i = 1; i < numSrcs; ++i)
-      {
-        FLOAT_TYPE const* __restrict__ srcPtr = ((FLOAT_TYPE const*)(p.src[i] + offset)) + loopPackOffset;
-
-        #pragma unroll UNROLL_FACTOR
-        for (int u = 0; u < UNROLL_FACTOR; ++u)
-          vals[u] += *(srcPtr + u * WARP_SIZE);
-      }
-    }
-
-    for (int i = 0; i < numDsts; ++i)
-    {
-      FLOAT_TYPE* __restrict__ dstPtr = (FLOAT_TYPE*)(p.dst[i + offset]) + loopPackOffset;
-      #pragma unroll UNROLL_FACTOR
-      for (int u = 0; u < UNROLL_FACTOR; ++u)
-        *(dstPtr + u * WARP_SIZE) = vals[u];
-    }
-    loopPackOffset += loopPackInc;
-  }
-
-  return numFloatsLeft;
-}
-
-template <typename FLOAT_TYPE, int UNROLL_FACTOR>
-__device__ size_t GpuReduceFuncImpl(SubExecParam const &p, size_t const offset, size_t const N)
-{
-  // Each thread in the block works on UNROLL_FACTOR FLOAT_TYPEs during each iteration of the loop
-  int    constexpr numFloatsPerRead      = sizeof(FLOAT_TYPE) / sizeof(float);
-  size_t const     numFloatsPerInnerLoop = blockDim.x * numFloatsPerRead;
-  size_t const     numFloatsPerOuterLoop = numFloatsPerInnerLoop * UNROLL_FACTOR;
-  size_t const     numFloatsLeft         = (numFloatsPerRead == 1 && UNROLL_FACTOR == 1) ? 0 : N % numFloatsPerOuterLoop;
-  size_t const     numFloatsDone         = N - numFloatsLeft;
-  int    const     numSrcs               = p.numSrcs;
-  int    const     numDsts               = p.numDsts;
-
-  for (size_t idx = threadIdx.x * numFloatsPerRead; idx < numFloatsDone; idx += numFloatsPerOuterLoop)
-  {
-    FLOAT_TYPE tmp[UNROLL_FACTOR];
-
-    if (numSrcs == 0)
-    {
-        #pragma unroll UNROLL_FACTOR
-        for (int u = 0; u < UNROLL_FACTOR; ++u)
-          tmp[u] = MemsetVal<FLOAT_TYPE>();
-    }
-    else
-    {
-      #pragma unroll UNROLL_FACTOR
-      for (int u = 0; u < UNROLL_FACTOR; ++u)
-        tmp[u] = *((FLOAT_TYPE*)(&p.src[0][offset + idx + u * numFloatsPerInnerLoop]));
-
-      for (int i = 1; i < numSrcs; ++i)
-      {
-        #pragma unroll UNROLL_FACTOR
-        for (int u = 0; u < UNROLL_FACTOR; ++u)
-          tmp[u] += *((FLOAT_TYPE*)(&p.src[i][offset + idx + u * numFloatsPerInnerLoop]));
-      }
-    }
-
-    for (int i = 0; i < numDsts; ++i)
-    {
-      for (int u = 0; u < UNROLL_FACTOR; ++u)
-      {
-        *((FLOAT_TYPE*)(&p.dst[i][offset + idx + u * numFloatsPerInnerLoop])) = tmp[u];
-      }
-    }
-  }
-  return numFloatsLeft;
-}
-
-template <typename FLOAT_TYPE>
-__device__ size_t GpuReduceFunc(SubExecParam const &p, size_t const offset, size_t const N, int const unroll)
-{
-  switch (unroll)
-  {
-  case  1: return GpuReduceFuncImpl<FLOAT_TYPE,  1>(p, offset, N);
-  case  2: return GpuReduceFuncImpl<FLOAT_TYPE,  2>(p, offset, N);
-  case  3: return GpuReduceFuncImpl<FLOAT_TYPE,  3>(p, offset, N);
-  case  4: return GpuReduceFuncImpl<FLOAT_TYPE,  4>(p, offset, N);
-  case  5: return GpuReduceFuncImpl<FLOAT_TYPE,  5>(p, offset, N);
-  case  6: return GpuReduceFuncImpl<FLOAT_TYPE,  6>(p, offset, N);
-  case  7: return GpuReduceFuncImpl<FLOAT_TYPE,  7>(p, offset, N);
-  case  8: return GpuReduceFuncImpl<FLOAT_TYPE,  8>(p, offset, N);
-  case  9: return GpuReduceFuncImpl<FLOAT_TYPE,  9>(p, offset, N);
-  case 10: return GpuReduceFuncImpl<FLOAT_TYPE, 10>(p, offset, N);
-  case 11: return GpuReduceFuncImpl<FLOAT_TYPE, 11>(p, offset, N);
-  case 12: return GpuReduceFuncImpl<FLOAT_TYPE, 12>(p, offset, N);
-  case 13: return GpuReduceFuncImpl<FLOAT_TYPE, 13>(p, offset, N);
-  case 14: return GpuReduceFuncImpl<FLOAT_TYPE, 14>(p, offset, N);
-  case 15: return GpuReduceFuncImpl<FLOAT_TYPE, 15>(p, offset, N);
-  case 16: return GpuReduceFuncImpl<FLOAT_TYPE, 16>(p, offset, N);
-  default: return GpuReduceFuncImpl<FLOAT_TYPE,  1>(p, offset, N);
-  }
-}
-
-// GPU copy kernel
-__global__ void __launch_bounds__(MAX_BLOCKSIZE)
-GpuReduceKernel2(SubExecParam* params)
-{
-  int64_t startCycle = wall_clock64();
-  SubExecParam& p = params[blockIdx.y];
-
-  size_t numFloatsLeft = GpuReduceFunc<float4>(p, 0, p.N, 8);
-  if (numFloatsLeft)
-    numFloatsLeft = GpuReduceFunc<float4>(p, p.N - numFloatsLeft, numFloatsLeft, 1);
-
-  if (numFloatsLeft)
-  GpuReduceFunc<float>(p, p.N - numFloatsLeft, numFloatsLeft, 1);
-
-  __threadfence_system();
-  if (threadIdx.x == 0)
-  {
-    p.startCycle = startCycle;
-    p.stopCycle  = wall_clock64();
-  }
-}
-
-#define NUM_GPU_KERNELS 18
-typedef void (*GpuKernelFuncPtr)(SubExecParam*);
-
-GpuKernelFuncPtr GpuKernelTable[NUM_GPU_KERNELS] =
-{
-  GpuReduceKernel<8>,
-  GpuReduceKernel<1>,
-  GpuReduceKernel<2>,
-  GpuReduceKernel<3>,
-  GpuReduceKernel<4>,
-  GpuReduceKernel<5>,
-  GpuReduceKernel<6>,
-  GpuReduceKernel<7>,
-  GpuReduceKernel<8>,
-  GpuReduceKernel<9>,
-  GpuReduceKernel<10>,
-  GpuReduceKernel<11>,
-  GpuReduceKernel<12>,
-  GpuReduceKernel<13>,
-  GpuReduceKernel<14>,
-  GpuReduceKernel<15>,
-  GpuReduceKernel<16>,
-  GpuReduceKernel2
-};
-
-std::string GpuKernelNames[NUM_GPU_KERNELS] =
-{
-  "Default - 8xUnroll",
-  "Unroll x1",
-  "Unroll x2",
-  "Unroll x3",
-  "Unroll x4",
-  "Unroll x5",
-  "Unroll x6",
-  "Unroll x7",
-  "Unroll x8",
-  "Unroll x9",
-  "Unroll x10",
-  "Unroll x11",
-  "Unroll x12",
-  "Unroll x13",
-  "Unroll x14",
-  "Unroll x15",
-  "Unroll x16",
-  "8xUnrollB",
+  GPU_KERNEL_UNROLL_DECL(64),
+  GPU_KERNEL_UNROLL_DECL(128),
+  GPU_KERNEL_UNROLL_DECL(192),
+  GPU_KERNEL_UNROLL_DECL(256),
+  GPU_KERNEL_UNROLL_DECL(320),
+  GPU_KERNEL_UNROLL_DECL(384),
+  GPU_KERNEL_UNROLL_DECL(448),
+  GPU_KERNEL_UNROLL_DECL(512)
 };

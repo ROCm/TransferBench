@@ -3,6 +3,16 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.45
+
+### Additions
+* Adding A2A_MODE to a2a preset (0 = copy, 1 = read-only, 2 = write-only)
+* Adding GFX_UNROLL to modify GFX kernel's unroll factor
+* Adding GFX_WAVE_ORDER to modify order in which wavefronts process data
+
+### Modifications
+* Rewrote the GFX reduction kernel to support new wave ordering
+
 ## v1.44
 
 ### Additions

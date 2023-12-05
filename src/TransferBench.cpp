@@ -158,7 +158,7 @@ int main(int argc, char **argv)
     }
     ev.DisplayRemoteWriteEnvVars();
 
-    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 8);
+    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 4);
     int srcIdx      = (argc > 4 ? atoi(argv[4]) : 0);
     int minGpus     = (argc > 5 ? atoi(argv[5]) : 1);
     int maxGpus     = (argc > 6 ? atoi(argv[6]) : std::min(ev.numGpuDevices - 1, 3));
@@ -611,16 +611,26 @@ void ExecuteTransfers(EnvVars const& ev,
         transfer->executorBandwidth = exeBandwidthGbs;
         totalCUs += transfer->numSubExecs;
 
+        char exeSubIndexStr[32] = "";
+        if (ev.useXccFilter)
+        {
+          if (transfer->exeSubIndex == -1)
+            sprintf(exeSubIndexStr, ".*");
+          else
+            sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
+        }
+
         if (!verbose) continue;
         if (!ev.outputToCsv)
         {
-          printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
+          printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d%s:%03d -> %s\n",
                  transfer->transferIndex,
                  transfer->transferBandwidth,
                  transfer->transferTime,
                  transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
                  ExeTypeName[transfer->exeType], transfer->exeIndex,
+                 exeSubIndexStr,
                  transfer->numSubExecs,
                  transfer->DstToStr().c_str());
 
@@ -668,10 +678,10 @@ void ExecuteTransfers(EnvVars const& ev,
         }
         else
         {
-          printf("%d,%d,%lu,%s,%c%02d,%s,%d,%.3f,%.3f,%s,%s\n",
+          printf("%d,%d,%lu,%s,%c%02d%s,%s,%d,%.3f,%.3f,%s,%s\n",
                  testNum, transfer->transferIndex, transfer->numBytesActual,
                  transfer->SrcToStr().c_str(),
-                 MemTypeStr[transfer->exeType], transfer->exeIndex,
+                 MemTypeStr[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
                  transfer->DstToStr().c_str(),
                  transfer->numSubExecs,
                  transfer->transferBandwidth, transfer->transferTime,
@@ -699,14 +709,24 @@ void ExecuteTransfers(EnvVars const& ev,
       transfer->executorBandwidth = transfer->transferBandwidth;
       maxGpuTime = std::max(maxGpuTime, transfer->transferTime);
       if (!verbose) continue;
+
+      char exeSubIndexStr[32] = "";
+      if (ev.useXccFilter)
+      {
+        if (transfer->exeSubIndex == -1)
+          sprintf(exeSubIndexStr, ".*");
+        else
+          sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
+      }
+
       if (!ev.outputToCsv)
       {
-        printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d:%03d -> %s\n",
+        printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d%s:%03d -> %s\n",
                transfer->transferIndex,
                transfer->transferBandwidth, transfer->transferTime,
                transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
-               ExeTypeName[transfer->exeType], transfer->exeIndex,
+               ExeTypeName[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
                transfer->numSubExecs,
                transfer->DstToStr().c_str());
 
@@ -753,10 +773,10 @@ void ExecuteTransfers(EnvVars const& ev,
       }
       else
       {
-        printf("%d,%d,%lu,%s,%s%02d,%s,%d,%.3f,%.3f,%s,%s\n",
+        printf("%d,%d,%lu,%s,%s%02d%s,%s,%d,%.3f,%.3f,%s,%s\n",
                testNum, transfer->transferIndex, transfer->numBytesActual,
                transfer->SrcToStr().c_str(),
-               ExeTypeName[transfer->exeType], transfer->exeIndex,
+               ExeTypeName[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
                transfer->DstToStr().c_str(),
                transfer->numSubExecs,
                transfer->transferBandwidth, transfer->transferTime,
@@ -1436,15 +1456,16 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
 #if defined(__NVCC__)
     HIP_CALL(hipEventRecord(startEvent, stream));
-    GpuKernelTable[ev.gpuKernel]<<<numBlocksToRun, ev.blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr);
+    GpuKernelTable[ev.gfxBlockSize/warpSize - 1][ev.gfxUnroll - 1]
+      <<<numBlocksToRun, ev.gfxBlockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr, ev.waveOrder);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(GpuKernelTable[ev.gpuKernel],
+    hipExtLaunchKernelGGL(GpuKernelTable[ev.gfxBlockSize/warpSize - 1][ev.gfxUnroll - 1],
                           dim3(numXCCs, numBlocksToRun, 1),
-                          dim3(ev.blockSize, 1, 1),
+                          dim3(ev.gfxBlockSize, 1, 1),
                           ev.sharedMemBytes, stream,
                           startEvent, stopEvent,
-                          0, transfer->subExecParamGpuPtr);
+                          0, transfer->subExecParamGpuPtr, ev.gfxWaveOrder);
 #endif
     // Synchronize per iteration, unless in single sync mode, in which case
     // synchronize during last warmup / last actual iteration
@@ -1947,8 +1968,8 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   Transfer transfer;
   transfer.numBytes    = numBytesPerTransfer;
   transfer.numSubExecs = numSubExecs;
-  transfer.numSrcs     = 1;
-  transfer.numDsts     = 1;
+  transfer.numSrcs     = ev.a2aMode == 2 ? 0 : 1;
+  transfer.numDsts     = ev.a2aMode == 1 ? 0 : 1;
   transfer.exeType     = EXE_GPU_GFX;
   transfer.exeSubIndex = -1;
   transfer.srcType.resize(1, ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
@@ -2066,21 +2087,34 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
   size_t assigned = 0;
   for (int i = 0; i < this->numSubExecs; ++i)
   {
-    int    const subExecLeft = std::max(0, maxSubExecToUse - i);
-    size_t const leftover    = N - assigned;
-    size_t const roundedN    = (leftover + targetMultiple - 1) / targetMultiple;
+    SubExecParam& p  = this->subExecParam[i];
+    p.numSrcs        = this->numSrcs;
+    p.numDsts        = this->numDsts;
 
-    SubExecParam& p = this->subExecParam[i];
-    p.N             = subExecLeft ? std::min(leftover, ((roundedN / subExecLeft) * targetMultiple)) : 0;
-    p.numSrcs       = this->numSrcs;
-    p.numDsts       = this->numDsts;
-    for (int iSrc = 0; iSrc < this->numSrcs; ++iSrc)
-      p.src[iSrc] = this->srcMem[iSrc] + assigned + initOffset;
-    for (int iDst = 0; iDst < this->numDsts; ++iDst)
-      p.dst[iDst] = this->dstMem[iDst] + assigned + initOffset;
+    if (ev.gfxSingleTeam && this->exeType == EXE_GPU_GFX)
+    {
+      p.N           = N;
+      p.teamSize    = this->numSubExecs;
+      p.teamIdx     = i;
+      for (int iSrc = 0; iSrc < this->numSrcs; ++iSrc) p.src[iSrc] = this->srcMem[iSrc] + initOffset;
+      for (int iDst = 0; iDst < this->numDsts; ++iDst) p.dst[iDst] = this->dstMem[iDst] + initOffset;
+    }
+    else
+    {
+      int    const subExecLeft = std::max(0, maxSubExecToUse - i);
+      size_t const leftover    = N - assigned;
+      size_t const roundedN    = (leftover + targetMultiple - 1) / targetMultiple;
+
+      p.N           = subExecLeft ? std::min(leftover, ((roundedN / subExecLeft) * targetMultiple)) : 0;
+      p.teamSize    = 1;
+      p.teamIdx     = 0;
+      for (int iSrc = 0; iSrc < this->numSrcs; ++iSrc) p.src[iSrc] = this->srcMem[iSrc] + initOffset + assigned;
+      for (int iDst = 0; iDst < this->numDsts; ++iDst) p.dst[iDst] = this->dstMem[iDst] + initOffset + assigned;
+
+      assigned += p.N;
+    }
 
     p.preferredXccId = -1;
-
     if (ev.useXccFilter && this->exeType == EXE_GPU_GFX)
     {
       std::uniform_int_distribution<int> distribution(0, ev.xccIdsPerDevice[this->exeIndex].size() - 1);
@@ -2109,7 +2143,6 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
 
     p.startCycle = 0;
     p.stopCycle  = 0;
-    assigned += p.N;
   }
 
   this->transferTime = 0.0;
@@ -2178,7 +2211,7 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
       int const deviceIdx = RemappedIndex(this->srcIndex[srcIdx], false);
       HIP_CALL(hipSetDevice(deviceIdx));
       if (ev.usePrepSrcKernel)
-        PrepSrcDataKernel<<<32, ev.blockSize>>>(srcPtr, N, srcIdx);
+        PrepSrcDataKernel<<<32, ev.gfxBlockSize>>>(srcPtr, N, srcIdx);
       else
         HIP_CALL(hipMemcpy(srcPtr, reference.data(), this->numBytesActual, hipMemcpyDefault));
       HIP_CALL(hipDeviceSynchronize());
@@ -2424,17 +2457,22 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
   char memType = ev.useFineGrain ? 'F' : 'G';
   printf("Bytes to write: %lu from GPU %d using %d CUs [Sweeping %d to %d parallel writes]\n", numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
 
+  char sep = (ev.outputToCsv ? ',' : ' ');
+
   for (int i = 0; i < ev.numGpuDevices; i++)
   {
     if (i == srcIdx) continue;
-    printf("   GPU %3d   ", i);
+    printf("   GPU %-3d  %c", i, sep);
   }
   printf("\n");
-  for (int i = 0; i < ev.numGpuDevices-1; i++)
+  if (!ev.outputToCsv)
   {
-    printf("-------------");
+    for (int i = 0; i < ev.numGpuDevices-1; i++)
+    {
+      printf("-------------");
+    }
+    printf("\n");
   }
-  printf("\n");
 
   for (int p = minGpus; p <= maxGpus; p++)
   {
@@ -2469,11 +2507,12 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         for (int i = 0; i < ev.numGpuDevices; i++)
         {
           if (bitmask & (1<<i))
-            printf("  %8.3f   ", transfers[counter++].transferBandwidth);
+            printf("  %8.3f  %c", transfers[counter++].transferBandwidth, sep);
           else if (i != srcIdx)
-            printf("             ");
+            printf("            %c", sep);
         }
 
+        printf(" %d %d", p, numSubExecs);
         for (auto i = 0; i < transfers.size(); i++)
         {
           printf(" (N0 G%d %c%d)", srcIdx, MemTypeStr[transfers[i].dstType[0]], transfers[i].dstIndex[0]);
@@ -2481,9 +2520,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         printf("\n");
       }
     }
-    printf("\n");
   }
-
 }
 
 void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int const numGpuSubExecs, int const numCpuSubExecs, bool const isRandom)
