@@ -126,6 +126,7 @@ public:
 
   // Enviroment variables only for A2A preset
   int a2aDirect;         // Only execute on links that are directly connected
+  int a2aMode;           // Perform 0=copy, 1=read only, 2 = write only
 
   // Developer features
   int enableDebug;       // Enable debug output
@@ -225,6 +226,7 @@ public:
 
     // A2A Benchmark related
     a2aDirect         = GetEnvVar("A2A_DIRECT"          , 1);
+    a2aMode           = GetEnvVar("A2A_MODE"            , 0);
 
     // Determine random seed
     char *sweepSeedStr = getenv("SWEEP_SEED");
@@ -498,6 +500,13 @@ public:
         exit(1);
       }
     }
+
+    if (a2aMode < 0 || a2aMode > 2)
+    {
+      printf("[ERROR] a2aMode must be between 0 and 2\n");
+      exit(1);
+    }
+
     if (gfxUnroll < 1 || gfxUnroll > MAX_UNROLL)
     {
       printf("[ERROR] GFX kernel unroll factor must be between 1 and %d\n", MAX_UNROLL);
@@ -752,6 +761,10 @@ public:
       printf("[AllToAll Related]\n");
     PRINT_EV("A2A_DIRECT", a2aDirect,
              std::string(a2aDirect ? "Only using direct links" : "Full all-to-all"));
+    PRINT_EV("A2A_MODE", a2aMode,
+             std::string(a2aMode == 0 ? "Perform copy" :
+                         a2aMode == 1 ? "Perform read-only" :
+                                        "Perform write-only"));
     PRINT_EV("USE_FINE_GRAIN", useFineGrain,
              std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
