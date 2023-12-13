@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.45"
+#define TB_VERSION "1.46"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -171,8 +171,8 @@ public:
     // Different hardware pick different GPU kernels
     // This performance difference is generally only noticable when executing fewer CUs
     int defaultGfxUnroll = 4;
-    if      (archName == "gfx906") defaultGfxUnroll = 13;
-    else if (archName == "gfx90a") defaultGfxUnroll = 9;
+    if      (archName == "gfx906") defaultGfxUnroll = 8;
+    else if (archName == "gfx90a") defaultGfxUnroll = 8;
     else if (archName == "gfx940") defaultGfxUnroll = 6;
     else if (archName == "gfx941") defaultGfxUnroll = 6;
     else if (archName == "gfx942") defaultGfxUnroll = 4;
@@ -183,7 +183,7 @@ public:
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     continueOnError   = GetEnvVar("CONTINUE_ON_ERROR"   , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
-    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
+    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
@@ -509,7 +509,7 @@ public:
 
     if (gfxUnroll < 1 || gfxUnroll > MAX_UNROLL)
     {
-      printf("[ERROR] GFX kernel unroll factor must be between 1 and %d\n", MAX_UNROLL);
+      printf("[ERROR] GFX kernel unroll factor must be between 1 and %d (Not %d)\n", MAX_UNROLL, gfxUnroll);
       exit(1);
     }
 
