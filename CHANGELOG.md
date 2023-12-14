@@ -3,6 +3,15 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.46
+
+### Fixes
+* Fixing GFX_UNROLL set to 13 (past 8) on gfx906 cards
+
+### Modifications
+* GFX_SINGLE_TEAM=1 by default
+* Adding field showing summation of individual Transfer bandwidths for Executors
+
 ## v1.45
 
 ### Additions

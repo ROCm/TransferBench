@@ -597,18 +597,24 @@ void ExecuteTransfers(EnvVars const& ev,
       double exeBandwidthGbs = (exeInfo.totalBytes / 1.0E9) / exeDurationMsec * 1000.0f;
       maxGpuTime = std::max(maxGpuTime, exeDurationMsec);
 
+      double sumBandwidthGbs = 0.0;
+      for (auto& transfer: exeInfo.transfers)
+      {
+        transfer->transferTime /= (1.0 * numTimedIterations);
+        transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
+        transfer->executorBandwidth = exeBandwidthGbs;
+        sumBandwidthGbs += transfer->transferBandwidth;
+      }
+
       if (verbose && !ev.outputToCsv)
       {
-        printf(" Executor: %3s %02d | %7.3f GB/s | %8.3f ms | %12lu bytes\n",
-               ExeTypeName[exeType], exeIndex, exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes);
+        printf(" Executor: %3s %02d | %7.3f GB/s | %8.3f ms | %12lu bytes | %-7.3f GB/s (sum)\n",
+               ExeTypeName[exeType], exeIndex, exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes, sumBandwidthGbs);
       }
 
       int totalCUs = 0;
       for (auto const& transfer : exeInfo.transfers)
       {
-        transfer->transferTime /= (1.0 * numTimedIterations);
-        transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
-        transfer->executorBandwidth = exeBandwidthGbs;
         totalCUs += transfer->numSubExecs;
 
         char exeSubIndexStr[32] = "";
