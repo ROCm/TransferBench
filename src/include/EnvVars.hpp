@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.46"
+#define TB_VERSION "1.47"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -530,8 +530,7 @@ public:
     for (int i = 0; i < numDetectedGpus; i++)
     {
 #if defined(__NVCC__)
-      // NOTE: wallClock doesn't exist in CUDA.  This may need to be adjusted / run with fixed clocks
-      wallClockPerDeviceMhz[i] = 1410000;
+      wallClockPerDeviceMhz[i] = 1000000;
 #else
       hipDeviceProp_t prop;
       HIP_CALL(hipGetDeviceProperties(&prop, i));

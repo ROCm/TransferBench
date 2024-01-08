@@ -1459,16 +1459,17 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     // Otherwise, just launch the threadblocks associated with this single Transfer
     int const numBlocksToRun = ev.useSingleStream ? exeInfo.totalSubExecs : transfer->numSubExecs;
     int const numXCCs = (ev.useXccFilter ? ev.xccIdsPerDevice[exeIndex].size() : 1);
+    dim3 const gridSize(numXCCs, numBlocksToRun, 1);
+    dim3 const blockSize(ev.gfxBlockSize, 1, 1);
 
 #if defined(__NVCC__)
     HIP_CALL(hipEventRecord(startEvent, stream));
-    GpuKernelTable[ev.gfxBlockSize/warpSize - 1][ev.gfxUnroll - 1]
-      <<<numBlocksToRun, ev.gfxBlockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr, ev.waveOrder);
+    GpuKernelTable[ev.gfxBlockSize/64 - 1][ev.gfxUnroll - 1]
+      <<<gridSize, blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr, ev.gfxWaveOrder);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(GpuKernelTable[ev.gfxBlockSize/warpSize - 1][ev.gfxUnroll - 1],
-                          dim3(numXCCs, numBlocksToRun, 1),
-                          dim3(ev.gfxBlockSize, 1, 1),
+    hipExtLaunchKernelGGL(GpuKernelTable[ev.gfxBlockSize/64 - 1][ev.gfxUnroll - 1],
+                          gridSize, blockSize,
                           ev.sharedMemBytes, stream,
                           startEvent, stopEvent,
                           0, transfer->subExecParamGpuPtr, ev.gfxWaveOrder);
@@ -1994,9 +1995,9 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
 
       if (ev.a2aDirect)
       {
-#if !defined(__NVCC__)
         if (i == j) continue;
 
+#if !defined(__NVCC__)
         uint32_t linkType, hopCount;
         HIP_CALL(hipExtGetLinkTypeAndHopCount(RemappedIndex(i, false),
                                               RemappedIndex(j, false),
@@ -2460,7 +2461,6 @@ void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int
 
 void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus)
 {
-  char memType = ev.useFineGrain ? 'F' : 'G';
   printf("Bytes to write: %lu from GPU %d using %d CUs [Sweeping %d to %d parallel writes]\n", numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
 
   char sep = (ev.outputToCsv ? ',' : ' ');

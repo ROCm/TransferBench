@@ -13,7 +13,7 @@ else
 endif
 
 CXXFLAGS = -O3 -Iinclude -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
-NVFLAGS = -O3 -g -Iinclude -x cu -lnuma -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_75,code=sm_75
+NVFLAGS = -O3 -Iinclude -x cu -lnuma -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_75,code=sm_75
 LDFLAGS    += -lpthread
 all: $(EXE)
 
