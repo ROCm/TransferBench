@@ -284,7 +284,9 @@ __global__ void __launch_bounds__(BLOCKSIZE)
     __threadfence_system();
     p.stopCycle  = GetTimestamp();
     p.startCycle = startCycle;
+#if !defined(__NVCC__)
     p.xccId      = xccId;
+#endif
     __trace_hwreg();
   }
 }
