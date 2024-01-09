@@ -29,6 +29,10 @@ THE SOFTWARE.
 #define MEMSET_VAL      13323083.0f
 
 
+#if defined(__NVCC__)
+#define warpSize 32
+#endif
+
 #define MAX_WAVEGROUPS  MAX_BLOCKSIZE / warpSize
 #define MAX_UNROLL      8
 #define NUM_WAVEORDERS  6
@@ -44,7 +48,7 @@ struct SubExecParam
   int       numDsts;                            // Number of destination arrays
   float*    src[MAX_SRCS];                      // Source array pointers
   float*    dst[MAX_DSTS];                      // Destination array pointers
-  uint32_t  preferredXccId;                     // XCC ID to execute on
+  int32_t   preferredXccId;                     // XCC ID to execute on
 
   // Prepared
   int       teamSize;                           // Index of this sub executor amongst team
@@ -133,6 +137,17 @@ PrepSrcDataKernel(float* ptr, size_t N, int srcBufferIdx)
   }
 }
 
+__device__ int64_t GetTimestamp()
+{
+#if defined(__NVCC__)
+  int64_t result;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(result));
+  return result;
+#else
+  return wall_clock64();
+#endif
+}
+
 // Helper function for memset
 template <typename T> __device__ __forceinline__ T      MemsetVal();
 template <>           __device__ __forceinline__ float  MemsetVal(){ return MEMSET_VAL; };
@@ -143,14 +158,16 @@ __global__ void __launch_bounds__(BLOCKSIZE)
   GpuReduceKernel(SubExecParam* params, int waveOrder)
 {
   int64_t startCycle;
-  if (threadIdx.x == 0) startCycle = wall_clock64();
+  if (threadIdx.x == 0) startCycle = GetTimestamp();
 
   SubExecParam& p = params[blockIdx.y];
 
   // (Experimental) Filter by XCC if desired
+#if !defined(__NVCC__)
   int32_t xccId;
   GetXccId(xccId);
   if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
+#endif
 
   // Collect data information
   int32_t const  numSrcs  = p.numSrcs;
@@ -168,7 +185,6 @@ __global__ void __launch_bounds__(BLOCKSIZE)
   int32_t const tIdx     = threadIdx.x % warpSize; // Thread index within wavefront
 
   size_t  const numFloat4 = p.N / 4;
-  int32_t const nFlt4PerWave = warpSize * 4;
 
   int32_t teamStride, waveStride, unrlStride, teamStride2, waveStride2;
   switch (waveOrder)
@@ -266,7 +282,7 @@ __global__ void __launch_bounds__(BLOCKSIZE)
   if (threadIdx.x == 0)
   {
     __threadfence_system();
-    p.stopCycle  = wall_clock64();
+    p.stopCycle  = GetTimestamp();
     p.startCycle = startCycle;
     p.xccId      = xccId;
     __trace_hwreg();

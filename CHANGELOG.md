@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.47
+
+### Fixes
+* Fixing CUDA support
+
 ## v1.46
 
 ### Fixes
