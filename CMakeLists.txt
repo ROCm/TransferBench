@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 if (DEFINED ENV{ROCM_PATH})
     set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE STRING "ROCm install directory")
 else()
