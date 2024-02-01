@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,18 @@ THE SOFTWARE.
 */
 
 #pragma once
+
+// Helper macro for catching HIP errors
+#define HIP_CALL(cmd)                                                                   \
+    do {                                                                                \
+        hipError_t error = (cmd);                                                       \
+        if (error != hipSuccess)                                                        \
+        {                                                                               \
+            std::cerr << "Encountered HIP error (" << hipGetErrorString(error)          \
+                      << ") at line " << __LINE__ << " in file " << __FILE__ << "\n";   \
+            exit(-1);                                                                   \
+        }                                                                               \
+    } while (0)
 
 #if defined(__NVCC__)
 
