@@ -417,7 +417,7 @@ void ExecuteTransfers(EnvVars const& ev,
 #if defined(__NVCC__)
             printf("[ERROR] DMA executor subindex not supported on NVIDIA hardware\n");
             exit(-1);
-#endif
+#else
             if (transfer->numSrcs != 1 || transfer->numDsts != 1)
             {
               printf("[ERROR] DMA Transfer must have at exactly one source and one destination");
@@ -425,6 +425,7 @@ void ExecuteTransfers(EnvVars const& ev,
             }
 
             // Collect HSA agent information
+
             hsa_amd_pointer_info_t info;
             info.size = sizeof(info);
 
@@ -458,6 +459,7 @@ void ExecuteTransfers(EnvVars const& ev,
                      transfer->DstToStr().c_str());
               exit(1);
             }
+#endif
           }
           else
           {
@@ -918,6 +920,13 @@ cleanup:
         DeallocateMemory(dstType, transfer->dstMem[iDst], transfer->numBytesActual + ev.byteOffset);
       }
       transfer->subExecParam.clear();
+
+      if (exeType == EXE_GPU_DMA && transfer->exeSubIndex != -1)
+      {
+#if !defined(__NVCC__)
+        HSA_CHECK(hsa_signal_destroy(transfer->signal));
+#endif
+      }
     }
 
     if (IsGpuType(exeType))
@@ -1105,10 +1114,17 @@ void DisplayTopology(bool const outputToCsv)
   printf("\n");
 
 #if defined(__NVCC__)
+
+  for (int i = 0; i < numGpuDevices; i++)
+  {
+    hipDeviceProp_t prop;
+    HIP_CALL(hipGetDeviceProperties(&prop, i));
+    printf(" GPU %02d | %s\n", i, prop.name);
+  }
+
   // No further topology detection done for NVIDIA platforms
   return;
-#endif
-
+#else
     // Figure out DMA engines per GPU
   std::vector<std::set<int>> dmaEngineIdsPerDevice(numGpuDevices);
   {
@@ -1174,7 +1190,6 @@ void DisplayTopology(bool const outputToCsv)
     printf("--------------+------+-------------+------------\n");
   }
 
-#if !defined(__NVCC__)
   char pciBusId[20];
   for (int i = 0; i < numGpuDevices; i++)
   {
@@ -1702,6 +1717,10 @@ void RunTransfer(EnvVars const& ev, int const iteration,
     }
     else
     {
+#if defined(__NVCC__)
+      printf("[ERROR] CUDA does not support targeting specific DMA engines\n");
+      exit(1);
+#else
       // Target specific DMA engine
 
       // Atomically set signal to 1
@@ -1729,6 +1748,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
         if (ev.showIterations)
           transfer->perIterationTime.push_back(deltaMsec);
       }
+#endif
     }
   }
   else if (transfer->exeType == EXE_CPU) // CPU execution agent
