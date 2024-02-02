@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021-2023 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2021-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.47"
+#define TB_VERSION "1.48"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -130,6 +130,7 @@ public:
 
   // Developer features
   int enableDebug;       // Enable debug output
+  int gpuMaxHwQueues;    // Tracks GPU_MAX_HW_QUEUES environment variable
 
   // Used to track current configuration mode
   ConfigModeEnum configMode;
@@ -202,6 +203,7 @@ public:
     useXccFilter      = GetEnvVar("USE_XCC_FILTER"      , 0);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
+    gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -790,6 +792,9 @@ public:
       printf("[Remote-Write Related]\n");
     PRINT_EV("USE_FINE_GRAIN", useFineGrain,
              std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
+    PRINT_EV("USE_REMOTE_READ", useRemoteRead,
+             std::string("Performing remote ") + (useRemoteRead ? "reads" : "writes"));
+    printf("\n");
   }
 
 

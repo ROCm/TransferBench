@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -161,7 +161,7 @@ int main(int argc, char **argv)
     int numSubExecs = (argc > 3 ? atoi(argv[3]) : 4);
     int srcIdx      = (argc > 4 ? atoi(argv[4]) : 0);
     int minGpus     = (argc > 5 ? atoi(argv[5]) : 1);
-    int maxGpus     = (argc > 6 ? atoi(argv[6]) : std::min(ev.numGpuDevices - 1, 3));
+    int maxGpus     = (argc > 6 ? atoi(argv[6]) : ev.numGpuDevices - 1);
 
     for (int N = 256; N <= (1<<27); N *= 2)
     {
@@ -358,6 +358,9 @@ void ExecuteTransfers(EnvVars const& ev,
         {
 #if !defined(__NVCC__)
           HIP_CALL(hipExtStreamCreateWithCUMask(&exeInfo.streams[i], ev.cuMask.size(), ev.cuMask.data()));
+#else
+          printf("[ERROR] CU Masking in not supported on NVIDIA hardware\n");
+          exit(-1);
 #endif
         }
         else
@@ -376,9 +379,98 @@ void ExecuteTransfers(EnvVars const& ev,
         AllocateMemory(MEM_GPU, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
                        (void**)&exeInfo.subExecParamGpu);
 #else
-        AllocateMemory(MEM_CPU, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
+        AllocateMemory(MEM_MANAGED, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
                        (void**)&exeInfo.subExecParamGpu);
 #endif
+
+        // Check for sufficient subExecutors
+        int numDeviceCUs = 0;
+        HIP_CALL(hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, exeIndex));
+        if (exeInfo.totalSubExecs > numDeviceCUs)
+        {
+          printf("[WARN] GFX executor %d requesting %d total subexecutors, however only has %d.  Some Transfers may be serialized\n",
+                 exeIndex, exeInfo.totalSubExecs, numDeviceCUs);
+        }
+      }
+
+      // Check for targeted DMA
+      if (exeType == EXE_GPU_DMA)
+      {
+        bool useRandomDma = false;
+        bool useTargetDma = false;
+
+        // Check for sufficient hardware queues
+#if !defined(__NVCC_)
+        if (exeInfo.transfers.size() > ev.gpuMaxHwQueues)
+        {
+          printf("[WARN] DMA executor %d attempting %lu parallel transfers, however GPU_MAX_HW_QUEUES only set to %d\n",
+                 exeIndex, exeInfo.transfers.size(), ev.gpuMaxHwQueues);
+        }
+#endif
+
+        for (Transfer* transfer : exeInfo.transfers)
+        {
+          if (transfer->exeSubIndex != -1)
+          {
+            useTargetDma = true;
+
+#if defined(__NVCC__)
+            printf("[ERROR] DMA executor subindex not supported on NVIDIA hardware\n");
+            exit(-1);
+#else
+            if (transfer->numSrcs != 1 || transfer->numDsts != 1)
+            {
+              printf("[ERROR] DMA Transfer must have at exactly one source and one destination");
+              exit(1);
+            }
+
+            // Collect HSA agent information
+
+            hsa_amd_pointer_info_t info;
+            info.size = sizeof(info);
+
+            HSA_CHECK(hsa_amd_pointer_info(transfer->dstMem[0], &info, NULL, NULL, NULL));
+            transfer->dstAgent = info.agentOwner;
+
+            HSA_CHECK(hsa_amd_pointer_info(transfer->srcMem[0], &info, NULL, NULL, NULL));
+            transfer->srcAgent = info.agentOwner;
+
+            // Create HSA completion signal
+            HSA_CHECK(hsa_signal_create(1, 0, NULL, &transfer->signal));
+
+            // Check for valid engine Id
+            if (transfer->exeSubIndex < -1 || transfer->exeSubIndex >= 32)
+            {
+              printf("[ERROR] DMA executor subindex must be between 0 and 31\n");
+              exit(1);
+            }
+
+            // Check that engine Id exists between agents
+            uint32_t engineIdMask = 0;
+            HSA_CHECK(hsa_amd_memory_copy_engine_status(transfer->dstAgent,
+                                                        transfer->srcAgent,
+                                                        &engineIdMask));
+            transfer->sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << transfer->exeSubIndex);
+            if (!(transfer->sdmaEngineId & engineIdMask))
+            {
+              printf("[ERROR] DMA executor %d.%d does not exist or cannot copy between source %s to destination %s\n",
+                     transfer->exeIndex, transfer->exeSubIndex,
+                     transfer->SrcToStr().c_str(),
+                     transfer->DstToStr().c_str());
+              exit(1);
+            }
+#endif
+          }
+          else
+          {
+            useRandomDma = true;
+          }
+        }
+        if (useRandomDma && useTargetDma)
+        {
+          printf("[WARN] Mixing targeted and untargetted DMA execution on GPU %d may result in resource conflicts\n",
+            exeIndex);
+        }
       }
     }
   }
@@ -618,7 +710,7 @@ void ExecuteTransfers(EnvVars const& ev,
         totalCUs += transfer->numSubExecs;
 
         char exeSubIndexStr[32] = "";
-        if (ev.useXccFilter)
+        if (ev.useXccFilter || transfer->exeType == EXE_GPU_DMA)
         {
           if (transfer->exeSubIndex == -1)
             sprintf(exeSubIndexStr, ".*");
@@ -719,7 +811,7 @@ void ExecuteTransfers(EnvVars const& ev,
       char exeSubIndexStr[32] = "";
       if (ev.useXccFilter)
       {
-        if (transfer->exeSubIndex == -1)
+        if (transfer->exeSubIndex == -1 || transfer->exeType == EXE_GPU_DMA)
           sprintf(exeSubIndexStr, ".*");
         else
           sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
@@ -828,6 +920,13 @@ cleanup:
         DeallocateMemory(dstType, transfer->dstMem[iDst], transfer->numBytesActual + ev.byteOffset);
       }
       transfer->subExecParam.clear();
+
+      if (exeType == EXE_GPU_DMA && transfer->exeSubIndex != -1)
+      {
+#if !defined(__NVCC__)
+        HSA_CHECK(hsa_signal_destroy(transfer->signal));
+#endif
+      }
     }
 
     if (IsGpuType(exeType))
@@ -845,7 +944,7 @@ cleanup:
 #if !defined(__NVCC__)
         DeallocateMemory(MEM_GPU, exeInfo.subExecParamGpu);
 #else
-        DeallocateMemory(MEM_CPU, exeInfo.subExecParamGpu);
+        DeallocateMemory(MEM_MANAGED, exeInfo.subExecParamGpu);
 #endif
       }
     }
@@ -1015,9 +1114,52 @@ void DisplayTopology(bool const outputToCsv)
   printf("\n");
 
 #if defined(__NVCC__)
+
+  for (int i = 0; i < numGpuDevices; i++)
+  {
+    hipDeviceProp_t prop;
+    HIP_CALL(hipGetDeviceProperties(&prop, i));
+    printf(" GPU %02d | %s\n", i, prop.name);
+  }
+
   // No further topology detection done for NVIDIA platforms
   return;
-#endif
+#else
+    // Figure out DMA engines per GPU
+  std::vector<std::set<int>> dmaEngineIdsPerDevice(numGpuDevices);
+  {
+    std::vector<hsa_agent_t> agentList;
+    hsa_amd_pointer_info_t info;
+    info.size = sizeof(info);
+    for (int deviceId = 0; deviceId < numGpuDevices; deviceId++)
+    {
+      HIP_CALL(hipSetDevice(deviceId));
+      int32_t* tempBuffer;
+      HIP_CALL(hipMalloc((void**)&tempBuffer, 1024));
+      HSA_CHECK(hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL));
+      agentList.push_back(info.agentOwner);
+      HIP_CALL(hipFree(tempBuffer));
+    }
+
+    for (int srcDevice = 0; srcDevice < numGpuDevices; srcDevice++)
+    {
+      dmaEngineIdsPerDevice[srcDevice].clear();
+      for (int dstDevice = 0; dstDevice < numGpuDevices; dstDevice++)
+      {
+        if (srcDevice == dstDevice) continue;
+        uint32_t engineIdMask = 0;
+        if (hsa_amd_memory_copy_engine_status(agentList[dstDevice],
+                                              agentList[srcDevice],
+                                              &engineIdMask) != HSA_STATUS_SUCCESS)
+          continue;
+        for (int engineId = 0; engineId < 32; engineId++)
+        {
+          if (engineIdMask & (1U << engineId))
+            dmaEngineIdsPerDevice[srcDevice].insert(engineId);
+        }
+      }
+    }
+  }
 
   // Print out detected GPU topology
   if (outputToCsv)
@@ -1025,7 +1167,7 @@ void DisplayTopology(bool const outputToCsv)
     printf("GPU");
     for (int j = 0; j < numGpuDevices; j++)
       printf(",GPU %02d", j);
-    printf(",PCIe Bus ID,ClosestNUMA\n");
+    printf(",PCIe Bus ID,ClosestNUMA,DMA engines\n");
   }
   else
   {
@@ -1042,13 +1184,12 @@ void DisplayTopology(bool const outputToCsv)
     printf("        |");
     for (int j = 0; j < numGpuDevices; j++)
       printf(" GPU %02d |", j);
-    printf(" PCIe Bus ID  | #CUs | Closest NUMA\n");
+    printf(" PCIe Bus ID  | #CUs | Closest NUMA | DMA engines\n");
     for (int j = 0; j <= numGpuDevices; j++)
       printf("--------+");
-    printf("--------------+------+-------------\n");
+    printf("--------------+------+-------------+------------\n");
   }
 
-#if !defined(__NVCC__)
   char pciBusId[20];
   for (int i = 0; i < numGpuDevices; i++)
   {
@@ -1085,9 +1226,19 @@ void DisplayTopology(bool const outputToCsv)
     HIP_CALL(hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, deviceIdx));
 
     if (outputToCsv)
-      printf("%s,%d,%d\n", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
+      printf("%s,%d,%d,", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
     else
-      printf(" %11s | %4d | %d\n", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
+    {
+      printf(" %11s | %4d | %-12d |", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
+
+      bool isFirst = true;
+      for (auto x : dmaEngineIdsPerDevice[deviceIdx])
+      {
+        if (isFirst) isFirst = false; else printf(",");
+        printf("%d", x);
+      }
+      printf("\n");
+    }
   }
 #endif
 }
@@ -1324,6 +1475,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
 
     // Check that the allocated pages are actually on the correct NUMA node
     memset(*memPtr, 0, numBytes);
+
     CheckPages((char*)*memPtr, numBytes, devIndex);
 
     // Reset to default numa mem policy
@@ -1344,12 +1496,14 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
       exit(1);
 #else
       HIP_CALL(hipSetDevice(devIndex));
-
-      hipDeviceProp_t prop;
-      HIP_CALL(hipGetDeviceProperties(&prop, 0));
       int flag = hipDeviceMallocUncached;
       HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
 #endif
+    }
+    else if (memType == MEM_MANAGED)
+    {
+      HIP_CALL(hipSetDevice(devIndex));
+      HIP_CALL(hipMallocManaged((void**)memPtr, numBytes));
     }
     HIP_CALL(hipMemset(*memPtr, 0, numBytes));
     HIP_CALL(hipDeviceSynchronize());
@@ -1386,6 +1540,15 @@ void DeallocateMemory(MemType memType, void* memPtr, size_t const bytes)
     if (memPtr == nullptr)
     {
       printf("[ERROR] Attempting to free null GPU pointer for %lu bytes. Skipping hipFree\n", bytes);
+      return;
+    }
+    HIP_CALL(hipFree(memPtr));
+  }
+  else if (memType == MEM_MANAGED)
+  {
+    if (memPtr == nullptr)
+    {
+      printf("[ERROR] Attempting to free null managed pointer for %lu bytes. Skipping hipMFree\n", bytes);
       return;
     }
     HIP_CALL(hipFree(memPtr));
@@ -1432,11 +1595,15 @@ void CheckPages(char* array, size_t numBytes, int targetId)
 
 uint32_t GetId(uint32_t hwId)
 {
+#if defined(__NVCC_)
+  return hwId;
+#else
   // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
   int const shId = (hwId >> 12) &  1;
   int const cuId = (hwId >>  8) & 15;
   int const seId = (hwId >> 13) &  3;
   return (shId << 5) + (cuId << 2) + seId;
+#endif
 }
 
 void RunTransfer(EnvVars const& ev, int const iteration,
@@ -1529,37 +1696,75 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   }
   else if (transfer->exeType == EXE_GPU_DMA)
   {
-    // Switch to executing GPU
     int const exeIndex = RemappedIndex(transfer->exeIndex, false);
-    HIP_CALL(hipSetDevice(exeIndex));
 
-    hipStream_t& stream     = exeInfo.streams[transferIdx];
-    hipEvent_t&  startEvent = exeInfo.startEvents[transferIdx];
-    hipEvent_t&  stopEvent  = exeInfo.stopEvents[transferIdx];
-
-    HIP_CALL(hipEventRecord(startEvent, stream));
-    if (transfer->numSrcs == 0 && transfer->numDsts == 1)
+    if (transfer->exeSubIndex == -1)
     {
-      HIP_CALL(hipMemsetAsync(transfer->dstMem[0],
-                              MEMSET_CHAR, transfer->numBytesActual, stream));
+      // Switch to executing GPU
+      HIP_CALL(hipSetDevice(exeIndex));
+      hipStream_t& stream     = exeInfo.streams[transferIdx];
+      hipEvent_t&  startEvent = exeInfo.startEvents[transferIdx];
+      hipEvent_t&  stopEvent  = exeInfo.stopEvents[transferIdx];
+
+      HIP_CALL(hipEventRecord(startEvent, stream));
+      if (transfer->numSrcs == 0 && transfer->numDsts == 1)
+      {
+        HIP_CALL(hipMemsetAsync(transfer->dstMem[0],
+                                MEMSET_CHAR, transfer->numBytesActual, stream));
+      }
+      else if (transfer->numSrcs == 1 && transfer->numDsts == 1)
+      {
+        HIP_CALL(hipMemcpyAsync(transfer->dstMem[0], transfer->srcMem[0],
+                                transfer->numBytesActual, hipMemcpyDefault,
+                                stream));
+      }
+      HIP_CALL(hipEventRecord(stopEvent, stream));
+      HIP_CALL(hipStreamSynchronize(stream));
+
+      if (iteration >= 0)
+      {
+        // Record GPU timing
+        float gpuDeltaMsec;
+        HIP_CALL(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        transfer->transferTime += gpuDeltaMsec;
+        if (ev.showIterations)
+          transfer->perIterationTime.push_back(gpuDeltaMsec);
+      }
     }
-    else if (transfer->numSrcs == 1 && transfer->numDsts == 1)
+    else
     {
-      HIP_CALL(hipMemcpyAsync(transfer->dstMem[0], transfer->srcMem[0],
-                              transfer->numBytesActual, hipMemcpyDefault,
-                              stream));
-    }
-    HIP_CALL(hipEventRecord(stopEvent, stream));
-    HIP_CALL(hipStreamSynchronize(stream));
+#if defined(__NVCC__)
+      printf("[ERROR] CUDA does not support targeting specific DMA engines\n");
+      exit(1);
+#else
+      // Target specific DMA engine
 
-    if (iteration >= 0)
-    {
-      // Record GPU timing
-      float gpuDeltaMsec;
-      HIP_CALL(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-      transfer->transferTime += gpuDeltaMsec;
-      if (ev.showIterations)
-        transfer->perIterationTime.push_back(gpuDeltaMsec);
+      // Atomically set signal to 1
+      HSA_CALL(hsa_signal_store_screlease(transfer->signal, 1));
+
+      auto cpuStart = std::chrono::high_resolution_clock::now();
+      HSA_CALL(hsa_amd_memory_async_copy_on_engine(transfer->dstMem[0], transfer->dstAgent,
+                                                   transfer->srcMem[0], transfer->srcAgent,
+                                                   transfer->numBytesActual, 0, NULL,
+                                                   transfer->signal,
+                                                   transfer->sdmaEngineId, true));
+      // Wait for SDMA transfer to complete
+      // NOTE: "A wait operation can spuriously resume at any time sooner than the timeout
+      //        (for example, due to system or other external factors) even when the
+      //         condition has not been met.)
+      while(hsa_signal_wait_scacquire(transfer->signal,
+                                      HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+                                      HSA_WAIT_STATE_ACTIVE) >= 1);
+      if (iteration >= 0)
+      {
+        // Record GPU timing
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+        transfer->transferTime += deltaMsec;
+        if (ev.showIterations)
+          transfer->perIterationTime.push_back(deltaMsec);
+      }
+#endif
     }
   }
   else if (transfer->exeType == EXE_CPU) // CPU execution agent
@@ -2260,6 +2465,8 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
                ExeTypeStr[this->exeType], this->exeIndex,
                this->numSubExecs,
                this->DstToStr().c_str());
+        printf("[ERROR] Possible cause is misconfigured IOMMU (AMD Instinct cards require amd_iommu=on and iommu=pt)\n");
+        printf("[ERROR] Please see https://community.amd.com/t5/knowledge-base/iommu-advisory-for-amd-instinct/ta-p/484601 for more details\n");
         if (!ev.continueOnError)
           exit(1);
         return false;
@@ -2461,7 +2668,8 @@ void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int
 
 void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus)
 {
-  printf("Bytes to write: %lu from GPU %d using %d CUs [Sweeping %d to %d parallel writes]\n", numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
+  printf("Bytes to %s: %lu from GPU %d using %d CUs [Sweeping %d to %d parallel writes]\n",
+         ev.useRemoteRead ? "read" : "write", numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
 
   char sep = (ev.outputToCsv ? ',' : ' ');
 
@@ -2493,17 +2701,31 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
           if (bitmask & (1<<i))
           {
             Transfer t;
-            t.dstType.resize(1);
-            t.dstIndex.resize(1);
             t.exeType     = EXE_GPU_GFX;
-            t.exeIndex    = srcIdx;
             t.exeSubIndex = -1;
             t.numSubExecs = numSubExecs;
             t.numBytes    = numBytesPerTransfer;
-            t.numSrcs     = 0;
-            t.numDsts     = 1;
-            t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
-            t.dstIndex[0] = i;
+
+            if (ev.useRemoteRead)
+            {
+              t.numSrcs  = 1;
+              t.numDsts  = 0;
+              t.exeIndex = i;
+              t.srcType.resize(1);
+              t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+              t.srcIndex.resize(1);
+              t.srcIndex[0] = srcIdx;
+            }
+            else
+            {
+              t.numSrcs     = 0;
+              t.numDsts     = 1;
+              t.exeIndex    = srcIdx;
+              t.dstType.resize(1);
+              t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+              t.dstIndex.resize(1);
+              t.dstIndex[0] = i;
+            }
             transfers.push_back(t);
           }
         }
@@ -2521,7 +2743,10 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         printf(" %d %d", p, numSubExecs);
         for (auto i = 0; i < transfers.size(); i++)
         {
-          printf(" (N0 G%d %c%d)", srcIdx, MemTypeStr[transfers[i].dstType[0]], transfers[i].dstIndex[0]);
+          printf(" (%s %c%d %s)",
+                 transfers[i].SrcToStr().c_str(),
+                 MemTypeStr[transfers[i].exeType], transfers[i].exeIndex,
+                 transfers[i].DstToStr().c_str());
         }
         printf("\n");
       }

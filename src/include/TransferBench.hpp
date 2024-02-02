@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2019-2023 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,6 +19,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
+#pragma once
 
 #include <vector>
 #include <sstream>
@@ -31,21 +32,7 @@ THE SOFTWARE.
 #include <map>
 #include <iostream>
 #include <sstream>
-
 #include "Compatibility.hpp"
-
-// Helper macro for catching HIP errors
-#define HIP_CALL(cmd)                                                                   \
-    do {                                                                                \
-        hipError_t error = (cmd);                                                       \
-        if (error != hipSuccess)                                                        \
-        {                                                                               \
-            std::cerr << "Encountered HIP error (" << hipGetErrorString(error)          \
-                      << ") at line " << __LINE__ << " in file " << __FILE__ << "\n";   \
-            exit(-1);                                                                   \
-        }                                                                               \
-    } while (0)
-
 #include "EnvVars.hpp"
 
 // Simple configuration parameters
@@ -62,6 +49,7 @@ typedef enum
   MEM_GPU_FINE     = 3, // Fine-grained global GPU memory
   MEM_CPU_UNPINNED = 4, // Unpinned CPU memory
   MEM_NULL         = 5, // NULL memory - used for empty
+  MEM_MANAGED      = 6
 } MemType;
 
 typedef enum
@@ -71,12 +59,12 @@ typedef enum
   EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
 } ExeType;
 
-bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE); }
+bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
 bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
 bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
 
-char const MemTypeStr[7] = "CGBFUN";
+char const MemTypeStr[8] = "CGBFUNM";
 char const ExeTypeStr[4] = "CGD";
 char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
 
@@ -128,6 +116,14 @@ struct Transfer
   std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock
   SubExecParam*              subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
   std::vector<int>           subExecIdx;         // Indicies into subExecParamGpu
+
+#if !defined(__NVCC__)
+  // For targeted-SDMA
+  hsa_agent_t                dstAgent;           // DMA destination memory agent
+  hsa_agent_t                srcAgent;           // DMA source memory agent
+  hsa_signal_t               signal;             // HSA signal for completion
+  hsa_amd_sdma_engine_id_t   sdmaEngineId;       // DMA engine ID
+#endif
 
   // Prepares src/dst subarray pointers for each SubExecutor
   void PrepareSubExecParams(EnvVars const& ev);

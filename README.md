@@ -10,6 +10,7 @@ Documentation for TransferBench is available at
 
 * You must have a ROCm stack installed on your system (HIP runtime)
 * You must have `libnuma` installed on your system
+* AMD IOMMU must be enabled and set to passthrough for AMD Instinct cards
 
 ## Documentation
 
@@ -66,11 +67,15 @@ make
 * Running TransferBench with no arguments displays usage instructions and detected topology
   information
 * You can use several preset configurations instead of a configuration file:
-  * `p2p`: Peer-to-peer benchmark test
-  * `sweep`: Sweep across possible sets of transfers
-  * `rsweep`: Random sweep across possible sets of transfers
-* When using the same GPU executor in multiple simultaneous transfers, performance may be
-  serialized due to the maximum number of hardware queues available
+  * `a2a`    : All-to-all benchmark test
+  * `cmdline`: Take in Transfers to run from command-line instead of via file
+  * `p2p`    : Peer-to-peer benchmark test
+  * `rsweep` : Random sweep across possible sets of transfers
+  * `rwrite` : Benchmarks parallel remote writes from a single GPU
+  * `scaling`: GPU subexecutor scaling tests
+  * 'schmoo` : Local/Remote read/write/copy between two GPUs
+  * `sweep`  : Sweep across possible sets of transfers
+
+* When using the same GPU executor in multiple simultaneous transfers on separate streams (USE_SINGLE_STREAM=0),
+  performance may be serialized due to the maximum number of hardware queues available
   * The number of maximum hardware queues can be adjusted via `GPU_MAX_HW_QUEUES`
-  * Alternatively, running in single-stream mode (`USE_SINGLE_STREAM`=1) may avoid this issue
-    by launching all transfers on a single stream, rather than on individual streams

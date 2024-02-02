@@ -3,6 +3,18 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.48
+
+### Fixes
+* Various fixes for TransferBenchCuda
+
+### Additions
+* Support for targeting specific DMA engines via executor subindex (e.g. D0.1)
+* Printing warnings when exeuctors are overcommited
+
+### Modifications
+* USE_REMOTE_READ supported for rwrite preset benchmark
+
 ## v1.47
 
 ### Fixes

@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -62,12 +62,15 @@ struct SubExecParam
 };
 
 // Macro for collecting HW_REG_HW_ID
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__NVCC__)
-#define __trace_hwreg() \
-  p.hwId = 0
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__)
+#define GetHwId(hwId) \
+  hwId = 0
+#elif defined(__NVCC__)
+#define GetHwId(hwId) \
+  asm("mov.u32 %0, %smid;" : "=r"(hwId) )
 #else
-#define __trace_hwreg() \
-  asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (p.hwId));
+#define GetHwId(hwId) \
+  asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId));
 #endif
 
 // Macro for collecting HW_REG_XCC_ID
@@ -284,10 +287,8 @@ __global__ void __launch_bounds__(BLOCKSIZE)
     __threadfence_system();
     p.stopCycle  = GetTimestamp();
     p.startCycle = startCycle;
-#if !defined(__NVCC__)
-    p.xccId      = xccId;
-#endif
-    __trace_hwreg();
+    GetHwId(p.hwId);
+    GetXccId(p.xccId);
   }
 }
 
