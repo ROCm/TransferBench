@@ -49,6 +49,7 @@ typedef enum
   MEM_GPU_FINE     = 3, // Fine-grained global GPU memory
   MEM_CPU_UNPINNED = 4, // Unpinned CPU memory
   MEM_NULL         = 5, // NULL memory - used for empty
+  MEM_MANAGED      = 6
 } MemType;
 
 typedef enum
@@ -58,12 +59,12 @@ typedef enum
   EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
 } ExeType;
 
-bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE); }
+bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
 bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
 bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
 
-char const MemTypeStr[7] = "CGBFUN";
+char const MemTypeStr[8] = "CGBFUNM";
 char const ExeTypeStr[4] = "CGD";
 char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
 

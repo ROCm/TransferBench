@@ -77,6 +77,7 @@ THE SOFTWARE.
 #define hipHostFree                                        cudaFreeHost
 #define hipHostMalloc                                      cudaMallocHost
 #define hipMalloc                                          cudaMalloc
+#define hipMallocManaged                                   cudaMallocManaged
 #define hipMemcpy                                          cudaMemcpy
 #define hipMemcpyAsync                                     cudaMemcpyAsync
 #define hipMemset                                          cudaMemset

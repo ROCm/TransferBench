@@ -62,9 +62,12 @@ struct SubExecParam
 };
 
 // Macro for collecting HW_REG_HW_ID
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__NVCC__)
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__)
 #define GetHwId(hwId) \
   hwId = 0
+#elif defined(__NVCC__)
+#define GetHwId(hwId) \
+  asm("mov.u32 %0, %smid;" : "=r"(hwId) )
 #else
 #define GetHwId(hwId) \
   asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId));
@@ -284,10 +287,8 @@ __global__ void __launch_bounds__(BLOCKSIZE)
     __threadfence_system();
     p.stopCycle  = GetTimestamp();
     p.startCycle = startCycle;
-#if !defined(__NVCC__)
-    GetXccId(p.xccId);
     GetHwId(p.hwId);
-#endif
+    GetXccId(p.xccId);
   }
 }
 

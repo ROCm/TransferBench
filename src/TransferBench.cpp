@@ -379,7 +379,7 @@ void ExecuteTransfers(EnvVars const& ev,
         AllocateMemory(MEM_GPU, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
                        (void**)&exeInfo.subExecParamGpu);
 #else
-        AllocateMemory(MEM_CPU, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
+        AllocateMemory(MEM_MANAGED, exeIndex, exeInfo.totalSubExecs * sizeof(SubExecParam),
                        (void**)&exeInfo.subExecParamGpu);
 #endif
 
@@ -944,7 +944,7 @@ cleanup:
 #if !defined(__NVCC__)
         DeallocateMemory(MEM_GPU, exeInfo.subExecParamGpu);
 #else
-        DeallocateMemory(MEM_CPU, exeInfo.subExecParamGpu);
+        DeallocateMemory(MEM_MANAGED, exeInfo.subExecParamGpu);
 #endif
       }
     }
@@ -1475,6 +1475,7 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
 
     // Check that the allocated pages are actually on the correct NUMA node
     memset(*memPtr, 0, numBytes);
+
     CheckPages((char*)*memPtr, numBytes, devIndex);
 
     // Reset to default numa mem policy
@@ -1495,12 +1496,14 @@ void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPt
       exit(1);
 #else
       HIP_CALL(hipSetDevice(devIndex));
-
-      hipDeviceProp_t prop;
-      HIP_CALL(hipGetDeviceProperties(&prop, 0));
       int flag = hipDeviceMallocUncached;
       HIP_CALL(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
 #endif
+    }
+    else if (memType == MEM_MANAGED)
+    {
+      HIP_CALL(hipSetDevice(devIndex));
+      HIP_CALL(hipMallocManaged((void**)memPtr, numBytes));
     }
     HIP_CALL(hipMemset(*memPtr, 0, numBytes));
     HIP_CALL(hipDeviceSynchronize());
@@ -1537,6 +1540,15 @@ void DeallocateMemory(MemType memType, void* memPtr, size_t const bytes)
     if (memPtr == nullptr)
     {
       printf("[ERROR] Attempting to free null GPU pointer for %lu bytes. Skipping hipFree\n", bytes);
+      return;
+    }
+    HIP_CALL(hipFree(memPtr));
+  }
+  else if (memType == MEM_MANAGED)
+  {
+    if (memPtr == nullptr)
+    {
+      printf("[ERROR] Attempting to free null managed pointer for %lu bytes. Skipping hipMFree\n", bytes);
       return;
     }
     HIP_CALL(hipFree(memPtr));
@@ -1583,11 +1595,15 @@ void CheckPages(char* array, size_t numBytes, int targetId)
 
 uint32_t GetId(uint32_t hwId)
 {
+#if defined(__NVCC_)
+  return hwId;
+#else
   // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
   int const shId = (hwId >> 12) &  1;
   int const cuId = (hwId >>  8) & 15;
   int const seId = (hwId >> 13) &  3;
   return (shId << 5) + (cuId << 2) + seId;
+#endif
 }
 
 void RunTransfer(EnvVars const& ev, int const iteration,
