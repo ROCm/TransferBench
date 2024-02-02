@@ -5,6 +5,9 @@ Documentation for TransferBench is available at
 
 ## v1.48
 
+### Fixes
+* Various fixes for TransferBenchCuda
+
 ### Additions
 * Support for targeting specific DMA engines via executor subindex (e.g. D0.1)
 * Printing warnings when exeuctors are overcommited
