@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.49
+
+### Fixes
+* Enumerating previously missed DMA engines used only for CPU traffic in topology display
+
 ## v1.48
 
 ### Fixes

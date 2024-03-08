@@ -1128,28 +1128,39 @@ void DisplayTopology(bool const outputToCsv)
     // Figure out DMA engines per GPU
   std::vector<std::set<int>> dmaEngineIdsPerDevice(numGpuDevices);
   {
-    std::vector<hsa_agent_t> agentList;
+    std::vector<hsa_agent_t> gpuAgentList;
+    std::vector<hsa_agent_t> allAgentList;
     hsa_amd_pointer_info_t info;
     info.size = sizeof(info);
+
     for (int deviceId = 0; deviceId < numGpuDevices; deviceId++)
     {
       HIP_CALL(hipSetDevice(deviceId));
-      int32_t* tempBuffer;
-      HIP_CALL(hipMalloc((void**)&tempBuffer, 1024));
-      HSA_CHECK(hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL));
-      agentList.push_back(info.agentOwner);
-      HIP_CALL(hipFree(tempBuffer));
+      int32_t* tempGpuBuffer;
+      HIP_CALL(hipMalloc((void**)&tempGpuBuffer, 1024));
+      HSA_CHECK(hsa_amd_pointer_info(tempGpuBuffer, &info, NULL, NULL, NULL));
+      gpuAgentList.push_back(info.agentOwner);
+      allAgentList.push_back(info.agentOwner);
+      HIP_CALL(hipFree(tempGpuBuffer));
+    }
+    for (int deviceId = 0; deviceId < numCpuDevices; deviceId++)
+    {
+      int32_t* tempCpuBuffer;
+      AllocateMemory(MEM_CPU, deviceId, 1024, (void**)&tempCpuBuffer);
+      HSA_CHECK(hsa_amd_pointer_info(tempCpuBuffer, &info, NULL, NULL, NULL));
+      allAgentList.push_back(info.agentOwner);
+      DeallocateMemory(MEM_CPU, tempCpuBuffer, 1024);
     }
 
     for (int srcDevice = 0; srcDevice < numGpuDevices; srcDevice++)
     {
       dmaEngineIdsPerDevice[srcDevice].clear();
-      for (int dstDevice = 0; dstDevice < numGpuDevices; dstDevice++)
+      for (int dstDevice = 0; dstDevice < allAgentList.size(); dstDevice++)
       {
         if (srcDevice == dstDevice) continue;
         uint32_t engineIdMask = 0;
-        if (hsa_amd_memory_copy_engine_status(agentList[dstDevice],
-                                              agentList[srcDevice],
+        if (hsa_amd_memory_copy_engine_status(allAgentList[dstDevice],
+                                              gpuAgentList[srcDevice],
                                               &engineIdMask) != HSA_STATUS_SUCCESS)
           continue;
         for (int engineId = 0; engineId < 32; engineId++)
