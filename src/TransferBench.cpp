@@ -189,6 +189,14 @@ int main(int argc, char **argv)
     int minGpus     = (argc > 5 ? atoi(argv[5]) : 1);
     int maxGpus     = (argc > 6 ? atoi(argv[6]) : ev.numGpuDevices - 1);
 
+    if (maxGpus > ev.gpuMaxHwQueues && ev.useDmaCopy)
+    {
+      printf("[ERROR] DMA executor %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d\n",
+             srcIdx, maxGpus, ev.gpuMaxHwQueues);
+      printf("[ERROR] Aborting to avoid misleading results due to potential serialization of Transfers\n");
+      exit(1);
+    }
+
     for (int N = 256; N <= (1<<27); N *= 2)
     {
       int delta = std::max(1, N / ev.samplingFactor);
