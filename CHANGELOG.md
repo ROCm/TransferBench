@@ -3,6 +3,15 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.50
+
+### Added
+- Adding new parallel copy preset benchmark (pcopy)
+  - Usage: ./TransferBench pcopy <numBytes=64M> <#CUs=8> <srcGpu=0> <minGpus=1> <maxGpus=#GPU-1>
+### Fixed
+- Removed non-copies DMA Transfers (this had previously been using hipMemset)
+- Fixed CPU executor when operating on null destination
+
 ## v1.49
 
 ### Fixes

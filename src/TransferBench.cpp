@@ -175,6 +175,32 @@ int main(int argc, char **argv)
       } while (curr < N * 2);
     }
   }
+  else if (!strcmp(argv[1], "pcopy"))
+  {
+    if (ev.numGpuDevices < 2)
+    {
+      printf("[ERROR] Parallel copy benchmark requires at least 2 GPUs\n");
+      exit(1);
+    }
+    ev.DisplayParallelCopyEnvVars();
+
+    int numSubExecs = (argc > 3 ? atoi(argv[3]) : 8);
+    int srcIdx      = (argc > 4 ? atoi(argv[4]) : 0);
+    int minGpus     = (argc > 5 ? atoi(argv[5]) : 1);
+    int maxGpus     = (argc > 6 ? atoi(argv[6]) : ev.numGpuDevices - 1);
+
+    for (int N = 256; N <= (1<<27); N *= 2)
+    {
+      int delta = std::max(1, N / ev.samplingFactor);
+      int curr = (numBytesPerTransfer == 0) ? N : numBytesPerTransfer / sizeof(float);
+      do
+      {
+        RunParallelCopyBenchmark(ev, curr * sizeof(float), numSubExecs, srcIdx, minGpus, maxGpus);
+        if (numBytesPerTransfer != 0) exit(0);
+        curr += delta;
+      } while (curr < N * 2);
+    }
+  }
   else if (!strcmp(argv[1], "cmdline"))
   {
     // Print environment variables and CSV header
@@ -1413,9 +1439,9 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
       exit(1);
     }
 
-    if (transfer.exeType == EXE_GPU_DMA && (transfer.numSrcs > 1 || transfer.numDsts > 1))
+    if (transfer.exeType == EXE_GPU_DMA && (transfer.numSrcs != 1 || transfer.numDsts != 1))
     {
-      printf("[ERROR] GPU DMA executor can only be used for single source / single dst Transfers\n");
+      printf("[ERROR] GPU DMA executor can only be used for single source + single dst copies\n");
       exit(1);
     }
 
@@ -1718,12 +1744,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       hipEvent_t&  stopEvent  = exeInfo.stopEvents[transferIdx];
 
       HIP_CALL(hipEventRecord(startEvent, stream));
-      if (transfer->numSrcs == 0 && transfer->numDsts == 1)
-      {
-        HIP_CALL(hipMemsetAsync(transfer->dstMem[0],
-                                MEMSET_CHAR, transfer->numBytesActual, stream));
-      }
-      else if (transfer->numSrcs == 1 && transfer->numDsts == 1)
+      if (transfer->numSrcs == 1 && transfer->numDsts == 1)
       {
         HIP_CALL(hipMemcpyAsync(transfer->dstMem[0], transfer->srcMem[0],
                                 transfer->numBytesActual, hipMemcpyDefault,
@@ -2737,6 +2758,90 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
               t.dstIndex.resize(1);
               t.dstIndex[0] = i;
             }
+            transfers.push_back(t);
+          }
+        }
+        ExecuteTransfers(ev, 0, 0, transfers, false);
+
+        int counter = 0;
+        for (int i = 0; i < ev.numGpuDevices; i++)
+        {
+          if (bitmask & (1<<i))
+            printf("  %8.3f  %c", transfers[counter++].transferBandwidth, sep);
+          else if (i != srcIdx)
+            printf("            %c", sep);
+        }
+
+        printf(" %d %d", p, numSubExecs);
+        for (auto i = 0; i < transfers.size(); i++)
+        {
+          printf(" (%s %c%d %s)",
+                 transfers[i].SrcToStr().c_str(),
+                 MemTypeStr[transfers[i].exeType], transfers[i].exeIndex,
+                 transfers[i].DstToStr().c_str());
+        }
+        printf("\n");
+      }
+    }
+  }
+}
+
+void RunParallelCopyBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus)
+{
+  if (ev.useDmaCopy)
+    printf("Bytes to copy: %lu from GPU %d using DMA [Sweeping %d to %d parallel writes]\n",
+           numBytesPerTransfer, srcIdx, minGpus, maxGpus);
+  else
+    printf("Bytes to copy: %lu from GPU %d using GFX (%d CUs) [Sweeping %d to %d parallel writes]\n",
+           numBytesPerTransfer, srcIdx, numSubExecs, minGpus, maxGpus);
+
+  char sep = (ev.outputToCsv ? ',' : ' ');
+
+  for (int i = 0; i < ev.numGpuDevices; i++)
+  {
+    if (i == srcIdx) continue;
+    printf("   GPU %-3d  %c", i, sep);
+  }
+  printf("\n");
+  if (!ev.outputToCsv)
+  {
+    for (int i = 0; i < ev.numGpuDevices-1; i++)
+    {
+      printf("-------------");
+    }
+    printf("\n");
+  }
+
+  for (int p = minGpus; p <= maxGpus; p++)
+  {
+    for (int bitmask = 0; bitmask < (1<<ev.numGpuDevices); bitmask++)
+    {
+      if (bitmask & (1<<srcIdx)) continue;
+      if (__builtin_popcount(bitmask) == p)
+      {
+        std::vector<Transfer> transfers;
+        for (int i = 0; i < ev.numGpuDevices; i++)
+        {
+          if (bitmask & (1<<i))
+          {
+            Transfer t;
+            t.exeType     = ev.useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
+            t.exeSubIndex = -1;
+            t.numSubExecs = ev.useDmaCopy ? 1 : numSubExecs;
+            t.numBytes    = numBytesPerTransfer;
+
+            t.numSrcs     = 1;
+            t.numDsts     = 1;
+            t.exeIndex    = srcIdx;
+            t.srcType.resize(1);
+            t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+            t.srcIndex.resize(1);
+            t.srcIndex[0] = srcIdx;
+            t.dstType.resize(1);
+            t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
+            t.dstIndex.resize(1);
+            t.dstIndex[0] = i;
+
             transfers.push_back(t);
           }
         }

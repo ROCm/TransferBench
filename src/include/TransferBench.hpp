@@ -191,6 +191,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
 void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const numSubExecs);
 void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const localIdx, int const remoteIdx, int const maxSubExecs);
 void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus);
+void RunParallelCopyBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus);
 
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
 
