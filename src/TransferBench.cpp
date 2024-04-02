@@ -2785,7 +2785,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         {
           printf(" (%s %c%d %s)",
                  transfers[i].SrcToStr().c_str(),
-                 MemTypeStr[transfers[i].exeType], transfers[i].exeIndex,
+                 ExeTypeStr[transfers[i].exeType], transfers[i].exeIndex,
                  transfers[i].DstToStr().c_str());
         }
         printf("\n");
@@ -2869,7 +2869,7 @@ void RunParallelCopyBenchmark(EnvVars const& ev, size_t const numBytesPerTransfe
         {
           printf(" (%s %c%d %s)",
                  transfers[i].SrcToStr().c_str(),
-                 MemTypeStr[transfers[i].exeType], transfers[i].exeIndex,
+                 ExeTypeStr[transfers[i].exeType], transfers[i].exeIndex,
                  transfers[i].DstToStr().c_str());
         }
         printf("\n");
