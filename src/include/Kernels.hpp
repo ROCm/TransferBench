@@ -95,16 +95,32 @@ void CpuReduceKernel(SubExecParam const& p)
   else if (numSrcs == 1)
   {
     float const* __restrict__ src = p.src[0];
-    for (int i = 0; i < numDsts; ++i)
+    if (numDsts == 0)
     {
-      memcpy(p.dst[i], src, p.N * sizeof(float));
+      float sum = 0.0;
+      for (int j = 0; j < p.N; j++)
+        sum += p.src[0][j];
+
+      // Add a dummy check to ensure the read is not optimized out
+      if (sum != sum)
+      {
+        printf("[ERROR] Nan detected\n");
+      }
+    }
+    else
+    {
+      for (int i = 0; i < numDsts; ++i)
+      {
+        memcpy(p.dst[i], src, p.N * sizeof(float));
+      }
     }
   }
   else
   {
+    float sum = 0.0f;
     for (int j = 0; j < p.N; j++)
     {
-      float sum = p.src[0][j];
+      sum = p.src[0][j];
       for (int i = 1; i < numSrcs; i++) sum += p.src[i][j];
       for (int i = 0; i < numDsts; i++) p.dst[i][j] = sum;
     }
