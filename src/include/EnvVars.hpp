@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.49"
+#define TB_VERSION "1.50"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -797,6 +797,18 @@ public:
     printf("\n");
   }
 
+  void DisplayParallelCopyEnvVars() const
+  {
+    DisplayEnvVars();
+    if (hideEnv) return;
+    if (!outputToCsv)
+      printf("[Parallel-copy Related]\n");
+    PRINT_EV("USE_FINE_GRAIN", useFineGrain,
+             std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
+    PRINT_EV("USE_GPU_DMA", useDmaCopy,
+             std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
+    printf("\n");
+  }
 
   // Helper function that gets parses environment variable or sets to default value
   static int GetEnvVar(std::string const& varname, int defaultValue)

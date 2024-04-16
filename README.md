@@ -70,10 +70,11 @@ make
   * `a2a`    : All-to-all benchmark test
   * `cmdline`: Take in Transfers to run from command-line instead of via file
   * `p2p`    : Peer-to-peer benchmark test
+  * `pcopy`  : Benchmark parallel copies from a single GPU to other GPUs
   * `rsweep` : Random sweep across possible sets of transfers
-  * `rwrite` : Benchmarks parallel remote writes from a single GPU
+  * `rwrite` : Benchmarks parallel remote writes from a single GPU to other GPUs
   * `scaling`: GPU subexecutor scaling tests
-  * 'schmoo` : Local/Remote read/write/copy between two GPUs
+  * `schmoo` : Local/Remote read/write/copy between two GPUs
   * `sweep`  : Sweep across possible sets of transfers
 
 * When using the same GPU executor in multiple simultaneous transfers on separate streams (USE_SINGLE_STREAM=0),
