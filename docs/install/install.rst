@@ -2,9 +2,9 @@
   :description: TransferBench documentation 
   :keywords: TransferBench, API, ROCm, HIP
 
--------------
-Requirements
--------------
+---------------------------
+Installing TransferBench
+---------------------------
 
 * ROCm stack installed on the system (HIP runtime)
 * `libnuma` installed on the system
