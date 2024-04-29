@@ -26,7 +26,7 @@ The documentation is structured as follows:
 
   .. grid-item-card:: Tutorials
 
-    * :doc:`ConfigFile Format <tutorials/>`
+    * :doc:`ConfigFile Format <examples/configfile_format>`
  
 To contribute to the documentation, refer to
 `Contributing to ROCm <https://rocm.docs.amd.com/en/latest/contribute/contributing.html>`_.
