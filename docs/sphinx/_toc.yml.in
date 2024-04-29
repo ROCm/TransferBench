@@ -1,16 +1,33 @@
-# Anywhere {branch} is used, the branch name will be substituted.
-# These comments will also be removed.
-
 defaults:
   numbered: False
-  maxdepth: 6
-
 root: index
 subtrees:
-  - entries:
-    - file: instructions
-    - file: examples/index
-    - file: api
-  - caption: About
-    entries:
-      - file: license
+- caption: Installation
+  entries:
+  - file: install/installation.rst
+    title: TransferBench installation 
+
+- caption: API reference
+  entries:
+  - file: doxygen/html/files
+    title: API library
+  - file: doxygen/html/globals
+    title: Functions
+  - file: doxygen/html/annotated
+    title: Data structures
+
+- caption: How to
+  entries:
+  - file: how to/use-transferbench.rst
+    title: Use TransferBench
+ 
+
+- caption: Tutorials
+  entries:
+  - file: Examples/configfile-format.rst
+    title: Configfile format
+
+
+- caption: About
+  entries:
+  - file: license.md
