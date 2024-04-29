@@ -3,7 +3,7 @@
   :keywords: TransferBench, API, ROCm, HIP
 
 ---------------------------
-Installing TransferBench
+TransferBench Installation
 ---------------------------
 
 * ROCm stack installed on the system (HIP runtime)
