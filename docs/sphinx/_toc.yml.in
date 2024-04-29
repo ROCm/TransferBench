@@ -4,7 +4,7 @@ root: index
 subtrees:
 - caption: Installation
   entries:
-  - file: install/installation.rst
+  - file: install/install.rst
     title: TransferBench installation 
 
 - caption: API reference
