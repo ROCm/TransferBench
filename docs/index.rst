@@ -4,8 +4,35 @@ Welcome to TransferBench's documentation!
 TransferBench is a simple utility capable of benchmarking simultaneous transfers between user-specified devices (CPUs/GPUs).
 A Transfer is defined as a single operation where an executor reads and adds together values from source (SRC) memory locations, then writes the sum to destination (DST) memory locations. This simplifies to a simple copy operation when dealing with single SRC/DST.
 
-The user has control over the SRC and DST memory locations by indicating memory type followed by the device index. TransferBench supports coarse-grained pinned host memory, unpinned host memory, fine-grained host memory, coarse-grained global device memory, fine-grained global device memory, and null memory (for an empty transfer). In addition, the user can determine the size of the transfer (number of bytes to copy) for their tests.
+The documentation is structured as follows:
 
-The executor of the transfer can also be specified by the user. The options are CPU, kernel-based GPU, and SDMA-based GPU (DMA) executors. TransferBench also provides the option to choose the number of sub-executors. In case of a CPU executor this argument specifies the number of CPU threads, while for a GPU executor it defines the number of compute units (CU). If DMA is specified as the executor, the sub-executor argument determines the number of streams to be used.
+.. grid:: 2
+  :gutter: 3
+
+  .. grid-item-card:: Install
+
+       * :doc:`TransferBench installation <./install/installation>`
+
+  .. grid-item-card:: API library
+
+    * :doc:`API library <../doxygen/html/files>`
+    * :doc:`Functions <../doxygen/html/globals>`
+    * :doc:`Data structures <../doxygen/html/annotated>`
+
+  .. grid-item-card:: How to
+
+    * :doc:`Use ROCm Validation Suite <how to/use-transferbench>`
+
+
+  .. grid-item-card:: Tutorials
+
+    * :URL: 
+ 
+To contribute to the documentation, refer to
+`Contributing to ROCm <https://rocm.docs.amd.com/en/latest/contribute/contributing.html>`_.
+
+You can find licensing information on the
+`Licensing <https://rocm.docs.amd.com/en/latest/about/license.html>`_ page.
+
 
 For more examples, please refer to :ref:`Examples`
