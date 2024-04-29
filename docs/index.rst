@@ -11,7 +11,7 @@ The documentation is structured as follows:
 
   .. grid-item-card:: Install
 
-       * :doc:`TransferBench installation <./install/installation>`
+       * :doc:`TransferBench installation <./install/install>`
 
   .. grid-item-card:: API library
 
