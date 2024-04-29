@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm Validation Suite documentation 
-  :keywords: ROCm Validation Suite, RVS, ROCm, documentation
+  :description: TransferBench documentation 
+  :keywords: TransferBench, API, ROCm, HIP
 
 -------------
 Requirements
