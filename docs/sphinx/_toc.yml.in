@@ -24,7 +24,7 @@ subtrees:
 
 - caption: Tutorials
   entries:
-  - file: examples/configfile-format.rst
+  - file: examples/configfile_format.rst
     title: Configfile format
 
 
