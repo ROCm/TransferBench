@@ -31,7 +31,9 @@ To build TransferBench using CMake, use the following commands:
     
                 $ make
 
-If ROCm is installed in a folder other than `/opt/rocm/`, set `ROCM_PATH` appropriately
+.. Note:: 
+
+If ROCm is installed in a folder other than `/opt/rocm/`, set `ROCM_PATH` appropriately.
 
 --------------------------
 NVIDIA platform support
