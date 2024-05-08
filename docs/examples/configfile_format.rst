@@ -2,7 +2,7 @@
 ConfigFile format
 --------------------
 
-A Transfer is defined as a single operation where an Executor reads and adds together
+A Transfer is defined as a single operation where an executor reads and adds together
 values from Source (SRC) memory locations, then writes the sum to destination (DST) memory locations.
 This simplifies to a simple copy operation when dealing with single SRC/DST.
 
