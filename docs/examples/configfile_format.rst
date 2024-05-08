@@ -1,5 +1,5 @@
 --------------------
-ConfigFile Format
+ConfigFile format
 --------------------
 
 A Transfer is defined as a single operation where an Executor reads and adds together
@@ -19,7 +19,7 @@ Three Executors are supported by TransferBench::
 
 Each single line in the configuration file defines a set of Transfers (a Test) to run in parallel
 
-There are two ways to specify a Test:
+There are two ways to specify a test:
 
 1) Basic
 
