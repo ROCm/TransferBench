@@ -3,6 +3,8 @@ TransferBench documentation
 ****************************
 TransferBench is a utility capable of benchmarking simultaneous transfers between user-specified devices (CPUs/GPUs). A transfer is a single operation where an executor reads and adds values from source (SRC) memory locations, then writes the sum to destination (DST) memory locations. This simplifies to a simple copy operation when dealing with a single SRC/DST.
 
+For more information, see `GitHub. <https://github.com/ROCm/TransferBench>`_
+
 .. grid:: 2
   :gutter: 3
 
