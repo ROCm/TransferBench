@@ -22,10 +22,6 @@ For more information, see `GitHub. <https://github.com/ROCm/TransferBench>`_
     * :doc:`Use TransferBench <how to/use-transferbench>`
 
 
-  .. grid-item-card:: Tutorials
-
-    * :doc:`ConfigFile format <examples/configfile_format>`
- 
 To contribute to the documentation, refer to
 `Contributing to ROCm <https://rocm.docs.amd.com/en/latest/contribute/contributing.html>`_.
 
