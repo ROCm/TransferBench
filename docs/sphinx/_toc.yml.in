@@ -18,12 +18,6 @@ subtrees:
     title: Use TransferBench
  
 
-- caption: Tutorials
-  entries:
-  - file: examples/configfile_format.rst
-    title: ConfigFile format
-
-
 - caption: About
   entries:
   - file: license.md
