@@ -25,9 +25,10 @@ Refer to the following example to use TransferBench.
 ConfigFile format
 --------------------
 
-A Transfer is defined as a single operation where an executor reads and adds together
-values from Source (SRC) memory locations, then writes the sum to destination (DST) memory locations.
+A Transfer is defined as a single operation where an executor reads and adds together values from Source (SRC) memory locations, then writes the sum to destination (DST) memory locations.
 This simplifies to a simple copy operation when dealing with single SRC/DST.
+
+.. code-block:: bash
 
    SRC 0                DST 0
    SRC 1 -> Executor -> DST 1
