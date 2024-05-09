@@ -3,8 +3,10 @@
   :keywords: TransferBench, API, ROCm, HIP
 
 ---------------------------
-TransferBench Installation
+TransferBench installation
 ---------------------------
+
+The following software is required to install TransferBench:
 
 * ROCm stack installed on the system (HIP runtime)
 * `libnuma` installed on the system
