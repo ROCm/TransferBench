@@ -1,10 +1,34 @@
+.. meta::
+  :description: TransferBench documentation 
+  :keywords: TransferBench, API, ROCm, documentation, HIP
+
+
+Using TransferBench
+---------------------
+  
+Users have control over the SRC and DST memory locations by indicating memory type followed by the device index. TransferBench supports the following:
+
+* coarse-grained pinned host memory
+* unpinned host memory
+* fine-grained host memory
+* coarse-grained global device memory
+* fine-grained global device memory
+* null memory (for an empty transfer).
+
+In addition, users can determine the size of the transfer (number of bytes to copy) for their tests.
+
+Users can also specify executors of the transfer. The options are CPU, kernel-based GPU, and SDMA-based GPU (DMA) executors. TransferBench also provides the option to choose the number of sub-executors. In case of a CPU executor this argument specifies the number of CPU threads, while for a GPU executor it defines the number of compute units (CU). If DMA is specified as the executor, the sub-executor argument determines the number of streams to be used.
+
+Refer to the following example to use TransferBench.
+
 --------------------
 ConfigFile format
 --------------------
 
-A Transfer is defined as a single operation where an executor reads and adds together
-values from Source (SRC) memory locations, then writes the sum to destination (DST) memory locations.
+A Transfer is defined as a single operation where an executor reads and adds together values from Source (SRC) memory locations, then writes the sum to destination (DST) memory locations.
 This simplifies to a simple copy operation when dealing with single SRC/DST.
+
+.. code-block:: bash
 
    SRC 0                DST 0
    SRC 1 -> Executor -> DST 1
@@ -91,3 +115,6 @@ Copy 1Mb from GPU0 to GPU1 with 4 CUs, and 2Mb from GPU1 to GPU0 with 8 CUs::
 Broadcast from GPU 0 to GPU 0 and GPU 1::
 
    1 16 (G0->G0->G0G1)
+
+
+
