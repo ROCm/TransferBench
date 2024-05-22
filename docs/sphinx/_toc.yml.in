@@ -1,16 +1,23 @@
-# Anywhere {branch} is used, the branch name will be substituted.
-# These comments will also be removed.
-
 defaults:
   numbered: False
-  maxdepth: 6
-
 root: index
 subtrees:
-  - entries:
-    - file: instructions
-    - file: examples/index
-    - file: api
-  - caption: About
-    entries:
-      - file: license
+- caption: Install
+  entries:
+  - file: install/install.rst
+    title: TransferBench installation 
+
+- caption: API reference
+  entries:
+  - file: reference/api.rst
+    title: API library
+ 
+- caption: How to
+  entries:
+  - file: how to/use-transferbench.rst
+    title: Use TransferBench
+ 
+
+- caption: About
+  entries:
+  - file: license.md
