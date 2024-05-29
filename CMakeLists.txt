@@ -24,6 +24,8 @@ set(LIBRARY_NAME TransferBench)
 
 rocm_install(TARGETS TransferBench)
 
+rocm_package_add_dependencies(DEPENDS libnuma1 hsa-rocr)
+
 rocm_create_package(
     NAME ${LIBRARY_NAME}
     DESCRIPTION "TransferBench package"
