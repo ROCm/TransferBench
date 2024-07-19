@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.51
+
+### Fixed
+- Fixed out-of-bounds memory access during topology detection that can happen if the number of
+  CPUs is less than the number of NUMA domains
+
 ## v1.50
 
 ### Added

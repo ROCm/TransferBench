@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.50"
+#define TB_VERSION "1.51"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -524,8 +524,10 @@ public:
     // Determine how many CPUs exit per NUMA node (to avoid executing on NUMA without CPUs)
     numCpusPerNuma.resize(numDetectedCpus);
     int const totalCpus = numa_num_configured_cpus();
-    for (int i = 0; i < totalCpus; i++)
-      numCpusPerNuma[numa_node_of_cpu(i)]++;
+    for (int i = 0; i < totalCpus; i++) {
+      int node = numa_node_of_cpu(i);
+      if (node >= 0) numCpusPerNuma[node]++;
+    }
 
     // Build array of wall clock rates per GPU device
     wallClockPerDeviceMhz.resize(numDetectedGpus);
