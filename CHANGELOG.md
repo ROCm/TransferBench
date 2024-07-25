@@ -8,6 +8,7 @@ Documentation for TransferBench is available at
 ### Fixed
 - Fixed out-of-bounds memory access during topology detection that can happen if the number of
   CPUs is less than the number of NUMA domains
+- Fixed CU masking functionality on multi-XCD architectures (e.g. MI300)
 
 ## v1.50
 

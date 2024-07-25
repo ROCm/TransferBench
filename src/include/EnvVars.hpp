@@ -299,6 +299,24 @@ public:
     }
     else fillPattern.clear();
 
+    // Figure out number of xccs per device
+    int maxNumXccs = 64;
+    xccIdsPerDevice.resize(numGpuDevices);
+    for (int i = 0; i < numGpuDevices; i++)
+    {
+      int* data;
+      HIP_CALL(hipSetDevice(i));
+      HIP_CALL(hipHostMalloc((void**)&data, maxNumXccs * sizeof(int)));
+      CollectXccIdsKernel<<<maxNumXccs, 1>>>(data);
+      HIP_CALL(hipDeviceSynchronize());
+
+      xccIdsPerDevice[i].clear();
+      for (int j = 0; j < maxNumXccs; j++)
+        xccIdsPerDevice[i].insert(data[j]);
+
+      HIP_CALL(hipHostFree(data));
+    }
+
     // Check for CU mask
     cuMask.clear();
     char* cuMaskStr = getenv("CU_MASK");
@@ -308,6 +326,7 @@ public:
       printf("[WARN] CU_MASK is not supported in CUDA\n");
 #else
       std::vector<std::pair<int, int>> ranges;
+      int numXccs = (xccIdsPerDevice.size() > 0 ? xccIdsPerDevice[0].size() : 1);
       int maxCU = 0;
       char* token = strtok(cuMaskStr, ",");
       while (token)
@@ -330,34 +349,20 @@ public:
         }
         token = strtok(NULL, ",");
       }
-      cuMask.resize(maxCU / 32 + 1, 0);
+      cuMask.resize(2 * numXccs, 0);
 
       for (auto range : ranges)
       {
         for (int i = range.first; i <= range.second; i++)
         {
-          cuMask[i / 32] |= (1 << (i % 32));
+          for (int x = 0; x < numXccs; x++)
+          {
+            int targetBit = i * numXccs + x;
+            cuMask[targetBit/32] |= (1<<(targetBit%32));
+          }
         }
       }
 #endif
-    }
-
-    // Figure out number of xccs per device
-    int maxNumXccs = 64;
-    xccIdsPerDevice.resize(numGpuDevices);
-    for (int i = 0; i < numGpuDevices; i++)
-    {
-      int* data;
-      HIP_CALL(hipSetDevice(i));
-      HIP_CALL(hipHostMalloc((void**)&data, maxNumXccs * sizeof(int)));
-      CollectXccIdsKernel<<<maxNumXccs, 1>>>(data);
-      HIP_CALL(hipDeviceSynchronize());
-
-      xccIdsPerDevice[i].clear();
-      for (int j = 0; j < maxNumXccs; j++)
-        xccIdsPerDevice[i].insert(data[j]);
-
-      HIP_CALL(hipHostFree(data));
     }
 
     // Parse preferred XCC table (if provided
@@ -830,37 +835,28 @@ public:
   std::string GetCuMaskDesc() const
   {
     std::vector<std::pair<int, int>> runs;
-
+    int numXccs = (xccIdsPerDevice.size() > 0 ? xccIdsPerDevice[0].size() : 1);
     bool inRun = false;
     std::pair<int, int> curr;
     int used = 0;
-    for (int i = 0; i < cuMask.size(); i++)
-    {
-      for (int j = 0; j < 32; j++)
-      {
-        if (cuMask[i] & (1 << j))
-        {
-          used++;
-          if (!inRun)
-          {
-            inRun = true;
-            curr.first = i * 32 + j;
-          }
-        }
-        else
-        {
-          if (inRun)
-          {
-            inRun = false;
-            curr.second = i * 32 + j - 1;
-            runs.push_back(curr);
-          }
-        }
+    for (int targetBit = 0; targetBit < cuMask.size() * 32; targetBit += numXccs) {
+      if (cuMask[targetBit/32] & (1 << (targetBit%32))) {
+	used++;
+	if (!inRun) {
+	  inRun = true;
+	  curr.first = targetBit / numXccs;
+	}
+      } else {
+	if (inRun) {
+	  inRun = false;
+	  curr.second = targetBit / numXccs - 1;
+	  runs.push_back(curr);
+	}
       }
     }
     if (inRun)
-      curr.second = cuMask.size() * 32 - 1;
-
+      curr.second = (cuMask.size() * 32) / numXccs - 1;
+    
     std::string result = "CUs used: (" + std::to_string(used) + ") ";
     for (int i = 0; i < runs.size(); i++)
     {
