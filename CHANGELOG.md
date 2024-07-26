@@ -5,6 +5,10 @@ Documentation for TransferBench is available at
 
 ## v1.51
 
+### Added
+- Support for sub-iterations via NUM_SUBITERATIONS.  This allows for additional looping during an iteration
+  If set to 0, this should infinitely loop (which may be useful for some debug purposes)
+
 ### Fixed
 - Fixed out-of-bounds memory access during topology detection that can happen if the number of
   CPUs is less than the number of NUMA domains

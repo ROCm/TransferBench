@@ -87,6 +87,7 @@ public:
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
+  int numSubIterations;  // Number of subiterations to perform
   int numWarmups;        // Number of un-timed warmup iterations to perform
   int outputToCsv;       // Output in CSV format
   int samplingFactor;    // Affects how many different values of N are generated (when N set to 0)
@@ -191,6 +192,7 @@ public:
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
+    numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , DEFAULT_NUM_WARMUPS);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , DEFAULT_SAMPLING_FACTOR);
@@ -593,6 +595,7 @@ public:
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
     printf(" NUM_ITERATIONS=I       - Perform I timed iteration(s) per test\n");
+    printf(" NUM_SUBITERATIONS=S    - Perform S sub-iteration(s) per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS=W          - Perform W untimed warmup iteration(s) per test\n");
     printf(" OUTPUT_TO_CSV          - Outputs to CSV format if set\n");
     printf(" SAMPLING_FACTOR=F      - Add F samples (when possible) between powers of 2 when auto-generating data sizes\n");
@@ -663,6 +666,8 @@ public:
     PRINT_EV("NUM_ITERATIONS", numIterations,
              std::string("Running ") + std::to_string(numIterations > 0 ? numIterations : -numIterations) + " "
              + (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
+    PRINT_EV("NUM_SUBITERATIONS", numSubIterations,
+	     std::string("Running ") + (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)) + " subiterations");
     PRINT_EV("NUM_WARMUPS", numWarmups,
              std::string("Running " + std::to_string(numWarmups) + " warmup iteration(s) per Test"));
     PRINT_EV("SHARED_MEM_BYTES", sharedMemBytes,

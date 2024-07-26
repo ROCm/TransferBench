@@ -696,7 +696,7 @@ void ExecuteTransfers(EnvVars const& ev,
   }
 
   // Report timings
-  totalCpuTime = totalCpuTime / (1.0 * numTimedIterations) * 1000;
+  totalCpuTime = totalCpuTime / (1.0 * numTimedIterations * ev.numSubIterations) * 1000;
   double totalBandwidthGbs = (totalBytesTransferred / 1.0E6) / totalCpuTime;
   if (totalBandwidthCpu) *totalBandwidthCpu = totalBandwidthGbs;
 
@@ -719,14 +719,14 @@ void ExecuteTransfers(EnvVars const& ev,
           exeInfo.totalTime = std::max(exeInfo.totalTime, transfer->transferTime);
       }
 
-      double exeDurationMsec = exeInfo.totalTime / (1.0 * numTimedIterations);
+      double exeDurationMsec = exeInfo.totalTime / (1.0 * numTimedIterations * ev.numSubIterations);
       double exeBandwidthGbs = (exeInfo.totalBytes / 1.0E9) / exeDurationMsec * 1000.0f;
       maxGpuTime = std::max(maxGpuTime, exeDurationMsec);
 
       double sumBandwidthGbs = 0.0;
       for (auto& transfer: exeInfo.transfers)
       {
-        transfer->transferTime /= (1.0 * numTimedIterations);
+        transfer->transferTime /= (1.0 * numTimedIterations * ev.numSubIterations);
         transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
         transfer->executorBandwidth = exeBandwidthGbs;
         sumBandwidthGbs += transfer->transferBandwidth;
@@ -1683,14 +1683,14 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 #if defined(__NVCC__)
     HIP_CALL(hipEventRecord(startEvent, stream));
     GpuKernelTable[ev.gfxBlockSize/64 - 1][ev.gfxUnroll - 1]
-      <<<gridSize, blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr, ev.gfxWaveOrder);
+      <<<gridSize, blockSize, ev.sharedMemBytes, stream>>>(transfer->subExecParamGpuPtr, ev.gfxWaveOrder, ev.numSubIterations);
     HIP_CALL(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(GpuKernelTable[ev.gfxBlockSize/64 - 1][ev.gfxUnroll - 1],
                           gridSize, blockSize,
                           ev.sharedMemBytes, stream,
                           startEvent, stopEvent,
-                          0, transfer->subExecParamGpuPtr, ev.gfxWaveOrder);
+                          0, transfer->subExecParamGpuPtr, ev.gfxWaveOrder, ev.numSubIterations);
 #endif
     // Synchronize per iteration, unless in single sync mode, in which case
     // synchronize during last warmup / last actual iteration
@@ -1757,13 +1757,13 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       hipEvent_t&  startEvent = exeInfo.startEvents[transferIdx];
       hipEvent_t&  stopEvent  = exeInfo.stopEvents[transferIdx];
 
+      int subIteration = 0;
       HIP_CALL(hipEventRecord(startEvent, stream));
-      if (transfer->numSrcs == 1 && transfer->numDsts == 1)
-      {
+      do {
         HIP_CALL(hipMemcpyAsync(transfer->dstMem[0], transfer->srcMem[0],
                                 transfer->numBytesActual, hipMemcpyDefault,
                                 stream));
-      }
+      } while (++subIteration != ev.numSubIterations);
       HIP_CALL(hipEventRecord(stopEvent, stream));
       HIP_CALL(hipStreamSynchronize(stream));
 
@@ -1772,6 +1772,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
         // Record GPU timing
         float gpuDeltaMsec;
         HIP_CALL(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        //gpuDeltaMsec /= (1.0 * ev.numSubIterations);
         transfer->transferTime += gpuDeltaMsec;
         if (ev.showIterations)
           transfer->perIterationTime.push_back(gpuDeltaMsec);
@@ -1784,23 +1785,27 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       exit(1);
 #else
       // Target specific DMA engine
-
-      // Atomically set signal to 1
-      HSA_CALL(hsa_signal_store_screlease(transfer->signal, 1));
-
       auto cpuStart = std::chrono::high_resolution_clock::now();
-      HSA_CALL(hsa_amd_memory_async_copy_on_engine(transfer->dstMem[0], transfer->dstAgent,
-                                                   transfer->srcMem[0], transfer->srcAgent,
-                                                   transfer->numBytesActual, 0, NULL,
-                                                   transfer->signal,
-                                                   transfer->sdmaEngineId, true));
-      // Wait for SDMA transfer to complete
-      // NOTE: "A wait operation can spuriously resume at any time sooner than the timeout
-      //        (for example, due to system or other external factors) even when the
-      //         condition has not been met.)
-      while(hsa_signal_wait_scacquire(transfer->signal,
-                                      HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-                                      HSA_WAIT_STATE_ACTIVE) >= 1);
+
+      int subIterations = 0;
+      do {
+        // Atomically set signal to 1
+        HSA_CALL(hsa_signal_store_screlease(transfer->signal, 1));
+
+        HSA_CALL(hsa_amd_memory_async_copy_on_engine(transfer->dstMem[0], transfer->dstAgent,
+                                                     transfer->srcMem[0], transfer->srcAgent,
+                                                     transfer->numBytesActual, 0, NULL,
+                                                     transfer->signal,
+                                                     transfer->sdmaEngineId, true));
+        // Wait for SDMA transfer to complete
+        // NOTE: "A wait operation can spuriously resume at any time sooner than the timeout
+        //        (for example, due to system or other external factors) even when the
+        //         condition has not been met.)
+        while(hsa_signal_wait_scacquire(transfer->signal,
+                                        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+                                        HSA_WAIT_STATE_ACTIVE) >= 1);
+      } while (++subIterations < ev.numSubIterations);
+
       if (iteration >= 0)
       {
         // Record GPU timing
@@ -1825,15 +1830,18 @@ void RunTransfer(EnvVars const& ev, int const iteration,
 
     std::vector<std::thread> childThreads;
 
+    int subIteration = 0;
     auto cpuStart = std::chrono::high_resolution_clock::now();
+    do {
+      // Launch each subExecutor in child-threads to perform memcopies
+      for (int i = 0; i < transfer->numSubExecs; ++i)
+        childThreads.push_back(std::thread(CpuReduceKernel, std::ref(transfer->subExecParam[i])));
 
-    // Launch each subExecutor in child-threads to perform memcopies
-    for (int i = 0; i < transfer->numSubExecs; ++i)
-      childThreads.push_back(std::thread(CpuReduceKernel, std::ref(transfer->subExecParam[i])));
-
-    // Wait for child-threads to finish
-    for (int i = 0; i < transfer->numSubExecs; ++i)
-      childThreads[i].join();
+      // Wait for child-threads to finish
+      for (int i = 0; i < transfer->numSubExecs; ++i)
+        childThreads[i].join();
+      childThreads.clear();
+    } while (++subIteration != ev.numSubIterations);
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
 
