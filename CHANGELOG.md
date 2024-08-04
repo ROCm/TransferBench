@@ -5,9 +5,17 @@ Documentation for TransferBench is available at
 
 ## v1.51
 
+## Modified
+- CSV output has been modified slightly to match normal terminal output
+- Output for non single stream mode has been changed to match single stream mode (results per Executor)
+
 ### Added
 - Support for sub-iterations via NUM_SUBITERATIONS.  This allows for additional looping during an iteration
   If set to 0, this should infinitely loop (which may be useful for some debug purposes)
+- Support for variable number of subexecutors (currently for GPU-GFX executor only).  Setting subExecutors to
+  0 will run over a range of CUs to use, and report only the results of the best one found. This can be tuned
+  for performance by setting the MIN_VAR_SUBEXEC and MAX_VAR_SUBEXEC environment variables to narrow the
+  search space.  The number of CUs used will be identical for all variable subExecutor transfers
 
 ### Fixed
 - Fixed out-of-bounds memory access during topology detection that can happen if the number of

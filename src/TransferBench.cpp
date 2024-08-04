@@ -211,12 +211,8 @@ int main(int argc, char **argv)
   }
   else if (!strcmp(argv[1], "cmdline"))
   {
-    // Print environment variables and CSV header
+    // Print environment variables
     ev.DisplayEnvVars();
-    if (ev.outputToCsv)
-    {
-      printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
-    }
 
     // Read Transfer from command line
     std::string cmdlineTransfer;
@@ -263,10 +259,6 @@ int main(int argc, char **argv)
 
   // Print environment variables and CSV header
   ev.DisplayEnvVars();
-  if (ev.outputToCsv)
-  {
-    printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
-  }
 
   int testNum = 0;
   char line[MAX_LINE_LEN];
@@ -313,6 +305,80 @@ void ExecuteTransfers(EnvVars const& ev,
                       bool verbose,
                       double* totalBandwidthCpu)
 {
+  // Check for any Transfers using variable number of sub-executors
+  std::vector<int> varTransfers;
+  std::vector<int> numUsedSubExec(ev.numGpuDevices, 0);
+  std::vector<int> numVarSubExec(ev.numGpuDevices, 0);
+
+  for (int i = 0; i < transfers.size(); i++) {
+    Transfer& t = transfers[i];
+    t.transferIndex = i;
+    t.numBytesActual = (t.numBytes ? t.numBytes : N * sizeof(float));
+
+    if (t.exeType == EXE_GPU_GFX) {
+      if (t.numSubExecs == 0) {
+        varTransfers.push_back(i);
+        numVarSubExec[t.exeIndex]++;
+      } else {
+        numUsedSubExec[t.exeIndex] += t.numSubExecs;
+      }
+    } else if (t.numSubExecs == 0) {
+      printf("[ERROR] Variable subexecutor count is only supported for GFX executor\n");
+      exit(1);
+    }
+  }
+
+  if (verbose && !ev.outputToCsv) printf("Test %d:\n", testNum);
+
+  TestResults testResults;
+  if (varTransfers.size() == 0) {
+    testResults = ExecuteTransfersImpl(ev, transfers);
+  } else {
+    // Determine maximum number of subexecutors
+    int maxNumSubExec = 0;
+    if (ev.maxNumVarSubExec) {
+      maxNumSubExec = ev.maxNumVarSubExec;
+    } else {
+      HIP_CALL(hipDeviceGetAttribute(&maxNumSubExec, hipDeviceAttributeMultiprocessorCount, 0));
+      for (int device = 0; device < ev.numGpuDevices; device++) {
+        int numSubExec = 0;
+        HIP_CALL(hipDeviceGetAttribute(&numSubExec, hipDeviceAttributeMultiprocessorCount, device));
+        int leftOverSubExec = numSubExec - numUsedSubExec[device];
+        if (leftOverSubExec < numVarSubExec[device])
+          maxNumSubExec = 1;
+        else if (numVarSubExec[device] != 0) {
+          maxNumSubExec = std::min(maxNumSubExec, leftOverSubExec / numVarSubExec[device]);
+        }
+      }
+    }
+
+    // Loop over subexecs
+    std::vector<Transfer> bestTransfers;
+    double bestBandwidthCpu = -1.0;
+
+    for (int numSubExec = ev.minNumVarSubExec; numSubExec <= maxNumSubExec; numSubExec++) {
+      std::vector<Transfer> currTransfers = transfers;
+      for (auto idx : varTransfers) {
+        currTransfers[idx].numSubExecs = numSubExec;
+      }
+      TestResults tempResults = ExecuteTransfersImpl(ev, currTransfers);
+      if (tempResults.totalBandwidthCpu > testResults.totalBandwidthCpu) {
+        bestTransfers = currTransfers;
+        testResults = tempResults;
+      }
+    }
+    transfers = bestTransfers;
+  }
+  if (totalBandwidthCpu) *totalBandwidthCpu = testResults.totalBandwidthCpu;
+
+  if (verbose) {
+    ReportResults(ev, transfers, testResults);
+  }
+}
+
+TestResults ExecuteTransfersImpl(EnvVars const& ev,
+                                 std::vector<Transfer>& transfers)
+{
   int const initOffset = ev.byteOffset / sizeof(float);
 
   // Map transfers by executor
@@ -341,15 +407,12 @@ void ExecuteTransfers(EnvVars const& ev,
     // Loop over each transfer this executor is involved in
     for (Transfer* transfer : exeInfo.transfers)
     {
-      // Determine how many bytes to copy for this Transfer (use custom if pre-specified)
-      transfer->numBytesActual = (transfer->numBytes ? transfer->numBytes : N * sizeof(float));
-
       // Allocate source memory
       transfer->srcMem.resize(transfer->numSrcs);
       for (int iSrc = 0; iSrc < transfer->numSrcs; ++iSrc)
       {
         MemType const& srcType  = transfer->srcType[iSrc];
-        int     const  srcIndex    = RemappedIndex(transfer->srcIndex[iSrc], IsCpuType(srcType));
+        int     const  srcIndex = RemappedIndex(transfer->srcIndex[iSrc], IsCpuType(srcType));
 
         // Ensure executing GPU can access source memory
         if (IsGpuType(exeType) && IsGpuType(srcType) && srcIndex != exeIndex)
@@ -363,7 +426,7 @@ void ExecuteTransfers(EnvVars const& ev,
       for (int iDst = 0; iDst < transfer->numDsts; ++iDst)
       {
         MemType const& dstType  = transfer->dstType[iDst];
-        int     const  dstIndex    = RemappedIndex(transfer->dstIndex[iDst], IsCpuType(dstType));
+        int     const  dstIndex = RemappedIndex(transfer->dstIndex[iDst], IsCpuType(dstType));
 
         // Ensure executing GPU can access destination memory
         if (IsGpuType(exeType) && IsGpuType(dstType) && dstIndex != exeIndex)
@@ -509,7 +572,6 @@ void ExecuteTransfers(EnvVars const& ev,
     }
   }
 
-  if (verbose && !ev.outputToCsv) printf("Test %d:\n", testNum);
 
   // Prepare input memory and block parameters for current N
   bool isSrcCorrect = true;
@@ -610,7 +672,7 @@ void ExecuteTransfers(EnvVars const& ev,
     if (ev.numIterations < 0 && totalCpuTime > -ev.numIterations) break;
 
     // Pause before starting first timed iteration in interactive mode
-    if (verbose && ev.useInteractive && iteration == 0)
+    if (ev.useInteractive && iteration == 0)
     {
       printf("Memory prepared:\n");
 
@@ -674,7 +736,7 @@ void ExecuteTransfers(EnvVars const& ev,
   }
 
   // Pause for interactive mode
-  if (verbose && isSrcCorrect && ev.useInteractive)
+  if (isSrcCorrect && ev.useInteractive)
   {
     printf("Transfers complete. Hit <Enter> to continue: ");
     if (scanf("%*c") != 0)
@@ -695,243 +757,47 @@ void ExecuteTransfers(EnvVars const& ev,
     totalBytesTransferred += transfer->numBytesActual;
   }
 
-  // Report timings
-  totalCpuTime = totalCpuTime / (1.0 * numTimedIterations * ev.numSubIterations) * 1000;
-  double totalBandwidthGbs = (totalBytesTransferred / 1.0E6) / totalCpuTime;
-  if (totalBandwidthCpu) *totalBandwidthCpu = totalBandwidthGbs;
+  // Record results
+  TestResults testResults;
+  testResults.numTimedIterations = numTimedIterations;
+  testResults.totalBytesTransferred = totalBytesTransferred;
+  testResults.totalDurationMsec = totalCpuTime / (1.0 * numTimedIterations * ev.numSubIterations) * 1000;
+  testResults.totalBandwidthCpu = (totalBytesTransferred / 1.0E6) / testResults.totalDurationMsec;
 
-  double maxGpuTime = 0;
-
+  double maxExeDurationMsec = 0.0;
   if (!isSrcCorrect) goto cleanup;
-  if (ev.useSingleStream)
+
+  for (auto& exeInfoPair : transferMap)
   {
-    for (auto& exeInfoPair : transferMap)
+    ExecutorInfo  exeInfo  = exeInfoPair.second;
+    ExeType const exeType  = exeInfoPair.first.first;
+    int     const exeIndex = exeInfoPair.first.second;
+    ExeResult& exeResult   = testResults.exeResults[std::make_pair(exeType, exeIndex)];
+
+    // Compute total time for non GPU executors
+    if (exeType != EXE_GPU_GFX || ev.useSingleStream == 0)
     {
-      ExecutorInfo  exeInfo  = exeInfoPair.second;
-      ExeType const exeType  = exeInfoPair.first.first;
-      int     const exeIndex = exeInfoPair.first.second;
-
-      // Compute total time for non GPU executors
-      if (exeType != EXE_GPU_GFX)
-      {
-        exeInfo.totalTime = 0;
-        for (auto const& transfer : exeInfo.transfers)
-          exeInfo.totalTime = std::max(exeInfo.totalTime, transfer->transferTime);
-      }
-
-      double exeDurationMsec = exeInfo.totalTime / (1.0 * numTimedIterations * ev.numSubIterations);
-      double exeBandwidthGbs = (exeInfo.totalBytes / 1.0E9) / exeDurationMsec * 1000.0f;
-      maxGpuTime = std::max(maxGpuTime, exeDurationMsec);
-
-      double sumBandwidthGbs = 0.0;
-      for (auto& transfer: exeInfo.transfers)
-      {
-        transfer->transferTime /= (1.0 * numTimedIterations * ev.numSubIterations);
-        transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
-        transfer->executorBandwidth = exeBandwidthGbs;
-        sumBandwidthGbs += transfer->transferBandwidth;
-      }
-
-      if (verbose && !ev.outputToCsv)
-      {
-        printf(" Executor: %3s %02d | %7.3f GB/s | %8.3f ms | %12lu bytes | %-7.3f GB/s (sum)\n",
-               ExeTypeName[exeType], exeIndex, exeBandwidthGbs, exeDurationMsec, exeInfo.totalBytes, sumBandwidthGbs);
-      }
-
-      int totalCUs = 0;
+      exeInfo.totalTime = 0;
       for (auto const& transfer : exeInfo.transfers)
-      {
-        totalCUs += transfer->numSubExecs;
-
-        char exeSubIndexStr[32] = "";
-        if (ev.useXccFilter || transfer->exeType == EXE_GPU_DMA)
-        {
-          if (transfer->exeSubIndex == -1)
-            sprintf(exeSubIndexStr, ".*");
-          else
-            sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
-        }
-
-        if (!verbose) continue;
-        if (!ev.outputToCsv)
-        {
-          printf("     Transfer %02d  | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d%s:%03d -> %s\n",
-                 transfer->transferIndex,
-                 transfer->transferBandwidth,
-                 transfer->transferTime,
-                 transfer->numBytesActual,
-                 transfer->SrcToStr().c_str(),
-                 ExeTypeName[transfer->exeType], transfer->exeIndex,
-                 exeSubIndexStr,
-                 transfer->numSubExecs,
-                 transfer->DstToStr().c_str());
-
-          if (ev.showIterations)
-          {
-            std::set<std::pair<double, int>> times;
-            double stdDevTime = 0;
-            double stdDevBw = 0;
-            for (int i = 0; i < numTimedIterations; i++)
-            {
-              times.insert(std::make_pair(transfer->perIterationTime[i], i+1));
-              double const varTime = fabs(transfer->transferTime - transfer->perIterationTime[i]);
-              stdDevTime += varTime * varTime;
-
-              double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->perIterationTime[i] * 1000.0f;
-              double const varBw = fabs(iterBandwidthGbs - transfer->transferBandwidth);
-              stdDevBw += varBw * varBw;
-            }
-            stdDevTime = sqrt(stdDevTime / numTimedIterations);
-            stdDevBw = sqrt(stdDevBw / numTimedIterations);
-
-            for (auto t : times)
-            {
-              double iterDurationMsec = t.first;
-              double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
-              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
-
-              std::set<int> usedXccs;
-              if (t.second - 1 < transfer->perIterationCUs.size())
-              {
-                printf(" CUs:");
-                for (auto x : transfer->perIterationCUs[t.second - 1])
-                {
-                  printf(" %02d:%02d", x.first, x.second);
-                  usedXccs.insert(x.first);
-                }
-              }
-              printf(" XCCs:");
-              for (auto x : usedXccs)
-                printf(" %02d", x);
-              printf("\n");
-            }
-            printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
-          }
-        }
-        else
-        {
-          printf("%d,%d,%lu,%s,%c%02d%s,%s,%d,%.3f,%.3f,%s,%s\n",
-                 testNum, transfer->transferIndex, transfer->numBytesActual,
-                 transfer->SrcToStr().c_str(),
-                 MemTypeStr[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
-                 transfer->DstToStr().c_str(),
-                 transfer->numSubExecs,
-                 transfer->transferBandwidth, transfer->transferTime,
-                 PtrVectorToStr(transfer->srcMem, initOffset).c_str(),
-                 PtrVectorToStr(transfer->dstMem, initOffset).c_str());
-        }
-      }
-
-      if (verbose && ev.outputToCsv)
-      {
-        printf("%d,ALL,%lu,ALL,%c%02d,ALL,%d,%.3f,%.3f,ALL,ALL\n",
-               testNum, totalBytesTransferred,
-               MemTypeStr[exeType], exeIndex, totalCUs,
-               exeBandwidthGbs, exeDurationMsec);
-      }
+        exeInfo.totalTime = std::max(exeInfo.totalTime, transfer->transferTime);
     }
-  }
-  else
-  {
-    for (auto const& transferPair : transferList)
+
+    exeResult.totalBytes      = exeInfo.totalBytes;
+    exeResult.durationMsec    = exeInfo.totalTime / (1.0 * numTimedIterations * ev.numSubIterations);
+    exeResult.bandwidthGbs    = (exeInfo.totalBytes / 1.0E9) / exeResult.durationMsec * 1000.0f;
+    exeResult.sumBandwidthGbs = 0;
+    maxExeDurationMsec        = std::max(maxExeDurationMsec, exeResult.durationMsec);
+
+    for (auto& transfer: exeInfo.transfers)
     {
-      Transfer* transfer = transferPair.second;
-      transfer->transferTime /= (1.0 * numTimedIterations);
+      exeResult.transferIdx.push_back(transfer->transferIndex);
+      transfer->transferTime /= (1.0 * numTimedIterations * ev.numSubIterations);
       transfer->transferBandwidth = (transfer->numBytesActual / 1.0E9) / transfer->transferTime * 1000.0f;
-      transfer->executorBandwidth = transfer->transferBandwidth;
-      maxGpuTime = std::max(maxGpuTime, transfer->transferTime);
-      if (!verbose) continue;
-
-      char exeSubIndexStr[32] = "";
-      if (ev.useXccFilter)
-      {
-        if (transfer->exeSubIndex == -1 || transfer->exeType == EXE_GPU_DMA)
-          sprintf(exeSubIndexStr, ".*");
-        else
-          sprintf(exeSubIndexStr, ".%d", transfer->exeSubIndex);
-      }
-
-      if (!ev.outputToCsv)
-      {
-        printf(" Transfer %02d      | %7.3f GB/s | %8.3f ms | %12lu bytes | %s -> %s%02d%s:%03d -> %s\n",
-               transfer->transferIndex,
-               transfer->transferBandwidth, transfer->transferTime,
-               transfer->numBytesActual,
-               transfer->SrcToStr().c_str(),
-               ExeTypeName[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
-               transfer->numSubExecs,
-               transfer->DstToStr().c_str());
-
-        if (ev.showIterations)
-        {
-            std::set<std::pair<double, int>> times;
-            double stdDevTime = 0;
-            double stdDevBw = 0;
-            for (int i = 0; i < numTimedIterations; i++)
-            {
-              times.insert(std::make_pair(transfer->perIterationTime[i], i+1));
-              double const varTime = fabs(transfer->transferTime - transfer->perIterationTime[i]);
-              stdDevTime += varTime * varTime;
-
-              double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / transfer->perIterationTime[i] * 1000.0f;
-              double const varBw = fabs(iterBandwidthGbs - transfer->transferBandwidth);
-              stdDevBw += varBw * varBw;
-            }
-            stdDevTime = sqrt(stdDevTime / numTimedIterations);
-            stdDevBw = sqrt(stdDevBw / numTimedIterations);
-
-            for (auto t : times)
-            {
-              double iterDurationMsec = t.first;
-              double iterBandwidthGbs = (transfer->numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
-              printf("      Iter %03d    | %7.3f GB/s | %8.3f ms |", t.second, iterBandwidthGbs, iterDurationMsec);
-              std::set<int> usedXccs;
-              if (t.second - 1 < transfer->perIterationCUs.size())
-              {
-                printf(" CUs:");
-                for (auto x : transfer->perIterationCUs[t.second - 1])
-                {
-                  printf(" %02d:%02d", x.first, x.second);
-                  usedXccs.insert(x.first);
-                }
-              }
-              printf(" XCCs:");
-              for (auto x : usedXccs)
-                printf(" %d", x);
-              printf("\n");
-            }
-            printf("      StandardDev | %7.3f GB/s | %8.3f ms |\n", stdDevBw, stdDevTime);
-        }
-      }
-      else
-      {
-        printf("%d,%d,%lu,%s,%s%02d%s,%s,%d,%.3f,%.3f,%s,%s\n",
-               testNum, transfer->transferIndex, transfer->numBytesActual,
-               transfer->SrcToStr().c_str(),
-               ExeTypeName[transfer->exeType], transfer->exeIndex, exeSubIndexStr,
-               transfer->DstToStr().c_str(),
-               transfer->numSubExecs,
-               transfer->transferBandwidth, transfer->transferTime,
-               PtrVectorToStr(transfer->srcMem, initOffset).c_str(),
-               PtrVectorToStr(transfer->dstMem, initOffset).c_str());
-      }
+      transfer->executorBandwidth = exeResult.bandwidthGbs;
+      exeResult.sumBandwidthGbs += transfer->transferBandwidth;
     }
   }
-
-  // Display aggregate statistics
-  if (verbose)
-  {
-    if (!ev.outputToCsv)
-    {
-      printf(" Aggregate (CPU)  | %7.3f GB/s | %8.3f ms | %12lu bytes | Overhead: %.3f ms\n",
-             totalBandwidthGbs, totalCpuTime, totalBytesTransferred, totalCpuTime - maxGpuTime);
-    }
-    else
-    {
-      printf("%d,ALL,%lu,ALL,ALL,ALL,ALL,%.3f,%.3f,ALL,ALL\n",
-             testNum, totalBytesTransferred, totalBandwidthGbs, totalCpuTime);
-    }
-  }
+  testResults.overheadMsec = testResults.totalDurationMsec - maxExeDurationMsec;
 
   // Release GPU memory
 cleanup:
@@ -983,6 +849,8 @@ cleanup:
       }
     }
   }
+
+  return testResults;
 }
 
 void DisplayUsage(char const* cmdName)
@@ -1396,9 +1264,9 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
   if (!advancedMode)
   {
     iss >> numSubExecs;
-    if (numSubExecs <= 0 || iss.fail())
+    if (numSubExecs < 0 || iss.fail())
     {
-      printf("Parsing error: Number of blocks to use (%d) must be greater than 0\n", numSubExecs);
+      printf("Parsing error: Number of blocks to use (%d) must be non-negative\n", numSubExecs);
       exit(1);
     }
   }
@@ -3178,4 +3046,85 @@ std::string PtrVectorToStr(std::vector<float*> const& strVector, int const initO
     ss << (strVector[i] + initOffset);
   }
   return ss.str();
+}
+
+void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, TestResults const results)
+{
+  char sep = ev.outputToCsv ? ',' : '|';
+  size_t numTimedIterations = results.numTimedIterations;
+
+  // Loop over each executor
+  for (auto exeInfoPair : results.exeResults) {
+    ExeResult const& exeResult = exeInfoPair.second;
+    ExeType exeType  = exeInfoPair.first.first;
+    int     exeIndex = exeInfoPair.first.second;
+
+    printf(" Executor: %3s %02d %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)\n",
+           ExeTypeName[exeType], exeIndex, sep, exeResult.bandwidthGbs, sep,
+           exeResult.durationMsec, sep, exeResult.totalBytes, sep, exeResult.sumBandwidthGbs);
+
+    for (int idx : exeResult.transferIdx) {
+      Transfer const& t = transfers[idx];
+
+      char exeSubIndexStr[32] = "";
+      if (ev.useXccFilter || t.exeType == EXE_GPU_DMA) {
+        if (t.exeSubIndex == -1)
+          sprintf(exeSubIndexStr, ".*");
+        else
+          sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
+      }
+      printf("     Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%02d%s:%03d -> %s\n",
+             t.transferIndex, sep,
+             t.transferBandwidth, sep,
+             t.transferTime, sep,
+             t.numBytesActual, sep,
+             t.SrcToStr().c_str(),
+             ExeTypeName[t.exeType], t.exeIndex,
+             exeSubIndexStr,
+             t.numSubExecs,
+             t.DstToStr().c_str());
+
+      // Show per-iteration timing information
+      if (ev.showIterations) {
+
+        std::set<std::pair<double, int>> times;
+        double stdDevTime = 0;
+        double stdDevBw = 0;
+        for (int i = 0; i < numTimedIterations; i++) {
+          times.insert(std::make_pair(t.perIterationTime[i], i+1));
+          double const varTime = fabs(t.transferTime - t.perIterationTime[i]);
+          stdDevTime += varTime * varTime;
+
+          double iterBandwidthGbs = (t.numBytesActual / 1.0E9) / t.perIterationTime[i] * 1000.0f;
+          double const varBw = fabs(iterBandwidthGbs - t.transferBandwidth);
+          stdDevBw += varBw * varBw;
+        }
+        stdDevTime = sqrt(stdDevTime / numTimedIterations);
+        stdDevBw = sqrt(stdDevBw / numTimedIterations);
+
+        for (auto time : times) {
+          double iterDurationMsec = time.first;
+          double iterBandwidthGbs = (t.numBytesActual / 1.0E9) / iterDurationMsec * 1000.0f;
+          printf("      Iter %03d    %c %7.3f GB/s %c %8.3f ms %c", time.second, sep, iterBandwidthGbs, sep, iterDurationMsec, sep);
+
+          std::set<int> usedXccs;
+          if (time.second - 1 < t.perIterationCUs.size()) {
+            printf(" CUs:");
+            for (auto x : t.perIterationCUs[time.second - 1]) {
+              printf(" %02d:%02d", x.first, x.second);
+              usedXccs.insert(x.first);
+            }
+          }
+          printf(" XCCs:");
+          for (auto x : usedXccs)
+            printf(" %02d", x);
+          printf("\n");
+        }
+        printf("      StandardDev %c %7.3f GB/s %c %8.3f ms %c\n", sep, stdDevBw, sep, stdDevTime, sep);
+      }
+    }
+  }
+
+  printf(" Aggregate (CPU)  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n", sep,
+         results.totalBandwidthCpu, sep, results.totalDurationMsec, sep, results.totalBytesTransferred, sep, results.overheadMsec);
 }

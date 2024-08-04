@@ -84,6 +84,8 @@ public:
   int gfxUnroll;         // GFX-kernel unroll factor
   int gfxWaveOrder;      // GFX-kernel wavefront ordering
   int hideEnv;           // Skip printing environment variable
+  int minNumVarSubExec;  // Minimum # of subexecutors to use for variable subExec Transfers
+  int maxNumVarSubExec;  // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
@@ -189,6 +191,8 @@ public:
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
+    minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
+    maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
@@ -436,6 +440,11 @@ public:
       printf("[ERROR] BLOCK_ORDER must be 0 (Sequential), 1 (Interleaved), or 2 (Random)\n");
       exit(1);
     }
+    if (minNumVarSubExec  < 1)
+    {
+      printf("[ERROR] Minimum number of subexecutors for variable subexector transfers must be at least 1\n");
+      exit(1);
+    }
     if (numWarmups < 0)
     {
       printf("[ERROR] NUM_WARMUPS must be set to a non-negative number\n");
@@ -592,6 +601,8 @@ public:
     printf(" GFX_SINGLE_TEAM        - Have subexecutors work together on full array instead of working on individual disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER         - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
     printf(" HIDE_ENV               - Hide environment variable value listing\n");
+    printf(" MIN_VAR_SUBEXEC        - Minumum # of subexecutors to use for variable subExec Transfers\n");
+    printf(" MAX_VAR_SUBEXEC        - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
     printf(" NUM_ITERATIONS=I       - Perform I timed iteration(s) per test\n");
@@ -659,6 +670,12 @@ public:
                                                                        gfxWaveOrder == 3 ? "Wavefront,CU,Unroll" :
                                                                        gfxWaveOrder == 4 ? "CU,Unroll,Wavefront" :
                                                                                            "CU,Wavefront,Unroll")));
+    PRINT_EV("MIN_VAR_SUBEXEC", minNumVarSubExec,
+             std::string("Using at least ") + std::to_string(minNumVarSubExec) + " subexecutor(s) for variable subExec tranfers");
+    PRINT_EV("MAX_VAR_SUBEXEC", maxNumVarSubExec,
+             maxNumVarSubExec ?
+             std::string("Using at most ") + std::to_string(maxNumVarSubExec) + " subexecutor(s) for variable subExec tranfers" :
+             "Using up to maximum device subexecutors for variable subExec tranfers");
     PRINT_EV("NUM_CPU_DEVICES", numCpuDevices,
              std::string("Using ") + std::to_string(numCpuDevices) + " CPU devices");
     PRINT_EV("NUM_GPU_DEVICES", numGpuDevices,
@@ -667,7 +684,7 @@ public:
              std::string("Running ") + std::to_string(numIterations > 0 ? numIterations : -numIterations) + " "
              + (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
     PRINT_EV("NUM_SUBITERATIONS", numSubIterations,
-	     std::string("Running ") + (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)) + " subiterations");
+             std::string("Running ") + (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)) + " subiterations");
     PRINT_EV("NUM_WARMUPS", numWarmups,
              std::string("Running " + std::to_string(numWarmups) + " warmup iteration(s) per Test"));
     PRINT_EV("SHARED_MEM_BYTES", sharedMemBytes,
@@ -846,22 +863,22 @@ public:
     int used = 0;
     for (int targetBit = 0; targetBit < cuMask.size() * 32; targetBit += numXccs) {
       if (cuMask[targetBit/32] & (1 << (targetBit%32))) {
-	used++;
-	if (!inRun) {
-	  inRun = true;
-	  curr.first = targetBit / numXccs;
-	}
+        used++;
+        if (!inRun) {
+          inRun = true;
+          curr.first = targetBit / numXccs;
+        }
       } else {
-	if (inRun) {
-	  inRun = false;
-	  curr.second = targetBit / numXccs - 1;
-	  runs.push_back(curr);
-	}
+        if (inRun) {
+          inRun = false;
+          curr.second = targetBit / numXccs - 1;
+          runs.push_back(curr);
+        }
       }
     }
     if (inRun)
       curr.second = (cuMask.size() * 32) / numXccs - 1;
-    
+
     std::string result = "CUs used: (" + std::to_string(used) + ") ";
     for (int i = 0; i < runs.size(); i++)
     {

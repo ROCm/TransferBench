@@ -158,6 +158,25 @@ struct ExecutorInfo
   double totalTime;
 };
 
+struct ExeResult
+{
+  double bandwidthGbs;
+  double durationMsec;
+  double sumBandwidthGbs;
+  size_t totalBytes;
+  std::vector<int> transferIdx;
+};
+
+struct TestResults
+{
+  size_t numTimedIterations;
+  size_t totalBytesTransferred;
+  double totalBandwidthCpu;
+  double totalDurationMsec;
+  double overheadMsec;
+  std::map<std::pair<ExeType, int>, ExeResult> exeResults;
+};
+
 typedef std::pair<ExeType, int> Executor;
 typedef std::map<Executor, ExecutorInfo> TransferMap;
 
@@ -179,7 +198,8 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
 void ExecuteTransfers(EnvVars const& ev, int const testNum, size_t const N,
                       std::vector<Transfer>& transfers, bool verbose = true,
                       double* totalBandwidthCpu = nullptr);
-
+TestResults ExecuteTransfersImpl(EnvVars const& ev, std::vector<Transfer>& transfers);
+void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, TestResults const results);
 void EnablePeerAccess(int const deviceId, int const peerDeviceId);
 void AllocateMemory(MemType memType, int devIndex, size_t numBytes, void** memPtr);
 void DeallocateMemory(MemType memType, void* memPtr, size_t const size = 0);
