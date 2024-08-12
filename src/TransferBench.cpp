@@ -116,6 +116,11 @@ int main(int argc, char **argv)
     RunAllToAllBenchmark(ev, numBytesPerTransfer, numSubExecs);
     exit(0);
   }
+  // Health check
+  else if (!strcmp(argv[1], "healthcheck")) {
+    RunHealthCheck(ev);
+    exit(0);
+  }
   // - Test schmoo benchmark
   else if (!strcmp(argv[1], "schmoo"))
   {
@@ -874,6 +879,7 @@ void DisplayUsage(char const* cmdName)
   printf("              a2a          - GPU All-To-All benchmark\n");
   printf("                             - 3rd optional arg: # of SubExecs to use\n");
   printf("              cmdline      - Read Transfers from command line arguments (after N)\n");
+  printf("              healthcheck  - Simple bandwidth health check (MI300 series only)\n");
   printf("              p2p          - Peer-to-peer benchmark tests\n");
   printf("              rwrite/pcopy - Parallel writes/copies from single GPU to other GPUs\n");
   printf("                             - 3rd optional arg: # GPU SubExecs per Transfer\n");
@@ -3128,3 +3134,235 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
   printf(" Aggregate (CPU)  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n", sep,
          results.totalBandwidthCpu, sep, results.totalDurationMsec, sep, results.totalBytesTransferred, sep, results.overheadMsec);
 }
+
+void RunHealthCheck(EnvVars ev)
+{
+  bool hasFail = false;
+
+  // Force use of single stream
+  ev.useSingleStream = 1;
+
+  // Check for supported platforms
+#if defined(__NVCC__)
+  printf("[WARN] healthcheck preset not supported on NVIDIA hardware\n");
+  return;
+#else
+  for (int gpuId = 0; gpuId < ev.numGpuDevices; gpuId++) {
+    hipDeviceProp_t prop;
+    HIP_CALL(hipGetDeviceProperties(&prop, gpuId));
+    std::string fullName = prop.gcnArchName;
+    std::string archName = fullName.substr(0, fullName.find(':'));
+    if (!(archName == "gfx940" || archName == "gfx941" || archName == "gfx942"))
+    {
+      printf("[WARN] healthcheck preset is currently only supported on MI300 series hardware\n");
+      exit(1);
+    }
+  }
+
+  // Pass limits
+  double udirLimit = getenv("LIMIT_UDIR") ? atof(getenv("LIMIT_UDIR")) : (int)(48 * 0.95);
+  double bdirLimit = getenv("LIMIT_BDIR") ? atof(getenv("LIMIT_BDIR")) : (int)(96 * 0.95);
+  double a2aLimit  = getenv("LIMIT_A2A")  ? atof(getenv("LIMIT_A2A"))  : (int)(45 * 0.95);
+
+  // Run CPU to GPU
+
+  // Run unidirectional read from CPU to GPU
+  printf("Testing unidirectional reads from CPU ");
+  {
+    std::vector<std::pair<int, double>> fails;
+    for (int gpuId = 0; gpuId < ev.numGpuDevices; gpuId++) {
+      printf("."); fflush(stdout);
+      std::vector<Transfer> transfers(1);
+      Transfer& t = transfers[0];
+      t.exeType     = EXE_GPU_GFX;
+      t.exeIndex    = gpuId;
+      t.numBytes    = 64*1024*1024;
+      t.numBytesActual = 64*1024*1024;
+      t.numSrcs     = 1;
+      t.srcType.push_back(MEM_CPU);
+      t.srcIndex.push_back(GetClosestNumaNode(gpuId));
+      t.numDsts     = 0;
+      t.dstType.clear();
+      t.dstIndex.clear();
+
+    // Loop over number of CUs to use
+      bool passed = false;
+      double bestResult = 0;
+      for (int cu = 7; cu <= 10; cu++) {
+        t.numSubExecs = cu;
+        TestResults tesResults = ExecuteTransfersImpl(ev, transfers);
+        bestResult = std::max(bestResult, t.transferBandwidth);
+        if (t.transferBandwidth >= udirLimit) {
+          passed = true;
+          break;
+      }
+      }
+      if (!passed) fails.push_back(std::make_pair(gpuId, bestResult));
+    }
+    if (fails.size() == 0) {
+      printf("PASS\n");
+    } else {
+      hasFail = true;
+      printf("FAIL (%lu test(s))\n", fails.size());
+      for (auto p : fails) {
+        printf(" GPU %02d: Measured: %6.2f GB/s      Criteria: %6.2f GB/s\n", p.first, p.second, udirLimit);
+      }
+    }
+  }
+
+  // Run unidirectional write from GPU to CPU
+  printf("Testing unidirectional writes to  CPU ");
+  {
+    std::vector<std::pair<int, double>> fails;
+    for (int gpuId = 0; gpuId < ev.numGpuDevices; gpuId++) {
+      printf("."); fflush(stdout);
+      std::vector<Transfer> transfers(1);
+      Transfer& t = transfers[0];
+      t.exeType     = EXE_GPU_GFX;
+      t.exeIndex    = gpuId;
+      t.numBytes    = 64*1024*1024;
+      t.numBytesActual = 64*1024*1024;
+      t.numDsts     = 1;
+      t.dstType.push_back(MEM_CPU);
+      t.dstIndex.push_back(GetClosestNumaNode(gpuId));
+      t.numSrcs     = 0;
+      t.srcType.clear();
+      t.srcIndex.clear();
+
+      // Loop over number of CUs to use
+      bool passed = false;
+      double bestResult = 0;
+      for (int cu = 7; cu <= 10; cu++) {
+        t.numSubExecs = cu;
+
+        TestResults tesResults = ExecuteTransfersImpl(ev, transfers);
+        bestResult = std::max(bestResult, t.transferBandwidth);
+        if (t.transferBandwidth >= udirLimit) {
+          passed = true;
+          break;
+        }
+      }
+      if (!passed) fails.push_back(std::make_pair(gpuId, bestResult));
+    }
+    if (fails.size() == 0) {
+      printf("PASS\n");
+    } else {
+      hasFail = true;
+      printf("FAIL (%lu test(s))\n", fails.size());
+      for (auto p : fails) {
+        printf(" GPU %02d: Measured: %6.2f GB/s      Criteria: %6.2f GB/s\n", p.first, p.second, udirLimit);
+      }
+    }
+  }
+
+  // Run bidirectional tests
+  printf("Testing bidirectional  reads + writes ");
+  {
+    std::vector<std::pair<int, double>> fails;
+    for (int gpuId = 0; gpuId < ev.numGpuDevices; gpuId++) {
+      printf("."); fflush(stdout);
+      std::vector<Transfer> transfers(2);
+      Transfer& t0 = transfers[0];
+      Transfer& t1 = transfers[1];
+
+      t0.exeType     = EXE_GPU_GFX;
+      t0.exeIndex    = gpuId;
+      t0.numBytes    = 64*1024*1024;
+      t0.numBytesActual = 64*1024*1024;
+      t0.numSrcs     = 1;
+      t0.srcType.push_back(MEM_CPU);
+      t0.srcIndex.push_back(GetClosestNumaNode(gpuId));
+      t0.numDsts     = 0;
+      t0.dstType.clear();
+      t0.dstIndex.clear();
+
+      t1.exeType     = EXE_GPU_GFX;
+      t1.exeIndex    = gpuId;
+      t1.numBytes    = 64*1024*1024;
+      t1.numBytesActual = 64*1024*1024;
+      t1.numDsts     = 1;
+      t1.dstType.push_back(MEM_CPU);
+      t1.dstIndex.push_back(GetClosestNumaNode(gpuId));
+      t1.numSrcs     = 0;
+      t1.srcType.clear();
+      t1.srcIndex.clear();
+
+      // Loop over number of CUs to use
+      bool passed = false;
+      double bestResult = 0;
+      for (int cu = 7; cu <= 10; cu++) {
+        t0.numSubExecs = cu;
+        t1.numSubExecs = cu;
+
+        TestResults tesResults = ExecuteTransfersImpl(ev, transfers);
+        double sum = t0.transferBandwidth + t1.transferBandwidth;
+        bestResult = std::max(bestResult, sum);
+        if (sum >= bdirLimit) {
+          passed = true;
+          break;
+        }
+      }
+      if (!passed) fails.push_back(std::make_pair(gpuId, bestResult));
+    }
+    if (fails.size() == 0) {
+      printf("PASS\n");
+    } else {
+      hasFail = true;
+      printf("FAIL (%lu test(s))\n", fails.size());
+      for (auto p : fails) {
+        printf(" GPU %02d: Measured: %6.2f GB/s      Criteria: %6.2f GB/s\n", p.first, p.second, bdirLimit);
+      }
+    }
+  }
+
+  // Run XGMI tests:
+  printf("Testing all-to-all XGMI copies        "); fflush(stdout);
+  {
+    ev.gfxUnroll = 2;
+    std::vector<Transfer> transfers;
+    for (int i = 0; i < ev.numGpuDevices; i++) {
+      for (int j = 0; j < ev.numGpuDevices; j++) {
+        if (i == j) continue;
+        Transfer t;
+        t.exeType = EXE_GPU_GFX;
+        t.exeIndex = i;
+        t.numBytes = t.numBytesActual = 64*1024*1024;
+        t.numSrcs = 1;
+        t.numDsts = 1;
+        t.numSubExecs = 8;
+        t.srcType.push_back(MEM_GPU_FINE);
+        t.dstType.push_back(MEM_GPU_FINE);
+        t.srcIndex.push_back(i);
+        t.dstIndex.push_back(j);
+        transfers.push_back(t);
+      }
+    }
+    TestResults tesResults = ExecuteTransfersImpl(ev, transfers);
+    std::vector<std::pair<std::pair<int,int>, double>> fails;
+    int transferIdx = 0;
+    for (int i = 0; i < ev.numGpuDevices; i++) {
+      printf("."); fflush(stdout);
+      for (int j = 0; j < ev.numGpuDevices; j++) {
+        if (i == j) continue;
+        Transfer const& t = transfers[transferIdx];
+        if (t.transferBandwidth < a2aLimit) {
+          fails.push_back(std::make_pair(std::make_pair(i,j), t.transferBandwidth));
+        }
+        transferIdx++;
+      }
+    }
+    if (fails.size() == 0) {
+      printf("PASS\n");
+    } else {
+      hasFail = true;
+      printf("FAIL (%lu test(s))\n", fails.size());
+      for (auto p : fails) {
+        printf(" GPU %02d to GPU %02d: %6.2f GB/s      Criteria: %6.2f GB/s\n", p.first.first, p.first.second, p.second, a2aLimit);
+      }
+    }
+  }
+
+  exit(hasFail ? 1 : 0);
+}
+
+#endif

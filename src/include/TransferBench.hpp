@@ -212,6 +212,7 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
 void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int const localIdx, int const remoteIdx, int const maxSubExecs);
 void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus);
 void RunParallelCopyBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int numSubExecs, int const srcIdx, int minGpus, int maxGpus);
+void RunHealthCheck(EnvVars ev);
 
 std::string GetLinkTypeDesc(uint32_t linkType, uint32_t hopCount);
 
