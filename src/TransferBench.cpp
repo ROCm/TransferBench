@@ -359,8 +359,6 @@ void ExecuteTransfers(EnvVars const& ev,
 
     // Loop over subexecs
     std::vector<Transfer> bestTransfers;
-    double bestBandwidthCpu = -1.0;
-
     for (int numSubExec = ev.minNumVarSubExec; numSubExec <= maxNumSubExec; numSubExec++) {
       std::vector<Transfer> currTransfers = transfers;
       for (auto idx : varTransfers) {
@@ -384,8 +382,6 @@ void ExecuteTransfers(EnvVars const& ev,
 TestResults ExecuteTransfersImpl(EnvVars const& ev,
                                  std::vector<Transfer>& transfers)
 {
-  int const initOffset = ev.byteOffset / sizeof(float);
-
   // Map transfers by executor
   TransferMap transferMap;
   for (int i = 0; i < transfers.size(); i++)
@@ -3137,16 +3133,17 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
 
 void RunHealthCheck(EnvVars ev)
 {
-  bool hasFail = false;
-
-  // Force use of single stream
-  ev.useSingleStream = 1;
-
   // Check for supported platforms
 #if defined(__NVCC__)
   printf("[WARN] healthcheck preset not supported on NVIDIA hardware\n");
   return;
 #else
+
+  bool hasFail = false;
+
+  // Force use of single stream
+  ev.useSingleStream = 1;
+
   for (int gpuId = 0; gpuId < ev.numGpuDevices; gpuId++) {
     hipDeviceProp_t prop;
     HIP_CALL(hipGetDeviceProperties(&prop, gpuId));
@@ -3363,6 +3360,5 @@ void RunHealthCheck(EnvVars ev)
   }
 
   exit(hasFail ? 1 : 0);
-}
-
 #endif
+}
