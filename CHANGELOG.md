@@ -3,6 +3,29 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.51
+
+## Modified
+- CSV output has been modified slightly to match normal terminal output
+- Output for non single stream mode has been changed to match single stream mode (results per Executor)
+
+### Added
+- Support for sub-iterations via NUM_SUBITERATIONS.  This allows for additional looping during an iteration
+  If set to 0, this should infinitely loop (which may be useful for some debug purposes)
+- Support for variable number of subexecutors (currently for GPU-GFX executor only).  Setting subExecutors to
+  0 will run over a range of CUs to use, and report only the results of the best one found. This can be tuned
+  for performance by setting the MIN_VAR_SUBEXEC and MAX_VAR_SUBEXEC environment variables to narrow the
+  search space.  The number of CUs used will be identical for all variable subExecutor transfers
+- Experimental new "healthcheck" preset config which currently only supports MI300 series.  This preset runs
+  through CPU to GPU bandwidth tests and all-to-all XGMI bandwidth tests and compares against expected values
+  Pass criteria limits can be modified (due to platform differences) via the environment variables
+  LIMIT_UDIR (undirectional), LIMIT_BDIR (bidirectional), and LIMIT_A2A (Per GPU-GPU link bandwidth)
+
+### Fixed
+- Fixed out-of-bounds memory access during topology detection that can happen if the number of
+  CPUs is less than the number of NUMA domains
+- Fixed CU masking functionality on multi-XCD architectures (e.g. MI300)
+
 ## v1.50
 
 ### Added

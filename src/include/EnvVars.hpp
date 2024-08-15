@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
 
-#define TB_VERSION "1.50"
+#define TB_VERSION "1.51"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -84,9 +84,12 @@ public:
   int gfxUnroll;         // GFX-kernel unroll factor
   int gfxWaveOrder;      // GFX-kernel wavefront ordering
   int hideEnv;           // Skip printing environment variable
+  int minNumVarSubExec;  // Minimum # of subexecutors to use for variable subExec Transfers
+  int maxNumVarSubExec;  // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
+  int numSubIterations;  // Number of subiterations to perform
   int numWarmups;        // Number of un-timed warmup iterations to perform
   int outputToCsv;       // Output in CSV format
   int samplingFactor;    // Affects how many different values of N are generated (when N set to 0)
@@ -188,9 +191,12 @@ public:
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
+    minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
+    maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
+    numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , DEFAULT_NUM_WARMUPS);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , DEFAULT_SAMPLING_FACTOR);
@@ -299,6 +305,24 @@ public:
     }
     else fillPattern.clear();
 
+    // Figure out number of xccs per device
+    int maxNumXccs = 64;
+    xccIdsPerDevice.resize(numGpuDevices);
+    for (int i = 0; i < numGpuDevices; i++)
+    {
+      int* data;
+      HIP_CALL(hipSetDevice(i));
+      HIP_CALL(hipHostMalloc((void**)&data, maxNumXccs * sizeof(int)));
+      CollectXccIdsKernel<<<maxNumXccs, 1>>>(data);
+      HIP_CALL(hipDeviceSynchronize());
+
+      xccIdsPerDevice[i].clear();
+      for (int j = 0; j < maxNumXccs; j++)
+        xccIdsPerDevice[i].insert(data[j]);
+
+      HIP_CALL(hipHostFree(data));
+    }
+
     // Check for CU mask
     cuMask.clear();
     char* cuMaskStr = getenv("CU_MASK");
@@ -308,6 +332,7 @@ public:
       printf("[WARN] CU_MASK is not supported in CUDA\n");
 #else
       std::vector<std::pair<int, int>> ranges;
+      int numXccs = (xccIdsPerDevice.size() > 0 ? xccIdsPerDevice[0].size() : 1);
       int maxCU = 0;
       char* token = strtok(cuMaskStr, ",");
       while (token)
@@ -330,34 +355,20 @@ public:
         }
         token = strtok(NULL, ",");
       }
-      cuMask.resize(maxCU / 32 + 1, 0);
+      cuMask.resize(2 * numXccs, 0);
 
       for (auto range : ranges)
       {
         for (int i = range.first; i <= range.second; i++)
         {
-          cuMask[i / 32] |= (1 << (i % 32));
+          for (int x = 0; x < numXccs; x++)
+          {
+            int targetBit = i * numXccs + x;
+            cuMask[targetBit/32] |= (1<<(targetBit%32));
+          }
         }
       }
 #endif
-    }
-
-    // Figure out number of xccs per device
-    int maxNumXccs = 64;
-    xccIdsPerDevice.resize(numGpuDevices);
-    for (int i = 0; i < numGpuDevices; i++)
-    {
-      int* data;
-      HIP_CALL(hipSetDevice(i));
-      HIP_CALL(hipHostMalloc((void**)&data, maxNumXccs * sizeof(int)));
-      CollectXccIdsKernel<<<maxNumXccs, 1>>>(data);
-      HIP_CALL(hipDeviceSynchronize());
-
-      xccIdsPerDevice[i].clear();
-      for (int j = 0; j < maxNumXccs; j++)
-        xccIdsPerDevice[i].insert(data[j]);
-
-      HIP_CALL(hipHostFree(data));
     }
 
     // Parse preferred XCC table (if provided
@@ -427,6 +438,11 @@ public:
     if (blockOrder < 0 || blockOrder > 2)
     {
       printf("[ERROR] BLOCK_ORDER must be 0 (Sequential), 1 (Interleaved), or 2 (Random)\n");
+      exit(1);
+    }
+    if (minNumVarSubExec  < 1)
+    {
+      printf("[ERROR] Minimum number of subexecutors for variable subexector transfers must be at least 1\n");
       exit(1);
     }
     if (numWarmups < 0)
@@ -524,8 +540,10 @@ public:
     // Determine how many CPUs exit per NUMA node (to avoid executing on NUMA without CPUs)
     numCpusPerNuma.resize(numDetectedCpus);
     int const totalCpus = numa_num_configured_cpus();
-    for (int i = 0; i < totalCpus; i++)
-      numCpusPerNuma[numa_node_of_cpu(i)]++;
+    for (int i = 0; i < totalCpus; i++) {
+      int node = numa_node_of_cpu(i);
+      if (node >= 0) numCpusPerNuma[node]++;
+    }
 
     // Build array of wall clock rates per GPU device
     wallClockPerDeviceMhz.resize(numDetectedGpus);
@@ -583,9 +601,12 @@ public:
     printf(" GFX_SINGLE_TEAM        - Have subexecutors work together on full array instead of working on individual disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER         - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
     printf(" HIDE_ENV               - Hide environment variable value listing\n");
+    printf(" MIN_VAR_SUBEXEC        - Minumum # of subexecutors to use for variable subExec Transfers\n");
+    printf(" MAX_VAR_SUBEXEC        - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
     printf(" NUM_ITERATIONS=I       - Perform I timed iteration(s) per test\n");
+    printf(" NUM_SUBITERATIONS=S    - Perform S sub-iteration(s) per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS=W          - Perform W untimed warmup iteration(s) per test\n");
     printf(" OUTPUT_TO_CSV          - Outputs to CSV format if set\n");
     printf(" SAMPLING_FACTOR=F      - Add F samples (when possible) between powers of 2 when auto-generating data sizes\n");
@@ -649,6 +670,12 @@ public:
                                                                        gfxWaveOrder == 3 ? "Wavefront,CU,Unroll" :
                                                                        gfxWaveOrder == 4 ? "CU,Unroll,Wavefront" :
                                                                                            "CU,Wavefront,Unroll")));
+    PRINT_EV("MIN_VAR_SUBEXEC", minNumVarSubExec,
+             std::string("Using at least ") + std::to_string(minNumVarSubExec) + " subexecutor(s) for variable subExec tranfers");
+    PRINT_EV("MAX_VAR_SUBEXEC", maxNumVarSubExec,
+             maxNumVarSubExec ?
+             std::string("Using at most ") + std::to_string(maxNumVarSubExec) + " subexecutor(s) for variable subExec tranfers" :
+             "Using up to maximum device subexecutors for variable subExec tranfers");
     PRINT_EV("NUM_CPU_DEVICES", numCpuDevices,
              std::string("Using ") + std::to_string(numCpuDevices) + " CPU devices");
     PRINT_EV("NUM_GPU_DEVICES", numGpuDevices,
@@ -656,6 +683,8 @@ public:
     PRINT_EV("NUM_ITERATIONS", numIterations,
              std::string("Running ") + std::to_string(numIterations > 0 ? numIterations : -numIterations) + " "
              + (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
+    PRINT_EV("NUM_SUBITERATIONS", numSubIterations,
+             std::string("Running ") + (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)) + " subiterations");
     PRINT_EV("NUM_WARMUPS", numWarmups,
              std::string("Running " + std::to_string(numWarmups) + " warmup iteration(s) per Test"));
     PRINT_EV("SHARED_MEM_BYTES", sharedMemBytes,
@@ -828,36 +857,27 @@ public:
   std::string GetCuMaskDesc() const
   {
     std::vector<std::pair<int, int>> runs;
-
+    int numXccs = (xccIdsPerDevice.size() > 0 ? xccIdsPerDevice[0].size() : 1);
     bool inRun = false;
     std::pair<int, int> curr;
     int used = 0;
-    for (int i = 0; i < cuMask.size(); i++)
-    {
-      for (int j = 0; j < 32; j++)
-      {
-        if (cuMask[i] & (1 << j))
-        {
-          used++;
-          if (!inRun)
-          {
-            inRun = true;
-            curr.first = i * 32 + j;
-          }
+    for (int targetBit = 0; targetBit < cuMask.size() * 32; targetBit += numXccs) {
+      if (cuMask[targetBit/32] & (1 << (targetBit%32))) {
+        used++;
+        if (!inRun) {
+          inRun = true;
+          curr.first = targetBit / numXccs;
         }
-        else
-        {
-          if (inRun)
-          {
-            inRun = false;
-            curr.second = i * 32 + j - 1;
-            runs.push_back(curr);
-          }
+      } else {
+        if (inRun) {
+          inRun = false;
+          curr.second = targetBit / numXccs - 1;
+          runs.push_back(curr);
         }
       }
     }
     if (inRun)
-      curr.second = cuMask.size() * 32 - 1;
+      curr.second = (cuMask.size() * 32) / numXccs - 1;
 
     std::string result = "CUs used: (" + std::to_string(used) + ") ";
     for (int i = 0; i < runs.size(); i++)

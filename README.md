@@ -67,8 +67,9 @@ make
 * Running TransferBench with no arguments displays usage instructions and detected topology
   information
 * You can use several preset configurations instead of a configuration file:
-  * `a2a`    : All-to-all benchmark test
-  * `cmdline`: Take in Transfers to run from command-line instead of via file
+  * `a2a` : All-to-all benchmark test
+  * `cmdline` : Take in Transfers to run from command-line instead of via file
+  * `healthcheck` : Simple health check (supported on MI300 series only)
   * `p2p`    : Peer-to-peer benchmark test
   * `pcopy`  : Benchmark parallel copies from a single GPU to other GPUs
   * `rsweep` : Random sweep across possible sets of transfers

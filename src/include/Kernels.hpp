@@ -174,7 +174,7 @@ template <>           __device__ __forceinline__ float4 MemsetVal(){ return make
 
 template <int BLOCKSIZE, int UNROLL>
 __global__ void __launch_bounds__(BLOCKSIZE)
-  GpuReduceKernel(SubExecParam* params, int waveOrder)
+  GpuReduceKernel(SubExecParam* params, int waveOrder, int numSubIterations)
 {
   int64_t startCycle;
   if (threadIdx.x == 0) startCycle = GetTimestamp();
@@ -216,84 +216,88 @@ __global__ void __launch_bounds__(BLOCKSIZE)
   case 5: /* C,W,U */ teamStride = 1; waveStride = nTeams; unrlStride = nTeams * nWaves;  teamStride2 = 1;      waveStride2 = nTeams; break;
   }
 
-  // First loop: Each wavefront in the team works on UNROLL float4s per thread
-  size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
-  size_t const loop1Limit  = numFloat4 / loop1Stride * loop1Stride;
-  {
-    float4 val[UNROLL];
-    if (numSrcs == 0)
+  int subIterations = 0;
+  while (1) {
+    // First loop: Each wavefront in the team works on UNROLL float4s per thread
+    size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
+    size_t const loop1Limit  = numFloat4 / loop1Stride * loop1Stride;
     {
-      #pragma unroll
-      for (int u = 0; u < UNROLL; u++)
-        val[u] = MemsetVal<float4>();
-    }
-
-    for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride)
-    {
-      // Read sources into memory and accumulate in registers
-      if (numSrcs)
-      {
-        for (int u = 0; u < UNROLL; u++)
-          val[u] = srcFloat4[0][idx + u * unrlStride * warpSize];
-        for (int s = 1; s < numSrcs; s++)
-          for (int u = 0; u < UNROLL; u++)
-            val[u] += srcFloat4[s][idx + u * unrlStride * warpSize];
-      }
-
-      // Write accumulation to all outputs
-      for (int d = 0; d < numDsts; d++)
-      {
+      float4 val[UNROLL];
+      if (numSrcs == 0) {
         #pragma unroll
         for (int u = 0; u < UNROLL; u++)
-          dstFloat4[d][idx + u * unrlStride * warpSize] = val[u];
+          val[u] = MemsetVal<float4>();
       }
-    }
-  }
 
-  // Second loop: Deal with remaining float4s
-  {
-    if (loop1Limit < numFloat4)
-    {
-      float4 val;
-      if (numSrcs == 0) val = MemsetVal<float4>();
-
-      size_t const loop2Stride = nTeams * nWaves * warpSize;
-      for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < numFloat4; idx += loop2Stride)
+      for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride)
       {
+        // Read sources into memory and accumulate in registers
         if (numSrcs)
         {
-          val = srcFloat4[0][idx];
+          for (int u = 0; u < UNROLL; u++)
+            val[u] = srcFloat4[0][idx + u * unrlStride * warpSize];
           for (int s = 1; s < numSrcs; s++)
-            val += srcFloat4[s][idx];
+            for (int u = 0; u < UNROLL; u++)
+              val[u] += srcFloat4[s][idx + u * unrlStride * warpSize];
         }
 
+        // Write accumulation to all outputs
         for (int d = 0; d < numDsts; d++)
-          dstFloat4[d][idx] = val;
-      }
-    }
-  }
-
-  // Third loop; Deal with remaining floats
-  {
-    if (numFloat4 * 4 < p.N)
-    {
-      float val;
-      if (numSrcs == 0) val = MemsetVal<float>();
-
-      size_t const loop3Stride = nTeams * nWaves * warpSize;
-      for( size_t idx = numFloat4 * 4 + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride)
-      {
-        if (numSrcs)
         {
-          val = p.src[0][idx];
-          for (int s = 1; s < numSrcs; s++)
-            val += p.src[s][idx];
+          #pragma unroll
+          for (int u = 0; u < UNROLL; u++)
+            dstFloat4[d][idx + u * unrlStride * warpSize] = val[u];
         }
-
-        for (int d = 0; d < numDsts; d++)
-          p.dst[d][idx] = val;
       }
     }
+
+    // Second loop: Deal with remaining float4s
+    {
+      if (loop1Limit < numFloat4)
+      {
+        float4 val;
+        if (numSrcs == 0) val = MemsetVal<float4>();
+
+        size_t const loop2Stride = nTeams * nWaves * warpSize;
+        for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < numFloat4; idx += loop2Stride)
+        {
+          if (numSrcs)
+          {
+            val = srcFloat4[0][idx];
+            for (int s = 1; s < numSrcs; s++)
+              val += srcFloat4[s][idx];
+          }
+
+          for (int d = 0; d < numDsts; d++)
+            dstFloat4[d][idx] = val;
+        }
+      }
+    }
+
+    // Third loop; Deal with remaining floats
+    {
+      if (numFloat4 * 4 < p.N)
+      {
+        float val;
+        if (numSrcs == 0) val = MemsetVal<float>();
+
+        size_t const loop3Stride = nTeams * nWaves * warpSize;
+        for( size_t idx = numFloat4 * 4 + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride)
+        {
+          if (numSrcs)
+          {
+            val = p.src[0][idx];
+            for (int s = 1; s < numSrcs; s++)
+              val += p.src[s][idx];
+          }
+
+          for (int d = 0; d < numDsts; d++)
+            p.dst[d][idx] = val;
+        }
+      }
+    }
+
+    if (++subIterations == numSubIterations) break;
   }
 
   // Wait for all threads to finish
@@ -308,7 +312,7 @@ __global__ void __launch_bounds__(BLOCKSIZE)
   }
 }
 
-typedef void (*GpuKernelFuncPtr)(SubExecParam*, int);
+typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int);
 
 #define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE) \
   {GpuReduceKernel<BLOCKSIZE, 1>,  \
