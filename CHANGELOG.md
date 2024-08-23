@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.52
+### Added
+- Added USE_HSA_DMA env var to switch to using hsa_amd_memory_async_copy instead of hipMemcpyAsync for DMA execution
+
 ## v1.51
 
 ## Modified

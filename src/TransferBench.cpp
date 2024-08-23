@@ -508,9 +508,9 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
 
         for (Transfer* transfer : exeInfo.transfers)
         {
-          if (transfer->exeSubIndex != -1)
+          if (transfer->exeSubIndex != -1 || ev.useHsaDma)
           {
-            useTargetDma = true;
+            useTargetDma = (transfer->exeSubIndex != -1);
 
 #if defined(__NVCC__)
             printf("[ERROR] DMA executor subindex not supported on NVIDIA hardware\n");
@@ -544,18 +544,20 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
             }
 
             // Check that engine Id exists between agents
-            uint32_t engineIdMask = 0;
-            HSA_CHECK(hsa_amd_memory_copy_engine_status(transfer->dstAgent,
-                                                        transfer->srcAgent,
-                                                        &engineIdMask));
-            transfer->sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << transfer->exeSubIndex);
-            if (!(transfer->sdmaEngineId & engineIdMask))
-            {
-              printf("[ERROR] DMA executor %d.%d does not exist or cannot copy between source %s to destination %s\n",
-                     transfer->exeIndex, transfer->exeSubIndex,
-                     transfer->SrcToStr().c_str(),
-                     transfer->DstToStr().c_str());
-              exit(1);
+            if (useTargetDma) {
+              uint32_t engineIdMask = 0;
+              HSA_CHECK(hsa_amd_memory_copy_engine_status(transfer->dstAgent,
+                                                          transfer->srcAgent,
+                                                          &engineIdMask));
+              transfer->sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << transfer->exeSubIndex);
+              if (!(transfer->sdmaEngineId & engineIdMask))
+              {
+                printf("[ERROR] DMA executor %d.%d does not exist or cannot copy between source %s to destination %s\n",
+                       transfer->exeIndex, transfer->exeSubIndex,
+                       transfer->SrcToStr().c_str(),
+                       transfer->DstToStr().c_str());
+                exit(1);
+              }
             }
 #endif
           }
@@ -822,7 +824,7 @@ cleanup:
       }
       transfer->subExecParam.clear();
 
-      if (exeType == EXE_GPU_DMA && transfer->exeSubIndex != -1)
+      if (exeType == EXE_GPU_DMA && (transfer->exeSubIndex != -1 || ev.useHsaDma))
       {
 #if !defined(__NVCC__)
         HSA_CHECK(hsa_signal_destroy(transfer->signal));
@@ -1619,65 +1621,61 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   {
     int const exeIndex = RemappedIndex(transfer->exeIndex, false);
 
-    if (transfer->exeSubIndex == -1)
-    {
+    int subIterations = 0;
+    if (transfer->exeSubIndex == -1 && !ev.useHsaDma) {
       // Switch to executing GPU
       HIP_CALL(hipSetDevice(exeIndex));
       hipStream_t& stream     = exeInfo.streams[transferIdx];
       hipEvent_t&  startEvent = exeInfo.startEvents[transferIdx];
       hipEvent_t&  stopEvent  = exeInfo.stopEvents[transferIdx];
 
-      int subIteration = 0;
       HIP_CALL(hipEventRecord(startEvent, stream));
       do {
         HIP_CALL(hipMemcpyAsync(transfer->dstMem[0], transfer->srcMem[0],
                                 transfer->numBytesActual, hipMemcpyDefault,
                                 stream));
-      } while (++subIteration != ev.numSubIterations);
+      } while (++subIterations != ev.numSubIterations);
       HIP_CALL(hipEventRecord(stopEvent, stream));
       HIP_CALL(hipStreamSynchronize(stream));
 
-      if (iteration >= 0)
-      {
-        // Record GPU timing
+      // Record time based on HIP events
+      if (iteration >= 0) {
         float gpuDeltaMsec;
         HIP_CALL(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        //gpuDeltaMsec /= (1.0 * ev.numSubIterations);
         transfer->transferTime += gpuDeltaMsec;
         if (ev.showIterations)
           transfer->perIterationTime.push_back(gpuDeltaMsec);
       }
-    }
-    else
-    {
+    } else {
 #if defined(__NVCC__)
       printf("[ERROR] CUDA does not support targeting specific DMA engines\n");
       exit(1);
 #else
-      // Target specific DMA engine
+      // Use hsa_amd_memory copy (either targeted or untargeted)
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
-      int subIterations = 0;
       do {
         // Atomically set signal to 1
         HSA_CALL(hsa_signal_store_screlease(transfer->signal, 1));
-
-        HSA_CALL(hsa_amd_memory_async_copy_on_engine(transfer->dstMem[0], transfer->dstAgent,
-                                                     transfer->srcMem[0], transfer->srcAgent,
-                                                     transfer->numBytesActual, 0, NULL,
-                                                     transfer->signal,
-                                                     transfer->sdmaEngineId, true));
+        if (ev.useHsaDma) {
+          HSA_CALL(hsa_amd_memory_async_copy(transfer->dstMem[0], transfer->dstAgent,
+                                             transfer->srcMem[0], transfer->srcAgent,
+                                             transfer->numBytesActual, 0, NULL,
+                                             transfer->signal));
+        } else {
+          HSA_CALL(hsa_amd_memory_async_copy_on_engine(transfer->dstMem[0], transfer->dstAgent,
+                                                       transfer->srcMem[0], transfer->srcAgent,
+                                                       transfer->numBytesActual, 0, NULL,
+                                                       transfer->signal,
+                                                       transfer->sdmaEngineId, true));
+        }
         // Wait for SDMA transfer to complete
-        // NOTE: "A wait operation can spuriously resume at any time sooner than the timeout
-        //        (for example, due to system or other external factors) even when the
-        //         condition has not been met.)
         while(hsa_signal_wait_scacquire(transfer->signal,
                                         HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
                                         HSA_WAIT_STATE_ACTIVE) >= 1);
       } while (++subIterations < ev.numSubIterations);
 
-      if (iteration >= 0)
-      {
+      if (iteration >= 0) {
         // Record GPU timing
         auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
         double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
