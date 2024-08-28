@@ -2104,7 +2104,7 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
   transfer.numSubExecs = numSubExecs;
   transfer.numSrcs     = ev.a2aMode == 2 ? 0 : 1;
   transfer.numDsts     = ev.a2aMode == 1 ? 0 : 1;
-  transfer.exeType     = EXE_GPU_GFX;
+  transfer.exeType     = (ev.useDmaCopy && transfer.numSrcs == 1 && transfer.numDsts == 1) ? EXE_GPU_DMA : EXE_GPU_GFX;
   transfer.exeSubIndex = -1;
   transfer.srcType.resize(1, ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
   transfer.dstType.resize(1, ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);

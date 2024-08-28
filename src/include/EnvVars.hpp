@@ -802,6 +802,8 @@ public:
                                         "Perform write-only"));
     PRINT_EV("USE_FINE_GRAIN", useFineGrain,
              std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
+    PRINT_EV("USE_GPU_DMA", useDmaCopy,
+             std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
              std::string("Using ") + (useRemoteRead ? "DST" : "SRC") + " as executor");
 

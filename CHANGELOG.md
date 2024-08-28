@@ -6,6 +6,7 @@ Documentation for TransferBench is available at
 ## v1.52
 ### Added
 - Added USE_HSA_DMA env var to switch to using hsa_amd_memory_async_copy instead of hipMemcpyAsync for DMA execution
+- Added ability to set USE_GPU_DMA env var for a2a benchmark
 
 ## v1.51
 
