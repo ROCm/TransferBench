@@ -37,7 +37,7 @@ Here is a copy operation from a single SRC to DST:
    SRC 1 -> Executor -> DST 1
    SRC X                DST Y
 
-Three Executors are supported by TransferBench:
+Three Executors are supported by TransferBench::
 
 Executor:        SubExecutor:
 1. CPU           CPU thread
@@ -50,27 +50,27 @@ There are two ways to specify a test:
 
 - Basic
 
-   The basic specification assumes the same number of SEs used per transfer.
-   A positive number of transfers is specified, followed by the number of SEs and triplets describing each transfer:
+  The basic specification assumes the same number of SEs used per transfer.
+  A positive number of transfers is specified, followed by the number of SEs and triplets describing each transfer:
 
-   Transfers SEs (srcMem1->Executor1->dstMem1) ... (srcMemL->ExecutorL->dstMemL)
+  Transfers SEs (srcMem1->Executor1->dstMem1) ... (srcMemL->ExecutorL->dstMemL)
 
-   .. code-block:: bash
+  .. code-block:: bash
 
-      1 4 (G0->G0->G1)                   Uses 4 CUs on GPU0 to copy from GPU0 to GPU1
-      1 4 (G2->C1->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
-      2 4 G0->G0->G1 G1->G1->G0          Copies from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs
+   1 4 (G0->G0->G1)                   Uses 4 CUs on GPU0 to copy from GPU0 to GPU1
+   1 4 (G2->C1->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
+   2 4 G0->G0->G1 G1->G1->G0          Copies from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs
 
 - Advanced
 
-   A negative number of transfers is specified, followed by quintuplets describing each transfer.
-   A non-zero number of bytes specified will override any provided value.
+  A negative number of transfers is specified, followed by quintuplets describing each transfer.
+  A non-zero number of bytes specified will override any provided value.
 
-   Transfers (srcMem1->Executor1->dstMem1 SEs1 Bytes1) ... (srcMemL->ExecutorL->dstMemL SEsL BytesL)
+  Transfers (srcMem1->Executor1->dstMem1 SEs1 Bytes1) ... (srcMemL->ExecutorL->dstMemL SEsL BytesL)
 
-   .. code-block:: bash
+  .. code-block:: bash
 
-      -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M) Copies 1Mb from GPU0 to GPU1 with 4 SEs and 2Mb from GPU1 to GPU0 with 2 SEs
+   -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M) Copies 1Mb from GPU0 to GPU1 with 4 SEs and 2Mb from GPU1 to GPU0 with 2 SEs
 
 Here is the list of arguments:
 
@@ -87,10 +87,10 @@ Here is the list of arguments:
      - Number of SEs to use (CPU threads or GPU threadblocks)
 
    * - srcMemL
-     - Source memory locations (Where the data is read)
+     - Source memory locations (where the data is read)
 
    * - Executor
-     - | Executor is specified by a character indicating type, followed by the device index (0-indexed)
+     - | Executor is specified by a character indicating type, followed by the device index (0-indexed):
        | - C: CPU-executed  (indexed from 0 to NUMA nodes - 1)
        | - G: GPU-executed  (indexed from 0 to GPUs - 1)
        | - D: DMA-executor  (indexed from 0 to GPUs - 1)
@@ -99,10 +99,10 @@ Here is the list of arguments:
      - Destination memory locations (where the data is written)
 
    * - bytesL
-     - | Number of bytes to copy (use command-line specified size when 0)
-       | Must be a multiple of 4 and may be suffixed with ('K','M', or 'G')
+     - | Number of bytes to copy (use command-line specified size when 0).
+       | Must be a multiple of 4 and may be suffixed with ('K','M', or 'G').
        | Memory locations are specified by one or more device characters or device index pairs.
-       | Characters indicate memory type and are followed by device index (0-indexed)
+       | Characters indicate memory type and are followed by device index (0-indexed).
        | Here are the characters and their respective memory locations:
        | - C:    Pinned host memory       (on NUMA node, indexed from 0 to [NUMA nodes-1])
        | - U:    Unpinned host memory     (on NUMA node, indexed from 0 to [NUMA nodes-1])
