@@ -112,7 +112,7 @@ Here is the list of arguments:
        | - N:    Null memory              (index ignored)
 
 Round brackets and arrows "->" can be included for human clarity, but will be ignored.
-Lines starting with will be ignored. Lines starting with will be echoed to output
+Lines starting with # will be ignored. Lines starting with ## will be echoed to output.
 
 **Transfer examples:**
 
