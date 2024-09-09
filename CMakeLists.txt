@@ -6,7 +6,7 @@ else()
 endif()
 cmake_minimum_required(VERSION 3.5)
 
-project(TransferBench VERSION 1.50 LANGUAGES CXX)
+project(TransferBench VERSION 1.51.0 LANGUAGES CXX)
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
 include_directories(${ROCM_PATH}/include)
 link_libraries(numa hsa-runtime64 pthread)
