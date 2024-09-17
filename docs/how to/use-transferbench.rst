@@ -48,12 +48,16 @@ Each line in the configuration file defines a set of transfers, also known as a 
 
 There are two ways to specify a test:
 
-- Basic
+- **Basic**
 
   The basic specification assumes the same number of SEs used per transfer.
   A positive number of transfers is specified, followed by the number of SEs and triplets describing each transfer:
 
   Transfers SEs (srcMem1->Executor1->dstMem1) ... (srcMemL->ExecutorL->dstMemL)
+
+  The arguments used to specify transfers in the config file are described in the :ref:`arguments table <config_file_arguments_table>`.
+
+  **Example**:
 
   .. code-block:: bash
 
@@ -61,18 +65,23 @@ There are two ways to specify a test:
    1 4 (G2->C1->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
    2 4 G0->G0->G1 G1->G1->G0          Copies from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs
 
-- Advanced
+- **Advanced**
 
   A negative number of transfers is specified, followed by quintuplets describing each transfer.
-  A non-zero number of bytes specified will override any provided value.
+  A non-zero number of bytes specified, overrides any provided value.
 
   Transfers (srcMem1->Executor1->dstMem1 SEs1 Bytes1) ... (srcMemL->ExecutorL->dstMemL SEsL BytesL)
+
+  The arguments used to specify transfers in the config file are described in the :ref:`arguments table <config_file_arguments_table>`.
+
+  **Example**:
 
   .. code-block:: bash
 
    -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M) Copies 1Mb from GPU0 to GPU1 with 4 SEs and 2Mb from GPU1 to GPU0 with 2 SEs
 
-Here is the list of arguments:
+Here is the list of arguments used to specify transfers in the config file:
+.. _config_file_arguments_table:
 
 .. list-table::
    :header-rows: 1
