@@ -81,6 +81,7 @@ There are two ways to specify a test:
    -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M) Copies 1Mb from GPU0 to GPU1 with 4 SEs and 2Mb from GPU1 to GPU0 with 2 SEs
 
 Here is the list of arguments used to specify transfers in the config file:
+
 .. _config_file_arguments_table:
 
 .. list-table::
