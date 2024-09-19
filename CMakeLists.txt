@@ -22,7 +22,7 @@ set(ROCMCHECKS_WARN_TOOLCHAIN_VAR OFF)
 set(PACKAGE_NAME TB)
 set(LIBRARY_NAME TransferBench)
 
-rocm_install(TARGETS TransferBench)
+rocm_install(TARGETS TransferBench COMPONENT devel)
 
 rocm_package_add_dependencies(DEPENDS libnuma1 hsa-rocr)
 
