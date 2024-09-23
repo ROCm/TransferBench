@@ -169,7 +169,7 @@ Here is the list of preset configurations that can be used instead of configurat
      - All-to-all benchmark test
 
    * - ``cmdline``
-     - Allows transfers to run from command-line instead of a configuration file
+     - Allows transfers to run from the command line instead of a configuration file
 
    * - ``healthcheck``
      - Simple health check (supported on MI300 series only)
