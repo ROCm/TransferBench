@@ -190,7 +190,7 @@ Here is the list of preset configurations that can be used instead of configurat
      - GPU subexecutor scaling tests
 
    * - ``schmoo``
-     - Read or write or copy operation on local or remote between two GPUs
+     - Read, write, or copy operation on local or remote between two GPUs
 
    * - ``sweep``
      - Sweep across possible sets of transfers
