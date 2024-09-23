@@ -5,7 +5,7 @@
 .. _install-transferbench:
 
 ---------------------------
-Installation
+Installing TransferBench
 ---------------------------
 
 This document provides information required to install and build TransferBench.
