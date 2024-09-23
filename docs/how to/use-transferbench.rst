@@ -172,7 +172,7 @@ Here is the list of preset configurations that can be used instead of configurat
      - Allows transfers to run from the command line instead of a configuration file
 
    * - ``healthcheck``
-     - Simple health check (supported on MI300 series only)
+     - Simple health check (supported on AMD Instinct MI300 series only)
 
    * - ``p2p``
      - Peer-to-peer benchmark test
