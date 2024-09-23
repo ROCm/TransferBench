@@ -110,7 +110,7 @@ Here is the list of arguments used to specify transfers in the config file:
 
    * - bytesL
      - | Number of bytes to copy (use command-line specified size when 0).
-       | Must be a multiple of 4 and may be suffixed with ('K','M', or 'G').
+       | Must be a multiple of four and can be suffixed with ('K','M', or 'G').
        | Memory locations are specified by one or more device characters or device index pairs.
        | Characters indicate memory type and are followed by device index (0-indexed).
        | Here are the characters and their respective memory locations:
