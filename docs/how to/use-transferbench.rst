@@ -29,7 +29,7 @@ Specifying transfers in a configuration file
 
 A transfer is defined as a single operation where an executor reads and adds together values from SRC memory locations, then writes the sum to the DST memory locations.
 This simplifies to a copy operation when using a single SRC or DST.
-Here is a copy operation from a single SRC to DST:
+Here's a copy operation from a single SRC to DST:
 
 .. code-block:: bash
 
