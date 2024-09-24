@@ -4,8 +4,8 @@
 
 .. _transferbench-api:
 
--------------
-API library
--------------
+--------------------------
+TransferBench API library
+--------------------------
 
 .. doxygenindex::
