@@ -24,7 +24,7 @@ To build TransferBench using Makefile, use:
 
 .. code-block:: bash
 
-            $ make
+  make
 
 To build TransferBench using CMake, use:
 
