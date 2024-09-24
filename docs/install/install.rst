@@ -30,13 +30,10 @@ To build TransferBench using CMake, use:
 
 .. code-block:: bash
 
-                $ mkdir build
-
-                $ cd build
-
-                $ CXX=/opt/rocm/bin/hipcc cmake ..
-
-                $ make
+  mkdir build
+  cd build
+  CXX=/opt/rocm/bin/hipcc cmake ..
+  make
 
 .. note::
 
