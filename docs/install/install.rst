@@ -1,6 +1,6 @@
 .. meta::
-  :description: TransferBench documentation
-  :keywords: TransferBench, API, ROCm, HIP
+  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :keywords: Build TransferBench, Install TransferBench, API, ROCm, HIP
 
 .. _install-transferbench:
 
@@ -13,7 +13,7 @@ This document provides information required to install and build TransferBench.
 Prerequisite
 ---------------
 
-* Install ROCm stack on the system (HIP runtime)
+* Install ROCm stack on the system to obtain HIP runtime
 * Install ``libnuma`` on the system
 * Enable AMD IOMMU and set to passthrough for AMD Instinct cards
 
@@ -56,7 +56,7 @@ To build documentation locally, use:
 NVIDIA platform support
 --------------------------
 
-You can build TransferBench to run on NVIDIA platforms via HIP or native NVCC.
+You can build TransferBench to run on NVIDIA platforms via :ref:`HIP <hip:index>` or native NVCC.
 
 To build with HIP for NVIDIA, install a HIP-compatible CUDA version such as CUDA 11.5 and use:
 

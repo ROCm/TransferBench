@@ -1,6 +1,6 @@
 .. meta::
-  :description: TransferBench documentation
-  :keywords: TransferBench, API, ROCm, documentation, HIP
+  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :keywords: Using TransferBench, TransferBench Usage, TransferBench How To, API, ROCm, documentation, HIP
 
 .. _using-transferbench:
 
@@ -27,7 +27,7 @@ You can specify the transfers in a configuration file or use preset configuratio
 Specifying transfers in a configuration file
 ----------------------------------------------
 
-A transfer is defined as a single operation where an executor reads and adds together values from SRC memory locations, then writes the sum to the DST memory locations.
+A transfer is defined as a single operation where an executor reads and adds together values from SRC memory locations, followed by writing the sum to the DST memory locations.
 This simplifies to a copy operation when using a single SRC or DST.
 Here's a copy operation from a single SRC to DST:
 
@@ -37,12 +37,14 @@ Here's a copy operation from a single SRC to DST:
    SRC 1 -> Executor -> DST 1
    SRC X                DST Y
 
-Three Executors are supported by TransferBench::
+Three executors are supported by TransferBench::
 
-Executor:        SubExecutor:
-1. CPU           CPU thread
-2. GPU           GPU threadblock/Compute Unit (CU)
-3. DMA           N/A (Can only be used for a single SRC to DST copy)
+.. code-block:: bash
+
+  Executor:        SubExecutor:
+  1. CPU           CPU thread
+  2. GPU           GPU threadblock/Compute Unit (CU)
+  3. DMA           N/A (Can only be used for a single SRC to DST copy)
 
 Each line in the configuration file defines a set of transfers, also known as a test, to run in parallel.
 
@@ -53,7 +55,9 @@ There are two ways to specify a test:
   The basic specification assumes the same number of SEs used per transfer.
   A positive number of transfers is specified, followed by the number of SEs and triplets describing each transfer:
 
-  Transfers SEs (srcMem1->Executor1->dstMem1) ... (srcMemL->ExecutorL->dstMemL)
+  .. code-block:: bash
+
+    Transfers SEs (srcMem1->Executor1->dstMem1) ... (srcMemL->ExecutorL->dstMemL)
 
   The arguments used to specify transfers in the config file are described in the :ref:`arguments table <config_file_arguments_table>`.
 
@@ -67,10 +71,12 @@ There are two ways to specify a test:
 
 - **Advanced**
 
-  A negative number of transfers is specified, followed by quintuplets describing each transfer.
-  A non-zero number of bytes specified, overrides any provided value.
+  In the advanced specification, a negative number of transfers is specified, followed by quintuplets describing each transfer.
+  Specifying a non-zero number of bytes overrides any provided value.
 
-  Transfers (srcMem1->Executor1->dstMem1 SEs1 Bytes1) ... (srcMemL->ExecutorL->dstMemL SEsL BytesL)
+  .. code-block:: bash
+
+    Transfers (srcMem1->Executor1->dstMem1 SEs1 Bytes1) ... (srcMemL->ExecutorL->dstMemL SEsL BytesL)
 
   The arguments used to specify transfers in the config file are described in the :ref:`arguments table <config_file_arguments_table>`.
 
@@ -134,7 +140,7 @@ Single DMA-executed transfer between GPU 0 and 1::
 
    1 1 (G0->D0->G1)
 
-Copying 1Mb from GPU0 to GPU1 with 4 CUs, and 2Mb from GPU1 to GPU0 with 8 CUs::
+Copying 1Mb from GPU 0 to GPU 1 with 4 CUs, and 2Mb from GPU 1 to GPU 0 with 8 CUs::
 
    -2 (G0->G0->G1 4 1M) (G1->G1->G0 8 2M)
 
