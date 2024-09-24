@@ -37,7 +37,7 @@ Here's a copy operation from a single SRC to DST:
    SRC 1 -> Executor -> DST 1
    SRC X                DST Y
 
-Three executors are supported by TransferBench::
+Three executors are supported by TransferBench:
 
 .. code-block:: bash
 
