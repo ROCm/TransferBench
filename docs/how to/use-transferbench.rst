@@ -19,7 +19,7 @@ You can control the SRC and DST memory locations by indicating the memory type f
 
 In addition, you can determine the size of the transfer (number of bytes to copy) for the tests.
 
-You can also specify executors of the transfer. The options are CPU, kernel-based GPU, and SDMA-based GPU (DMA) executors. TransferBench also provides the option to choose the number of Sub-Executors (SE). The number of SEs specify the number of CPU threads in case of a CPU executor and the number of compute units (CU) for a GPU executor.
+You can also specify transfer executors . The options are CPU, kernel-based GPU, and SDMA-based GPU (DMA) executors. TransferBench also provides the option to choose the number of Sub-Executors (SE). The number of SEs specifies the number of CPU threads in the case of a CPU executor and the number of compute units (CU) for a GPU executor.
 For a DMA executor, the SE argument determines the number of streams to be used.
 
 You can specify the transfers in a configuration file or use preset configurations for transfers.
