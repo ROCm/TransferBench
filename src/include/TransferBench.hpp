@@ -57,6 +57,7 @@ typedef enum
   EXE_CPU          = 0, // CPU executor              (subExecutor = CPU thread)
   EXE_GPU_GFX      = 1, // GPU kernel-based executor (subExecutor = threadblock/CU)
   EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
+  EXE_RDMA         = 3  // RDMA-based executor       (subExecutor = undefined)   
 } ExeType;
 
 bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
