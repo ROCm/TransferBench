@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include <sstream>
 #include "Compatibility.hpp"
 #include "EnvVars.hpp"
+#include "IBVerbsWrapper.hpp"
 
 // Simple configuration parameters
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);  // Amount of data transferred per Transfer
@@ -64,10 +65,11 @@ bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == ME
 bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
 bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
+bool IsRDMAType(ExeType e) { return (e == EXE_RDMA); };
 
 char const MemTypeStr[8] = "CGBFUNM";
-char const ExeTypeStr[4] = "CGD";
-char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
+char const ExeTypeStr[5] = "CGDR";
+char const ExeTypeName[4][5] = {"CPU", "GPU", "DMA", "RDMA"};
 
 MemType inline CharToMemType(char const c)
 {
@@ -154,6 +156,9 @@ struct ExecutorInfo
   std::vector<hipStream_t> streams;
   std::vector<hipEvent_t>  startEvents;
   std::vector<hipEvent_t>  stopEvents;
+
+  // For RDMA-Executors
+  RDMA_Executor            rdmaExecutor;
 
   // Results
   double totalTime;

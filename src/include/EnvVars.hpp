@@ -88,6 +88,7 @@ public:
   int maxNumVarSubExec;  // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
+  int numNICDevices;     // Number of RDMA Capable NICs to use (defaults to # number of RDMA NIC devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numSubIterations;  // Number of subiterations to perform
   int numWarmups;        // Number of un-timed warmup iterations to perform

@@ -81,12 +81,12 @@ class RDMA_Executor
 {
 public:
   /**
-   * @brief Constructor that initializes the RDMA Executor with a given NIC ID.
+   * @brief Initializes the RDMA Executor with a given NIC ID.
    * 
    * @param IBV_Device_ID The ID of the RDMA capable NIC to use.
    * @param IBV_Port_ID The Active Port ID of the NIC (typically 1).
    */
-  RDMA_Executor(int IBV_Device_ID, int IBV_Port_ID = IB_PORT) 
+  void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = IB_PORT) 
   {
       InitDeviceList();
       IBV_PTR_CALL(device_context, ibv_open_device(device_list[IBV_Device_ID]));
@@ -110,7 +110,7 @@ public:
    * @param dst Pointer to the destination memory region.
    * @param size Size of the memory region to register and send.
    */
-  void RDMA_MemoryRegister(void *src, void *dst, size_t size) 
+  void MemoryRegister(void *src, void *dst, size_t size) 
   {
     IBV_PTR_CALL(source_mr, ibv_reg_mr(protection_domain, src, size, rdma_flags));        
     IBV_PTR_CALL(destination_mr, ibv_reg_mr(protection_domain, dst, size, rdma_flags));           
@@ -141,7 +141,7 @@ public:
    * @param completion_queue Pointer to the completion queue.
    * @param WR_ID Work request ID.
    */
-  void RDMA_TransferData() 
+  void TransferData() 
   {
     sg.addr = (uint64_t) src_ptr;
     sg.length = size;
@@ -161,7 +161,7 @@ public:
   /**
    * @brief Tears down the RDMA setup by destroying all RDMA resources.
    */
-  void RDMA_TearDown() 
+  void TearDown() 
   {
     if (sender_qp) 
     {
@@ -216,7 +216,7 @@ public:
    */
   ~RDMA_Executor() 
   {
-    RDMA_TearDown();
+    TearDown();
   }
 
 private:
