@@ -53,16 +53,16 @@ To build documentation locally, use:
 NVIDIA platform support
 --------------------------
 
-You can build TransferBench to run on NVIDIA platforms via :ref:`HIP <hip:index>` or native NVCC.
-
-To build with HIP for NVIDIA, install a HIP-compatible CUDA version such as CUDA 11.5 and use:
-
-.. code-block:: bash
-
-  CUDA_PATH=<path_to_CUDA> HIP_PLATFORM=nvidia make`
+You can build TransferBench to run on NVIDIA platforms using native NVIDIA CUDA Compiler Driver (NVCC).
 
 To build with native NVCC, use:
 
 .. code-block:: bash
 
   make
+
+TransferBench looks for NVCC in `/usr/local/cuda` by default. To modify the location of NVCC, use environment variable `CUDA_PATH`:
+
+.. code-block:: bash
+
+  CUDA_PATH=/usr/local/cuda make
