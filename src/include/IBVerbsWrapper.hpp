@@ -77,7 +77,8 @@ static int poll_completion_queue(struct ibv_cq *cq);
  * This class provides functionalities to initialize RDMA devices, register memory,
  * post send requests, and tear down the RDMA setup.
  */
-class RDMA_Executor {
+class RDMA_Executor 
+{
 public:
   /**
    * @brief Constructor that initializes the RDMA Executor with a given NIC ID.
@@ -85,7 +86,8 @@ public:
    * @param IBV_Device_ID The ID of the RDMA capable NIC to use.
    * @param IBV_Port_ID The Active Port ID of the NIC (typically 1).
    */
-  RDMA_Executor(int IBV_Device_ID, int IBV_Port_ID = IB_PORT) {
+  RDMA_Executor(int IBV_Device_ID, int IBV_Port_ID = IB_PORT) 
+  {
       InitDeviceList();
       IBV_PTR_CALL(device_context, ibv_open_device(device_list[IBV_Device_ID]));
       IBV_PTR_CALL(protection_domain, ibv_alloc_pd(device_context));
@@ -108,7 +110,8 @@ public:
    * @param dst Pointer to the destination memory region.
    * @param size Size of the memory region to register and send.
    */
-  void RDMA_MemoryRegister(void *src, void *dst, size_t size) {
+  void RDMA_MemoryRegister(void *src, void *dst, size_t size) 
+  {
     IBV_PTR_CALL(source_mr, ibv_reg_mr(protection_domain, src, size, rdma_flags));        
     IBV_PTR_CALL(destination_mr, ibv_reg_mr(protection_domain, dst, size, rdma_flags));           
     src_ptr = src;
@@ -138,7 +141,8 @@ public:
    * @param completion_queue Pointer to the completion queue.
    * @param WR_ID Work request ID.
    */
-  void RDMA_TransferData() {
+  void RDMA_TransferData() 
+  {
     sg.addr = (uint64_t) src_ptr;
     sg.length = size;
     sg.lkey = source_mr->lkey;     
@@ -157,27 +161,35 @@ public:
   /**
    * @brief Tears down the RDMA setup by destroying all RDMA resources.
    */
-  void RDMA_TearDown() {
-    if (sender_qp) {
-        IBV_CALL(ibv_destroy_qp(sender_qp));
+  void RDMA_TearDown() 
+  {
+    if (sender_qp) 
+    {
+      IBV_CALL(ibv_destroy_qp(sender_qp));
     }
-    if (receiver_qp) {
-        IBV_CALL(ibv_destroy_qp(receiver_qp));
+    if (receiver_qp) 
+    {
+      IBV_CALL(ibv_destroy_qp(receiver_qp));
     }
-    if (completion_queue) {
-        IBV_CALL(ibv_destroy_cq(completion_queue));
+    if (completion_queue) 
+    {
+      IBV_CALL(ibv_destroy_cq(completion_queue));
     }
-    if (source_mr) {
-        IBV_CALL(ibv_dereg_mr(source_mr));
+    if (source_mr) 
+    {
+      IBV_CALL(ibv_dereg_mr(source_mr));
     }
-    if (destination_mr) {
-        IBV_CALL(ibv_dereg_mr(destination_mr));
+    if (destination_mr) 
+    {
+      IBV_CALL(ibv_dereg_mr(destination_mr));
     }
-    if (protection_domain) {
-        IBV_CALL(ibv_dealloc_pd(protection_domain));
+    if (protection_domain) 
+    {
+      IBV_CALL(ibv_dealloc_pd(protection_domain));
     }
-    if (device_context) {
-        IBV_CALL(ibv_close_device(device_context));
+    if (device_context) 
+    {
+      IBV_CALL(ibv_close_device(device_context));
     }
     sender_qp = nullptr;
     receiver_qp = nullptr;
@@ -191,8 +203,10 @@ public:
   /**
    * @brief Initializes the device list if it is not already initialized.
    */
-  static void InitDeviceList() {
-    if (device_list == NULL) {
+  static void InitDeviceList() 
+  {
+    if (device_list == NULL) 
+    {
       IBV_PTR_CALL(device_list, ibv_get_device_list(NULL));        
     }
   }
@@ -200,7 +214,8 @@ public:
   /**
    * @brief Destructor that tears down the RDMA setup.
    */
-  ~RDMA_Executor() {
+  ~RDMA_Executor() 
+  {
     RDMA_TearDown();
   }
 
