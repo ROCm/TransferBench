@@ -28,6 +28,7 @@ THE SOFTWARE.
 #include <time.h>
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
+#include "IBVerbsWrapper.hpp"
 
 #define TB_VERSION "1.51"
 
@@ -88,7 +89,7 @@ public:
   int maxNumVarSubExec;  // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int numCpuDevices;     // Number of CPU devices to use (defaults to # NUMA nodes detected)
   int numGpuDevices;     // Number of GPU devices to use (defaults to # HIP devices detected)
-  int numNICDevices;     // Number of RDMA Capable NICs to use (defaults to # number of RDMA NIC devices detected)
+  int numNicDevices;     // Number of RDMA Capable NICs to use (defaults to # number of RDMA NIC devices detected)
   int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numSubIterations;  // Number of subiterations to perform
   int numWarmups;        // Number of un-timed warmup iterations to perform
@@ -167,7 +168,7 @@ public:
     int numDetectedCpus = numa_num_configured_nodes();
     int numDetectedGpus;
     HIP_CALL(hipGetDeviceCount(&numDetectedGpus));
-
+    int numDetectedRdmaNics = RDMA_Executor::GetNicCount();
     hipDeviceProp_t prop;
     HIP_CALL(hipGetDeviceProperties(&prop, 0));
     std::string fullName = prop.gcnArchName;
@@ -196,6 +197,7 @@ public:
     maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
     numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
+    numNicDevices     = GetEnvVar("NUM_RDMA_DEVICES"    , numDetectedRdmaNics);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
     numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , DEFAULT_NUM_WARMUPS);
@@ -416,6 +418,11 @@ public:
       printf("[ERROR] Number of CPUs to use (%d) cannot exceed number of detected CPUs (%d)\n", numCpuDevices, numDetectedCpus);
       exit(1);
     }
+    if (numNicDevices > numDetectedRdmaNics)
+    {
+      printf("[ERROR] Number of RDMA NICs to use (%d) cannot exceed number of detected NICs (%d)\n", numNicDevices, numDetectedRdmaNics);
+      exit(1);
+    }    
     if (numGpuDevices > numDetectedGpus)
     {
       printf("[ERROR] Number of GPUs to use (%d) cannot exceed number of detected GPUs (%d)\n", numGpuDevices, numDetectedGpus);

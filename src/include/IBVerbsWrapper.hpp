@@ -19,6 +19,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
+#pragma once
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,8 +208,21 @@ public:
   {
     if (device_list == NULL) 
     {
-      IBV_PTR_CALL(device_list, ibv_get_device_list(NULL));        
+      IBV_PTR_CALL(device_list, ibv_get_device_list(NULL));      
     }
+  }
+
+  /**
+   * @brief Get RDMA device count.
+   */
+  static size_t GetNicCount()  
+  {
+    if (device_list == NULL) 
+    {
+      InitDeviceList();
+      while(device_list[ib_device_count++] != NULL);                    
+    }
+    return ib_device_count;
   }
 
   /**
@@ -220,7 +234,8 @@ public:
   }
 
 private:
-  static struct ibv_device **device_list; ///< List of RDMA capable devices.
+  static struct ibv_device **device_list; ///< List of RDMA capable NICs.
+  static size_t ib_device_count;          ///< Number of RDMA capable NICs.
   struct ibv_pd *protection_domain; ///< Protection domain for RDMA operations.
   struct ibv_cq *completion_queue; ///< Completion queue for RDMA operations.
   struct ibv_qp *sender_qp; ///< Queue pair for sending RDMA requests.
@@ -238,7 +253,7 @@ private:
 
 // Initialize the static member device_list
 struct ibv_device **RDMA_Executor::device_list = NULL;
-
+size_t RDMA_Executor::ib_device_count = 0;
 
 /**
  * @brief Creates an InfiniBand Queue Pair (QP).

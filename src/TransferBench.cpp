@@ -1223,6 +1223,11 @@ void ParseExeType(EnvVars const& ev, std::string const& token,
     printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", ev.numCpuDevices-1, exeIndex);
     exit(1);
   }
+  if (IsRdmaType(exeType) && (exeIndex < 0 || exeIndex >= ev.numNicDevices))
+  {
+    printf("[ERROR] NIC index must be between 0 and %d (instead of %d)\n", ev.numNicDevices-1, exeIndex);
+    exit(1);
+  }
   if (IsGpuType(exeType) && (exeIndex < 0 || exeIndex >= ev.numGpuDevices))
   {
     printf("[ERROR] GPU index must be between 0 and %d (instead of %d)\n", ev.numGpuDevices-1, exeIndex);

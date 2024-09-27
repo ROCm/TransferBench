@@ -65,7 +65,7 @@ bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == ME
 bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
 bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
-bool IsRDMAType(ExeType e) { return (e == EXE_RDMA); };
+bool IsRdmaType(ExeType e) { return (e == EXE_RDMA); };
 
 char const MemTypeStr[8] = "CGBFUNM";
 char const ExeTypeStr[5] = "CGDR";
