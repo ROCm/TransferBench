@@ -571,6 +571,10 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
         }
       }
     }
+    if(IsRdmaType(exeType)) 
+    {      
+      exeInfo.rdmaExecutor.InitDeviceAndQPs(exeIndex);
+    }
   }
 
 
@@ -661,6 +665,13 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
                          hipMemcpyDefault));
       HIP_CALL(hipDeviceSynchronize());
     }
+    if (exeType == EXE_RDMA)
+    {
+      for (int i = 0; i < exeInfo.transfers.size(); i++)
+      {
+        exeInfo.rdmaExecutor.MemoryRegister(exeInfo.transfers[i]->srcMem[0], exeInfo.transfers[i]->dstMem[0], exeInfo.transfers[i]->numBytesActual);
+      }
+    }
   }
 
   // Launch kernels (warmup iterations are not counted)
@@ -702,7 +713,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     {
       ExecutorInfo& exeInfo = exeInfoPair.second;
       ExeType       exeType = exeInfoPair.first.first;
-      int const numTransfersToRun = (exeType == EXE_GPU_GFX && ev.useSingleStream) ? 1 : exeInfo.transfers.size();
+      int const numTransfersToRun = ((exeType == EXE_GPU_GFX && ev.useSingleStream) || exeType == EXE_RDMA) ? 1 : exeInfo.transfers.size();
 
       for (int i = 0; i < numTransfersToRun; ++i)
         threads.push(std::thread(RunTransfer, std::ref(ev), iteration, std::ref(exeInfo), i));
@@ -829,7 +840,10 @@ cleanup:
 #endif
       }
     }
-
+    if (IsRdmaType(exeType))
+    {
+      exeInfo.rdmaExecutor.TearDown();
+    }
     if (IsGpuType(exeType))
     {
       int const numStreams = (int)exeInfo.streams.size();
@@ -1718,6 +1732,22 @@ void RunTransfer(EnvVars const& ev, int const iteration,
       childThreads.clear();
     } while (++subIteration != ev.numSubIterations);
 
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+
+    // Record time if not a warmup iteration
+    if (iteration >= 0)
+    {
+      double const delta = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0);
+      transfer->transferTime += delta;
+      if (ev.showIterations)
+        transfer->perIterationTime.push_back(delta);
+    }
+  }
+  else if (transfer->exeType == EXE_RDMA) // RDMA execution agent
+  {
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    exeInfo.rdmaExecutor.TransferData();
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
 
     // Record time if not a warmup iteration

@@ -111,12 +111,13 @@ public:
    * @param dst Pointer to the destination memory region.
    * @param size Size of the memory region to register and send.
    */
-  void MemoryRegister(void *src, void *dst, size_t size) 
+  void MemoryRegister(void *src, void *dst, size_t numBytes) 
   {
-    IBV_PTR_CALL(source_mr, ibv_reg_mr(protection_domain, src, size, rdma_flags));        
-    IBV_PTR_CALL(destination_mr, ibv_reg_mr(protection_domain, dst, size, rdma_flags));           
+    IBV_PTR_CALL(source_mr, ibv_reg_mr(protection_domain, src, numBytes, rdma_flags));        
+    IBV_PTR_CALL(destination_mr, ibv_reg_mr(protection_domain, dst, numBytes, rdma_flags));           
     src_ptr = src;
     dst_ptr = dst;
+    size = numBytes;
   }
 
 
@@ -167,38 +168,38 @@ public:
     if (sender_qp) 
     {
       IBV_CALL(ibv_destroy_qp(sender_qp));
+      sender_qp = nullptr;
     }
     if (receiver_qp) 
     {
       IBV_CALL(ibv_destroy_qp(receiver_qp));
+      receiver_qp = nullptr;
     }
     if (completion_queue) 
     {
       IBV_CALL(ibv_destroy_cq(completion_queue));
+      completion_queue = nullptr;
     }
     if (source_mr) 
     {
       IBV_CALL(ibv_dereg_mr(source_mr));
+      source_mr = nullptr;
     }
     if (destination_mr) 
     {
       IBV_CALL(ibv_dereg_mr(destination_mr));
+      destination_mr = nullptr;
     }
     if (protection_domain) 
     {
       IBV_CALL(ibv_dealloc_pd(protection_domain));
+      protection_domain = nullptr;
     }
     if (device_context) 
     {
       IBV_CALL(ibv_close_device(device_context));
+      device_context = nullptr;
     }
-    sender_qp = nullptr;
-    receiver_qp = nullptr;
-    completion_queue = nullptr;
-    source_mr = nullptr;
-    destination_mr = nullptr;
-    protection_domain = nullptr;
-    device_context = nullptr;
   }
   
   /**
@@ -230,25 +231,25 @@ public:
    */
   ~RDMA_Executor() 
   {
-    TearDown();
+    //TearDown();
   }
 
 private:
-  static struct ibv_device **device_list; ///< List of RDMA capable NICs.
   static size_t ib_device_count;          ///< Number of RDMA capable NICs.
-  struct ibv_pd *protection_domain; ///< Protection domain for RDMA operations.
-  struct ibv_cq *completion_queue; ///< Completion queue for RDMA operations.
-  struct ibv_qp *sender_qp; ///< Queue pair for sending RDMA requests.
-  struct ibv_qp *receiver_qp; ///< Queue pair for receiving RDMA requests.
-  struct ibv_context *device_context; ///< Device context for the RDMA capable NIC.
+   static struct ibv_device **device_list; ///< List of RDMA capable devices.
+  struct ibv_pd *protection_domain = nullptr; ///< Protection domain for RDMA operations.
+  struct ibv_cq *completion_queue = nullptr; ///< Completion queue for RDMA operations.
+  struct ibv_qp *sender_qp = nullptr; ///< Queue pair for sending RDMA requests.
+  struct ibv_qp *receiver_qp = nullptr; ///< Queue pair for receiving RDMA requests.
+  struct ibv_context *device_context = nullptr; ///< Device context for the RDMA capable NIC.
   struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.
-  struct ibv_mr *source_mr; ///< Memory region for the source buffer.
-  struct ibv_mr *destination_mr; ///< Memory region for the destination buffer.
+  struct ibv_mr *source_mr = nullptr; ///< Memory region for the source buffer.
+  struct ibv_mr *destination_mr = nullptr; ///< Memory region for the destination buffer.
   struct ibv_sge sg = {}; ///< Scatter/gather element for RDMA operations.
   struct ibv_send_wr wr = {}; ///< Work request for RDMA send operations.
-  void *src_ptr; ///< Source data pointer;
-  void *dst_ptr; ///< Destination data pointer.
-  size_t size; ///< Data size in bytes.
+  void *src_ptr = nullptr; ///< Source data pointer;
+  void *dst_ptr = nullptr; ///< Destination data pointer.
+  size_t size = 0; ///< Data size in bytes.
 };
 
 // Initialize the static member device_list
