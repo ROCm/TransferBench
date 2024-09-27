@@ -15,7 +15,7 @@ Prerequisite
 
 * Install ROCm stack on the system to obtain HIP runtime
 * Install ``libnuma`` on the system
-* Enable AMD IOMMU and set to passthrough for AMD Instinct cards
+* `Enable AMD IOMMU <https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#iommu-configuration-systems-with-256-cpu-threads>`_ and set to passthrough for AMD Instinct cards
 
 Build TransferBench
 ---------------------
