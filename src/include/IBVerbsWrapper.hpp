@@ -29,7 +29,9 @@ THE SOFTWARE.
 #include <infiniband/verbs.h>
 #include <iostream>
 #include <vector>
-#include <mutex>
+
+#define MAX_SEND_WR_PER_QP 12
+#define MAX_RECV_WR_PER_QP 12
 
 #define IB_PORT 1
 #define IB_PSN  2233
@@ -71,7 +73,7 @@ static int qp_init(struct ibv_qp *qp, unsigned flags);
 static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn);
 static int qp_transition_to_ready_to_send(struct ibv_qp *qp);
 static bool is_qp_ready_to_send(struct ibv_qp *qp);
-static int poll_completion_queue(struct ibv_cq *cq, int transfer_index);
+static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> &sendRecvStat);
 
 /**
  * @class RDMA_Executor
@@ -150,7 +152,8 @@ public:
     IBV_PTR_CALL(dst_mr, ibv_reg_mr(rdma_resource->protection_domain, dst, numBytes, rdma_flags));           
     source_mr.push_back(std::make_pair(src_mr, src));
     destination_mr.push_back(std::make_pair(dst_mr, dst));    
-    size = numBytes;
+    receiveStatuses.push_back(false);
+    messageSizes.push_back(numBytes);
   }
 
 
@@ -183,7 +186,7 @@ public:
     struct ibv_sge sg = {}; 
     struct ibv_send_wr wr = {};
     sg.addr = (uint64_t) source_mr[transferIdx].second;
-    sg.length = size;
+    sg.length = messageSizes[transferIdx];
     sg.lkey = source_mr[transferIdx].first->lkey;     
     struct ibv_send_wr *bad_wr;
     wr.wr_id = transferIdx;
@@ -192,10 +195,9 @@ public:
     wr.opcode = IBV_WR_RDMA_WRITE;
     wr.send_flags = IBV_SEND_SIGNALED;
     wr.wr.rdma.remote_addr = (uint64_t) destination_mr[transferIdx].second;
-    wr.wr.rdma.rkey = destination_mr[transferIdx].first->rkey;
-    std::lock_guard local_lock(rdma_resource->resource_mutex);
-    IBV_CALL(ibv_post_send(rdma_resource->sender_qp, &wr, &bad_wr));
-    IBV_CALL(poll_completion_queue(rdma_resource->completion_queue, transferIdx));
+    wr.wr.rdma.rkey = destination_mr[transferIdx].first->rkey;   
+    IBV_CALL(ibv_post_send(rdma_resource->sender_qp, &wr, &bad_wr));    
+    IBV_CALL(poll_completion_queue(rdma_resource->completion_queue, transferIdx, receiveStatuses));
   }
 
   /**
@@ -289,17 +291,17 @@ private:
       struct ibv_qp *receiver_qp = nullptr; ///< Queue pair for receiving RDMA requests.
       struct ibv_context *device_context = nullptr; ///< Device context for the RDMA capable NIC.  
       struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.  
-      std::mutex resource_mutex;           ///< Enable multithreaded protection of RDMA NIC resources.
-
+      std::mutex resource_mutex;           ///< Enable multithreaded protection of RDMA NIC resources.    
   };  
   static size_t ib_device_count;          ///< Number of RDMA capable NICs.
   static struct ibv_device **device_list; ///< List of RDMA capable devices.
   static std::vector<RDMA_Resources*> ib_attribute_mapper; ///< Store resoruce sensitive RDMA fields     
   std::vector<std::pair<struct ibv_mr *, void*>> source_mr; ///< Memory region for the source buffer.
-  std::vector<std::pair<struct ibv_mr *, void*>> destination_mr; ///< Memory region for the destination buffer. 
+  std::vector<std::pair<struct ibv_mr *, void*>> destination_mr; ///< Memory region for the destination buffer.
+  std::vector<bool> receiveStatuses; ///< Keep track of send/recv statuses 
+  std::vector<size_t> messageSizes; ///< Keep track of message sizes
   int ib_device_id; ///< IB NIC device ID.
-  int ib_device_port; ///< IB Port ID.
-  size_t size = 0; ///< Data size in bytes.
+  int ib_device_port; ///< IB Port ID.  
 };
 // Initialize the static member device_list
 struct ibv_device **RDMA_Executor::device_list = NULL;
@@ -328,8 +330,8 @@ static struct ibv_qp *qp_create(struct ibv_pd *pd, struct ibv_cq* cq)
   struct ibv_qp_init_attr attr = {};
   attr.send_cq = cq;
   attr.recv_cq = cq;
-  attr.cap.max_send_wr  = 1;
-  attr.cap.max_recv_wr  = 1;
+  attr.cap.max_send_wr  = MAX_RECV_WR_PER_QP;
+  attr.cap.max_recv_wr  = MAX_RECV_WR_PER_QP;
   attr.cap.max_send_sge = 1;
   attr.cap.max_recv_sge = 1;
   attr.qp_type = IBV_QPT_RC;
@@ -458,16 +460,30 @@ static bool is_qp_ready_to_send(struct ibv_qp *qp) {
  * @param cq Pointer to the completion queue (CQ) to be polled.
  * @return Always returns 0.
  */
-static int poll_completion_queue(struct ibv_cq *cq, int transferIdx)
+static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> &sendRecvStat)
 {
   int nc = 0;              // Number of completions polled
   struct ibv_wc wc;        // Work completion structure
-
-  while (!nc || wc.wr_id != transferIdx) {   // Loop until at least one completion is found
-      nc = ibv_poll_cq(cq, 1, &wc);          // Poll the completion queue
+  
+  while (nc <= 0 && !sendRecvStat[transferIdx]) {   // Loop until at least one completion is found  
+    nc = ibv_poll_cq(cq, 1, &wc);             // Poll the completion queue
+     if(nc > 0) {
+        assert(wc.status == IBV_WC_SUCCESS); // Ensure the status of the work completion is successful
+        if(wc.wr_id == transferIdx) break;
+        else {   
+          sendRecvStat[wc.wr_id] = true;     // Lock is not needed.  ibv_poll_cq is thread-safe
+          nc = 0;                            // reset to keep looping until my data is at least received
+        }
+      }
       assert(nc >= 0);                       // Ensure the number of completions polled is non-negative
-  }
 
-  assert(wc.status == IBV_WC_SUCCESS); // Ensure the status of the work completion is successful
-  return 0;               // Return 0 to indicate success
+  } 
+  // No need to lock the shared vector. There are two cases
+  // 1. If my receive was accomplished by another thread, my loop won't exit
+  // unless unless the memory location has been sucessefully set by the receiving thread
+  // 2. If my receive was accomplished by my thread, then it is guaranteed that I am the only
+  // one trying to access this location
+  // All of this will change if ibv_poll_cq was not thread-safe
+  sendRecvStat[transferIdx] = false;
+  return 0;               
 }
