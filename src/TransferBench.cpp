@@ -713,7 +713,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     {
       ExecutorInfo& exeInfo = exeInfoPair.second;
       ExeType       exeType = exeInfoPair.first.first;
-      int const numTransfersToRun = ((exeType == EXE_GPU_GFX && ev.useSingleStream)) ? 1 : exeInfo.transfers.size();
+      int const numTransfersToRun = (exeType == EXE_GPU_GFX && ev.useSingleStream) ? 1 : exeInfo.transfers.size();
 
       for (int i = 0; i < numTransfersToRun; ++i)
         threads.push(std::thread(RunTransfer, std::ref(ev), iteration, std::ref(exeInfo), i));
