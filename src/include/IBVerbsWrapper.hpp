@@ -28,6 +28,8 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <infiniband/verbs.h>
 #include <iostream>
+#include <vector>
+#include <mutex>
 
 #define IB_PORT 1
 #define IB_PSN  2233
@@ -45,7 +47,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
         int error = (func);                                                             \
         if (error != 0)                                                                 \
         {                                                                               \
-            std::cerr << "Encountered RDMA error at line " << __LINE__                  \
+            std::cerr << "Encountered RDMA error " << error << " at line " << __LINE__  \
             << " in file " << __FILE__ << "\n";                                         \
             exit(-1);                                                                   \
         }                                                                               \
@@ -69,7 +71,7 @@ static int qp_init(struct ibv_qp *qp, unsigned flags);
 static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn);
 static int qp_transition_to_ready_to_send(struct ibv_qp *qp);
 static bool is_qp_ready_to_send(struct ibv_qp *qp);
-static int poll_completion_queue(struct ibv_cq *cq);
+static int poll_completion_queue(struct ibv_cq *cq, int transfer_index);
 
 /**
  * @class RDMA_Executor
@@ -89,20 +91,48 @@ public:
    */
   void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = IB_PORT) 
   {
-      InitDeviceList();
-      IBV_PTR_CALL(device_context, ibv_open_device(device_list[IBV_Device_ID]));
-      IBV_PTR_CALL(protection_domain, ibv_alloc_pd(device_context));
-      IBV_PTR_CALL(completion_queue, ibv_create_cq(device_context, 100, NULL, NULL, 0));  
-      IBV_CALL(ibv_query_port(device_context, IBV_Port_ID, &port_attr));
-      IBV_PTR_CALL(sender_qp, qp_create(protection_domain, completion_queue));
-      IBV_PTR_CALL(receiver_qp, qp_create(protection_domain, completion_queue));
-      IBV_CALL(qp_init(sender_qp, rdma_flags));
-      IBV_CALL(qp_init(receiver_qp, rdma_flags));
-      IBV_CALL(qp_transition_to_ready_to_receive(sender_qp, port_attr.lid, sender_qp->qp_num));
-      IBV_CALL(qp_transition_to_ready_to_receive(receiver_qp, port_attr.lid, receiver_qp->qp_num));
-      IBV_CALL(qp_transition_to_ready_to_send(sender_qp));
-      IBV_CALL(qp_transition_to_ready_to_send(receiver_qp));
+    InitDeviceList();
+    ib_device_id = IBV_Device_ID;
+    ib_device_port = IBV_Port_ID;
+    if(ib_attribute_mapper.size() <= IBV_Device_ID) 
+    {
+      ib_attribute_mapper.resize(IBV_Device_ID + 1); 
+    }
+    if(!ib_attribute_mapper[IBV_Device_ID])
+    {          
+      ib_attribute_mapper[IBV_Device_ID] = new RDMA_Resources();
+      auto& rdma_resource_attr = ib_attribute_mapper[IBV_Device_ID];
+      IBV_PTR_CALL(rdma_resource_attr->device_context, 
+            ibv_open_device(device_list[IBV_Device_ID]));
+      IBV_PTR_CALL(rdma_resource_attr->protection_domain, 
+            ibv_alloc_pd(rdma_resource_attr->device_context));
+      IBV_PTR_CALL(rdma_resource_attr->completion_queue, 
+            ibv_create_cq(rdma_resource_attr->device_context, 
+              100, NULL, NULL, 0));  
+      IBV_CALL(ibv_query_port(rdma_resource_attr->device_context, 
+            IBV_Port_ID, 
+            &rdma_resource_attr->port_attr));
+      IBV_PTR_CALL(rdma_resource_attr->sender_qp, 
+            qp_create(rdma_resource_attr->protection_domain, 
+                rdma_resource_attr->completion_queue));
+      IBV_PTR_CALL(rdma_resource_attr->receiver_qp, 
+            qp_create(rdma_resource_attr->protection_domain, 
+                rdma_resource_attr->completion_queue));
+      IBV_CALL(qp_init(rdma_resource_attr->sender_qp, 
+          rdma_flags));
+      IBV_CALL(qp_init(rdma_resource_attr->receiver_qp, 
+          rdma_flags));
+     IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->sender_qp, 
+                 rdma_resource_attr->port_attr.lid, 
+                 rdma_resource_attr->sender_qp->qp_num));
+      IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->receiver_qp, 
+                  rdma_resource_attr->port_attr.lid, 
+                  rdma_resource_attr->receiver_qp->qp_num));
+      IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->sender_qp));
+      IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->receiver_qp));
+    }
   }
+  
 
   /**
    * @brief Registers memory for RDMA.
@@ -113,10 +143,13 @@ public:
    */
   void MemoryRegister(void *src, void *dst, size_t numBytes) 
   {
-    IBV_PTR_CALL(source_mr, ibv_reg_mr(protection_domain, src, numBytes, rdma_flags));        
-    IBV_PTR_CALL(destination_mr, ibv_reg_mr(protection_domain, dst, numBytes, rdma_flags));           
-    src_ptr = src;
-    dst_ptr = dst;
+    auto&& rdma_resource = ib_attribute_mapper[ib_device_id];
+    struct ibv_mr *src_mr;
+    struct ibv_mr *dst_mr;
+    IBV_PTR_CALL(src_mr, ibv_reg_mr(rdma_resource->protection_domain, src, numBytes, rdma_flags));        
+    IBV_PTR_CALL(dst_mr, ibv_reg_mr(rdma_resource->protection_domain, dst, numBytes, rdma_flags));           
+    source_mr.push_back(std::make_pair(src_mr, src));
+    destination_mr.push_back(std::make_pair(dst_mr, dst));    
     size = numBytes;
   }
 
@@ -143,63 +176,76 @@ public:
    * @param completion_queue Pointer to the completion queue.
    * @param WR_ID Work request ID.
    */
-  void TransferData() 
-  {
-    sg.addr = (uint64_t) src_ptr;
+  void TransferData(int transferIdx) 
+  {    
+    assert(transferIdx < source_mr.size());
+    auto&& rdma_resource = ib_attribute_mapper[ib_device_id];
+    struct ibv_sge sg = {}; 
+    struct ibv_send_wr wr = {};
+    sg.addr = (uint64_t) source_mr[transferIdx].second;
     sg.length = size;
-    sg.lkey = source_mr->lkey;     
+    sg.lkey = source_mr[transferIdx].first->lkey;     
     struct ibv_send_wr *bad_wr;
-    wr.wr_id = WR_ID;
+    wr.wr_id = transferIdx;
     wr.sg_list = &sg;
     wr.num_sge = 1;
     wr.opcode = IBV_WR_RDMA_WRITE;
     wr.send_flags = IBV_SEND_SIGNALED;
-    wr.wr.rdma.remote_addr = (uint64_t) dst_ptr;
-    wr.wr.rdma.rkey = destination_mr->rkey;
-    IBV_CALL(ibv_post_send(sender_qp, &wr, &bad_wr));
-    IBV_CALL(poll_completion_queue(completion_queue));
+    wr.wr.rdma.remote_addr = (uint64_t) destination_mr[transferIdx].second;
+    wr.wr.rdma.rkey = destination_mr[transferIdx].first->rkey;
+    std::lock_guard local_lock(rdma_resource->resource_mutex);
+    IBV_CALL(ibv_post_send(rdma_resource->sender_qp, &wr, &bad_wr));
+    IBV_CALL(poll_completion_queue(rdma_resource->completion_queue, transferIdx));
   }
 
   /**
    * @brief Tears down the RDMA setup by destroying all RDMA resources.
    */
   void TearDown() 
-  {
-    if (sender_qp) 
+  {   
+    if (source_mr.size() > 0) 
     {
-      IBV_CALL(ibv_destroy_qp(sender_qp));
-      sender_qp = nullptr;
+      for(auto mr : source_mr) 
+      {
+        IBV_CALL(ibv_dereg_mr(mr.first));        
+      }
+      source_mr.clear();
     }
-    if (receiver_qp) 
+    if (destination_mr.size() > 0) 
     {
-      IBV_CALL(ibv_destroy_qp(receiver_qp));
-      receiver_qp = nullptr;
+      for(auto mr : destination_mr) 
+      {
+        IBV_CALL(ibv_dereg_mr(mr.first));
+      }
     }
-    if (completion_queue) 
+    auto&& rdma_resource = ib_attribute_mapper[ib_device_id];
+    if(rdma_resource == nullptr) return;
+    if (rdma_resource->sender_qp) 
     {
-      IBV_CALL(ibv_destroy_cq(completion_queue));
-      completion_queue = nullptr;
+      IBV_CALL(ibv_destroy_qp(rdma_resource->sender_qp));
+      rdma_resource->sender_qp = nullptr;
     }
-    if (source_mr) 
+    if (rdma_resource->receiver_qp) 
     {
-      IBV_CALL(ibv_dereg_mr(source_mr));
-      source_mr = nullptr;
+      IBV_CALL(ibv_destroy_qp(rdma_resource->receiver_qp));
+      rdma_resource->receiver_qp = nullptr;
     }
-    if (destination_mr) 
+    if (rdma_resource->completion_queue) 
     {
-      IBV_CALL(ibv_dereg_mr(destination_mr));
-      destination_mr = nullptr;
+      IBV_CALL(ibv_destroy_cq(rdma_resource->completion_queue));
+      rdma_resource->completion_queue = nullptr;
     }
-    if (protection_domain) 
+    if (rdma_resource->protection_domain) 
     {
-      IBV_CALL(ibv_dealloc_pd(protection_domain));
-      protection_domain = nullptr;
+      IBV_CALL(ibv_dealloc_pd(rdma_resource->protection_domain));
+      rdma_resource->protection_domain = nullptr;
     }
-    if (device_context) 
+    if (rdma_resource->device_context) 
     {
-      IBV_CALL(ibv_close_device(device_context));
-      device_context = nullptr;
+      IBV_CALL(ibv_close_device(rdma_resource->device_context));
+      rdma_resource->device_context = nullptr;
     }
+    rdma_resource = nullptr;
   }
   
   /**
@@ -235,26 +281,30 @@ public:
   }
 
 private:
+  class RDMA_Resources {
+    public:
+      struct ibv_pd *protection_domain = nullptr; ///< Protection domain for RDMA operations.
+      struct ibv_cq *completion_queue = nullptr; ///< Completion queue for RDMA operations.
+      struct ibv_qp *sender_qp = nullptr; ///< Queue pair for sending RDMA requests.
+      struct ibv_qp *receiver_qp = nullptr; ///< Queue pair for receiving RDMA requests.
+      struct ibv_context *device_context = nullptr; ///< Device context for the RDMA capable NIC.  
+      struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.  
+      std::mutex resource_mutex;           ///< Enable multithreaded protection of RDMA NIC resources.
+
+  };  
   static size_t ib_device_count;          ///< Number of RDMA capable NICs.
-   static struct ibv_device **device_list; ///< List of RDMA capable devices.
-  struct ibv_pd *protection_domain = nullptr; ///< Protection domain for RDMA operations.
-  struct ibv_cq *completion_queue = nullptr; ///< Completion queue for RDMA operations.
-  struct ibv_qp *sender_qp = nullptr; ///< Queue pair for sending RDMA requests.
-  struct ibv_qp *receiver_qp = nullptr; ///< Queue pair for receiving RDMA requests.
-  struct ibv_context *device_context = nullptr; ///< Device context for the RDMA capable NIC.
-  struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.
-  struct ibv_mr *source_mr = nullptr; ///< Memory region for the source buffer.
-  struct ibv_mr *destination_mr = nullptr; ///< Memory region for the destination buffer.
-  struct ibv_sge sg = {}; ///< Scatter/gather element for RDMA operations.
-  struct ibv_send_wr wr = {}; ///< Work request for RDMA send operations.
-  void *src_ptr = nullptr; ///< Source data pointer;
-  void *dst_ptr = nullptr; ///< Destination data pointer.
+  static struct ibv_device **device_list; ///< List of RDMA capable devices.
+  static std::vector<RDMA_Resources*> ib_attribute_mapper; ///< Store resoruce sensitive RDMA fields     
+  std::vector<std::pair<struct ibv_mr *, void*>> source_mr; ///< Memory region for the source buffer.
+  std::vector<std::pair<struct ibv_mr *, void*>> destination_mr; ///< Memory region for the destination buffer. 
+  int ib_device_id; ///< IB NIC device ID.
+  int ib_device_port; ///< IB Port ID.
   size_t size = 0; ///< Data size in bytes.
 };
-
 // Initialize the static member device_list
 struct ibv_device **RDMA_Executor::device_list = NULL;
 size_t RDMA_Executor::ib_device_count = 0;
+std::vector<RDMA_Executor::RDMA_Resources*> RDMA_Executor::ib_attribute_mapper;
 
 /**
  * @brief Creates an InfiniBand Queue Pair (QP).
@@ -408,17 +458,16 @@ static bool is_qp_ready_to_send(struct ibv_qp *qp) {
  * @param cq Pointer to the completion queue (CQ) to be polled.
  * @return Always returns 0.
  */
-static int poll_completion_queue(struct ibv_cq *cq)
+static int poll_completion_queue(struct ibv_cq *cq, int transferIdx)
 {
   int nc = 0;              // Number of completions polled
   struct ibv_wc wc;        // Work completion structure
 
-  while (!nc) {            // Loop until at least one completion is found
-      nc = ibv_poll_cq(cq, 1, &wc);  // Poll the completion queue
-      assert(nc >= 0);     // Ensure the number of completions polled is non-negative
+  while (!nc || wc.wr_id != transferIdx) {   // Loop until at least one completion is found
+      nc = ibv_poll_cq(cq, 1, &wc);          // Poll the completion queue
+      assert(nc >= 0);                       // Ensure the number of completions polled is non-negative
   }
 
-  assert(wc.wr_id == WR_ID);          // Ensure the work request ID matches the expected WR_ID
   assert(wc.status == IBV_WC_SUCCESS); // Ensure the status of the work completion is successful
   return 0;               // Return 0 to indicate success
 }

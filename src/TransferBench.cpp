@@ -713,7 +713,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     {
       ExecutorInfo& exeInfo = exeInfoPair.second;
       ExeType       exeType = exeInfoPair.first.first;
-      int const numTransfersToRun = ((exeType == EXE_GPU_GFX && ev.useSingleStream) || exeType == EXE_RDMA) ? 1 : exeInfo.transfers.size();
+      int const numTransfersToRun = ((exeType == EXE_GPU_GFX && ev.useSingleStream)) ? 1 : exeInfo.transfers.size();
 
       for (int i = 0; i < numTransfersToRun; ++i)
         threads.push(std::thread(RunTransfer, std::ref(ev), iteration, std::ref(exeInfo), i));
@@ -1747,7 +1747,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   {
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
-    exeInfo.rdmaExecutor.TransferData();
+    exeInfo.rdmaExecutor.TransferData(transferIdx);
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
 
     // Record time if not a warmup iteration
