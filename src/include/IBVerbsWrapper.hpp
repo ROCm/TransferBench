@@ -501,16 +501,46 @@ static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector
 }
 #else
 #warning "RDMA Executor API not supported. Executor is disabled."
+#define RDMA_NOT_SUPPORTED_ERROR()                           \
+  do {                                                       \
+    std::cout << "Error: RDMA Executor API not supported. "  \
+              << "DISABLE_RDMA_EXECUTOR flag is set. "       \
+              << "Executor API Call line " << __LINE__       \
+              << " in file " << __FILE__ << "\n";            \
+    exit(1);                                                 \
+  } while(0)                                                 \
+
 class RDMA_Executor
 {
 public:
-  void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = 0) {}
-  void MemoryRegister(void *src, void *dst, size_t numBytes){}
-  void TransferData(int transferIdx){}
-  void TearDown() {}
-  static bool IsSupported() { return false;}
-  static void InitDeviceList() {}
-  static size_t GetNicCount() { return 0;}
+  void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = 0)
+  {
+    RDMA_NOT_SUPPORTED_ERROR();
+  }
+  void MemoryRegister(void *src, void *dst, size_t numBytes)
+  {
+    RDMA_NOT_SUPPORTED_ERROR();
+  }
+  void TransferData(int transferIdx)
+  {
+    RDMA_NOT_SUPPORTED_ERROR();
+  }
+  void TearDown()
+  {
+    RDMA_NOT_SUPPORTED_ERROR();
+  }
+  static bool IsSupported()
+  {
+    return false;
+  }
+  static void InitDeviceList()
+  {
+    RDMA_NOT_SUPPORTED_ERROR();
+  }
+  static size_t GetNicCount()
+  {
+    return 0;
+  }
 };
 #endif
 #endif
