@@ -291,7 +291,6 @@ private:
       struct ibv_qp *receiver_qp = nullptr; ///< Queue pair for receiving RDMA requests.
       struct ibv_context *device_context = nullptr; ///< Device context for the RDMA capable NIC.  
       struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.  
-      std::mutex resource_mutex;           ///< Enable multithreaded protection of RDMA NIC resources.    
   };  
   static size_t ib_device_count;          ///< Number of RDMA capable NICs.
   static struct ibv_device **device_list; ///< List of RDMA capable devices.
