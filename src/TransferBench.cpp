@@ -1232,14 +1232,23 @@ void ParseExeType(EnvVars const& ev, std::string const& token,
   }
   exeType = CharToExeType(typeChar);
 
+
+  if (IsRdmaType(exeType))
+  {
+    if (!RDMA_Executor::IsSupported())
+    {
+      printf("[WARNING] Given %c, but RDMA executor is not supported. Switching over to GPU_DMA %d executor\n", typeChar, exeIndex);     
+      exeType = EXE_GPU_DMA;
+    }
+    else if(exeIndex < 0 || exeIndex >= ev.numNicDevices)
+    {
+      printf("[ERROR] NIC index must be between 0 and %d (instead of %d)\n", ev.numNicDevices-1, exeIndex);
+      exit(1);
+    }
+  }
   if (IsCpuType(exeType) && (exeIndex < 0 || exeIndex >= ev.numCpuDevices))
   {
     printf("[ERROR] CPU index must be between 0 and %d (instead of %d)\n", ev.numCpuDevices-1, exeIndex);
-    exit(1);
-  }
-  if (IsRdmaType(exeType) && (exeIndex < 0 || exeIndex >= ev.numNicDevices))
-  {
-    printf("[ERROR] NIC index must be between 0 and %d (instead of %d)\n", ev.numNicDevices-1, exeIndex);
     exit(1);
   }
   if (IsGpuType(exeType) && (exeIndex < 0 || exeIndex >= ev.numGpuDevices))

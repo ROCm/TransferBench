@@ -19,8 +19,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
-#pragma once
 
+#ifndef RDMA_EXECUTOR_HPP
+#define RDMA_EXECUTOR_HPP
+#ifndef DISABLE_RDMA_EXECUTOR
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,6 +200,17 @@ public:
     wr.wr.rdma.rkey = destination_mr[transferIdx].first->rkey;   
     IBV_CALL(ibv_post_send(rdma_resource->sender_qp, &wr, &bad_wr));    
     IBV_CALL(poll_completion_queue(rdma_resource->completion_queue, transferIdx, receiveStatuses));
+  }
+
+
+  /**
+   * @brief Checks if RDMA functionality is supported.
+   * 
+   * @return true if the required features are supported, false otherwise.
+   */
+  static bool IsSupported()
+  { 
+    return true;
   }
 
   /**
@@ -486,3 +499,18 @@ static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector
   sendRecvStat[transferIdx] = false;
   return 0;               
 }
+#else
+#warning "RDMA Executor API not supported. Executor is disabled."
+class RDMA_Executor
+{
+public:
+  void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = 0) {}
+  void MemoryRegister(void *src, void *dst, size_t numBytes){}
+  void TransferData(int transferIdx){}
+  void TearDown() {}
+  static bool IsSupported() { return false;}
+  static void InitDeviceList() {}
+  static size_t GetNicCount() { return 0;}
+};
+#endif
+#endif
