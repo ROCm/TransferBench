@@ -22,7 +22,7 @@ THE SOFTWARE.
 
 #ifndef RDMA_EXECUTOR_HPP
 #define RDMA_EXECUTOR_HPP
-#ifndef DISABLE_RDMA_EXECUTOR
+#ifndef LIB_IBVERBS_UNAVAILABLE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -20,7 +20,7 @@ CXXFLAGS = -O3 -Iinclude -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-
 ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
 	CXXFLAGS += -libverbs
 else
-	CXXFLAGS += -DDISABLE_RDMA_EXECUTOR	 
+	CXXFLAGS += -DLIB_IBVERBS_UNAVAILABLE
 endif
 
 NVFLAGS = -O3 -Iinclude -x cu -lnuma -arch=native
