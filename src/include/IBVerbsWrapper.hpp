@@ -71,7 +71,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 
 static struct ibv_qp *qp_create(struct ibv_pd *pd, struct ibv_cq* cq);
 static int qp_init(struct ibv_qp *qp, uint8_t port_num, unsigned flags);
-static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t port, bool isRoCE);
+static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t gid_index, uint8_t port, bool isRoCE);
 static int qp_transition_to_ready_to_send(struct ibv_qp *qp);
 static bool is_qp_ready_to_send(struct ibv_qp *qp);
 static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> &sendRecvStat);
@@ -90,9 +90,10 @@ public:
    * @brief Initializes the RDMA Executor with a given NIC ID.
    * 
    * @param IBV_Device_ID The ID of the RDMA capable NIC to use.
+   * @param gid_index GID Index to be leveraged for RoCE traffic
    * @param IBV_Port_ID The Active Port ID of the NIC.
    */
-  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t IBV_Port_ID = 1)
+  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t gid_index, uint8_t IBV_Port_ID = 1)
   {
     InitDeviceList();
     ib_device_id = IBV_Device_ID;
@@ -141,11 +142,11 @@ public:
       }
       IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->sender_qp,
                  rdma_resource_attr->port_attr.lid, 
-                 rdma_resource_attr->receiver_qp->qp_num, rdma_resource_attr->gid, ib_device_port, isRoce));
+                 rdma_resource_attr->receiver_qp->qp_num, rdma_resource_attr->gid, gid_index, ib_device_port, isRoce));
 
       IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->receiver_qp,
                   rdma_resource_attr->port_attr.lid, 
-                  rdma_resource_attr->sender_qp->qp_num, rdma_resource_attr->gid, ib_device_port, isRoce));
+                  rdma_resource_attr->sender_qp->qp_num, rdma_resource_attr->gid, gid_index, ib_device_port, isRoce));
 
       IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->sender_qp));
       IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->receiver_qp));
@@ -431,7 +432,7 @@ static int qp_init(struct ibv_qp *qp, uint8_t port_num, unsigned flags)
  * @param isRoCE Boolean flag indicating whether the configuration is for RoCE (true) or not (false).
  * @return int 0 on success, or the error code returned by ibv_modify_qp on failure.
  */
-static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t port, bool isRoCE)
+static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t gid_index, uint8_t port, bool isRoCE)
 {
   struct ibv_qp_attr attr = {};
   memset(&attr, 0, sizeof(struct ibv_qp_attr));
@@ -446,7 +447,7 @@ static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, u
     attr.ah_attr.grh.dgid.global.subnet_prefix = gid.global.subnet_prefix;
     attr.ah_attr.grh.dgid.global.interface_id = gid.global.interface_id;
     attr.ah_attr.grh.flow_label = 0;
-    attr.ah_attr.grh.sgid_index = 3;
+    attr.ah_attr.grh.sgid_index = gid_index;
     attr.ah_attr.grh.hop_limit = 255;
   }
   else 
@@ -569,7 +570,7 @@ static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector
 class RDMA_Executor
 {
 public:
-  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t IBV_Port_ID = 0)
+  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t gid_index, uint8_t IBV_Port_ID = 0)
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }
