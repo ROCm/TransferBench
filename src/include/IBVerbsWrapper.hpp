@@ -115,6 +115,15 @@ public:
       IBV_CALL(ibv_query_port(rdma_resource_attr->device_context, 
             IBV_Port_ID, 
             &rdma_resource_attr->port_attr));
+      if(rdma_resource_attr->port_attr.state != IBV_PORT_ACTIVE) 
+      {
+        std::cout << "[Error] selected RDMA device " 
+                 << IBV_Device_ID 
+                 << " is down. Select a different device" 
+                << std::endl;
+        exit(1);                 
+      }
+
       IBV_PTR_CALL(rdma_resource_attr->sender_qp, 
             qp_create(rdma_resource_attr->protection_domain, 
                 rdma_resource_attr->completion_queue));
