@@ -500,7 +500,7 @@ static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector
   return 0;               
 }
 #else
-#warning "RDMA Executor API not supported. Executor is disabled."
+#warning "LIB Ibverbs is not installed. RDMA Executor is therefore disabled."
 #define RDMA_NOT_SUPPORTED_ERROR()                           \
   do {                                                       \
     std::cout << "Error: RDMA Executor API not supported. "  \
