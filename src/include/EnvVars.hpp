@@ -103,6 +103,7 @@ public:
   int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
   int useXccFilter;      // Use XCC filtering (experimental)
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
+  uint8_t ibGidIndex;    // GID Index for RoCE NICs
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
@@ -196,7 +197,7 @@ public:
     minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
     maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
     numCpuDevices     = GetEnvVar("NUM_CPU_DEVICES"     , numDetectedCpus);
-    numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);
+    numGpuDevices     = GetEnvVar("NUM_GPU_DEVICES"     , numDetectedGpus);    
     numNicDevices     = GetEnvVar("NUM_RDMA_DEVICES"    , numDetectedRdmaNics);
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , DEFAULT_NUM_ITERATIONS);
     numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
@@ -213,6 +214,7 @@ public:
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     enableDebug       = GetEnvVar("DEBUG"               , 0);
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
+    ibGidIndex        = GetEnvVar("IB_GID_INDEX"        , 3);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -613,6 +615,7 @@ public:
     printf(" MAX_VAR_SUBEXEC        - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
     printf(" NUM_CPU_DEVICES=X      - Restrict number of CPUs to X.  May not be greater than # detected NUMA nodes\n");
     printf(" NUM_GPU_DEVICES=X      - Restrict number of GPUs to X.  May not be greater than # detected HIP devices\n");
+    printf(" NUM_RDMA_DEVICES=X     - Restrict number of RDMA to X.  May not be greater than # detected RDMA devices\n");
     printf(" NUM_ITERATIONS=I       - Perform I timed iteration(s) per test\n");
     printf(" NUM_SUBITERATIONS=S    - Perform S sub-iteration(s) per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS=W          - Perform W untimed warmup iteration(s) per test\n");
@@ -626,6 +629,7 @@ public:
     printf(" USE_SINGLE_STREAM      - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
     printf(" USE_XCC_FILTER         - Use XCC filtering (experimental)\n");
     printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
+    printf(" IB_GID_INDEX           - Required for RoCE NICs (default=3)\n");
   }
 
   // Helper macro to switch between CSV and terminal output
@@ -688,6 +692,8 @@ public:
              std::string("Using ") + std::to_string(numCpuDevices) + " CPU devices");
     PRINT_EV("NUM_GPU_DEVICES", numGpuDevices,
              std::string("Using ") + std::to_string(numGpuDevices) + " GPU devices");
+    PRINT_EV("NUM_RDMA_DEVICES", numNicDevices,
+             std::string("Using ") + std::to_string(numNicDevices) + " RDMA devices");             
     PRINT_EV("NUM_ITERATIONS", numIterations,
              std::string("Running ") + std::to_string(numIterations > 0 ? numIterations : -numIterations) + " "
              + (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
@@ -709,6 +715,8 @@ public:
              std::string("Using single stream per ") + (useSingleStream ? "device" : "Transfer"));
     PRINT_EV("USE_XCC_FILTER", useXccFilter,
              std::string("XCC filtering ") + (useXccFilter ? "enabled" : "disabled"));
+    PRINT_EV("IB_GID_INDEX", ibGidIndex,
+             std::string("RoCE GID INDEX is set to ") + std::to_string(ibGidIndex));              
     if (useXccFilter)
     {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
