@@ -35,8 +35,7 @@ THE SOFTWARE.
 #define MAX_SEND_WR_PER_QP 12
 #define MAX_RECV_WR_PER_QP 12
 
-#define IB_PORT 1
-#define IB_PSN  2233
+#define IB_PSN  0
 const uint64_t WR_ID = 1789;
 
 const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
@@ -71,12 +70,12 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 
 
 static struct ibv_qp *qp_create(struct ibv_pd *pd, struct ibv_cq* cq);
-static int qp_init(struct ibv_qp *qp, unsigned flags);
-static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn);
+static int qp_init(struct ibv_qp *qp, uint8_t port_num, unsigned flags);
+static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t port, bool isRoCE);
 static int qp_transition_to_ready_to_send(struct ibv_qp *qp);
 static bool is_qp_ready_to_send(struct ibv_qp *qp);
 static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> &sendRecvStat);
-
+static int set_ibv_gid(struct ibv_context *ctx, uint8_t port_num, int gid_index, ibv_gid& gid);
 /**
  * @class RDMA_Executor
  * @brief A class to manage RDMA operations using an RDMA capable NIC.
@@ -91,9 +90,9 @@ public:
    * @brief Initializes the RDMA Executor with a given NIC ID.
    * 
    * @param IBV_Device_ID The ID of the RDMA capable NIC to use.
-   * @param IBV_Port_ID The Active Port ID of the NIC (typically 1).
+   * @param IBV_Port_ID The Active Port ID of the NIC.
    */
-  void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = IB_PORT) 
+  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t IBV_Port_ID = 1)
   {
     InitDeviceList();
     ib_device_id = IBV_Device_ID;
@@ -122,18 +121,27 @@ public:
       IBV_PTR_CALL(rdma_resource_attr->receiver_qp, 
             qp_create(rdma_resource_attr->protection_domain, 
                 rdma_resource_attr->completion_queue));
-      IBV_CALL(qp_init(rdma_resource_attr->sender_qp, 
+      IBV_CALL(qp_init(rdma_resource_attr->sender_qp, IBV_Port_ID,
           rdma_flags));
-      IBV_CALL(qp_init(rdma_resource_attr->receiver_qp, 
+      IBV_CALL(qp_init(rdma_resource_attr->receiver_qp, IBV_Port_ID,
           rdma_flags));
-     IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->sender_qp, 
+      bool isRoce = rdma_resource_attr->port_attr.link_layer == IBV_LINK_LAYER_ETHERNET;
+      if(isRoce)
+      {
+        IBV_CALL(set_ibv_gid(rdma_resource_attr->device_context, IBV_Port_ID, 3, rdma_resource_attr->gid));
+      }
+      IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->sender_qp,
                  rdma_resource_attr->port_attr.lid, 
-                 rdma_resource_attr->sender_qp->qp_num));
-      IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->receiver_qp, 
+                 rdma_resource_attr->receiver_qp->qp_num, rdma_resource_attr->gid, ib_device_port, isRoce));
+
+      IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->receiver_qp,
                   rdma_resource_attr->port_attr.lid, 
-                  rdma_resource_attr->receiver_qp->qp_num));
+                  rdma_resource_attr->sender_qp->qp_num, rdma_resource_attr->gid, ib_device_port, isRoce));
+
       IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->sender_qp));
       IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->receiver_qp));
+
+
     }
   }
   
@@ -304,6 +312,7 @@ private:
       struct ibv_qp *receiver_qp = nullptr; ///< Queue pair for receiving RDMA requests.
       struct ibv_context *device_context = nullptr; ///< Device context for the RDMA capable NIC.  
       struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.  
+      union ibv_gid gid;                  ///< GID handler needed for RoCE support
   };  
   static size_t ib_device_count;          ///< Number of RDMA capable NICs.
   static struct ibv_device **device_list; ///< List of RDMA capable devices.
@@ -340,14 +349,32 @@ std::vector<RDMA_Executor::RDMA_Resources*> RDMA_Executor::ib_attribute_mapper;
 static struct ibv_qp *qp_create(struct ibv_pd *pd, struct ibv_cq* cq)
 {
   struct ibv_qp_init_attr attr = {};
+  memset(&attr, 0, sizeof(struct ibv_qp_init_attr));
   attr.send_cq = cq;
   attr.recv_cq = cq;
-  attr.cap.max_send_wr  = MAX_RECV_WR_PER_QP;
+  attr.cap.max_send_wr  = MAX_SEND_WR_PER_QP;
   attr.cap.max_recv_wr  = MAX_RECV_WR_PER_QP;
   attr.cap.max_send_sge = 1;
   attr.cap.max_recv_sge = 1;
   attr.qp_type = IBV_QPT_RC;
   return ibv_create_qp(pd, &attr);    
+}
+
+/**
+ * @brief Sets the InfiniBand GID (Global Identifier) for a given port.
+ *
+ * This function queries and sets the GID for a specified port number and GID index
+ * on the given InfiniBand context.
+ *
+ * @param ctx Pointer to the ibv_context structure representing the InfiniBand device context.
+ * @param port_num Reference to the port number on the InfiniBand device.
+ * @param gid_index Index of the GID to query.
+ * @param gid Reference to the ibv_gid structure where the queried GID will be stored.
+ * @return int Returns 0 on success, or the error code returned by ibv_query_gid on failure.
+ */
+static int set_ibv_gid(struct ibv_context *ctx, uint8_t port_num, int gid_index, ibv_gid& gid) 
+{
+  return ibv_query_gid(ctx, port_num, gid_index, &gid);
 }
 
 /**
@@ -361,12 +388,13 @@ static struct ibv_qp *qp_create(struct ibv_pd *pd, struct ibv_cq* cq)
  * @param flags Access flags to be set for the QP.
  * @return int Returns 0 on success, or the error code returned by ibv_modify_qp on failure.
  */
-static int qp_init(struct ibv_qp *qp, unsigned flags)
+static int qp_init(struct ibv_qp *qp, uint8_t port_num, unsigned flags)
 {
   struct ibv_qp_attr attr = {};        // Initialize the QP attributes structure to zero
+  memset(&attr, 0, sizeof(struct ibv_qp_attr));
   attr.qp_state   = IBV_QPS_INIT;      // Set the QP state to INIT
   attr.pkey_index = 0;                 // Set the partition key index to 0
-  attr.port_num   = IB_PORT;           // Set the port number to the defined IB_PORT
+  attr.port_num   = port_num;           // Set the port number to the defined IB_PORT
   attr.qp_access_flags = flags;        // Set the QP access flags to the provided flags
 
   // Modify the QP with the specified attributes and return the result
@@ -377,31 +405,49 @@ static int qp_init(struct ibv_qp *qp, unsigned flags)
               IBV_QP_ACCESS_FLAGS);    // Modify the access flags
 }
 
+
+
 /**
  * @brief Transition the Queue Pair (QP) to the Ready to Receive (RTR) state.
  *
- * This function modifies the attributes of the given Queue Pair (QP) to transition it
- * to the Ready to Receive (RTR) state. It sets various attributes such as the QP state,
- * path MTU, receive queue PSN, destination QP number, and others required for the RTR state.
+ * This function modifies the attributes of a given Queue Pair (QP) to transition it to the 
+ * Ready to Receive (RTR) state. It sets various attributes such as the QP state, path MTU, 
+ * receive queue PSN, and others. It also handles both RoCE (RDMA over Converged Ethernet) 
+ * and non-RoCE configurations.
  *
- * @param qp Pointer to the QP to be modified.
- * @param dlid Destination Local Identifier (LID) for the Address Handle (AH) attribute.
- * @param dqpn Destination QP number.
- * @return int 0 on success, or the value returned by ibv_modify_qp on failure.
+ * @param qp Pointer to the ibv_qp structure representing the Queue Pair.
+ * @param dlid Destination Local Identifier (DLID) for non-RoCE configurations.
+ * @param dqpn Destination Queue Pair Number (DQPN).
+ * @param gid Global Identifier (GID) for RoCE configurations.
+ * @param isRoCE Boolean flag indicating whether the configuration is for RoCE (true) or not (false).
+ * @return int 0 on success, or the error code returned by ibv_modify_qp on failure.
  */
-static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn)
+static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t port, bool isRoCE)
 {
   struct ibv_qp_attr attr = {};
+  memset(&attr, 0, sizeof(struct ibv_qp_attr));
   attr.qp_state       = IBV_QPS_RTR;
   attr.path_mtu       = IBV_MTU_4096;
   attr.rq_psn         = IB_PSN;
   attr.max_dest_rd_atomic = 1;
   attr.min_rnr_timer  = 12;
-  attr.ah_attr.is_global = 0;
-  attr.ah_attr.dlid   = dlid;
+  if(isRoCE) 
+  {
+    attr.ah_attr.is_global = 1;
+    attr.ah_attr.grh.dgid.global.subnet_prefix = gid.global.subnet_prefix;
+    attr.ah_attr.grh.dgid.global.interface_id = gid.global.interface_id;
+    attr.ah_attr.grh.flow_label = 0;
+    attr.ah_attr.grh.sgid_index = 3;
+    attr.ah_attr.grh.hop_limit = 255;
+  }
+  else 
+  {
+    attr.ah_attr.is_global = 0;
+    attr.ah_attr.dlid   = dlid;
+  }  
   attr.ah_attr.sl     = 0;
   attr.ah_attr.src_path_bits = 0;
-  attr.ah_attr.port_num  = IB_PORT;
+  attr.ah_attr.port_num  = port;
   attr.dest_qp_num    = dqpn;
 
   return ibv_modify_qp(qp, &attr,
@@ -428,6 +474,7 @@ static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, u
 static int qp_transition_to_ready_to_send(struct ibv_qp *qp)
 {
   struct ibv_qp_attr attr = {};
+  memset(&attr, 0, sizeof(struct ibv_qp_attr));
   attr.qp_state       = IBV_QPS_RTS;
   attr.sq_psn         = IB_PSN;
   attr.timeout        = 14;
@@ -513,7 +560,7 @@ static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector
 class RDMA_Executor
 {
 public:
-  void InitDeviceAndQPs(int IBV_Device_ID, int IBV_Port_ID = 0)
+  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t IBV_Port_ID = 0)
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }
