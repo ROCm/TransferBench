@@ -107,15 +107,18 @@ public:
       ib_attribute_mapper[IBV_Device_ID] = new RDMA_Resources();
       auto& rdma_resource_attr = ib_attribute_mapper[IBV_Device_ID];
       IBV_PTR_CALL(rdma_resource_attr->device_context, 
-            ibv_open_device(device_list[IBV_Device_ID]));
+                  ibv_open_device(device_list[IBV_Device_ID]));
+
       IBV_PTR_CALL(rdma_resource_attr->protection_domain, 
-            ibv_alloc_pd(rdma_resource_attr->device_context));
+                  ibv_alloc_pd(rdma_resource_attr->device_context));
+
       IBV_PTR_CALL(rdma_resource_attr->completion_queue, 
-            ibv_create_cq(rdma_resource_attr->device_context, 
-              100, NULL, NULL, 0));  
+                  ibv_create_cq(rdma_resource_attr->device_context,
+                                100, NULL, NULL, 0));
       IBV_CALL(ibv_query_port(rdma_resource_attr->device_context, 
-            IBV_Port_ID, 
-            &rdma_resource_attr->port_attr));
+                              IBV_Port_ID,
+                              &rdma_resource_attr->port_attr));
+
       if(rdma_resource_attr->port_attr.state != IBV_PORT_ACTIVE) 
       {
         std::cout << "[Error] selected RDMA device " 
@@ -124,29 +127,34 @@ public:
                 << std::endl;
         exit(1);                 
       }
-
       IBV_PTR_CALL(rdma_resource_attr->sender_qp, 
-            qp_create(rdma_resource_attr->protection_domain, 
-                rdma_resource_attr->completion_queue));
+                  qp_create(rdma_resource_attr->protection_domain,
+                            rdma_resource_attr->completion_queue));
       IBV_PTR_CALL(rdma_resource_attr->receiver_qp, 
-            qp_create(rdma_resource_attr->protection_domain, 
-                rdma_resource_attr->completion_queue));
+                  qp_create(rdma_resource_attr->protection_domain,
+                            rdma_resource_attr->completion_queue));
+
       IBV_CALL(qp_init(rdma_resource_attr->sender_qp, IBV_Port_ID,
-          rdma_flags));
+                       rdma_flags));
       IBV_CALL(qp_init(rdma_resource_attr->receiver_qp, IBV_Port_ID,
-          rdma_flags));
+                       rdma_flags));
       bool isRoce = rdma_resource_attr->port_attr.link_layer == IBV_LINK_LAYER_ETHERNET;
       if(isRoce)
       {
-        IBV_CALL(set_ibv_gid(rdma_resource_attr->device_context, IBV_Port_ID, 3, rdma_resource_attr->gid));
+        IBV_CALL(set_ibv_gid(rdma_resource_attr->device_context,
+                            IBV_Port_ID, 3, rdma_resource_attr->gid));
       }
       IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->sender_qp,
-                 rdma_resource_attr->port_attr.lid, 
-                 rdma_resource_attr->receiver_qp->qp_num, rdma_resource_attr->gid, gid_index, ib_device_port, isRoce));
+                                                 rdma_resource_attr->port_attr.lid,
+                                                 rdma_resource_attr->receiver_qp->qp_num,
+                                                 rdma_resource_attr->gid, gid_index,
+                                                 ib_device_port, isRoce));
 
       IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->receiver_qp,
-                  rdma_resource_attr->port_attr.lid, 
-                  rdma_resource_attr->sender_qp->qp_num, rdma_resource_attr->gid, gid_index, ib_device_port, isRoce));
+                                                 rdma_resource_attr->port_attr.lid,
+                                                 rdma_resource_attr->sender_qp->qp_num,
+                                                 rdma_resource_attr->gid, gid_index,
+                                                 ib_device_port, isRoce));
 
       IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->sender_qp));
       IBV_CALL(qp_transition_to_ready_to_send(rdma_resource_attr->receiver_qp));
