@@ -305,10 +305,13 @@ public:
    */
   static size_t GetNicCount()  
   {
-    if (device_list == NULL) 
+    if (device_list == NULL && ib_device_count <= 0)
     {
       InitDeviceList();
-      while(device_list[ib_device_count++] != NULL);                    
+      while(device_list[ib_device_count] != NULL)
+      {
+        ib_device_count++;
+      }
     }
     return ib_device_count;
   }
