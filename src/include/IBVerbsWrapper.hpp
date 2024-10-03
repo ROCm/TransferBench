@@ -308,7 +308,7 @@ public:
     if (device_list == NULL && ib_device_count == 0)
     {
       InitDeviceList();
-      while(device_list[ib_device_count] != NULL)
+      while(device_list != NULL && device_list[ib_device_count] != NULL)
       {
         ib_device_count++;
       }
