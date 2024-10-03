@@ -93,7 +93,7 @@ public:
    * @param gid_index GID Index to be leveraged for RoCE traffic
    * @param IBV_Port_ID The Active Port ID of the NIC.
    */
-  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t gid_index, uint8_t IBV_Port_ID = 0)
+  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t gid_index, uint8_t IBV_Port_ID = 1)
   {
     InitDeviceList();
     ib_device_id = IBV_Device_ID;
