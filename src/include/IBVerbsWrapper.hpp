@@ -142,7 +142,7 @@ public:
       if(isRoce)
       {
         IBV_CALL(set_ibv_gid(rdma_resource_attr->device_context,
-                            IBV_Port_ID, 3, rdma_resource_attr->gid));
+                            IBV_Port_ID, gid_index, rdma_resource_attr->gid));
       }
       IBV_CALL(qp_transition_to_ready_to_receive(rdma_resource_attr->sender_qp,
                                                  rdma_resource_attr->port_attr.lid,
