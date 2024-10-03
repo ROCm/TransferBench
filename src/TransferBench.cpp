@@ -400,7 +400,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     Executor const& executor = exeInfoPair.first;
     ExecutorInfo& exeInfo    = exeInfoPair.second;
     ExeType const exeType    = executor.first;
-    int     const exeIndex   = RemappedIndex(executor.second, IsCpuType(exeType));
+    int     const exeIndex   = IsRdmaType(exeType)? executor.second : RemappedIndex(executor.second, IsCpuType(exeType));
 
     exeInfo.totalTime = 0.0;
     exeInfo.totalSubExecs = 0;
