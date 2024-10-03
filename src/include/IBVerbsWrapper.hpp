@@ -51,7 +51,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
         if (error != 0)                                                                 \
         {                                                                               \
             std::cerr << "Encountered RDMA error " << error << " at line " << __LINE__  \
-            << " in file " << __FILE__ << "\n";                                         \
+            << " in file " << __FILE__ << " and function " << __func__ << "\n";         \
             exit(-1);                                                                   \
         }                                                                               \
     } while (0)
@@ -63,7 +63,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
         if (ptr == NULL)                                                                \
         {                                                                               \
             std::cerr << "Encountered RDMA Null Pointer at line " << __LINE__           \
-            << " in file " << __FILE__ << "\n";                                         \
+            << " in file " << __FILE__ << " and function " << __func__ << "\n";         \
             exit(-1);                                                                   \
         }                                                                               \
     } while (0)
@@ -93,7 +93,7 @@ public:
    * @param gid_index GID Index to be leveraged for RoCE traffic
    * @param IBV_Port_ID The Active Port ID of the NIC.
    */
-  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t gid_index, uint8_t IBV_Port_ID = 1)
+  void InitDeviceAndQPs(int IBV_Device_ID, uint8_t gid_index, uint8_t IBV_Port_ID = 0)
   {
     InitDeviceList();
     ib_device_id = IBV_Device_ID;
