@@ -114,6 +114,7 @@ struct Transfer
 
   // Internal
   int                        transferIndex;      // Transfer identifier (within a Test)
+  size_t                     rdmaTransferId;     // Unique ID for RDMA registered memory
   std::vector<float*>        srcMem;             // Source memory
   std::vector<float*>        dstMem;             // Destination memory
   std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock

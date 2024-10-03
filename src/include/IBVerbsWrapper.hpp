@@ -170,20 +170,17 @@ public:
    * @param src Pointer to the source memory region.
    * @param dst Pointer to the destination memory region.
    * @param size Size of the memory region to register and send.
+   * @return id to indentify the transfer and registered memory
    */
-  void MemoryRegister(void *src, void *dst, size_t numBytes) 
+  size_t MemoryRegister(void *src, void *dst, size_t numBytes)
   {
     auto&& rdma_resource = ib_attribute_mapper[ib_device_id];
     struct ibv_mr *src_mr;
     struct ibv_mr *dst_mr;
     IBV_PTR_CALL(src_mr, ibv_reg_mr(rdma_resource->protection_domain, src, numBytes, rdma_flags));        
-    IBV_PTR_CALL(dst_mr, ibv_reg_mr(rdma_resource->protection_domain, dst, numBytes, rdma_flags));           
-    source_mr.push_back(std::make_pair(src_mr, src));
-    destination_mr.push_back(std::make_pair(dst_mr, dst));    
-    receiveStatuses.push_back(false);
-    messageSizes.push_back(numBytes);
+    IBV_PTR_CALL(dst_mr, ibv_reg_mr(rdma_resource->protection_domain, dst, numBytes, rdma_flags));
+    return AppendResources(src_mr, src, dst_mr, dst, numBytes);
   }
-
 
   /**
    * @brief Transfers data using RDMA.
@@ -258,7 +255,10 @@ public:
       {
         IBV_CALL(ibv_dereg_mr(mr.first));
       }
+      destination_mr.clear();
     }
+    receiveStatuses.clear();
+    messageSizes.clear();
     auto&& rdma_resource = ib_attribute_mapper[ib_device_id];
     if(rdma_resource == nullptr) return;
     if (rdma_resource->sender_qp) 
@@ -325,6 +325,16 @@ public:
   }
 
 private:
+
+  size_t AppendResources(ibv_mr *&src_mr, void *&src, ibv_mr *&dst_mr, void *&dst, size_t &numBytes)
+  {
+    source_mr.push_back(std::make_pair(src_mr, src));
+    destination_mr.push_back(std::make_pair(dst_mr, dst));
+    receiveStatuses.push_back(false);
+    messageSizes.push_back(numBytes);
+    return source_mr.size() - 1;
+  }
+
   class RDMA_Resources {
     public:
       struct ibv_pd *protection_domain = nullptr; ///< Protection domain for RDMA operations.
@@ -585,7 +595,7 @@ public:
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }
-  void MemoryRegister(void *src, void *dst, size_t numBytes)
+  size_t MemoryRegister(void *src, void *dst, size_t numBytes)
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }

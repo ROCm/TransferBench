@@ -669,7 +669,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     {
       for (int i = 0; i < exeInfo.transfers.size(); i++)
       {
-        exeInfo.rdmaExecutor.MemoryRegister(exeInfo.transfers[i]->srcMem[0], exeInfo.transfers[i]->dstMem[0], exeInfo.transfers[i]->numBytesActual);
+        exeInfo.transfers[i]->rdmaTransferId = exeInfo.rdmaExecutor.MemoryRegister(exeInfo.transfers[i]->srcMem[0], exeInfo.transfers[i]->dstMem[0], exeInfo.transfers[i]->numBytesActual);
       }
     }
   }
@@ -1756,7 +1756,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   {
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
-    exeInfo.rdmaExecutor.TransferData(transferIdx);
+    exeInfo.rdmaExecutor.TransferData(transfer->rdmaTransferId);
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
 
     // Record time if not a warmup iteration
