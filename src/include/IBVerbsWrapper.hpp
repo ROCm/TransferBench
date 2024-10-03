@@ -305,7 +305,7 @@ public:
    */
   static size_t GetNicCount()  
   {
-    if (device_list == NULL && ib_device_count <= 0)
+    if (device_list == NULL && ib_device_count == 0)
     {
       InitDeviceList();
       while(device_list[ib_device_count] != NULL)
