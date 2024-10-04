@@ -104,6 +104,7 @@ public:
   int useXccFilter;      // Use XCC filtering (experimental)
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
   uint8_t ibGidIndex;    // GID Index for RoCE NICs
+  uint8_t ibPort;        // NIC port number to be used
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
@@ -215,6 +216,7 @@ public:
     enableDebug       = GetEnvVar("DEBUG"               , 0);
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        , 3);
+    ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -630,6 +632,7 @@ public:
     printf(" USE_XCC_FILTER         - Use XCC filtering (experimental)\n");
     printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" IB_GID_INDEX           - Required for RoCE NICs (default=3)\n");
+    printf(" IB_PORT_NUMBER         - RDMA port number for RDMA executor (default=1)\n");
   }
 
   // Helper macro to switch between CSV and terminal output
@@ -716,7 +719,9 @@ public:
     PRINT_EV("USE_XCC_FILTER", useXccFilter,
              std::string("XCC filtering ") + (useXccFilter ? "enabled" : "disabled"));
     PRINT_EV("IB_GID_INDEX", ibGidIndex,
-             std::string("RoCE GID INDEX is set to ") + std::to_string(ibGidIndex));              
+             std::string("RoCE GID index is set to ") + std::to_string(ibGidIndex));
+    PRINT_EV("IB_PORT_NUMBER", ibPort,
+             std::string("IB port number is set to ") + std::to_string(ibPort));
     if (useXccFilter)
     {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
