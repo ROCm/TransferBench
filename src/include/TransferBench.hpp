@@ -93,7 +93,8 @@ struct Transfer
 {
   // Inputs
   ExeType                    exeType;            // Transfer executor type
-  int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
+  int                        srcExeIndex;        // Source executor index (NUMA node for CPU / device ID for GPU)
+  int                        dstExeIndex;        // Destination executor index (Just needed from RDMA executor)
   int                        exeSubIndex;        // Executor subindex
   int                        numSubExecs;        // Number of subExecutors to use for this Transfer
   size_t                     numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
@@ -174,6 +175,20 @@ struct ExeResult
   std::vector<int> transferIdx;
 };
 
+struct Executor 
+{
+  ExeType type;
+  int srcIndex;
+  int dstIndex;
+  Executor(ExeType type, int srcIndex, int dstIndex)
+    : type(type), srcIndex(srcIndex), dstIndex(dstIndex) {}
+
+  bool operator<(const Executor& other) const
+  {
+     return std::tie(type, srcIndex, dstIndex) < std::tie(other.type, other.srcIndex, other.dstIndex);
+  }
+};
+
 struct TestResults
 {
   size_t numTimedIterations;
@@ -181,10 +196,9 @@ struct TestResults
   double totalBandwidthCpu;
   double totalDurationMsec;
   double overheadMsec;
-  std::map<std::pair<ExeType, int>, ExeResult> exeResults;
+  std::map<Executor, ExeResult> exeResults;
 };
 
-typedef std::pair<ExeType, int> Executor;
 typedef std::map<Executor, ExecutorInfo> TransferMap;
 
 // Display usage instructions

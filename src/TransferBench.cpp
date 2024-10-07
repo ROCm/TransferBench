@@ -323,9 +323,9 @@ void ExecuteTransfers(EnvVars const& ev,
     if (t.exeType == EXE_GPU_GFX) {
       if (t.numSubExecs == 0) {
         varTransfers.push_back(i);
-        numVarSubExec[t.exeIndex]++;
+        numVarSubExec[t.srcExeIndex]++;
       } else {
-        numUsedSubExec[t.exeIndex] += t.numSubExecs;
+        numUsedSubExec[t.srcExeIndex] += t.numSubExecs;
       }
     } else if (t.numSubExecs == 0) {
       printf("[ERROR] Variable subexecutor count is only supported for GFX executor\n");
@@ -388,7 +388,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
   {
     Transfer& transfer = transfers[i];
     transfer.transferIndex = i;
-    Executor executor(transfer.exeType, transfer.exeIndex);
+    Executor executor(transfer.exeType, transfer.srcExeIndex, transfer.dstExeIndex);
     ExecutorInfo& executorInfo = transferMap[executor];
     executorInfo.transfers.push_back(&transfer);
   }
@@ -399,9 +399,9 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
   {
     Executor const& executor = exeInfoPair.first;
     ExecutorInfo& exeInfo    = exeInfoPair.second;
-    ExeType const exeType    = executor.first;
-    int     const exeIndex   = IsRdmaType(exeType)? executor.second : RemappedIndex(executor.second, IsCpuType(exeType));
-
+    ExeType const exeType    = executor.type;
+    int     const exeIndex   = IsRdmaType(exeType)? executor.srcIndex : RemappedIndex(executor.srcIndex, IsCpuType(exeType));
+    int     const dstExeIndex = IsRdmaType(exeType)? executor.dstIndex : -1;
     exeInfo.totalTime = 0.0;
     exeInfo.totalSubExecs = 0;
 
@@ -552,7 +552,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
             if (!(transfer->sdmaEngineId & engineIdMask))
             {
               printf("[ERROR] DMA executor %d.%d does not exist or cannot copy between source %s to destination %s\n",
-                     transfer->exeIndex, transfer->exeSubIndex,
+                     transfer->srcExeIndex, transfer->exeSubIndex,
                      transfer->SrcToStr().c_str(),
                      transfer->DstToStr().c_str());
               exit(1);
@@ -573,7 +573,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     }
     if(IsRdmaType(exeType)) 
     {      
-      exeInfo.rdmaExecutor.InitDeviceAndQPs(exeIndex, ev.ibGidIndex, ev.ibPort);
+      exeInfo.rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, ev.ibPort);
     }
   }
 
@@ -584,8 +584,8 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
   {
     Executor const& executor = exeInfoPair.first;
     ExecutorInfo& exeInfo    = exeInfoPair.second;
-    ExeType const exeType    = executor.first;
-    int     const exeIndex   = RemappedIndex(executor.second, IsCpuType(exeType));
+    ExeType const exeType    = executor.type;
+    int     const exeIndex   = RemappedIndex(executor.srcIndex, IsCpuType(exeType));
 
     exeInfo.totalBytes = 0;
     for (int i = 0; i < exeInfo.transfers.size(); ++i)
@@ -712,7 +712,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     for (auto& exeInfoPair : transferMap)
     {
       ExecutorInfo& exeInfo = exeInfoPair.second;
-      ExeType       exeType = exeInfoPair.first.first;
+      ExeType       exeType = exeInfoPair.first.type;
       int const numTransfersToRun = (exeType == EXE_GPU_GFX && ev.useSingleStream) ? 1 : exeInfo.transfers.size();
 
       for (int i = 0; i < numTransfersToRun; ++i)
@@ -782,9 +782,9 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
   for (auto& exeInfoPair : transferMap)
   {
     ExecutorInfo  exeInfo  = exeInfoPair.second;
-    ExeType const exeType  = exeInfoPair.first.first;
-    int     const exeIndex = exeInfoPair.first.second;
-    ExeResult& exeResult   = testResults.exeResults[std::make_pair(exeType, exeIndex)];
+    ExeType const exeType  = exeInfoPair.first.type;
+    int     const exeIndex = exeInfoPair.first.srcIndex;
+    ExeResult& exeResult   = testResults.exeResults[exeInfoPair.first];
 
     // Compute total time for non GPU executors
     if (exeType != EXE_GPU_GFX || ev.useSingleStream == 0)
@@ -816,8 +816,7 @@ cleanup:
   for (auto exeInfoPair : transferMap)
   {
     ExecutorInfo& exeInfo  = exeInfoPair.second;
-    ExeType const exeType  = exeInfoPair.first.first;
-    int     const exeIndex = RemappedIndex(exeInfoPair.first.second, IsCpuType(exeType));
+    ExeType const exeType  = exeInfoPair.first.type;    
 
     for (auto& transfer : exeInfo.transfers)
     {
@@ -1272,7 +1271,7 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
 {
   // Replace any round brackets or '->' with spaces,
   for (int i = 1; line[i]; i++)
-    if (line[i] == '(' || line[i] == ')' || line[i] == '-' || line[i] == '>' ) line[i] = ' ';
+    if (line[i] == '(' || line[i] == ')' || line[i] == '-' || line[i] == ':' || line[i] == '>' ) line[i] = ' ';
 
   transfers.clear();
 
@@ -1282,6 +1281,7 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
   if (iss.fail()) return;
 
   std::string exeMem;
+  std::string dstExeMem; // Needed for RDMA
   std::string srcMem;
   std::string dstMem;
 
@@ -1309,20 +1309,46 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
     transfer.numBytesActual = 0;
     if (!advancedMode)
     {
-      iss >> srcMem >> exeMem >> dstMem;
-      if (iss.fail())
+      iss >> srcMem >> exeMem;     
+      ParseExeType(ev, exeMem, transfer.exeType, transfer.srcExeIndex, transfer.exeSubIndex);
+      if(IsRdmaType(transfer.exeType))
       {
-        printf("Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet\n", i+1);
+        iss >> dstExeMem;
+        ExeType tmpExe;
+        ParseExeType(ev, dstExeMem, tmpExe, transfer.dstExeIndex, transfer.exeSubIndex);
+        if(!IsRdmaType(tmpExe))
+        {
+          printf("Error: Destination executor in Transfer %d must be of RDMA type\n", i+1);
+          exit(1);
+        }        
+      }
+      iss >> dstMem;
+      if (iss.fail())
+      {        
+        printf("Parsing error: Unable to read valid Transfer %d (SRC SRC_EXE [DST_EXE] DST) triplet\n", i+1);
         exit(1);
       }
     }
     else
     {
-      std::string numBytesToken;
-      iss >> srcMem >> exeMem >> dstMem >> numSubExecs >> numBytesToken;
+      std::string numBytesToken;      
+      iss >> srcMem >> exeMem;     
+      ParseExeType(ev, exeMem, transfer.exeType, transfer.srcExeIndex, transfer.exeSubIndex);
+      if(IsRdmaType(transfer.exeType))
+      {
+        iss >> dstExeMem;
+        ExeType tmpExe;
+        ParseExeType(ev, dstExeMem, tmpExe, transfer.dstExeIndex, transfer.exeSubIndex);
+        if(!IsRdmaType(tmpExe))
+        {
+          printf("Error: Destination executor in Transfer %d must be of RDMA type\n", i+1);
+          exit(1);
+        }        
+      }
+      iss >> dstMem >> numSubExecs >> numBytesToken;
       if (iss.fail())
       {
-        printf("Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple\n", i+1);
+        printf("Parsing error: Unable to read valid Transfer %d (SRC SRC_EXE [DST_EXE] DST #CU #Bytes) tuple\n", i+1);
         exit(1);
       }
       if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1)
@@ -1340,8 +1366,7 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
     }
 
     ParseMemType(ev, srcMem, transfer.srcType, transfer.srcIndex);
-    ParseMemType(ev, dstMem, transfer.dstType, transfer.dstIndex);
-    ParseExeType(ev, exeMem, transfer.exeType, transfer.exeIndex, transfer.exeSubIndex);
+    ParseMemType(ev, dstMem, transfer.dstType, transfer.dstIndex);   
 
     transfer.numSrcs = (int)transfer.srcType.size();
     transfer.numDsts = (int)transfer.dstType.size();
@@ -1563,7 +1588,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   if (transfer->exeType == EXE_GPU_GFX)
   {
     // Switch to executing GPU
-    int const exeIndex = RemappedIndex(transfer->exeIndex, false);
+    int const exeIndex = RemappedIndex(transfer->srcExeIndex, false);
     HIP_CALL(hipSetDevice(exeIndex));
 
     hipStream_t& stream     = exeInfo.streams[transferIdx];
@@ -1645,7 +1670,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   }
   else if (transfer->exeType == EXE_GPU_DMA)
   {
-    int const exeIndex = RemappedIndex(transfer->exeIndex, false);
+    int const exeIndex = RemappedIndex(transfer->srcExeIndex, false);
 
     if (transfer->exeSubIndex == -1)
     {
@@ -1719,7 +1744,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   else if (transfer->exeType == EXE_CPU) // CPU execution agent
   {
     // Force this thread and all child threads onto correct NUMA node
-    int const exeIndex = RemappedIndex(transfer->exeIndex, true);
+    int const exeIndex = RemappedIndex(transfer->srcExeIndex, true);
     if (numa_run_on_node(exeIndex))
     {
       printf("[ERROR] Unable to set CPU to NUMA node %d\n", exeIndex);
@@ -1860,7 +1885,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
         transfers[0].dstIndex.push_back(dstIndex);
         transfers[0].numSrcs = transfers[0].numDsts = 1;
         transfers[0].exeType = IsGpuType(ev.useRemoteRead ? dstType : srcType) ? gpuExeType : EXE_CPU;
-        transfers[0].exeIndex = (ev.useRemoteRead ? dstIndex : srcIndex);
+        transfers[0].srcExeIndex = (ev.useRemoteRead ? dstIndex : srcIndex);
         transfers[0].exeSubIndex = -1;
         transfers[0].numSubExecs = IsGpuType(transfers[0].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
 
@@ -1874,7 +1899,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
           transfers[1].srcIndex.push_back(dstIndex);
           transfers[1].dstIndex.push_back(srcIndex);
           transfers[1].exeType = IsGpuType(ev.useRemoteRead ? srcType : dstType) ? gpuExeType : EXE_CPU;
-          transfers[1].exeIndex = (ev.useRemoteRead ? srcIndex : dstIndex);
+          transfers[1].srcExeIndex = (ev.useRemoteRead ? srcIndex : dstIndex);
           transfers[1].exeSubIndex = -1;
           transfers[1].numSubExecs = IsGpuType(transfers[1].exeType) ? ev.numGpuSubExecs : ev.numCpuSubExecs;
         }
@@ -1884,7 +1909,7 @@ void RunPeerToPeerBenchmarks(EnvVars const& ev, size_t N)
         // Abort if executing on NUMA node with no CPUs
         for (int i = 0; i <= isBidirectional; i++)
         {
-          if (transfers[i].exeType == EXE_CPU && ev.numCpusPerNuma[transfers[i].exeIndex] == 0)
+          if (transfers[i].exeType == EXE_CPU && ev.numCpusPerNuma[transfers[i].srcExeIndex] == 0)
           {
             skipTest = true;
             break;
@@ -2083,7 +2108,7 @@ void RunScalingBenchmark(EnvVars const& ev, size_t N, int const exeIndex, int co
   t.numSrcs  = 1;
   t.numDsts  = 1;
   t.exeType  = EXE_GPU_GFX;
-  t.exeIndex = exeIndex;
+  t.srcExeIndex = exeIndex;
   t.exeSubIndex = -1;
   t.srcType.resize(1, MEM_GPU);
   t.dstType.resize(1, MEM_GPU);
@@ -2164,7 +2189,7 @@ void RunAllToAllBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, i
     for (int j = 0; j < numGpus; j++)
     {
       transfer.dstIndex[0] = j;
-      transfer.exeIndex    = (ev.useRemoteRead ? j : i);
+      transfer.srcExeIndex    = (ev.useRemoteRead ? j : i);
 
       if (ev.a2aDirect)
       {
@@ -2297,7 +2322,7 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
     p.preferredXccId = -1;
     if (ev.useXccFilter && this->exeType == EXE_GPU_GFX)
     {
-      std::uniform_int_distribution<int> distribution(0, ev.xccIdsPerDevice[this->exeIndex].size() - 1);
+      std::uniform_int_distribution<int> distribution(0, ev.xccIdsPerDevice[this->srcExeIndex].size() - 1);
 
       // Use this tranfer's executor subIndex if set
       if (this->exeSubIndex != -1)
@@ -2306,7 +2331,7 @@ void Transfer::PrepareSubExecParams(EnvVars const& ev)
       }
       else if (this->numDsts >= 1 && IsGpuType(this->dstType[0]))
       {
-        p.preferredXccId = ev.prefXccTable[this->exeIndex][this->dstIndex[0]];
+        p.preferredXccId = ev.prefXccTable[this->srcExeIndex][this->dstIndex[0]];
       }
 
       if (p.preferredXccId == -1)
@@ -2430,7 +2455,7 @@ bool Transfer::PrepareSrc(EnvVars const& ev)
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
                this->SrcToStr().c_str(),
-               ExeTypeStr[this->exeType], this->exeIndex,
+               ExeTypeStr[this->exeType], this->srcExeIndex,
                this->numSubExecs,
                this->DstToStr().c_str());
         printf("[ERROR] Possible cause is misconfigured IOMMU (AMD Instinct cards require amd_iommu=on and iommu=pt)\n");
@@ -2498,7 +2523,7 @@ void Transfer::ValidateDst(EnvVars const& ev)
         printf("[ERROR] Failed Transfer details: #%d: %s -> [%c%d:%d] -> %s\n",
                this->transferIndex,
                this->SrcToStr().c_str(),
-               ExeTypeStr[this->exeType], this->exeIndex,
+               ExeTypeStr[this->exeType], this->srcExeIndex,
                this->numSubExecs,
                this->DstToStr().c_str());
         if (!ev.continueOnError)
@@ -2545,7 +2570,7 @@ void RunSchmooBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer, int
   std::vector<Transfer> transfers(1);
   Transfer& t   = transfers[0];
   t.exeType     = EXE_GPU_GFX;
-  t.exeIndex    = localIdx;
+  t.srcExeIndex    = localIdx;
   t.exeSubIndex = -1;
   t.numBytes    = numBytesPerTransfer;
 
@@ -2678,7 +2703,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
             {
               t.numSrcs  = 1;
               t.numDsts  = 0;
-              t.exeIndex = i;
+              t.srcExeIndex = i;
               t.srcType.resize(1);
               t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
               t.srcIndex.resize(1);
@@ -2688,7 +2713,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
             {
               t.numSrcs     = 0;
               t.numDsts     = 1;
-              t.exeIndex    = srcIdx;
+              t.srcExeIndex    = srcIdx;
               t.dstType.resize(1);
               t.dstType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
               t.dstIndex.resize(1);
@@ -2713,7 +2738,7 @@ void RunRemoteWriteBenchmark(EnvVars const& ev, size_t const numBytesPerTransfer
         {
           printf(" (%s %c%d %s)",
                  transfers[i].SrcToStr().c_str(),
-                 ExeTypeStr[transfers[i].exeType], transfers[i].exeIndex,
+                 ExeTypeStr[transfers[i].exeType], transfers[i].srcExeIndex,
                  transfers[i].DstToStr().c_str());
         }
         printf("\n");
@@ -2768,7 +2793,7 @@ void RunParallelCopyBenchmark(EnvVars const& ev, size_t const numBytesPerTransfe
 
             t.numSrcs     = 1;
             t.numDsts     = 1;
-            t.exeIndex    = srcIdx;
+            t.srcExeIndex    = srcIdx;
             t.srcType.resize(1);
             t.srcType[0]  = (ev.useFineGrain ? MEM_GPU_FINE : MEM_GPU);
             t.srcIndex.resize(1);
@@ -2797,7 +2822,7 @@ void RunParallelCopyBenchmark(EnvVars const& ev, size_t const numBytesPerTransfe
         {
           printf(" (%s %c%d %s)",
                  transfers[i].SrcToStr().c_str(),
-                 ExeTypeStr[transfers[i].exeType], transfers[i].exeIndex,
+                 ExeTypeStr[transfers[i].exeType], transfers[i].srcExeIndex,
                  transfers[i].DstToStr().c_str());
         }
         printf("\n");
@@ -3020,7 +3045,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
         transfer.srcType        = {possibleTransfers[value].srcType};
         transfer.srcIndex       = {possibleTransfers[value].srcIndex};
         transfer.exeType        = possibleTransfers[value].exeType;
-        transfer.exeIndex       = possibleTransfers[value].exeIndex;
+        transfer.srcExeIndex       = possibleTransfers[value].exeIndex;
         transfer.exeSubIndex    = -1;
         transfer.dstType        = {possibleTransfers[value].dstType};
         transfer.dstIndex       = {possibleTransfers[value].dstIndex};
@@ -3074,7 +3099,7 @@ void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& tran
   {
     fprintf(fp, " (%c%d->%c%d->%c%d %d %lu)",
             MemTypeStr[transfer.srcType[0]], transfer.srcIndex[0],
-            ExeTypeStr[transfer.exeType],    transfer.exeIndex,
+            ExeTypeStr[transfer.exeType],    transfer.srcExeIndex,
             MemTypeStr[transfer.dstType[0]], transfer.dstIndex[0],
             transfer.numSubExecs,
             transfer.numBytes);
@@ -3102,8 +3127,8 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
   // Loop over each executor
   for (auto exeInfoPair : results.exeResults) {
     ExeResult const& exeResult = exeInfoPair.second;
-    ExeType exeType  = exeInfoPair.first.first;
-    int     exeIndex = exeInfoPair.first.second;
+    ExeType exeType  = exeInfoPair.first.type;
+    int     exeIndex = exeInfoPair.first.srcIndex;
 
     printf(" Executor: %3s %02d %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)\n",
            ExeTypeName[exeType], exeIndex, sep, exeResult.bandwidthGbs, sep,
@@ -3125,7 +3150,7 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
              t.transferTime, sep,
              t.numBytesActual, sep,
              t.SrcToStr().c_str(),
-             ExeTypeName[t.exeType], t.exeIndex,
+             ExeTypeName[t.exeType], t.srcExeIndex,
              exeSubIndexStr,
              t.numSubExecs,
              t.DstToStr().c_str());
@@ -3216,7 +3241,7 @@ void RunHealthCheck(EnvVars ev)
       std::vector<Transfer> transfers(1);
       Transfer& t = transfers[0];
       t.exeType     = EXE_GPU_GFX;
-      t.exeIndex    = gpuId;
+      t.srcExeIndex    = gpuId;
       t.numBytes    = 64*1024*1024;
       t.numBytesActual = 64*1024*1024;
       t.numSrcs     = 1;
@@ -3260,7 +3285,7 @@ void RunHealthCheck(EnvVars ev)
       std::vector<Transfer> transfers(1);
       Transfer& t = transfers[0];
       t.exeType     = EXE_GPU_GFX;
-      t.exeIndex    = gpuId;
+      t.srcExeIndex    = gpuId;
       t.numBytes    = 64*1024*1024;
       t.numBytesActual = 64*1024*1024;
       t.numDsts     = 1;
@@ -3307,7 +3332,7 @@ void RunHealthCheck(EnvVars ev)
       Transfer& t1 = transfers[1];
 
       t0.exeType     = EXE_GPU_GFX;
-      t0.exeIndex    = gpuId;
+      t0.srcExeIndex    = gpuId;
       t0.numBytes    = 64*1024*1024;
       t0.numBytesActual = 64*1024*1024;
       t0.numSrcs     = 1;
@@ -3318,7 +3343,7 @@ void RunHealthCheck(EnvVars ev)
       t0.dstIndex.clear();
 
       t1.exeType     = EXE_GPU_GFX;
-      t1.exeIndex    = gpuId;
+      t1.srcExeIndex    = gpuId;
       t1.numBytes    = 64*1024*1024;
       t1.numBytesActual = 64*1024*1024;
       t1.numDsts     = 1;
@@ -3366,7 +3391,7 @@ void RunHealthCheck(EnvVars ev)
         if (i == j) continue;
         Transfer t;
         t.exeType = EXE_GPU_GFX;
-        t.exeIndex = i;
+        t.srcExeIndex = i;
         t.numBytes = t.numBytesActual = 64*1024*1024;
         t.numSrcs = 1;
         t.numDsts = 1;
