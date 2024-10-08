@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include <sstream>
 #include "Compatibility.hpp"
 #include "EnvVars.hpp"
+#include "IBVerbsWrapper.hpp"
 
 // Simple configuration parameters
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);  // Amount of data transferred per Transfer
@@ -57,16 +58,18 @@ typedef enum
   EXE_CPU          = 0, // CPU executor              (subExecutor = CPU thread)
   EXE_GPU_GFX      = 1, // GPU kernel-based executor (subExecutor = threadblock/CU)
   EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
+  EXE_RDMA         = 3  // RDMA-based executor       (subExecutor = undefined)   
 } ExeType;
 
 bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
 bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
 bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
+bool IsRdmaType(ExeType e) { return (e == EXE_RDMA); };
 
 char const MemTypeStr[8] = "CGBFUNM";
-char const ExeTypeStr[4] = "CGD";
-char const ExeTypeName[3][4] = {"CPU", "GPU", "DMA"};
+char const ExeTypeStr[5] = "CGDR";
+char const ExeTypeName[4][5] = {"CPU", "GPU", "DMA", "RDMA"};
 
 MemType inline CharToMemType(char const c)
 {
@@ -90,7 +93,8 @@ struct Transfer
 {
   // Inputs
   ExeType                    exeType;            // Transfer executor type
-  int                        exeIndex;           // Executor index (NUMA node for CPU / device ID for GPU)
+  int                        srcExeIndex;        // Source executor index (NUMA node for CPU / device ID for GPU)
+  int                        dstExeIndex;        // Destination executor index (Just needed from RDMA executor)
   int                        exeSubIndex;        // Executor subindex
   int                        numSubExecs;        // Number of subExecutors to use for this Transfer
   size_t                     numBytes;           // # of bytes requested to Transfer (may be 0 to fallback to default)
@@ -111,6 +115,7 @@ struct Transfer
 
   // Internal
   int                        transferIndex;      // Transfer identifier (within a Test)
+  size_t                     rdmaTransferId;     // Unique ID for RDMA registered memory
   std::vector<float*>        srcMem;             // Source memory
   std::vector<float*>        dstMem;             // Destination memory
   std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock
@@ -154,6 +159,9 @@ struct ExecutorInfo
   std::vector<hipEvent_t>  startEvents;
   std::vector<hipEvent_t>  stopEvents;
 
+  // For RDMA-Executors
+  RDMA_Executor            rdmaExecutor;
+
   // Results
   double totalTime;
 };
@@ -167,6 +175,20 @@ struct ExeResult
   std::vector<int> transferIdx;
 };
 
+struct Executor 
+{
+  ExeType type;
+  int srcIndex;
+  int dstIndex;
+  Executor(ExeType type, int srcIndex, int dstIndex)
+    : type(type), srcIndex(srcIndex), dstIndex(dstIndex) {}
+
+  bool operator<(const Executor& other) const
+  {
+     return std::tie(type, srcIndex, dstIndex) < std::tie(other.type, other.srcIndex, other.dstIndex);
+  }
+};
+
 struct TestResults
 {
   size_t numTimedIterations;
@@ -174,10 +196,9 @@ struct TestResults
   double totalBandwidthCpu;
   double totalDurationMsec;
   double overheadMsec;
-  std::map<std::pair<ExeType, int>, ExeResult> exeResults;
+  std::map<Executor, ExeResult> exeResults;
 };
 
-typedef std::pair<ExeType, int> Executor;
 typedef std::map<Executor, ExecutorInfo> TransferMap;
 
 // Display usage instructions
