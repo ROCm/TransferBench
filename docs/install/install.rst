@@ -8,17 +8,17 @@
 Installing TransferBench
 ---------------------------
 
-This document provides information required to install and build TransferBench.
+This topic describes how to build TransferBench.
 
 Prerequisite
 ---------------
 
-* Install ROCm stack on the system to obtain HIP runtime
+* Install ROCm stack on the system to obtain `HIP runtime <hip:index>`
 * Install ``libnuma`` on the system
 * `Enable AMD IOMMU <https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#iommu-configuration-systems-with-256-cpu-threads>`_ and set to passthrough for AMD Instinct cards
 
-Build TransferBench
----------------------
+Building TransferBench
+------------------------
 
 To build TransferBench using Makefile, use:
 
@@ -39,7 +39,7 @@ To build TransferBench using CMake, use:
 
   If ROCm is installed in a folder other than ``/opt/rocm/``, set ``ROCM_PATH`` appropriately.
 
-Build documentation
+Building documentation
 -----------------------
 
 To build documentation locally, use:

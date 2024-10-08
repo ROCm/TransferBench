@@ -8,14 +8,14 @@
 Using TransferBench
 ---------------------
 
-You can control the SRC and DST memory locations by indicating the memory type followed by the device index. TransferBench supports the following memories:
+You can control the SRC and DST memory locations by indicating the memory type followed by the device index. TransferBench supports the following memory types:
 
-* Coarse-grained pinned host memory
-* Unpinned host memory
-* Fine-grained host memory
-* Coarse-grained global device memory
-* Fine-grained global device memory
-* Null memory (for an empty transfer)
+* Coarse-grained pinned host
+* Unpinned host
+* Fine-grained host
+* Coarse-grained global device
+* Fine-grained global device
+* Null (for an empty transfer)
 
 In addition, you can determine the size of the transfer (number of bytes to copy) for the tests.
 
