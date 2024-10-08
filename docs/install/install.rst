@@ -1,51 +1,68 @@
 .. meta::
-  :description: TransferBench documentation 
-  :keywords: TransferBench, API, ROCm, HIP
+  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :keywords: Build TransferBench, Install TransferBench, API, ROCm, HIP
+
+.. _install-transferbench:
 
 ---------------------------
-TransferBench installation
+Installing TransferBench
 ---------------------------
 
-The following software is required to install TransferBench:
+This topic describes how to build TransferBench.
 
-* ROCm stack installed on the system (HIP runtime)
-* `libnuma` installed on the system
+Prerequisite
+---------------
 
---------------------------
+* Install ROCm stack on the system to obtain :doc:`HIP runtime <hip:index>`
+* Install ``libnuma`` on the system
+* `Enable AMD IOMMU <https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#iommu-configuration-systems-with-256-cpu-threads>`_ and set to passthrough for AMD Instinct cards
+
 Building TransferBench
---------------------------
+------------------------
 
-To build TransferBench using Makefile, use the following instruction:
-
-.. code-block:: bash
-
-            $ make
-
-To build TransferBench using CMake, use the following commands:
+To build TransferBench using Makefile, use:
 
 .. code-block:: bash
 
-                $ mkdir build
-    
-                $ cd build
-    
-                $ CXX=/opt/rocm/bin/hipcc cmake ..
-    
-                $ make
+  make
 
-.. Note:: 
+To build TransferBench using CMake, use:
 
-If ROCm is installed in a folder other than `/opt/rocm/`, set `ROCM_PATH` appropriately.
+.. code-block:: bash
 
---------------------------
+  mkdir build
+  cd build
+  CXX=/opt/rocm/bin/hipcc cmake ..
+  make
+
+.. note::
+
+  If ROCm is installed in a folder other than ``/opt/rocm/``, set ``ROCM_PATH`` appropriately.
+
+Building documentation
+-----------------------
+
+To build documentation locally, use:
+
+.. code-block:: bash
+
+  cd docs
+  pip3 install -r .sphinx/requirements.txt
+  python3 -m sphinx -T -E -b html -d _build/doctrees -D language=en . _build/html
+
 NVIDIA platform support
 --------------------------
 
-TransferBench may also be built to run on NVIDIA platforms via HIP, but requires a HIP-compatible CUDA version installed. For example, CUDA 11.5.
+You can build TransferBench to run on NVIDIA platforms using native NVIDIA CUDA Compiler Driver (NVCC).
 
-To build on NVIDIA platforms, use the following instruction:
+To build with native NVCC, use:
 
 .. code-block:: bash
-    
-             CUDA_PATH=<path_to_CUDA> HIP_PLATFORM=nvidia make`
 
+  make
+
+TransferBench looks for NVCC in ``/usr/local/cuda`` by default. To modify the location of NVCC, use environment variable `CUDA_PATH`:
+
+.. code-block:: bash
+
+  CUDA_PATH=/usr/local/cuda make

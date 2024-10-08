@@ -5,18 +5,14 @@ subtrees:
 - caption: Install
   entries:
   - file: install/install.rst
-    title: TransferBench installation 
 
 - caption: API reference
   entries:
   - file: reference/api.rst
-    title: API library
- 
+
 - caption: How to
   entries:
   - file: how to/use-transferbench.rst
-    title: Use TransferBench
- 
 
 - caption: About
   entries:
