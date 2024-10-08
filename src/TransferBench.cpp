@@ -1163,6 +1163,15 @@ void DisplayTopology(bool const outputToCsv)
       printf("\n");
     }
   }
+
+  // Check that large BAR is enabled on all GPUs
+  for (int i = 0; i < numGpuDevices; i++) {
+    int const deviceIdx = RemappedIndex(i, false);
+    int isLargeBar = 0;
+    HIP_CALL(hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, deviceIdx));
+    if (!isLargeBar)
+      printf("[WARN] Large BAR is not enabled for GPU %d in BIOS.  This may result in segfaults\n", i);
+  }
 #endif
 }
 
