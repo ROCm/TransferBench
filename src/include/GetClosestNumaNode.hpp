@@ -84,24 +84,22 @@ AgentData& GetAgentData()
 {
   static AgentData agentData = {};
 
-  if (!agentData.isInitialized)
-  {
+  if (!agentData.isInitialized) {
     agentData.isInitialized = true;
 
     // Add all detected agents to the list
     HSA_CHECK(hsa_iterate_agents(AgentInfoCallback, &agentData));
 
     // Loop over each GPU
-    for (uint32_t i = 0; i < agentData.gpuAgents.size(); i++)
-    {
+    for (uint32_t i = 0; i < agentData.gpuAgents.size(); i++) {
       // Collect memory pool
       hsa_amd_memory_pool_t pool;
       HSA_CHECK(hsa_amd_agent_iterate_memory_pools(agentData.gpuAgents[i], MemPoolInfoCallback, &pool));
 
       // Loop over each CPU agent and check distance
+      agentData.closestNumaNode[i] = 0;
       int bestDistance = -1;
-      for (uint32_t j = 0; j < agentData.cpuAgents.size(); j++)
-      {
+      for (uint32_t j = 0; j < agentData.cpuAgents.size(); j++) {
         // Determine number of hops from GPU memory pool to CPU agent
         uint32_t hops = 0;
         HSA_CHECK(hsa_amd_agent_memory_pool_get_info(agentData.cpuAgents[j],
@@ -109,23 +107,23 @@ AgentData& GetAgentData()
                                                      HSA_AMD_AGENT_MEMORY_POOL_INFO_NUM_LINK_HOPS,
                                                      &hops));
         // Gather link info
-        hsa_amd_memory_pool_link_info_t* link_info =
-          (hsa_amd_memory_pool_link_info_t *)malloc(hops * sizeof(hsa_amd_memory_pool_link_info_t));
-        HSA_CHECK(hsa_amd_agent_memory_pool_get_info(agentData.cpuAgents[j],
-                                                     pool,
-                                                     HSA_AMD_AGENT_MEMORY_POOL_INFO_LINK_INFO,
-                                                     link_info));
-        int numaDist = 0;
-        for (int k = 0; k < hops; k++)
-        {
-          numaDist += link_info[k].numa_distance;
+        if (hops) {
+          hsa_amd_memory_pool_link_info_t* link_info =
+            (hsa_amd_memory_pool_link_info_t *)malloc(hops * sizeof(hsa_amd_memory_pool_link_info_t));
+          HSA_CHECK(hsa_amd_agent_memory_pool_get_info(agentData.cpuAgents[j],
+                                                       pool,
+                                                       HSA_AMD_AGENT_MEMORY_POOL_INFO_LINK_INFO,
+                                                       link_info));
+          int numaDist = 0;
+          for (int k = 0; k < hops; k++)
+            numaDist += link_info[k].numa_distance;
+
+          if (bestDistance == -1 || numaDist < bestDistance) {
+            agentData.closestNumaNode[i] = j;
+            bestDistance = numaDist;
+          }
+          free(link_info);
         }
-        if (bestDistance == -1 || numaDist < bestDistance)
-        {
-          agentData.closestNumaNode[i] = j;
-          bestDistance = numaDist;
-        }
-        free(link_info);
       }
     }
   }
