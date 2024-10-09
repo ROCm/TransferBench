@@ -105,6 +105,7 @@ public:
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
   uint8_t ibGidIndex;    // GID Index for RoCE NICs
   uint8_t ibPort;        // NIC port number to be used
+  uint8_t qpCount;        // NIC port number to be used
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
@@ -217,6 +218,7 @@ public:
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        , 3);
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
+    qpCount           = GetEnvVar("IB_QP_COUNT"         , 1);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -722,6 +724,8 @@ public:
              std::string("RoCE GID index is set to ") + std::to_string(ibGidIndex));
     PRINT_EV("IB_PORT_NUMBER", ibPort,
              std::string("IB port number is set to ") + std::to_string(ibPort));
+    PRINT_EV("IB_QP_COUNT", qpCount,
+             std::string("QP count is set to ") + std::to_string(qpCount));
     if (useXccFilter)
     {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");

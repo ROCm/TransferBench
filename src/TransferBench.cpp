@@ -573,7 +573,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     }
     if(IsRdmaType(exeType)) 
     {      
-      exeInfo.rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, ev.ibPort);
+      exeInfo.rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, ev.qpCount, ev.ibPort);
     }
   }
 
