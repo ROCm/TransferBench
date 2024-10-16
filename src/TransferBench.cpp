@@ -573,7 +573,10 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     }
     if(IsRdmaType(exeType)) 
     {      
-      exeInfo.rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, ev.qpCount, ev.ibPort);
+      for (Transfer* transfer : exeInfo.transfers)
+      {
+        transfer->rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, transfer->numSubExecs, ev.ibPort);
+      }
     }
   }
 
@@ -669,7 +672,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     {
       for (int i = 0; i < exeInfo.transfers.size(); i++)
       {
-        exeInfo.transfers[i]->rdmaTransferId = exeInfo.rdmaExecutor.MemoryRegister(exeInfo.transfers[i]->srcMem[0], exeInfo.transfers[i]->dstMem[0], exeInfo.transfers[i]->numBytesActual);
+        exeInfo.transfers[i]->rdmaTransferId = exeInfo.transfers[i]->rdmaExecutor.MemoryRegister(exeInfo.transfers[i]->srcMem[0], exeInfo.transfers[i]->dstMem[0], exeInfo.transfers[i]->numBytesActual);
       }
     }
   }
@@ -838,11 +841,12 @@ cleanup:
         HSA_CHECK(hsa_signal_destroy(transfer->signal));
 #endif
       }
+      if (IsRdmaType(exeType))
+      {
+        transfer->rdmaExecutor.TearDown();
+      }
     }
-    if (IsRdmaType(exeType))
-    {
-      exeInfo.rdmaExecutor.TearDown();
-    }
+
     if (IsGpuType(exeType))
     {
       int const numStreams = (int)exeInfo.streams.size();
@@ -1234,7 +1238,7 @@ void ParseExeType(EnvVars const& ev, std::string const& token,
 
   if (IsRdmaType(exeType))
   {
-    if (!RDMA_Executor::IsSupported())
+    if (!RdmaTransfer::IsSupported())
     {
       printf("[WARNING] Given %c, but RDMA executor is not supported. Switching over to GPU_DMA %d executor\n", typeChar, exeIndex);     
       exeType = EXE_GPU_DMA;
@@ -1781,7 +1785,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
   {
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
-    exeInfo.rdmaExecutor.TransferData(transfer->rdmaTransferId);
+    transfer->rdmaExecutor.TransferData(transfer->rdmaTransferId);
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
 
     // Record time if not a warmup iteration

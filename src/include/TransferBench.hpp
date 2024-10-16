@@ -121,7 +121,8 @@ struct Transfer
   std::vector<SubExecParam>  subExecParam;       // Defines subarrays assigned to each threadblock
   SubExecParam*              subExecParamGpuPtr; // Pointer to GPU copy of subExecParam
   std::vector<int>           subExecIdx;         // Indicies into subExecParamGpu
-
+  RdmaTransfer               rdmaExecutor;       // RDMA transfer
+  
 #if !defined(__NVCC__)
   // For targeted-SDMA
   hsa_agent_t                dstAgent;           // DMA destination memory agent
@@ -159,8 +160,6 @@ struct ExecutorInfo
   std::vector<hipEvent_t>  startEvents;
   std::vector<hipEvent_t>  stopEvents;
 
-  // For RDMA-Executors
-  RDMA_Executor            rdmaExecutor;
 
   // Results
   double totalTime;
