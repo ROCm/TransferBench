@@ -20,8 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-#ifndef RDMA_EXECUTOR_HPP
-#define RDMA_EXECUTOR_HPP
+#ifndef RdmaTransfer_HPP
+#define RdmaTransfer_HPP
 #ifndef LIB_IBVERBS_UNAVAILABLE
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,13 +77,13 @@ static bool is_qp_ready_to_send(struct ibv_qp *qp);
 static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> &sendRecvStat);
 static int set_ibv_gid(struct ibv_context *ctx, uint8_t port_num, int gid_index, ibv_gid& gid);
 /**
- * @class RDMA_Executor
+ * @class RdmaTransfer
  * @brief A class to manage RDMA operations using an RDMA capable NIC.
  *
  * This class provides functionalities to initialize RDMA devices, register memory,
  * post send requests, and tear down the RDMA setup.
  */
-class RDMA_Executor 
+class RdmaTransfer 
 {
 public:
   /**
@@ -350,7 +350,7 @@ public:
   /**
    * @brief Destructor that tears down the RDMA setup.
    */
-  ~RDMA_Executor() 
+  ~RdmaTransfer() 
   {
     //TearDown();
   }
@@ -412,9 +412,9 @@ private:
   uint8_t qp_count; ///< Number of QPs to be used for transferring data
 };
 // Initialize the static member device_list
-struct ibv_device **RDMA_Executor::device_list = NULL;
-size_t RDMA_Executor::ib_device_count = 0;
-//std::vector<RDMA_Executor::RDMA_Resources*> RDMA_Executor::ib_attribute_mapper;
+struct ibv_device **RdmaTransfer::device_list = NULL;
+size_t RdmaTransfer::ib_device_count = 0;
+//std::vector<RdmaTransfer::RDMA_Resources*> RdmaTransfer::ib_attribute_mapper;
 
 /**
  * @brief Creates an InfiniBand Queue Pair (QP).
@@ -643,7 +643,7 @@ static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector
     exit(1);                                                 \
   } while(0)                                                 \
 
-class RDMA_Executor
+class RdmaTransfer
 {
 public:
   void InitDeviceAndQPs(int source_device, int destination_device, uint8_t gid_index, uint8_t qpairs_count, uint8_t port_num)
