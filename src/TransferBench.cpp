@@ -553,7 +553,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
               if (!(transfer->sdmaEngineId & engineIdMask))
               {
                 printf("[ERROR] DMA executor %d.%d does not exist or cannot copy between source %s to destination %s\n",
-                       transfer->exeIndex, transfer->exeSubIndex,
+                       transfer->srcExeIndex, transfer->exeSubIndex,
                        transfer->SrcToStr().c_str(),
                        transfer->DstToStr().c_str());
                 exit(1);
