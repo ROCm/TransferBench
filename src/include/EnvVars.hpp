@@ -30,7 +30,7 @@ THE SOFTWARE.
 #include "Kernels.hpp"
 #include "IBVerbsWrapper.hpp"
 
-#define TB_VERSION "1.51"
+#define TB_VERSION "1.52"
 
 extern char const MemTypeStr[];
 extern char const ExeTypeStr[];
@@ -97,6 +97,7 @@ public:
   int samplingFactor;    // Affects how many different values of N are generated (when N set to 0)
   int sharedMemBytes;    // Amount of shared memory to use per threadblock
   int showIterations;    // Show per-iteration timing info
+  int useHsaDma;         // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
   int useInteractive;    // Pause for user-input before starting transfer loop
   int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
   int usePrepSrcKernel;  // Use GPU kernel to prepare source data instead of copy (can't be used with fillPattern)
@@ -207,6 +208,7 @@ public:
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , DEFAULT_SAMPLING_FACTOR);
     sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , defaultSharedMemBytes);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
+    useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     usePrepSrcKernel  = GetEnvVar("USE_PREP_KERNEL"     , 0);
@@ -625,6 +627,7 @@ public:
     printf(" SAMPLING_FACTOR=F      - Add F samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHARED_MEM_BYTES=X     - Use X shared mem bytes per threadblock, potentially to avoid multiple threadblocks per CU\n");
     printf(" SHOW_ITERATIONS        - Show per-iteration timing info\n");
+    printf(" USE_HSA_DMA            - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE        - Pause for user-input before starting transfer loop\n");
     printf(" USE_PCIE_INDEX         - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
     printf(" USE_PREP_KERNEL        - Use GPU kernel to initialize source data array pattern\n");
@@ -708,6 +711,8 @@ public:
              std::string("Using " + std::to_string(sharedMemBytes) + " shared mem per threadblock"));
     PRINT_EV("SHOW_ITERATIONS", showIterations,
              std::string(showIterations ? "Showing" : "Hiding") + " per-iteration timing");
+    PRINT_EV("USE_HSA_DMA", useHsaDma,
+             std::string("Using ") + (useHsaDma ? "hsa_amd_async_copy" : "hipMemcpyAsync") + " for DMA execution");
     PRINT_EV("USE_INTERACTIVE", useInteractive,
              std::string("Running in ") + (useInteractive ? "interactive" : "non-interactive") + " mode");
     PRINT_EV("USE_PCIE_INDEX", usePcieIndexing,
@@ -818,6 +823,8 @@ public:
                                         "Perform write-only"));
     PRINT_EV("USE_FINE_GRAIN", useFineGrain,
              std::string("Using ") + (useFineGrain ? "fine" : "coarse") + "-grained memory");
+    PRINT_EV("USE_GPU_DMA", useDmaCopy,
+             std::string("Using GPU-") + (useDmaCopy ? "DMA" : "GFX") + " as GPU executor");
     PRINT_EV("USE_REMOTE_READ", useRemoteRead,
              std::string("Using ") + (useRemoteRead ? "DST" : "SRC") + " as executor");
 
