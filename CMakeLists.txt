@@ -24,7 +24,7 @@ set(LIBRARY_NAME TransferBench)
 
 rocm_install(TARGETS TransferBench COMPONENT devel)
 
-rocm_package_add_dependencies(DEPENDS libnuma1 hsa-rocr)
+rocm_package_add_dependencies(DEPENDS numactl hsa-rocr)
 
 rocm_create_package(
     NAME ${LIBRARY_NAME}
