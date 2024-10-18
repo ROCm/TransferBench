@@ -5,7 +5,7 @@ else()
     set(ROCM_PATH "/opt/rocm" CACHE STRING "ROCm install directory")
 endif()
 cmake_minimum_required(VERSION 3.5)
-
+set(CMAKE_INSTALL_PREFIX "${ROCM_PATH}" CACHE PATH "")
 project(TransferBench VERSION 1.51.0 LANGUAGES CXX)
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
 include_directories(${ROCM_PATH}/include)
