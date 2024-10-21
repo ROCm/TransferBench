@@ -256,7 +256,7 @@ void PrintNicToGPUTopo(bool printAsCsv)
   else
   {
     std::cout << "Device Index | Device Name | Port Active | Closest GPU(s)| PCIe Bus ID" << std::endl;
-    std::cout << "-------------+-------------+-------------+---------------|------------" << std::endl;
+    std::cout << "-------------+-------------+-------------+---------------+------------" << std::endl;
   }
 
   for (int i = 0; i < IbDeviceBusIds.size(); ++i)
