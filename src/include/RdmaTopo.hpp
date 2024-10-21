@@ -33,8 +33,10 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <infiniband/verbs.h>
 #include "Compatibility.hpp"
+#include <set>
+
 static std::vector<std::string> IbDeviceBusIds;
-static std::vector<std::vector<int>> NicToGpuMapper;
+static std::vector<std::set<int>> NicToGpuMapper;
 static std::vector<int> GpuToNicMapper;
 static std::vector<std::string> DeviceNames;
 static int DeviceCount;
@@ -182,6 +184,36 @@ static int TraverseClosestIbDevice(int hipDeviceId)
   return closestDevice;
 }
 
+static int TraverseClosestGPUDevice(int IbvDeviceId)
+{
+  InitIbDevicePaths();
+  assert(IbvDeviceId < IbDeviceBusIds.size());
+  auto address = IbDeviceBusIds[IbvDeviceId];
+  if (address == "") return -1;
+  int numHipDevices;
+  HIP_CALL(hipGetDeviceCount(&numHipDevices));
+  GpuToNicMapper.resize(numHipDevices, -1);
+  int closestDevice = -1;
+  int minDistance = std::numeric_limits<int>::max();
+  for (int i = 0; i < numHipDevices; ++i)
+  {
+    char hipPciBusId[64];
+    hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i);
+    if (err != hipSuccess) 
+    {
+      std::cerr << "Failed to get PCI Bus ID for HIP device " << i << ": " << hipGetErrorString(err) << std::endl;
+      return -1;
+    }
+    int distance = GetPcieDistance(hipPciBusId, address);
+    if (distance < minDistance && distance >= 0)
+    {
+      minDistance = distance;
+      closestDevice = i;
+    }
+  }
+  return closestDevice;
+}
+
 void InitMappings()
 {
   INIT_ONCE();
@@ -196,8 +228,15 @@ void InitMappings()
     if(closestIbDevice >= 0)
     {
       assert(closestIbDevice < NicToGpuMapper.size());
-      NicToGpuMapper[closestIbDevice].push_back(i);
+      NicToGpuMapper[closestIbDevice].insert(i);
     }
+  }
+  for(int i = 0; i < DeviceCount; ++i)
+  {
+    auto closestGPU = TraverseClosestGPUDevice(i);
+    if(closestGPU >= 0) {
+      NicToGpuMapper[i].insert(closestGPU);
+    }    
   }
 }
 
@@ -228,10 +267,13 @@ void PrintNicToGPUTopo(bool printAsCsv)
 
     for (int j = 0; j < NicToGpuMapper[i].size(); ++j)
     {
-      closestGpus += std::to_string(NicToGpuMapper[i][j]);
-      if (j < NicToGpuMapper[i].size() - 1)
+      for (auto it = NicToGpuMapper[i].begin(); it != NicToGpuMapper[i].end(); ++it)
       {
-        closestGpus += ",";
+        closestGpus += std::to_string(*it);
+        if (std::next(it) != NicToGpuMapper[i].end())
+        {
+          closestGpus += ",";
+        }
       }
     }
     if (printAsCsv)
