@@ -1404,14 +1404,16 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
       int closestRdmaNicToDst = GetClosestIbDevice(transfer.dstIndex[0]);      
       if(closestRdmaNicToSrc != -1)
       {        
-        if(closestRdmaNicToSrc != transfer.srcExeIndex) {
-            printf("[INFO] Source RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.srcExeIndex, closestRdmaNicToSrc, transfer.srcIndex[0]);
+        if(closestRdmaNicToSrc != transfer.srcExeIndex)
+        {
+          printf("[INFO] Source RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.srcExeIndex, closestRdmaNicToSrc, transfer.srcIndex[0]);
         }
         transfer.srcExeIndex = closestRdmaNicToSrc;
       }
       if(closestRdmaNicToDst != -1)
       {
-        if(closestRdmaNicToDst != transfer.dstExeIndex) {
+        if(closestRdmaNicToDst != transfer.dstExeIndex)
+        {
           printf("[INFO] Destination RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.dstExeIndex, closestRdmaNicToSrc, transfer.dstIndex[0]);
         }
         transfer.dstExeIndex = closestRdmaNicToDst;
