@@ -3163,7 +3163,7 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
     ExeType exeType  = exeInfoPair.first.type;
     int     exeIndex = exeInfoPair.first.srcIndex;
 
-    printf(" Executor: %3s %02d %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)\n",
+    printf(" Executor: %4s %02d %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)\n",
            ExeTypeName[exeType], exeIndex, sep, exeResult.bandwidthGbs, sep,
            exeResult.durationMsec, sep, exeResult.totalBytes, sep, exeResult.sumBandwidthGbs);
 
@@ -3177,7 +3177,7 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
         else
           sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
       }
-      printf("     Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%02d%s:%03d -> %s\n",
+      printf("      Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%02d%s:%03d -> %s\n",
              t.transferIndex, sep,
              t.transferBandwidth, sep,
              t.transferTime, sep,
@@ -3229,7 +3229,7 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
     }
   }
 
-  printf(" Aggregate (CPU)  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n", sep,
+  printf("  Aggregate (CPU)  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n", sep,
          results.totalBandwidthCpu, sep, results.totalDurationMsec, sep, results.totalBytesTransferred, sep, results.overheadMsec);
 }
 
