@@ -1,6 +1,6 @@
 #ifndef GET_CLOSEST_NIC_HPP
 #define GET_CLOSEST_NIC_HPP
-
+#ifndef LIB_IBVERBS_UNAVAILABLE
 #include <iostream>
 #include <hip/hip_runtime.h>
 #include <iostream>
@@ -150,6 +150,10 @@ int GetClosestIbDevice(int hipDeviceId)
   }
   return closestDevice;
 }
-
-
+#else
+int GetClosestIbDevice(int hipDeviceId)
+{
+  return -1;
+}
+#endif
 #endif // GET_CLOSEST_NIC_HPP
