@@ -11,6 +11,9 @@
 #include <unistd.h>
 #include <infiniband/verbs.h>
 
+static std::vector<std::string> IbDeviceBusIds;
+static bool Initialized = false;
+
 // Function to extract the bus number from a PCIe address (domain:bus:device.function)
 int GetBusNumber(const std::string& pcieAddress)
 {
@@ -44,25 +47,22 @@ int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddr
   return std::abs(bus1 - bus2);
 }
 
-int GetClosestIbDevice(int hipDeviceId)
+static void InitIbDevicePaths()
 {
-  char hipPciBusId[64];
-  hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), hipDeviceId);
-  if (err != hipSuccess) 
+  if(Initialized)
   {
-    std::cerr << "Failed to get PCI Bus ID for HIP device " << hipDeviceId << ": " << hipGetErrorString(err) << std::endl;
-    return -1;
+    return;
   }
-
+  Initialized = true;
   struct ibv_device **dev_list;
   int num_devices;
   dev_list = ibv_get_device_list(&num_devices);
   if (!dev_list)
   {
     std::cerr << "Failed to get IB devices list." << std::endl;
-    return -1;
+    return;
   }
-
+  IbDeviceBusIds.resize(num_devices, "");
   int closestDevice = -1;
   int minDistance = std::numeric_limits<int>::max();
 
@@ -114,17 +114,40 @@ int GetClosestIbDevice(int hipDeviceId)
       std::size_t pos = pciPath.find_last_of('/');
       if (pos != std::string::npos) {
         std::string nicBusId = pciPath.substr(pos + 1);
-        int distance = GetPcieDistance(hipPciBusId, nicBusId);
-        if (distance < minDistance && distance >= 0)
-        {
-          minDistance = distance;
-          closestDevice = i;
-        }
+        IbDeviceBusIds[i] = nicBusId;        
       }
     }
   }
 
-  ibv_free_device_list(dev_list);
+  ibv_free_device_list(dev_list);  
+}
+
+int GetClosestIbDevice(int hipDeviceId)
+{
+  InitIbDevicePaths();
+  char hipPciBusId[64];
+  hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), hipDeviceId);
+  if (err != hipSuccess) 
+  {
+    std::cerr << "Failed to get PCI Bus ID for HIP device " << hipDeviceId << ": " << hipGetErrorString(err) << std::endl;
+    return -1;
+  }
+
+  int closestDevice = -1;
+  int minDistance = std::numeric_limits<int>::max();
+
+  for (int i = 0; i < IbDeviceBusIds.size(); ++i)
+  { 
+    auto address = IbDeviceBusIds[i];
+    if (address != "") {
+      int distance = GetPcieDistance(hipPciBusId, address);
+      if (distance < minDistance && distance >= 0)
+      {
+        minDistance = distance;
+        closestDevice = i;
+      }
+    }
+  }
   return closestDevice;
 }
 

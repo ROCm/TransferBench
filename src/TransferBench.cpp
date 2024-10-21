@@ -1125,10 +1125,10 @@ void DisplayTopology(bool const outputToCsv)
     printf("        |");
     for (int j = 0; j < numGpuDevices; j++)
       printf(" GPU %02d |", j);
-    printf(" PCIe Bus ID  | #CUs | Closest NUMA | DMA engines\n");
+    printf(" PCIe Bus ID  | #CUs | Closest NUMA | Closest NIC | DMA engines\n");
     for (int j = 0; j <= numGpuDevices; j++)
       printf("--------+");
-    printf("--------------+------+-------------+------------\n");
+    printf("--------------+------+--------------+-------------+----------------------------\n");
   }
 
   char pciBusId[20];
@@ -1167,10 +1167,10 @@ void DisplayTopology(bool const outputToCsv)
     HIP_CALL(hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, deviceIdx));
 
     if (outputToCsv)
-      printf("%s,%d,%d,", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
+      printf("%s,%d,%d,%d,", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx), GetClosestIbDevice(deviceIdx));
     else
     {
-      printf(" %11s | %4d | %-12d |", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx));
+      printf(" %11s | %4d | %-12d | %-11d |", pciBusId, numDeviceCUs, GetClosestNumaNode(deviceIdx), GetClosestIbDevice(deviceIdx));
 
       bool isFirst = true;
       for (auto x : dmaEngineIdsPerDevice[deviceIdx])
