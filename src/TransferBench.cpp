@@ -31,6 +31,7 @@ THE SOFTWARE.
 
 #include "TransferBench.hpp"
 #include "GetClosestNumaNode.hpp"
+#include "GetClosestNIC.hpp"
 
 int main(int argc, char **argv)
 {
@@ -1397,6 +1398,25 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
       exit(1);
     }
 
+    if(IsRdmaType(transfer.exeType))
+    {
+      int closestRdmaNicToSrc = GetClosestIbDevice(transfer.srcIndex[0]);
+      int closestRdmaNicToDst = GetClosestIbDevice(transfer.dstIndex[0]);      
+      if(closestRdmaNicToSrc != -1)
+      {        
+        if(closestRdmaNicToSrc != transfer.srcExeIndex) {
+            printf("[INFO] Source RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.srcExeIndex, closestRdmaNicToSrc, transfer.srcIndex[0]);
+        }
+        transfer.srcExeIndex = closestRdmaNicToSrc;
+      }
+      if(closestRdmaNicToDst != -1)
+      {
+        if(closestRdmaNicToDst != transfer.dstExeIndex) {
+          printf("[INFO] Destination RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.dstExeIndex, closestRdmaNicToSrc, transfer.dstIndex[0]);
+        }
+        transfer.dstExeIndex = closestRdmaNicToDst;
+      }
+    }
     transfer.numSubExecs = numSubExecs;
     transfer.numBytes = numBytes;
     transfers.push_back(transfer);
