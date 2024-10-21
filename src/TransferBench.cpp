@@ -31,7 +31,7 @@ THE SOFTWARE.
 
 #include "TransferBench.hpp"
 #include "GetClosestNumaNode.hpp"
-#include "GetClosestNIC.hpp"
+#include "RdmaTopo.hpp"
 
 int main(int argc, char **argv)
 {
@@ -1042,7 +1042,7 @@ void DisplayTopology(bool const outputToCsv)
     printf("\n");
   }
   printf("\n");
-
+  PrintNicToGPUTopo(outputToCsv);
 #if defined(__NVCC__)
 
   for (int i = 0; i < numGpuDevices; i++)

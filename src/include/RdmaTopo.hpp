@@ -32,9 +32,21 @@ THE SOFTWARE.
 #include <filesystem>
 #include <unistd.h>
 #include <infiniband/verbs.h>
-
+#include "Compatibility.hpp"
 static std::vector<std::string> IbDeviceBusIds;
+static std::vector<std::vector<int>> NicToGpuMapper;
+static std::vector<int> GpuToNicMapper;
+static std::vector<std::string> DeviceNames;
+static int DeviceCount;
 static bool Initialized = false;
+#define INIT_ONCE(ret)  \
+  do {                  \
+  if(Initialized)       \
+  {                     \
+    return ret;         \
+  }                     \
+  Initialized = true;   \
+  } while(0);
 
 // Function to extract the bus number from a PCIe address (domain:bus:device.function)
 int GetBusNumber(const std::string& pcieAddress)
@@ -71,26 +83,23 @@ int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddr
 
 static void InitIbDevicePaths()
 {
-  if(Initialized)
-  {
-    return;
-  }
-  Initialized = true;
   struct ibv_device **dev_list;
-  int num_devices;
-  dev_list = ibv_get_device_list(&num_devices);
+  dev_list = ibv_get_device_list(&DeviceCount);
   if (!dev_list)
   {
     std::cerr << "Failed to get IB devices list." << std::endl;
     return;
   }
-  IbDeviceBusIds.resize(num_devices, "");
+  IbDeviceBusIds.resize(DeviceCount, "");
+  NicToGpuMapper.resize(DeviceCount);
+  DeviceNames.resize(DeviceCount);
   int closestDevice = -1;
   int minDistance = std::numeric_limits<int>::max();
 
-  for (int i = 0; i < num_devices; ++i)
+  for (int i = 0; i < DeviceCount; ++i)
   {
     struct ibv_device *device = dev_list[i];
+    DeviceNames[i] = device->name;
     struct ibv_context *context = ibv_open_device(device);
     if (!context)
     {
@@ -144,7 +153,7 @@ static void InitIbDevicePaths()
   ibv_free_device_list(dev_list);  
 }
 
-int GetClosestIbDevice(int hipDeviceId)
+static int TraverseClosestIbDevice(int hipDeviceId)
 {
   InitIbDevicePaths();
   char hipPciBusId[64];
@@ -172,10 +181,82 @@ int GetClosestIbDevice(int hipDeviceId)
   }
   return closestDevice;
 }
+
+void InitMappings()
+{
+  INIT_ONCE();
+  int numHipDevices;
+  HIP_CALL(hipGetDeviceCount(&numHipDevices));
+  GpuToNicMapper.resize(numHipDevices, -1);
+
+  for (int i = 0; i < numHipDevices; ++i)
+  {
+    int closestIbDevice = TraverseClosestIbDevice(i);
+    GpuToNicMapper[i] = closestIbDevice;
+    if(closestIbDevice >= 0)
+    {
+      assert(closestIbDevice < NicToGpuMapper.size());
+      NicToGpuMapper[closestIbDevice].push_back(i);
+    }
+  }
+}
+
+int GetClosestIbDevice(int hipDeviceId)
+{
+  InitMappings();
+  return GpuToNicMapper[hipDeviceId];
+}
+
+void PrintNicToGPUTopo(bool printAsCsv)
+{
+  InitMappings();
+  if (printAsCsv)
+  {
+    std::cout << "Device Index,Device Name,Port Active,Closest GPU(s)" << std::endl;
+  }
+  else
+  {
+    std::cout << "Device Index | Device Name | Port Active | Closest GPU(s)" << std::endl;
+    std::cout << "-------------+-------------+-------------+---------------" << std::endl;
+  }
+
+  for (int i = 0; i < IbDeviceBusIds.size(); ++i)
+  {
+    std::string nicDevice = DeviceNames[i];
+    bool portActive = !NicToGpuMapper[i].empty();
+    std::string closestGpus;
+
+    for (int j = 0; j < NicToGpuMapper[i].size(); ++j)
+    {
+      closestGpus += std::to_string(NicToGpuMapper[i][j]);
+      if (j < NicToGpuMapper[i].size() - 1)
+      {
+        closestGpus += ",";
+      }
+    }
+    if (printAsCsv)
+    {
+      std::cout << i << ","
+          << nicDevice << "," 
+          << (portActive ? "Yes" : "No") << ","
+          << closestGpus << std::endl;
+    }
+    else
+    {
+      std::cout << std::left << std::setw(12) << i << " | "
+          << std::left << std::setw(11) << nicDevice << " | "
+          << std::left << std::setw(11) << (portActive ? "Yes" : "No") << " | "
+          << std::left << std::setw(11) << closestGpus << std::endl;
+    }
+  }
+  std::cout << std::endl;
+}
+
 #else
 int GetClosestIbDevice(int hipDeviceId)
 {
   return -1;
 }
+void PrintNicToGPUTopo(bool printAsCsv) { }
 #endif
 #endif // GET_CLOSEST_NIC_HPP
