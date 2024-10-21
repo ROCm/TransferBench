@@ -216,8 +216,8 @@ void PrintNicToGPUTopo(bool printAsCsv)
   }
   else
   {
-    std::cout << "Device Index | Device Name | Port Active | Closest GPU(s)" << std::endl;
-    std::cout << "-------------+-------------+-------------+---------------" << std::endl;
+    std::cout << "Device Index | Device Name | Port Active | Closest GPU(s)| PCIe Bus ID" << std::endl;
+    std::cout << "-------------+-------------+-------------+---------------|------------" << std::endl;
   }
 
   for (int i = 0; i < IbDeviceBusIds.size(); ++i)
@@ -239,14 +239,17 @@ void PrintNicToGPUTopo(bool printAsCsv)
       std::cout << i << ","
           << nicDevice << "," 
           << (portActive ? "Yes" : "No") << ","
-          << closestGpus << std::endl;
+          << closestGpus <<  ","
+          << IbDeviceBusIds[i] <<std::endl;
     }
     else
     {
       std::cout << std::left << std::setw(12) << i << " | "
           << std::left << std::setw(11) << nicDevice << " | "
           << std::left << std::setw(11) << (portActive ? "Yes" : "No") << " | "
-          << std::left << std::setw(11) << closestGpus << std::endl;
+          << std::left << std::setw(13) << closestGpus << " | "
+          << std::left << std::setw(11) << IbDeviceBusIds[i] 
+          << std::endl;
     }
   }
   std::cout << std::endl;
