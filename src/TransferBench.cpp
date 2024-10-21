@@ -1398,7 +1398,7 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
       exit(1);
     }
 
-    if(IsRdmaType(transfer.exeType))
+    if(ev.useClosestNic && IsRdmaType(transfer.exeType))
     {
       int closestRdmaNicToSrc = GetClosestIbDevice(transfer.srcIndex[0]);
       int closestRdmaNicToDst = GetClosestIbDevice(transfer.dstIndex[0]);      

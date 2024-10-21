@@ -106,6 +106,7 @@ public:
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
   uint8_t ibGidIndex;    // GID Index for RoCE NICs
   uint8_t ibPort;        // NIC port number to be used
+  int useClosestNic;     // Use NIC closest to GPU based on PCIe bus Ids (this will override user selections)
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
   std::vector<uint32_t> cuMask;   // Bit-vector representing the CU mask
@@ -219,6 +220,7 @@ public:
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        , 3);
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
+    useClosestNic     = GetEnvVar("USE_CLOSEST_NIC"     , 1);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -636,6 +638,7 @@ public:
     printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" IB_GID_INDEX           - Required for RoCE NICs (default=3)\n");
     printf(" IB_PORT_NUMBER         - RDMA port number for RDMA executor (default=1)\n");
+    printf(" USE_CLOSEST_NIC        - Automatically remap GPUs to closest RDMA NIC (set to 1 to enable)\n");
   }
 
   // Helper macro to switch between CSV and terminal output
@@ -727,6 +730,9 @@ public:
              std::string("RoCE GID index is set to ") + std::to_string(ibGidIndex));
     PRINT_EV("IB_PORT_NUMBER", ibPort,
              std::string("IB port number is set to ") + std::to_string(ibPort));
+    PRINT_EV("USE_CLOSEST_NIC", useClosestNic,
+            std::string("Using Closest NIC ") + (useClosestNic ? "enabled" : "disabled"));
+
     if (useXccFilter)
     {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
