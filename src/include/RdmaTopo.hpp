@@ -223,7 +223,7 @@ void PrintNicToGPUTopo(bool printAsCsv)
   for (int i = 0; i < IbDeviceBusIds.size(); ++i)
   {
     std::string nicDevice = DeviceNames[i];
-    bool portActive = !NicToGpuMapper[i].empty();
+    bool portActive = IbDeviceBusIds[i] != "";
     std::string closestGpus;
 
     for (int j = 0; j < NicToGpuMapper[i].size(); ++j)
