@@ -220,7 +220,7 @@ public:
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        , 3);
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
-    useClosestNic     = GetEnvVar("USE_CLOSEST_NIC"     , 1);
+    useClosestNic     = GetEnvVar("USE_CLOSEST_NIC"     , 0);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
