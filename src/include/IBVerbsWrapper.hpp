@@ -327,22 +327,18 @@ public:
   {
     if (device_list == NULL) 
     {
-      IBV_PTR_CALL(device_list, ibv_get_device_list(NULL));      
+      IBV_PTR_CALL(device_list, ibv_get_device_list(&ib_device_count));
     }
   }
 
   /**
    * @brief Get RDMA device count.
    */
-  static size_t GetNicCount()  
+  static int GetNicCount()
   {
     if (device_list == NULL && ib_device_count == 0)
     {
       InitDeviceList();
-      while(device_list != NULL && device_list[ib_device_count] != NULL)
-      {
-        ib_device_count++;
-      }
     }
     return ib_device_count;
   }
@@ -397,7 +393,7 @@ private:
       struct ibv_port_attr port_attr = {}; ///< Port attributes for the RDMA capable NIC.  
       union ibv_gid gid;                  ///< GID handler needed for RoCE support
   };  
-  static size_t ib_device_count;          ///< Number of RDMA capable NICs.
+  static int ib_device_count;          ///< Number of RDMA capable NICs.
   static struct ibv_device **device_list; ///< List of RDMA capable devices.
   std::vector<RDMA_Resources*> ib_attribute_mapper; ///< Store resoruce sensitive RDMA fields.
   std::vector<std::pair<struct ibv_mr *, void*>> source_mr; ///< Memory region for the source buffer.
@@ -413,7 +409,7 @@ private:
 };
 // Initialize the static member device_list
 struct ibv_device **RdmaTransfer::device_list = NULL;
-size_t RdmaTransfer::ib_device_count = 0;
+int RdmaTransfer::ib_device_count = 0;
 //std::vector<RdmaTransfer::RDMA_Resources*> RdmaTransfer::ib_attribute_mapper;
 
 /**
@@ -670,7 +666,7 @@ public:
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }
-  static size_t GetNicCount()
+  static int GetNicCount()
   {
     return 0;
   }
