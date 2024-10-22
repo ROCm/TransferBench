@@ -1400,8 +1400,10 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
 
     if(ev.useClosestNic && IsRdmaType(transfer.exeType))
     {
-      int closestRdmaNicToSrc = GetClosestIbDevice(transfer.srcIndex[0]);
-      int closestRdmaNicToDst = GetClosestIbDevice(transfer.dstIndex[0]);      
+      int closestRdmaNicToSrc = (transfer.srcType[0] == MemType::MEM_GPU || transfer.srcType[0] == MemType::MEM_GPU_FINE)?
+                                GetClosestIbDevice(transfer.srcIndex[0]) : -1;
+      int closestRdmaNicToDst = (transfer.dstType[0] == MemType::MEM_GPU || transfer.dstType[0] == MemType::MEM_GPU_FINE)?
+                                GetClosestIbDevice(transfer.dstIndex[0]) : -1;
       if(closestRdmaNicToSrc != -1)
       {        
         if(closestRdmaNicToSrc != transfer.srcExeIndex)
