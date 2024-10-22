@@ -193,15 +193,6 @@ public:
    * @note This function assumes that the source and destination memory regions,
    *       as well as the sender queue pair and completion queue, have been
    *       properly initialized and configured.
-   *
-   * @param src_ptr Pointer to the source memory region.
-   * @param size Size of the data to be transferred.
-   * @param source_mr Pointer to the source memory region's memory registration structure.
-   * @param dst_ptr Pointer to the destination memory region.
-   * @param destination_mr Pointer to the destination memory region's memory registration structure.
-   * @param sender_qp Pointer to the sender queue pair.
-   * @param completion_queue Pointer to the completion queue.
-   * @param WR_ID Work request ID.
    */
   void TransferData(int transferIdx) 
   {    
