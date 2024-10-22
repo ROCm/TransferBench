@@ -97,6 +97,7 @@ public:
    * @param source_device The index of the source RDMA device to be initialized.
    * @param destination_device The index of the destination RDMA device (currently unused).
    * @param gid_index The GID index to be used for RoCE (RDMA over Converged Ethernet).
+   * @param qpairs_count The number of QPs to use for each transfer.
    * @param port_num The port ID of the RDMA device to be used (default is 1).
    *
    * @note This function will exit the program if the selected RDMA device is down.
