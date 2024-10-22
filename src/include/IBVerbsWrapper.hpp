@@ -335,14 +335,6 @@ public:
     return ib_device_count;
   }
 
-  /**
-   * @brief Destructor that tears down the RDMA setup.
-   */
-  ~RdmaTransfer() 
-  {
-    //TearDown();
-  }
-
 private:
   void InitRDMAResources(int const& device_id, uint8_t const& port_num) {
     if (ib_attribute_mapper.size() <= device_id) {
