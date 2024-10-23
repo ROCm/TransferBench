@@ -55,21 +55,22 @@ typedef enum
 
 typedef enum
 {
-  EXE_CPU          = 0, // CPU executor              (subExecutor = CPU thread)
-  EXE_GPU_GFX      = 1, // GPU kernel-based executor (subExecutor = threadblock/CU)
-  EXE_GPU_DMA      = 2, // GPU SDMA-based executor   (subExecutor = streams)
-  EXE_RDMA         = 3  // RDMA-based executor       (subExecutor = undefined)   
+  EXE_CPU          = 0, // CPU executor                                   (subExecutor = CPU thread)
+  EXE_GPU_GFX      = 1, // GPU kernel-based executor                      (subExecutor = threadblock/CU)
+  EXE_GPU_DMA      = 2, // GPU SDMA-based executor                        (subExecutor = streams)
+  EXE_RDMA         = 3, // RDMA-based executor                            (subExecutor = QPs)
+  EXE_RDMA_TOPO    = 4  // RDMA-based executor indexed by the nearest GPU (subExecutor = QPs)
 } ExeType;
 
 bool IsGpuType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
 bool IsCpuType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); };
 bool IsGpuType(ExeType e) { return (e == EXE_GPU_GFX || e == EXE_GPU_DMA); };
 bool IsCpuType(ExeType e) { return (e == EXE_CPU); };
-bool IsRdmaType(ExeType e) { return (e == EXE_RDMA); };
+bool IsRdmaType(ExeType e) { return (e == EXE_RDMA || e == EXE_RDMA_TOPO); };
 
 char const MemTypeStr[8] = "CGBFUNM";
-char const ExeTypeStr[5] = "CGDR";
-char const ExeTypeName[4][5] = {"CPU", "GPU", "DMA", "RDMA"};
+char const ExeTypeStr[6] = "CGDRN";
+char const ExeTypeName[5][5] = {"CPU", "GPU", "DMA", "RDMA", "RDMA"};
 
 MemType inline CharToMemType(char const c)
 {

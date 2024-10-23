@@ -242,6 +242,7 @@ void InitMappings()
 int GetClosestIbDevice(int hipDeviceId)
 {
   InitMappings();
+  assert(hipDeviceId < GpuToNicMapper.size());
   return GpuToNicMapper[hipDeviceId];
 }
 

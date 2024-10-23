@@ -671,7 +671,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
                          hipMemcpyDefault));
       HIP_CALL(hipDeviceSynchronize());
     }
-    if (exeType == EXE_RDMA)
+    if (IsRdmaType(exeType))
     {
       for (int i = 0; i < exeInfo.transfers.size(); i++)
       {
@@ -1398,27 +1398,27 @@ void ParseTransfers(EnvVars const& ev, char* line, std::vector<Transfer>& transf
       exit(1);
     }
 
-    if(ev.useClosestNic && IsRdmaType(transfer.exeType))
+    if(transfer.exeType == ExeType::EXE_RDMA_TOPO)
     {
-      int closestRdmaNicToSrc = (transfer.srcType[0] == MemType::MEM_GPU || transfer.srcType[0] == MemType::MEM_GPU_FINE)?
-                                GetClosestIbDevice(transfer.srcIndex[0]) : -1;
-      int closestRdmaNicToDst = (transfer.dstType[0] == MemType::MEM_GPU || transfer.dstType[0] == MemType::MEM_GPU_FINE)?
-                                GetClosestIbDevice(transfer.dstIndex[0]) : -1;
+      int closestRdmaNicToSrc = GetClosestIbDevice(transfer.srcExeIndex);
+      int closestRdmaNicToDst = GetClosestIbDevice(transfer.dstExeIndex);
       if(closestRdmaNicToSrc != -1)
-      {        
-        if(closestRdmaNicToSrc != transfer.srcExeIndex)
-        {
-          printf("[INFO] Source RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.srcExeIndex, closestRdmaNicToSrc, transfer.srcIndex[0]);
-        }
+      {
         transfer.srcExeIndex = closestRdmaNicToSrc;
+      }
+      else
+      {
+        printf("[ERROR] Cannot find closest src NIC to GPU device %d\n", transfer.srcExeIndex);
+        exit(1);
       }
       if(closestRdmaNicToDst != -1)
       {
-        if(closestRdmaNicToDst != transfer.dstExeIndex)
-        {
-          printf("[INFO] Destination RDMA executor %d has been remapped to closest NIC %d for GPU device %d \n", transfer.dstExeIndex, closestRdmaNicToSrc, transfer.dstIndex[0]);
-        }
         transfer.dstExeIndex = closestRdmaNicToDst;
+      }
+      else 
+      {
+        printf("[ERROR] Cannot find closest dst NIC to GPU device %d\n", transfer.dstExeIndex);
+        exit(1);
       }
     }
     transfer.numSubExecs = numSubExecs;
@@ -1812,7 +1812,7 @@ void RunTransfer(EnvVars const& ev, int const iteration,
         transfer->perIterationTime.push_back(delta);
     }
   }
-  else if (transfer->exeType == EXE_RDMA) // RDMA execution agent
+  else if (IsRdmaType(transfer->exeType)) // RDMA execution agent
   {
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
