@@ -826,6 +826,10 @@ cleanup:
 
     for (auto& transfer : exeInfo.transfers)
     {
+      if (IsRdmaType(exeType))
+      {
+        transfer->rdmaExecutor.TearDown();
+      }
       for (int iSrc = 0; iSrc < transfer->numSrcs; ++iSrc)
       {
         MemType const& srcType = transfer->srcType[iSrc];
@@ -843,10 +847,6 @@ cleanup:
 #if !defined(__NVCC__)
         HSA_CHECK(hsa_signal_destroy(transfer->signal));
 #endif
-      }
-      if (IsRdmaType(exeType))
-      {
-        transfer->rdmaExecutor.TearDown();
       }
     }
 
