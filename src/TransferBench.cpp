@@ -3179,17 +3179,31 @@ void ReportResults(EnvVars const& ev, std::vector<Transfer> const& transfers, Te
         else
           sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
       }
-      printf("      Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%02d%s:%03d -> %s\n",
-             t.transferIndex, sep,
-             t.transferBandwidth, sep,
-             t.transferTime, sep,
-             t.numBytesActual, sep,
-             t.SrcToStr().c_str(),
-             ExeTypeName[t.exeType], t.srcExeIndex,
-             exeSubIndexStr,
-             t.numSubExecs,
-             t.DstToStr().c_str());
-
+      if(IsRdmaType(t.exeType))
+      {
+        printf("      Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%02d:%s%02d -> %s\n",
+              t.transferIndex, sep,
+              t.transferBandwidth, sep,
+              t.transferTime, sep,
+              t.numBytesActual, sep,
+              t.SrcToStr().c_str(),
+              ExeTypeName[t.exeType], t.srcExeIndex,
+              ExeTypeName[t.exeType], t.dstExeIndex,
+              t.DstToStr().c_str());
+      }
+      else
+      {
+        printf("      Transfer %02d  %c %7.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%02d%s:%03d -> %s\n",
+              t.transferIndex, sep,
+              t.transferBandwidth, sep,
+              t.transferTime, sep,
+              t.numBytesActual, sep,
+              t.SrcToStr().c_str(),
+              ExeTypeName[t.exeType], t.srcExeIndex,
+              exeSubIndexStr,
+              t.numSubExecs,
+              t.DstToStr().c_str());
+      }
       // Show per-iteration timing information
       if (ev.showIterations) {
 
