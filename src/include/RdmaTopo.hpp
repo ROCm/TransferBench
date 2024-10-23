@@ -24,7 +24,7 @@ THE SOFTWARE.
 #define GET_CLOSEST_NIC_HPP
 #ifndef LIB_IBVERBS_UNAVAILABLE
 #include <iostream>
-#include <hip/hip_runtime.h>
+#include "Compatibility.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -32,7 +32,6 @@ THE SOFTWARE.
 #include <filesystem>
 #include <unistd.h>
 #include <infiniband/verbs.h>
-#include "Compatibility.hpp"
 #include <set>
 
 static std::vector<std::string> IbDeviceBusIds;
