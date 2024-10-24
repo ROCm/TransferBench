@@ -71,7 +71,7 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 
 static struct ibv_qp *qp_create(struct ibv_pd *pd, struct ibv_cq* cq);
 static int qp_init(struct ibv_qp *qp, uint8_t port_num, unsigned flags);
-static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t gid_index, uint8_t port, bool isRoCE);
+static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t gid_index, uint8_t port, bool isRoCE, enum ibv_mtu mtu);
 static int qp_transition_to_ready_to_send(struct ibv_qp *qp);
 static bool is_qp_ready_to_send(struct ibv_qp *qp);
 static int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> &sendRecvStat);
@@ -147,7 +147,9 @@ public:
                                                   dst_rdma->port_attr.lid,
                                                   receiver_qp[i]->qp_num,
                                                   dst_rdma->gid, gid_index,
-                                                  ib_device_port, isRoce));
+                                                  ib_device_port, isRoce,
+                                                  src_rdma->port_attr.active_mtu
+                                                ));
 
       IBV_CALL(qp_transition_to_ready_to_send(sender_qp[i]));
 
@@ -155,7 +157,9 @@ public:
                                                 src_rdma->port_attr.lid,
                                                 sender_qp[i]->qp_num,
                                                 src_rdma->gid, gid_index,
-                                                ib_device_port, isRoce));
+                                                ib_device_port, isRoce,
+                                                dst_rdma->port_attr.active_mtu
+                                                ));
 
       IBV_CALL(qp_transition_to_ready_to_send(receiver_qp[i]));
     }
@@ -489,12 +493,12 @@ static int qp_init(struct ibv_qp *qp, uint8_t port_num, unsigned flags)
  * @param isRoCE Boolean flag indicating whether the configuration is for RoCE (true) or not (false).
  * @return int 0 on success, or the error code returned by ibv_modify_qp on failure.
  */
-static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t gid_index, uint8_t port, bool isRoCE)
+static int qp_transition_to_ready_to_receive(struct ibv_qp *qp, uint16_t dlid, uint32_t dqpn, ibv_gid gid, uint8_t gid_index, uint8_t port, bool isRoCE, enum ibv_mtu mtu)
 {
   struct ibv_qp_attr attr = {};
   memset(&attr, 0, sizeof(struct ibv_qp_attr));
   attr.qp_state       = IBV_QPS_RTR;
-  attr.path_mtu       = IBV_MTU_4096;
+  attr.path_mtu       = mtu;
   attr.rq_psn         = IB_PSN;
   attr.max_dest_rd_atomic = 1;
   attr.min_rnr_timer  = 12;
