@@ -13,6 +13,14 @@ else
 endif
 
 CXXFLAGS = -O3 -Iinclude -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
+
+# Compile RDMA executor if IBVerbs is found in the Dynamic Linker cache
+ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
+	CXXFLAGS += -libverbs
+else
+	CXXFLAGS += -DLIB_IBVERBS_UNAVAILABLE
+endif
+
 NVFLAGS = -O3 -Iinclude -x cu -lnuma -arch=native
 LDFLAGS    += -lpthread
 all: $(EXE)
