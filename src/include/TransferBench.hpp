@@ -34,7 +34,7 @@ THE SOFTWARE.
 #include <sstream>
 #include "Compatibility.hpp"
 #include "EnvVars.hpp"
-#include "IBVerbsWrapper.hpp"
+#include "RdmaTransfer.hpp"
 
 // Simple configuration parameters
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);  // Amount of data transferred per Transfer

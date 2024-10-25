@@ -28,7 +28,7 @@ THE SOFTWARE.
 #include <time.h>
 #include "Compatibility.hpp"
 #include "Kernels.hpp"
-#include "IBVerbsWrapper.hpp"
+#include "RdmaTransfer.hpp"
 
 #define TB_VERSION "1.52"
 
