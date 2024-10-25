@@ -578,7 +578,7 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
     {      
       for (Transfer* transfer : exeInfo.transfers)
       {
-        transfer->rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, transfer->numSubExecs, ev.ibPort);
+        transfer->rdmaExecutor.InitDeviceAndQPs(exeIndex, dstExeIndex, ev.ibGidIndex, ev.roceVersion, transfer->numSubExecs, ev.ibPort);
       }
     }
   }

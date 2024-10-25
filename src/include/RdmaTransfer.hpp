@@ -52,18 +52,21 @@ public:
    * @param source_device The index of the source RDMA device to be initialized.
    * @param destination_device The index of the destination RDMA device (currently unused).
    * @param gid_index The GID index to be used for RoCE (RDMA over Converged Ethernet).
+   * @param roce_version RoCE version used for GID Indexing.
    * @param qpairs_count The number of QPs to use for each transfer.
    * @param port_num The port ID of the RDMA device to be used (default is 1).
    *
    * @note This function will exit the program if the selected RDMA device is down.
    */
-  void InitDeviceAndQPs(int source_device, int destination_device, uint8_t gid_index, uint8_t qpairs_count, uint8_t port_num)
+  void InitDeviceAndQPs(int source_device, int destination_device, int gid_index, int roce_version, uint8_t qpairs_count, uint8_t port_num)
   {
     InitDeviceList();
     src_device_id = source_device;
     dst_device_id = destination_device;
     ib_device_port = port_num;
     qp_count = qpairs_count;
+    int src_gid_index = gid_index;
+    int dst_gid_index = gid_index;
     InitRDMAResources(src_device_id, port_num);
     InitRDMAResources(dst_device_id, port_num);
     auto && src_rdma = ib_attribute_mapper[src_device_id];
@@ -72,10 +75,12 @@ public:
     assert(src_rdma->port_attr.link_layer == dst_rdma->port_attr.link_layer);
     if(isRoce)
     {
+      IBV_CALL(set_gid_index(src_rdma->device_context, port_num, src_rdma->port_attr.gid_tbl_len, roce_version, &src_gid_index));
+      IBV_CALL(set_gid_index(dst_rdma->device_context, port_num, dst_rdma->port_attr.gid_tbl_len, roce_version, &dst_gid_index));
       IBV_CALL(set_ibv_gid(src_rdma->device_context,
-                          port_num, gid_index, src_rdma->gid));
+                          port_num, src_gid_index, src_rdma->gid));
       IBV_CALL(set_ibv_gid(dst_rdma->device_context,
-                          port_num, gid_index, dst_rdma->gid));
+                          port_num, dst_gid_index, dst_rdma->gid));
     }
     assert(sender_qp == nullptr);
     assert(receiver_qp == nullptr);
@@ -101,7 +106,7 @@ public:
       IBV_CALL(qp_transition_to_ready_to_receive(sender_qp[i],
                                                   dst_rdma->port_attr.lid,
                                                   receiver_qp[i]->qp_num,
-                                                  dst_rdma->gid, gid_index,
+                                                  dst_rdma->gid, dst_gid_index,
                                                   ib_device_port, isRoce,
                                                   src_rdma->port_attr.active_mtu
                                                 ));
@@ -111,7 +116,7 @@ public:
       IBV_CALL(qp_transition_to_ready_to_receive(receiver_qp[i],
                                                 src_rdma->port_attr.lid,
                                                 sender_qp[i]->qp_num,
-                                                src_rdma->gid, gid_index,
+                                                src_rdma->gid, src_gid_index,
                                                 ib_device_port, isRoce,
                                                 dst_rdma->port_attr.active_mtu
                                                 ));
@@ -368,7 +373,7 @@ int RdmaTransfer::ib_device_count = 0;
 class RdmaTransfer
 {
 public:
-  void InitDeviceAndQPs(int source_device, int destination_device, uint8_t gid_index, uint8_t qpairs_count, uint8_t port_num)
+  void InitDeviceAndQPs(int source_device, int destination_device, int gid_index, int roce_version, uint8_t qpairs_count, uint8_t port_num)
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }

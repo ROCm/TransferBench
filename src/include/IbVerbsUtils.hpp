@@ -1,6 +1,14 @@
 #ifndef LIB_IBVERBS_UNAVAILABLE
 #pragma once
 #include <infiniband/verbs.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <arpa/inet.h>
+#include <assert.h>
+#include <fcntl.h>
+
 #define MAX_SEND_WR_PER_QP 12
 #define MAX_RECV_WR_PER_QP 12
 
@@ -254,4 +262,192 @@ int poll_completion_queue(struct ibv_cq *cq, int transferIdx, std::vector<bool> 
   sendRecvStat[transferIdx] = false;
   return 0;               
 }
+
+static bool is_configured_gid(union ibv_gid* gid)
+{
+  const struct in6_addr *a = (struct in6_addr *)gid->raw;
+  int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
+  if (((a->s6_addr32[0] | trailer) == 0UL) || ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL)))
+  {
+    return false;
+  }
+  return true;
+}
+
+static bool link_local_gid(union ibv_gid* gid)
+{
+  const struct in6_addr *a = (struct in6_addr *)gid->raw;
+  if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL)
+  {
+    return true;
+  }
+  return false;
+}
+
+static bool validGid(union ibv_gid* gid)
+{
+  return (is_configured_gid(gid) && !link_local_gid(gid));
+}
+
+static sa_family_t get_ib_address_family()
+{
+  sa_family_t family = AF_INET;
+  const char* env = getenv("IB_ADDR_FAMILY");
+  if (env == NULL || strlen(env) == 0) {
+    return family;
+  }
+
+  printf("IB_ADDR_FAMILY set by environment to %s\n", env);
+
+  if (strcmp(env, "AF_INET") == 0) {
+    family = AF_INET;
+  } else if (strcmp(env, "AF_INET6") == 0) {
+    family = AF_INET6;
+  }
+
+  return family;
+}
+
+static sa_family_t get_gid_address_family(union ibv_gid* gid)
+{
+  const struct in6_addr *a = (struct in6_addr *)gid->raw;
+  bool isIpV4Mapped = ((a->s6_addr32[0] | a->s6_addr32[1]) | (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL;
+  bool isIpV4MappedMulticast = (a->s6_addr32[0] == htonl(0xff0e0000) && ((a->s6_addr32[1] | (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
+  return (isIpV4Mapped || isIpV4MappedMulticast) ? AF_INET : AF_INET6;
+}
+
+static bool match_gid_address_prefix(sa_family_t af, void* prefix, int prefixlen, union ibv_gid* gid)
+{
+  struct in_addr *base = NULL;
+  struct in6_addr *base6 = NULL;
+  struct in6_addr *addr6 = NULL;;
+  if (af == AF_INET) {
+    base = (struct in_addr *)prefix;
+  } else {
+    base6 = (struct in6_addr *)prefix;
+  }
+  addr6 = (struct in6_addr *)gid->raw;
+
+#define NETMASK(bits) (htonl(0xffffffff ^ ((1 << (32 - bits)) - 1)))
+
+  int i = 0;
+  while (prefixlen > 0 && i < 4) {
+    if (af == AF_INET) {
+      int mask = NETMASK(prefixlen);
+      if ((base->s_addr & mask) ^ (addr6->s6_addr32[3] & mask)) {
+        break;
+      }
+      prefixlen = 0;
+      break;
+    } else {
+      if (prefixlen >= 32) {
+        if (base6->s6_addr32[i] ^ addr6->s6_addr32[i]) {
+          break;
+        }
+        prefixlen -= 32;
+        ++i;
+      } else {
+        int mask = NETMASK(prefixlen);
+        if ((base6->s6_addr32[i] & mask) ^ (addr6->s6_addr32[i] & mask)) {
+          break;
+        }
+        prefixlen = 0;
+      }
+    }
+  }
+
+  return (prefixlen == 0) ? true : false;
+}
+
+static int get_RoCE_version_number(const char* deviceName, int portNum, int gidIndex, int* version) {
+  char gidRoceVerStr[16] = { 0 };
+  char roceTypePath[PATH_MAX] = { 0 };
+  sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d", deviceName, portNum, gidIndex);
+
+  int fd = open(roceTypePath, O_RDONLY);
+  if (fd == -1)
+  {
+    return 1;
+  }
+
+  int ret = read(fd, gidRoceVerStr, 15);
+  close(fd);
+
+  if (ret == -1)
+  {
+    return 1;
+  }
+
+  if (strlen(gidRoceVerStr))
+  {
+    if (strncmp(gidRoceVerStr, "IB/RoCE v1", strlen("IB/RoCE v1")) == 0 || strncmp(gidRoceVerStr, "RoCE v1", strlen("RoCE v1")) == 0)
+    {
+      *version = 1;
+    }
+    else if (strncmp(gidRoceVerStr, "RoCE v2", strlen("RoCE v2")) == 0)
+    {
+      *version = 2;
+    }
+  }
+
+  return 0;
+}
+
+static int update_gid_index(struct ibv_context* context, uint8_t portNum, sa_family_t af, void* prefix, int prefixlen, int roceVer, int gidIndexCandidate, int* gidIndex)
+{
+  union ibv_gid gid, gidCandidate;
+  IBV_CALL(ibv_query_gid(context, portNum, *gidIndex, &gid));
+  IBV_CALL(ibv_query_gid(context, portNum, gidIndexCandidate, &gidCandidate));
+
+  sa_family_t usrFam = af;
+  sa_family_t gidFam = get_gid_address_family(&gid);
+  sa_family_t gidCandidateFam = get_gid_address_family(&gidCandidate);
+  bool gidCandidateMatchSubnet = match_gid_address_prefix(usrFam, prefix, prefixlen, &gidCandidate);
+
+  if (gidCandidateFam != gidFam && gidCandidateFam == usrFam && gidCandidateMatchSubnet)
+  {
+    *gidIndex = gidIndexCandidate;
+  }
+  else
+  {
+    if (gidCandidateFam != usrFam || !validGid(&gidCandidate) || !gidCandidateMatchSubnet)
+    {
+      return 0;
+    }
+    int usrRoceVer = roceVer;
+    int gidRoceVerNum, gidRoceVerNumCandidate;
+    const char* deviceName = ibv_get_device_name(context->device);
+    IBV_CALL(get_RoCE_version_number(deviceName, portNum, *gidIndex, &gidRoceVerNum));
+    IBV_CALL(get_RoCE_version_number(deviceName, portNum, gidIndexCandidate, &gidRoceVerNumCandidate));
+    if ((gidRoceVerNum != gidRoceVerNumCandidate || !validGid(&gid)) && gidRoceVerNumCandidate == usrRoceVer)
+    {
+      *gidIndex = gidIndexCandidate;
+    }
+  }
+  return 0;
+}
+
+int set_gid_index(struct ibv_context *context, uint8_t portNum, int gidTblLen, int roce_version, int *gidIndex)
+{
+  if (*gidIndex >= 0)
+  {
+    return 0;
+  }
+
+  // TODO: Add support for AF_INET6 as user input (not commonly used on Host side)  
+  sa_family_t userAddrFamily = AF_INET;
+
+  int userRoceVersion = roce_version;
+
+  // TODO: Get address range from user
+  void *prefix = NULL;
+
+  *gidIndex = 0;
+  for (int gidIndexNext = 1; gidIndexNext < gidTblLen; ++gidIndexNext)
+  {
+    IBV_CALL(update_gid_index(context, portNum, userAddrFamily, prefix, 0, userRoceVersion, gidIndexNext, gidIndex));
+  }
+  return 0;
+}
+
 #endif
