@@ -427,15 +427,13 @@ static int update_gid_index(struct ibv_context* context, uint8_t portNum, sa_fam
   return 0;
 }
 
-int set_gid_index(struct ibv_context *context, uint8_t portNum, int gidTblLen, int roce_version, int *gidIndex)
+int set_gid_index(struct ibv_context *context, uint8_t portNum, int gidTblLen, int roce_version, int ip_address_family, int *gidIndex)
 {
   if (*gidIndex >= 0)
   {
     return 0;
-  }
-
-  // TODO: Add support for AF_INET6 as user input (not commonly used on Host side)  
-  sa_family_t userAddrFamily = AF_INET;
+  }  
+  sa_family_t userAddrFamily = (ip_address_family == 6)? AF_INET6 : AF_INET;
 
   int userRoceVersion = roce_version;
 

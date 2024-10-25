@@ -54,11 +54,12 @@ public:
    * @param gid_index The GID index to be used for RoCE (RDMA over Converged Ethernet).
    * @param roce_version RoCE version used for GID Indexing.
    * @param qpairs_count The number of QPs to use for each transfer.
+   * @param ip_address_family The IP Address Family for source and destination adapters
    * @param port_num The port ID of the RDMA device to be used (default is 1).
    *
    * @note This function will exit the program if the selected RDMA device is down.
    */
-  void InitDeviceAndQPs(int source_device, int destination_device, int gid_index, int roce_version, uint8_t qpairs_count, uint8_t port_num)
+  void InitDeviceAndQPs(int source_device, int destination_device, int gid_index, int roce_version, uint8_t qpairs_count, int ip_address_family, uint8_t port_num)
   {
     InitDeviceList();
     src_device_id = source_device;
@@ -75,8 +76,8 @@ public:
     assert(src_rdma->port_attr.link_layer == dst_rdma->port_attr.link_layer);
     if(isRoce)
     {
-      IBV_CALL(set_gid_index(src_rdma->device_context, port_num, src_rdma->port_attr.gid_tbl_len, roce_version, &src_gid_index));
-      IBV_CALL(set_gid_index(dst_rdma->device_context, port_num, dst_rdma->port_attr.gid_tbl_len, roce_version, &dst_gid_index));
+      IBV_CALL(set_gid_index(src_rdma->device_context, port_num, src_rdma->port_attr.gid_tbl_len, roce_version, ip_address_family, &src_gid_index));
+      IBV_CALL(set_gid_index(dst_rdma->device_context, port_num, dst_rdma->port_attr.gid_tbl_len, roce_version, ip_address_family, &dst_gid_index));
       IBV_CALL(set_ibv_gid(src_rdma->device_context,
                           port_num, src_gid_index, src_rdma->gid));
       IBV_CALL(set_ibv_gid(dst_rdma->device_context,
@@ -373,7 +374,7 @@ int RdmaTransfer::ib_device_count = 0;
 class RdmaTransfer
 {
 public:
-  void InitDeviceAndQPs(int source_device, int destination_device, int gid_index, int roce_version, uint8_t qpairs_count, uint8_t port_num)
+  void InitDeviceAndQPs(int source_device, int destination_device, int gid_index, int roce_version, uint8_t qpairs_count, int ip_address_family, uint8_t port_num)
   {
     RDMA_NOT_SUPPORTED_ERROR();
   }

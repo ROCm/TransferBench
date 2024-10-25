@@ -106,6 +106,7 @@ public:
   int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
   int ibGidIndex;        // GID Index for RoCE NICs
   int roceVersion;       // RoCE version number
+  int ipAddressFamily;   // IP Address Famliy 
   uint8_t ibPort;        // NIC port number to be used
 
   std::vector<float> fillPattern; // Pattern of floats used to fill source data
@@ -221,6 +222,7 @@ public:
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        ,-1);
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
     roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
+    ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
 
     // P2P Benchmark related
     useDmaCopy        = GetEnvVar("USE_GPU_DMA"         , 0); // Needed for numGpuSubExec
@@ -430,7 +432,12 @@ public:
     {
       printf("[ERROR] Number of RDMA NICs to use (%d) cannot exceed number of detected NICs (%d)\n", numNicDevices, numDetectedRdmaNics);
       exit(1);
-    }    
+    }
+    if(ipAddressFamily != 4 && ipAddressFamily != 6)
+    {
+      printf("[ERROR] Valid values for IP_ADDRESS_FAMILY are only 4 or 6. Given: (%d)", ipAddressFamily);
+      exit(1);
+    }
     if (numGpuDevices > numDetectedGpus)
     {
       printf("[ERROR] Number of GPUs to use (%d) cannot exceed number of detected GPUs (%d)\n", numGpuDevices, numDetectedGpus);
@@ -637,8 +644,10 @@ public:
     printf(" USE_XCC_FILTER         - Use XCC filtering (experimental)\n");
     printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" IB_GID_INDEX           - Required for RoCE NICs (default=3)\n");
-    printf(" IB_PORT_NUMBER         - RDMA port number for RDMA executor (default=1)\n");
+    printf(" IB_PORT_NUMBER         - RDMA port count for RDMA NIC (default=1)\n");
     printf(" USE_CLOSEST_NIC        - Automatically remap GPUs to closest RDMA NIC (set to 1 to enable)\n");
+    printf(" IP_ADDRESS_FAMILY      - IP address family (4=v4, 6=v6, default=v4)\n");
+    printf(" ROCE_VERSION           - RoCE version (default=2)\n");
   }
 
   // Helper macro to switch between CSV and terminal output
@@ -732,6 +741,8 @@ public:
              std::string("IB port number is set to ") + std::to_string(ibPort));
     PRINT_EV("ROCE_VERSION", roceVersion,
              std::string("RoCE version is set to ") + std::to_string(roceVersion));
+    PRINT_EV("IP_ADDRESS_FAMILY", ipAddressFamily,
+             std::string("IP address family is set to IPv") + std::to_string(ipAddressFamily));
     if (useXccFilter)
     {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
