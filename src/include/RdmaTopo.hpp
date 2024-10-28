@@ -189,7 +189,7 @@ int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddr
   return std::abs(bus1 - bus2);
 }
 
-static void InitIbDevicePaths()
+static void InitDevicePaths()
 {
   if (pcie_root == nullptr)
   {
@@ -280,7 +280,7 @@ static void InitIbDevicePaths()
 
 static int TraverseClosestIbDevice(int hipDeviceId)
 {
-  InitIbDevicePaths();
+  InitDevicePaths();
   char hipPciBusId[64];
   hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), hipDeviceId);
   if (err != hipSuccess) 
@@ -310,7 +310,7 @@ static int TraverseClosestIbDevice(int hipDeviceId)
 
 static int TraverseClosestGPUDevice(int IbvDeviceId)
 {
-  InitIbDevicePaths();
+  InitDevicePaths();
   assert(IbvDeviceId < IbDeviceBusIds.size());
   auto address = IbDeviceBusIds[IbvDeviceId];
   if (address == "") return -1;
