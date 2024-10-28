@@ -299,7 +299,7 @@ static void InitDevicePaths()
   }  
 }
 
-static int TraverseClosestIbDevice(int hipDeviceId)
+static int TraverseClosestIbDevice(int hipDeviceId, bool useTopoTree = true)
 {
   InitDevicePaths();
   char hipPciBusId[64];
@@ -309,24 +309,32 @@ static int TraverseClosestIbDevice(int hipDeviceId)
     std::cerr << "Failed to get PCI Bus ID for HIP device " << hipDeviceId << ": " << hipGetErrorString(err) << std::endl;
     return -1;
   }
-
-  int closestDevice = -1;
-  int minDistance = std::numeric_limits<int>::max();
-
-  // for (int i = 0; i < IbDeviceBusIds.size(); ++i)
-  // { 
-  //   auto address = IbDeviceBusIds[i];
-  //   if (address != "") {
-  //     int distance = GetPcieDistance(hipPciBusId, address);
-  //     if (distance < minDistance && distance >= 0)
-  //     {
-  //       minDistance = distance;
-  //       closestDevice = i;
-  //     }
-  //   }
-  // }
-  return GetLowestCommonAncestor(*pcie_root, hipPciBusId, IbDeviceBusIds);
-  //return closestDevice;
+  // The following will only use distance between bus IDs 
+  // to determine the closest NIC to GPU
+  if(!useTopoTree)
+  {
+    int closestDevice = -1;
+    int minDistance = std::numeric_limits<int>::max();
+    for (int i = 0; i < IbDeviceBusIds.size(); ++i)
+    { 
+      auto address = IbDeviceBusIds[i];
+      if (address != "") {
+        int distance = GetPcieDistance(hipPciBusId, address);
+        if (distance < minDistance && distance >= 0)
+        {
+          minDistance = distance;
+          closestDevice = i;
+        }
+      }
+    }
+    return closestDevice;
+  }  
+  // Use the topology tree to find the NIC that shares the LCA 
+  // with the GPU
+  else 
+  {
+    return GetLowestCommonAncestor(*pcie_root, hipPciBusId, IbDeviceBusIds);
+  }  
 }
 
 static int TraverseClosestGPUDevice(int IbvDeviceId)
