@@ -77,8 +77,11 @@ public:
     return nullptr;
   }
 };
+
 static PCIe_tree* pcie_root = nullptr;
-void InsertPCIePath(PCIe_tree& root, const std::string& pcieAddress) {
+
+void InsertPCIePath(PCIe_tree& root, const std::string& pcieAddress)
+{
   std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
   std::string canonicalPath = std::filesystem::canonical(devicePath).string();
   std::istringstream iss(canonicalPath);
@@ -86,10 +89,12 @@ void InsertPCIePath(PCIe_tree& root, const std::string& pcieAddress) {
   PCIe_tree* currentNode = &root;
 
   bool ignore = true;
-  while (std::getline(iss, token, '/')) {
+  while (std::getline(iss, token, '/'))
+  {
     std::string address = token;
     auto it = currentNode->children.find(PCIe_tree(address));
-    if (it == currentNode->children.end()) {
+    if (it == currentNode->children.end())
+    {
       currentNode->children.insert(PCIe_tree(address));
       it = currentNode->children.find(PCIe_tree(address));
     }
@@ -97,21 +102,28 @@ void InsertPCIePath(PCIe_tree& root, const std::string& pcieAddress) {
   }
 }
 
-const PCIe_tree* FindLowestCommonAncestor(const PCIe_tree* root, std::string node1, std::string node2) {
-  if (!root || root->address == node1 || root->address == node2) {
+const PCIe_tree* FindLowestCommonAncestor(const PCIe_tree* root, std::string node1, std::string node2)
+{
+  if (!root || root->address == node1 || root->address == node2)
+  {
     return root;
   }
 
   const PCIe_tree* leftLCA = nullptr;
   const PCIe_tree* rightLCA = nullptr;
 
-  for (const auto& child : root->children) {
+  for (const auto& child : root->children)
+  {
     const PCIe_tree* lca = FindLowestCommonAncestor(&child, node1, node2);
-    if (lca) {
-      if (leftLCA) {
+    if (lca)
+    {
+      if (leftLCA)
+      {
         rightLCA = lca;
         break;
-      } else {
+      } 
+      else
+      {
         leftLCA = lca;
       }
     }
@@ -124,30 +136,39 @@ const PCIe_tree* FindLowestCommonAncestor(const PCIe_tree* root, std::string nod
   return leftLCA ? leftLCA : rightLCA;
 }
 
-int GetDistanceToAncestor(const std::string leafnode, const PCIe_tree* node, int depth = 0) {
-  if (!node) {
+int GetDistanceToAncestor(const std::string leafnode, const PCIe_tree* node, int depth = 0)
+{
+  if (!node)
+  {
     return -1;
   }
-  if (leafnode == node->address) {
+  if (leafnode == node->address)
+  {
     return depth;
   }
-  for (const auto& child : node->children) {
+  for (const auto& child : node->children)
+  {
     int distance = GetDistanceToAncestor(leafnode, &child, depth + 1);
-    if (distance != -1) {
+    if (distance != -1)
+    {
       return distance;
     }
   }
   return -1;
 }
 
-static int GetLowestCommonAncestor(const PCIe_tree& root, const std::string node0, const std::vector<std::string>& leafNodes) {
+static int GetLowestCommonAncestor(const PCIe_tree& root, const std::string node0, const std::vector<std::string>& leafNodes)
+{
   int max_depth = -1;
   int index_of_closest = -1;
-  for (const auto& leafNode : leafNodes) {
+  for (const auto& leafNode : leafNodes)
+  {
     const PCIe_tree* lca = FindLowestCommonAncestor(&root, node0, leafNode);
-    if (lca) {
+    if (lca)
+    {
       int depth = GetDistanceToAncestor(lca->address, pcie_root);
-      if (depth > max_depth) {
+      if (depth > max_depth)
+      {
         max_depth = depth;
         index_of_closest = &leafNode - &leafNodes[0];
       }
