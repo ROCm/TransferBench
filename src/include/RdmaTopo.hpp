@@ -49,6 +49,118 @@ static bool Initialized = false;
   Initialized = true;   \
   } while(0);
 
+class PCIe_tree 
+{
+public:
+  std::set<PCIe_tree> children;
+  std::string address;
+
+  // Constructor
+  PCIe_tree(const std::string& addr) : address(addr) {}
+
+  // Comparison operator for std::set
+  bool operator<(const PCIe_tree& other) const {
+    return address < other.address;
+  }
+
+  // Function to find a node by address
+  const PCIe_tree* find(const std::string& addr) const {
+    if (address == addr) {
+      return this;
+    }
+    for (const auto& child : children) {
+      const PCIe_tree* result = child.find(addr);
+      if (result) {
+        return result;
+      }
+    }
+    return nullptr;
+  }
+};
+static PCIe_tree* pcie_root = nullptr;
+void InsertPCIePath(PCIe_tree& root, const std::string& pcieAddress)
+{
+    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
+    std::string canonicalPath = std::filesystem::canonical(devicePath).string();
+    std::istringstream iss(canonicalPath);
+    std::string token;
+    PCIe_tree* currentNode = &root;
+
+    bool ignore = true;
+    while (std::getline(iss, token, '/'))
+    {
+        std::string address = token;
+        auto it = currentNode->children.find(PCIe_tree(address));
+        if (it == currentNode->children.end())
+        {
+            currentNode->children.insert(PCIe_tree(address));
+            it = currentNode->children.find(PCIe_tree(address));
+        }
+        currentNode = const_cast<PCIe_tree*>(&(*it));
+    }
+}
+
+const PCIe_tree* findLowestCommonAncestor(const PCIe_tree* root, std::string node1, std::string node2) {
+    if (!root || root->address == node1 || root->address == node2) {
+        return root;
+    }
+
+    const PCIe_tree* leftLCA = nullptr;
+    const PCIe_tree* rightLCA = nullptr;
+
+    for (const auto& child : root->children) {
+        const PCIe_tree* lca = findLowestCommonAncestor(&child, node1, node2);
+        if (lca) {
+            if (leftLCA) {
+                rightLCA = lca;
+                break;
+            } else {
+                leftLCA = lca;
+            }
+        }
+    }
+
+    if (leftLCA && rightLCA) {
+        return root;
+    }
+
+    return leftLCA ? leftLCA : rightLCA;
+}
+
+int getDistanceToAncestor(const std::string leafnode, const PCIe_tree* node, int depth = 0) {
+    if (!node) {
+        return -1;
+    }
+    if (leafnode == node->address) {
+        return depth;
+    }
+    for (const auto& child : node->children) {
+        int distance = getDistanceToAncestor(leafnode, &child, depth + 1);
+        if (distance != -1) {
+            return distance;
+        }
+    }
+    return -1;
+}
+
+static int GetLowestCommonAncestor(const PCIe_tree& root, const std::string node0, const std::vector<std::string>& leafNodes) {
+    int max_depth = -1;
+    int index_of_closest = -1;
+    for (const auto& leafNode : leafNodes) {
+        const PCIe_tree* lca = findLowestCommonAncestor(&root, node0, leafNode);
+        if (lca) {
+            int depth = getDistanceToAncestor(lca->address, pcie_root);
+            if(depth > max_depth)
+            {
+              max_depth = depth;
+              index_of_closest = &leafNode - &leafNodes[0];
+            }
+            //std::cout << "Lowest common ancestor of " << node0.address << " and " << leafNode.address << " is " << lca->address << " at distance " << distance << std::endl;
+        }
+    }
+    return index_of_closest;
+}
+
 // Function to extract the bus number from a PCIe address (domain:bus:device.function)
 int GetBusNumber(const std::string& pcieAddress)
 {
@@ -84,6 +196,10 @@ int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddr
 
 static void InitIbDevicePaths()
 {
+  if (pcie_root == nullptr)
+  {
+    pcie_root = new PCIe_tree("");
+  }
   struct ibv_device **dev_list;
   dev_list = ibv_get_device_list(&DeviceCount);
   if (!dev_list)
@@ -146,12 +262,25 @@ static void InitIbDevicePaths()
       std::size_t pos = pciPath.find_last_of('/');
       if (pos != std::string::npos) {
         std::string nicBusId = pciPath.substr(pos + 1);
-        IbDeviceBusIds[i] = nicBusId;        
+        IbDeviceBusIds[i] = nicBusId;
+        InsertPCIePath(*pcie_root, nicBusId);       
       }
     }
   }
-
   ibv_free_device_list(dev_list);  
+  int numHipDevices;
+  HIP_CALL(hipGetDeviceCount(&numHipDevices));
+  for (int i = 0; i < numHipDevices; ++i)
+  {
+    char hipPciBusId[64];
+    hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i);
+    if (err != hipSuccess) 
+    {
+      std::cerr << "Failed to get PCI Bus ID for HIP device " << i << ": " << hipGetErrorString(err) << std::endl;   
+      return;   
+    }
+    InsertPCIePath(*pcie_root, hipPciBusId);
+  }  
 }
 
 static int TraverseClosestIbDevice(int hipDeviceId)
@@ -168,19 +297,20 @@ static int TraverseClosestIbDevice(int hipDeviceId)
   int closestDevice = -1;
   int minDistance = std::numeric_limits<int>::max();
 
-  for (int i = 0; i < IbDeviceBusIds.size(); ++i)
-  { 
-    auto address = IbDeviceBusIds[i];
-    if (address != "") {
-      int distance = GetPcieDistance(hipPciBusId, address);
-      if (distance < minDistance && distance >= 0)
-      {
-        minDistance = distance;
-        closestDevice = i;
-      }
-    }
-  }
-  return closestDevice;
+  // for (int i = 0; i < IbDeviceBusIds.size(); ++i)
+  // { 
+  //   auto address = IbDeviceBusIds[i];
+  //   if (address != "") {
+  //     int distance = GetPcieDistance(hipPciBusId, address);
+  //     if (distance < minDistance && distance >= 0)
+  //     {
+  //       minDistance = distance;
+  //       closestDevice = i;
+  //     }
+  //   }
+  // }
+  return GetLowestCommonAncestor(*pcie_root, hipPciBusId, IbDeviceBusIds);
+  //return closestDevice;
 }
 
 static int TraverseClosestGPUDevice(int IbvDeviceId)
