@@ -31,7 +31,7 @@ THE SOFTWARE.
 
 #include "TransferBench.hpp"
 #include "GetClosestNumaNode.hpp"
-#include "RdmaTopo.hpp"
+#include "PCIeTopo.hpp"
 
 int main(int argc, char **argv)
 {
