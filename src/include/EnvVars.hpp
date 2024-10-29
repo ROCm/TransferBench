@@ -645,7 +645,6 @@ public:
     printf(" VALIDATE_DIRECT        - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" IB_GID_INDEX           - Required for RoCE NICs (default=3)\n");
     printf(" IB_PORT_NUMBER         - RDMA port count for RDMA NIC (default=1)\n");
-    printf(" USE_CLOSEST_NIC        - Automatically remap GPUs to closest RDMA NIC (set to 1 to enable)\n");
     printf(" IP_ADDRESS_FAMILY      - IP address family (4=v4, 6=v6, default=v4)\n");
     printf(" ROCE_VERSION           - RoCE version (default=2)\n");
   }
