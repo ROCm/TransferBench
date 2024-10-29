@@ -20,8 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-#ifndef GET_CLOSEST_NIC_HPP
-#define GET_CLOSEST_NIC_HPP
+#ifndef PCIE_TOPO_HPP
+#define PCIE_TOPO_HPP
 #ifndef LIB_IBVERBS_UNAVAILABLE
 #include <iostream>
 #include "Compatibility.hpp"
@@ -160,28 +160,8 @@ int GetDistanceToAncestor(const std::string leafnode, const PCIe_tree* node, int
   return -1;
 }
 
-static int GetLowestCommonAncestor(const PCIe_tree& root, const std::string node0, const std::vector<std::string>& leafNodes)
-{
-  int max_depth = -1;
-  int index_of_closest = -1;
-  for (const auto& leafNode : leafNodes)
-  {
-    const PCIe_tree* lca = FindLowestCommonAncestor(&root, node0, leafNode);
-    if (lca)
-    {
-      int depth = GetDistanceToAncestor(lca->address, &pcie_root);
-      if (depth > max_depth)
-      {
-        max_depth = depth;
-        index_of_closest = &leafNode - &leafNodes[0];
-      }
-    }
-  }
-  return index_of_closest;
-}
-
 // Function to extract the bus number from a PCIe address (domain:bus:device.function)
-int GetBusNumber(const std::string& pcieAddress)
+static int GetBusNumber(const std::string& pcieAddress)
 {
   int domain, bus, device, function;
   char delimiter;
@@ -199,7 +179,7 @@ int GetBusNumber(const std::string& pcieAddress)
 }
 
 // Function to compute the distance between two PCIe addresses
-int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddress2)
+static int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddress2)
 {
   int bus1 = GetBusNumber(pcieAddress1);
   int bus2 = GetBusNumber(pcieAddress2);
@@ -211,6 +191,49 @@ int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddr
 
   // Distance between two PCIe devices based on their bus numbers
   return std::abs(bus1 - bus2);
+}
+
+static int GetLowestCommonAncestor(const PCIe_tree& root, const std::string node0, const std::vector<std::string>& leafNodes)
+{
+  int max_depth = -1;
+  int index_of_closest = -1;
+  std::vector <int> matches;
+  for (const auto& leafNode : leafNodes)
+  {
+    if (leafNode.empty()) continue;    
+    const PCIe_tree* lca = FindLowestCommonAncestor(&root, node0, leafNode);
+    if (lca)
+    {
+      int depth = GetDistanceToAncestor(lca->address, &pcie_root);
+      if (depth > max_depth)
+      {        
+        max_depth = depth;
+        index_of_closest = &leafNode - &leafNodes[0];
+        matches.clear(); // found a new max depth
+        matches.push_back(index_of_closest);
+      }
+      else if(depth == max_depth && depth >= 0)
+      {
+        matches.push_back(&leafNode - &leafNodes[0]);
+      }
+    }
+  }
+  // when more than one LCA match is found, opt for the one with the smallest
+  // bus id difference
+  if(matches.size() > 1)
+  {
+    int minDistance = std::numeric_limits<int>::max();
+    for (const auto& match : matches)
+    {
+      int distance = GetPcieDistance(node0, leafNodes[match]);
+      if (distance < minDistance)
+      {
+        minDistance = distance;
+        index_of_closest = match;
+      }
+    }
+  }
+  return index_of_closest;
 }
 
 static void InitDevicePaths()
@@ -457,4 +480,4 @@ int GetClosestIbDevice(int hipDeviceId)
 }
 void PrintNicToGPUTopo(bool printAsCsv) { }
 #endif
-#endif // GET_CLOSEST_NIC_HPP
+#endif // PCIE_TOPO_HPP
