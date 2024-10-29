@@ -336,11 +336,12 @@ static int get_closest_rdma_nic_id(int hipDeviceId, bool useTopoTree = true)
     std::cerr << "Failed to get PCI Bus ID for HIP device " << hipDeviceId << ": " << hipGetErrorString(err) << std::endl;
     return -1;
   }
+  int closestRdmaNicId = get_nearest_pcie_device_in_tree(pcie_root, hipPciBusId, IbDeviceBusIds);
   // The following will only use distance between bus IDs 
-  // to determine the closest NIC to GPU
-  if(!useTopoTree)
+  // to determine the closest NIC to GPU if the PCIe tree approach fails
+  if(closestRdmaNicId < 0)
   {
-    int closestRdmaNicId = -1;
+    printf("[Warn] falling back to PCIe bus ID distance to determine proximity\n");
     int minDistance = std::numeric_limits<int>::max();
     for (int i = 0; i < IbDeviceBusIds.size(); ++i)
     { 
@@ -353,15 +354,9 @@ static int get_closest_rdma_nic_id(int hipDeviceId, bool useTopoTree = true)
           closestRdmaNicId = i;
         }
       }
-    }
-    return closestRdmaNicId;
-  }  
-  // Use the topology tree to find the NIC that shares the LCA 
-  // with the GPU
-  else 
-  {
-    return get_nearest_pcie_device_in_tree(pcie_root, hipPciBusId, IbDeviceBusIds);
-  }  
+    }  
+  }
+  return closestRdmaNicId;    
 }
 
 static int get_closest_gpu_device_id(int IbvDeviceId)
