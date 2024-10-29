@@ -86,6 +86,11 @@ static PCIe_tree pcie_root;
 static void insert_pcie_path_to_tree(PCIe_tree* root, const std::string& pcieAddress)
 {
   std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
+  if (!std::filesystem::exists(devicePath))
+  {
+    printf("[ERROR] Device path %s does not exist\n", devicePath.c_str());
+    return;
+  }
   std::string canonicalPath = std::filesystem::canonical(devicePath).string();
   std::istringstream iss(canonicalPath);
   std::string token;
