@@ -57,6 +57,9 @@ public:
 
   // Constructor
   PCIe_tree(const std::string& addr) : address(addr) {}
+  
+  // Default constructor
+  PCIe_tree() : address("") {}
 
   // Comparison operator for std::set
   bool operator<(const PCIe_tree& other) const {
@@ -78,15 +81,15 @@ public:
   }
 };
 
-static PCIe_tree* pcie_root = nullptr;
+static PCIe_tree pcie_root;
 
-void InsertPCIePath(PCIe_tree& root, const std::string& pcieAddress)
+void InsertPCIePath(PCIe_tree* root, const std::string& pcieAddress)
 {
   std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
   std::string canonicalPath = std::filesystem::canonical(devicePath).string();
   std::istringstream iss(canonicalPath);
   std::string token;
-  PCIe_tree* currentNode = &root;
+  PCIe_tree* currentNode = root;
 
   bool ignore = true;
   while (std::getline(iss, token, '/'))
@@ -166,7 +169,7 @@ static int GetLowestCommonAncestor(const PCIe_tree& root, const std::string node
     const PCIe_tree* lca = FindLowestCommonAncestor(&root, node0, leafNode);
     if (lca)
     {
-      int depth = GetDistanceToAncestor(lca->address, pcie_root);
+      int depth = GetDistanceToAncestor(lca->address, &pcie_root);
       if (depth > max_depth)
       {
         max_depth = depth;
@@ -212,10 +215,6 @@ int GetPcieDistance(const std::string& pcieAddress1, const std::string& pcieAddr
 
 static void InitDevicePaths()
 {
-  if (pcie_root == nullptr)
-  {
-    pcie_root = new PCIe_tree("");
-  }
   struct ibv_device **dev_list;
   dev_list = ibv_get_device_list(&DeviceCount);
   if (!dev_list)
@@ -279,7 +278,7 @@ static void InitDevicePaths()
       if (pos != std::string::npos) {
         std::string nicBusId = pciPath.substr(pos + 1);
         IbDeviceBusIds[i] = nicBusId;
-        InsertPCIePath(*pcie_root, nicBusId);       
+        InsertPCIePath(&pcie_root, nicBusId);       
       }
     }
   }
@@ -295,7 +294,7 @@ static void InitDevicePaths()
       std::cerr << "Failed to get PCI Bus ID for HIP device " << i << ": " << hipGetErrorString(err) << std::endl;   
       return;   
     }
-    InsertPCIePath(*pcie_root, hipPciBusId);
+    InsertPCIePath(&pcie_root, hipPciBusId);
   }  
 }
 
@@ -333,7 +332,7 @@ static int TraverseClosestIbDevice(int hipDeviceId, bool useTopoTree = true)
   // with the GPU
   else 
   {
-    return GetLowestCommonAncestor(*pcie_root, hipPciBusId, IbDeviceBusIds);
+    return GetLowestCommonAncestor(pcie_root, hipPciBusId, IbDeviceBusIds);
   }  
 }
 
