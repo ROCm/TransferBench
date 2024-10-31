@@ -648,6 +648,7 @@ public:
     printf(" IP_ADDRESS_FAMILY      - IP address family (4=v4, 6=v6, default=v4)\n");
     printf(" ROCE_VERSION           - RoCE version (default=2)\n");
     printf(" SHOW_TOPO_TREE         - If set, show the PCIe tree paths for NICs and GPUs\n");
+    printf(" CLOSEST_NIC            - Comma-separated list of NICs to be mapped to each GPU in the device order\n");
   }
 
   // Helper macro to switch between CSV and terminal output

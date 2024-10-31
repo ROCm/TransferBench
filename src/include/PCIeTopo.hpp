@@ -38,7 +38,8 @@ static std::vector<std::string> IbDeviceBusIds;
 static std::vector<std::set<int>> NicToGpuMapper;
 static std::vector<int> GpuToNicMapper;
 static std::vector<std::string> DeviceNames;
-static int DeviceCount;
+static int RdmaNicCount;
+static int GpuCount;
 static bool Initialized = false;
 #define INIT_ONCE(ret)  \
   do {                  \
@@ -250,19 +251,19 @@ static int get_nearest_pcie_device_in_tree(const PCIe_tree& root, const std::str
 static void init_device_paths_and_build_pcie_tree()
 {
   struct ibv_device **dev_list;
-  dev_list = ibv_get_device_list(&DeviceCount);
+  dev_list = ibv_get_device_list(&RdmaNicCount);
   if (!dev_list)
   {
     std::cerr << "Failed to get IB devices list." << std::endl;
     return;
   }
-  IbDeviceBusIds.resize(DeviceCount, "");
-  NicToGpuMapper.resize(DeviceCount);
-  DeviceNames.resize(DeviceCount);
+  IbDeviceBusIds.resize(RdmaNicCount, "");
+  NicToGpuMapper.resize(RdmaNicCount);
+  DeviceNames.resize(RdmaNicCount);
   int closestDevice = -1;
   int minDistance = std::numeric_limits<int>::max();
 
-  for (int i = 0; i < DeviceCount; ++i)
+  for (int i = 0; i < RdmaNicCount; ++i)
   {
     struct ibv_device *device = dev_list[i];
     DeviceNames[i] = device->name;
@@ -316,10 +317,10 @@ static void init_device_paths_and_build_pcie_tree()
       }
     }
   }
-  ibv_free_device_list(dev_list);  
-  int numHipDevices;
-  HIP_CALL(hipGetDeviceCount(&numHipDevices));
-  for (int i = 0; i < numHipDevices; ++i)
+  ibv_free_device_list(dev_list);    
+  HIP_CALL(hipGetDeviceCount(&GpuCount));
+  GpuToNicMapper.resize(GpuCount, -1);
+  for (int i = 0; i < GpuCount; ++i)
   {
     char hipPciBusId[64];
     hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i);
@@ -369,13 +370,10 @@ static int get_closest_gpu_device_id(int IbvDeviceId)
   init_device_paths_and_build_pcie_tree();
   assert(IbvDeviceId < IbDeviceBusIds.size());
   auto address = IbDeviceBusIds[IbvDeviceId];
-  if (address == "") return -1;
-  int numHipDevices;
-  HIP_CALL(hipGetDeviceCount(&numHipDevices));
-  GpuToNicMapper.resize(numHipDevices, -1);
+  if (address.empty()) return -1;      
   int closestDevice = -1;
   int minDistance = std::numeric_limits<int>::max();
-  for (int i = 0; i < numHipDevices; ++i)
+  for (int i = 0; i < GpuCount; ++i)
   {
     char hipPciBusId[64];
     hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i);
@@ -396,11 +394,8 @@ static int get_closest_gpu_device_id(int IbvDeviceId)
 
 static void init_device_mappings()
 {
-  INIT_ONCE();
-  int numHipDevices;
+  INIT_ONCE();  
   init_device_paths_and_build_pcie_tree();
-  HIP_CALL(hipGetDeviceCount(&numHipDevices));
-  GpuToNicMapper.resize(numHipDevices, -1);
   const char* closestNicEnv = std::getenv("CLOSEST_NIC");
   if (closestNicEnv)
   {
@@ -412,7 +407,7 @@ static void init_device_mappings()
       try
       {
         int nicId = std::stoi(token);
-        if (nicId >= 0 && nicId < DeviceCount)
+        if (nicId >= 0 && nicId < RdmaNicCount)
         {
           GpuToNicMapper[i] = nicId;
           assert(nicId < NicToGpuMapper.size());
@@ -431,15 +426,15 @@ static void init_device_mappings()
         exit(1);
       }
     }
-    if(i < numHipDevices)
+    if(i < GpuCount)
     {
-      std::cerr << "[Error] Number of entries in CLOSEST_NIC environment variable is less than the number of detected GPUs: " << numHipDevices<< std::endl;
+      std::cerr << "[Error] Number of entries in CLOSEST_NIC environment variable is less than the number of detected GPUs: " << GpuCount<< std::endl;
       exit(1);
     }
   }
   else 
   {
-    for (int i = 0; i < numHipDevices; ++i)
+    for (int i = 0; i < GpuCount; ++i)
     {
       int closestIbDevice = get_closest_rdma_nic_id(i);
       GpuToNicMapper[i] = closestIbDevice;
