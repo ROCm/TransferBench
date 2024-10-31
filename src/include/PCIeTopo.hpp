@@ -333,8 +333,7 @@ static void init_device_paths_and_build_pcie_tree()
 }
 
 static int get_closest_rdma_nic_id(int hipDeviceId, bool useTopoTree = true)
-{
-  init_device_paths_and_build_pcie_tree();
+{   
   char hipPciBusId[64];
   hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), hipDeviceId);
   if (err != hipSuccess) 
@@ -399,19 +398,51 @@ static void init_device_mappings()
 {
   INIT_ONCE();
   int numHipDevices;
+  init_device_paths_and_build_pcie_tree();
   HIP_CALL(hipGetDeviceCount(&numHipDevices));
   GpuToNicMapper.resize(numHipDevices, -1);
-
-  for (int i = 0; i < numHipDevices; ++i)
+  const char* closestNicEnv = std::getenv("CLOSEST_NIC");
+  std::cout << DeviceCount << std::endl;
+  if (closestNicEnv)
   {
-    int closestIbDevice = get_closest_rdma_nic_id(i);
-    GpuToNicMapper[i] = closestIbDevice;
-    if(closestIbDevice >= 0)
+    std::istringstream iss(closestNicEnv);
+    std::string token;
+    int i = 0; 
+    while (std::getline(iss, token, ','))
     {
-      assert(closestIbDevice < NicToGpuMapper.size());
-      NicToGpuMapper[closestIbDevice].insert(i);
+      try
+      {
+        int nicId = std::stoi(token);
+        
+        if (nicId >= 0 && nicId < DeviceCount)
+        {
+          GpuToNicMapper[i] = nicId;
+          i++;
+        }
+        else
+        {
+          std::cerr << "Invalid NIC ID in CLOSEST_NIC environment variable: " << nicId << std::endl;
+        }        
+      }
+      catch (const std::invalid_argument& e)
+      {
+        std::cerr << "Invalid NIC ID in CLOSEST_NIC environment variable: " << token << std::endl;
+      }
     }
   }
+  else 
+  {
+    for (int i = 0; i < numHipDevices; ++i)
+    {
+      int closestIbDevice = get_closest_rdma_nic_id(i);
+      GpuToNicMapper[i] = closestIbDevice;
+      if(closestIbDevice >= 0)
+      {
+        assert(closestIbDevice < NicToGpuMapper.size());
+        NicToGpuMapper[closestIbDevice].insert(i);
+      }
+    }
+  }  
 }
 
 int GetClosestIbDevice(int hipDeviceId)
