@@ -54,12 +54,17 @@ class PCIe_tree
 public:
   std::set<PCIe_tree> children;
   std::string address;
+  std::string description;
 
   // Constructor
   PCIe_tree(const std::string& addr) : address(addr) {}
   
+    // Constructor
+  PCIe_tree(const std::string& addr, const std::string& desc)
+           :address(addr), description(desc) {}
+
   // Default constructor
-  PCIe_tree() : address("") {}
+  PCIe_tree() : address(""), description("") {}
 
   // Comparison operator for std::set
   bool operator<(const PCIe_tree& other) const {
@@ -83,7 +88,7 @@ public:
 
 static PCIe_tree pcie_root;
 
-static void insert_pcie_path_to_tree(PCIe_tree* root, const std::string& pcieAddress)
+static void insert_pcie_path_to_tree(PCIe_tree* root, const std::string& pcieAddress, const std::string& description)
 {
   std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
   if (!std::filesystem::exists(devicePath))
@@ -108,6 +113,7 @@ static void insert_pcie_path_to_tree(PCIe_tree* root, const std::string& pcieAdd
     }
     currentNode = const_cast<PCIe_tree*>(&(*it));
   }
+  currentNode->description = description;
 }
 
 static const PCIe_tree* find_lca_between_two_nodes(const PCIe_tree* root, std::string node1, std::string node2)
@@ -306,7 +312,7 @@ static void init_device_paths_and_build_pcie_tree()
       if (pos != std::string::npos) {
         std::string nicBusId = pciPath.substr(pos + 1);
         IbDeviceBusIds[i] = nicBusId;
-        insert_pcie_path_to_tree(&pcie_root, nicBusId);       
+        insert_pcie_path_to_tree(&pcie_root, nicBusId, DeviceNames[i]);
       }
     }
   }
@@ -322,7 +328,7 @@ static void init_device_paths_and_build_pcie_tree()
       std::cerr << "Failed to get PCI Bus ID for HIP device " << i << ": " << hipGetErrorString(err) << std::endl;   
       return;   
     }
-    insert_pcie_path_to_tree(&pcie_root, hipPciBusId);
+    insert_pcie_path_to_tree(&pcie_root, hipPciBusId, "GPU " + std::to_string(i));
   }  
 }
 
@@ -406,13 +412,6 @@ static void init_device_mappings()
       NicToGpuMapper[closestIbDevice].insert(i);
     }
   }
-  for(int i = 0; i < DeviceCount; ++i)
-  {
-    auto closestGPU = get_closest_gpu_device_id(i);
-    if(closestGPU >= 0) {
-      NicToGpuMapper[i].insert(closestGPU);
-    }    
-  }
 }
 
 int GetClosestIbDevice(int hipDeviceId)
@@ -420,6 +419,23 @@ int GetClosestIbDevice(int hipDeviceId)
   init_device_mappings();
   assert(hipDeviceId < GpuToNicMapper.size());
   return GpuToNicMapper[hipDeviceId];
+}
+void PrintPCIeTree(const PCIe_tree& node, const std::string& prefix = "", bool isLast = true)
+{
+  if(!node.address.empty())
+  {
+    std::cout << prefix << (isLast ? "└── " : "├── ") << node.address;
+    if(!node.description.empty())
+    {
+      std::cout << "(" << node.description << ")";
+    }
+    std::cout<< std::endl;
+  }
+  const auto& children = node.children;
+  for (auto it = children.begin(); it != children.end(); ++it)
+  {
+    PrintPCIeTree(*it, prefix + (isLast ? "    " : "│   "), std::next(it) == children.end());
+  }
 }
 
 void PrintNicToGPUTopo(bool printAsCsv)
@@ -467,6 +483,15 @@ void PrintNicToGPUTopo(bool printAsCsv)
     }
   }
   std::cout << std::endl;
+  if (std::getenv("SHOW_TOPO_TREE"))
+  {
+    std::cout << "--------------------------" << std::endl;
+    std::cout << "PCIe Tree (NICs and GPUs):" << std::endl;
+    std::cout << "--------------------------" << std::endl;
+    PrintPCIeTree(pcie_root);
+    std::cout << std::endl;
+  }
+
 }
 
 #else

@@ -971,17 +971,19 @@ void DisplayTopology(bool const outputToCsv)
 
   int numCpuDevices = numa_num_configured_nodes();
   int numGpuDevices;
+  int numRdmaNics = RdmaTransfer::GetNicCount();
   HIP_CALL(hipGetDeviceCount(&numGpuDevices));
 
   if (outputToCsv)
   {
     printf("NumCpus,%d\n", numCpuDevices);
     printf("NumGpus,%d\n", numGpuDevices);
+    printf("NumRdmaNics,%d\n", numRdmaNics);
   }
   else
   {
-    printf("\nDetected topology: %d configured CPU NUMA node(s) [%d total]   %d GPU device(s)\n",
-           numa_num_configured_nodes(), numa_max_node() + 1, numGpuDevices);
+    printf("\nDetected topology: %d configured CPU NUMA node(s) [%d total]   %d GPU device(s)   %d RDMA NIC(s)\n",
+           numa_num_configured_nodes(), numa_max_node() + 1, numGpuDevices, numRdmaNics);
   }
 
   // Print out detected CPU topology
