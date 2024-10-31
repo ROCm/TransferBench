@@ -402,7 +402,6 @@ static void init_device_mappings()
   HIP_CALL(hipGetDeviceCount(&numHipDevices));
   GpuToNicMapper.resize(numHipDevices, -1);
   const char* closestNicEnv = std::getenv("CLOSEST_NIC");
-  std::cout << DeviceCount << std::endl;
   if (closestNicEnv)
   {
     std::istringstream iss(closestNicEnv);
@@ -413,21 +412,29 @@ static void init_device_mappings()
       try
       {
         int nicId = std::stoi(token);
-        
         if (nicId >= 0 && nicId < DeviceCount)
         {
           GpuToNicMapper[i] = nicId;
+          assert(nicId < NicToGpuMapper.size());
+          NicToGpuMapper[nicId].insert(i);
           i++;
         }
         else
         {
-          std::cerr << "Invalid NIC ID in CLOSEST_NIC environment variable: " << nicId << std::endl;
+          std::cerr << "[Error] Invalid NIC ID in CLOSEST_NIC environment variable: " << nicId << std::endl;
+          exit(1);
         }        
       }
       catch (const std::invalid_argument& e)
       {
-        std::cerr << "Invalid NIC ID in CLOSEST_NIC environment variable: " << token << std::endl;
+        std::cerr << "[Error] Invalid NIC ID in CLOSEST_NIC environment variable: " << token << std::endl;
+        exit(1);
       }
+    }
+    if(i < numHipDevices)
+    {
+      std::cerr << "[Error] Number of entries in CLOSEST_NIC environment variable is less than the number of detected GPUs: " << numHipDevices<< std::endl;
+      exit(1);
     }
   }
   else 
