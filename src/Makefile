@@ -13,16 +13,18 @@ else
 endif
 
 CXXFLAGS = -O3 -Iinclude -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
-
+NVFLAGS = -O3 -Iinclude -x cu -lnuma -arch=native
+LDFLAGS    += -lpthread
 # Compile RDMA executor if IBVerbs is found in the Dynamic Linker cache
 ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
 	CXXFLAGS += -libverbs
+	NVFLAGS += -libverbs
 else
 	CXXFLAGS += -DLIB_IBVERBS_UNAVAILABLE
+	NVFLAGS += -DLIB_IBVERBS_UNAVAILABLE
 endif
 
-NVFLAGS = -O3 -Iinclude -x cu -lnuma -arch=native
-LDFLAGS    += -lpthread
+
 all: $(EXE)
 
 ../TransferBench: TransferBench.cpp $(shell find -regex ".*\.\hpp")
