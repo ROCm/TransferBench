@@ -789,7 +789,6 @@ TestResults ExecuteTransfersImpl(EnvVars const& ev,
   {
     ExecutorInfo  exeInfo  = exeInfoPair.second;
     ExeType const exeType  = exeInfoPair.first.type;
-    int     const exeIndex = exeInfoPair.first.srcIndex;
     ExeResult& exeResult   = testResults.exeResults[exeInfoPair.first];
 
     // Compute total time for non GPU executors

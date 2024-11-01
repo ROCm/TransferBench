@@ -102,7 +102,6 @@ static void insert_pcie_path_to_tree(PCIe_tree* root, const std::string& pcieAdd
   std::string token;
   PCIe_tree* currentNode = root;
 
-  bool ignore = true;
   while (std::getline(iss, token, '/'))
   {
     std::string address = token;
@@ -260,8 +259,6 @@ static void init_device_paths_and_build_pcie_tree()
   IbDeviceBusIds.resize(RdmaNicCount, "");
   NicToGpuMapper.resize(RdmaNicCount);
   DeviceNames.resize(RdmaNicCount);
-  int closestDevice = -1;
-  int minDistance = std::numeric_limits<int>::max();
 
   for (int i = 0; i < RdmaNicCount; ++i)
   {
