@@ -41,6 +41,7 @@ static std::vector<std::string> DeviceNames;
 static int RdmaNicCount;
 static int GpuCount;
 static bool Initialized = false;
+static bool MultiportFlag = false;
 #define INIT_ONCE(ret)  \
   do {                  \
   if(Initialized)       \
@@ -229,19 +230,32 @@ static int get_nearest_pcie_device_in_tree(const PCIe_tree& root, const std::str
       }
     }
   }
-  // when more than one LCA match is found, opt for the one with the smallest
-  // bus id difference
+  // 1. When more than one LCA match is found, opt for the one with the smallest
+  // bus id difference 
+  // 2. Also cover when two NICs have the same busIds which indicates a dualport case 
+  // (only two ports supported)
   if(matches.size() > 1)
   {
     int minDistance = std::numeric_limits<int>::max();
-    for (const auto& match : matches)
+    for (int i = 0; i < matches.size(); ++i)
     {
-      int distance = get_bus_id_distance(busID, targetBusIds[match]);
+      for(int j = i + 1; j < matches.size(); ++j)
+      {
+        // Multiport NIC
+        if(extract_bus_number(targetBusIds[matches[i]]) == extract_bus_number(targetBusIds[matches[j]]))
+        {
+          index_of_closest = !MultiportFlag? matches[i] : matches[j];
+          // Workaround to distribute ports over GPUs
+          MultiportFlag = !MultiportFlag;
+          return index_of_closest;
+        }
+      }
+      int distance = get_bus_id_distance(busID, targetBusIds[matches[i]]);
       if (distance < minDistance)
       {
         minDistance = distance;
-        index_of_closest = match;
-      }
+        index_of_closest = matches[i];
+      }      
     }
   }
   return index_of_closest;
