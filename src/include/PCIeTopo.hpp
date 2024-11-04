@@ -330,7 +330,7 @@ static void init_device_paths_and_build_pcie_tree()
   }  
 }
 
-static int get_closest_rdma_nic_id(int hipDeviceId, bool useTopoTree = true)
+static int get_closest_rdma_nic_id(int hipDeviceId)
 {   
   char hipPciBusId[64];
   hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), hipDeviceId);
