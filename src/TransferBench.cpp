@@ -2799,7 +2799,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
   for (auto src : ev.sweepSrc)
   {
     MemType const srcType = CharToMemType(src);
-    int const numDevices = IsGpuType(srcType) ? ev.numGpuDevices : ev.numCpuDevices;
+    int const numDevices = (srcType == MEM_NULL) ? 1 : IsGpuType(srcType) ? ev.numGpuDevices : ev.numCpuDevices;
 
     for (int srcIndex = 0; srcIndex < numDevices; ++srcIndex)
       srcList.push_back(std::make_pair(srcType, srcIndex));
@@ -2811,7 +2811,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
   for (auto dst : ev.sweepDst)
   {
     MemType const dstType = CharToMemType(dst);
-    int const numDevices = IsGpuType(dstType) ? ev.numGpuDevices : ev.numCpuDevices;
+    int const numDevices = (dstType == MEM_NULL) ? 1 : IsGpuType(dstType) ? ev.numGpuDevices : ev.numCpuDevices;
 
     for (int dstIndex = 0; dstIndex < numDevices; ++dstIndex)
       dstList.push_back(std::make_pair(dstType, dstIndex));
@@ -2870,7 +2870,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
         // Skip this SRC if XGMI distance is already past limit
         if (ev.sweepXgmiMax >= 0 && isXgmiSrc && numHopsSrc > ev.sweepXgmiMax) continue;
       }
-      else if (useXgmiOnly) continue;
+      else if (srcList[j].first != MEM_NULL && useXgmiOnly) continue;
 
       tinfo.srcType  = srcList[j].first;
       tinfo.srcIndex = srcList[j].second;
@@ -2903,7 +2903,7 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
         }
 
         // Skip this DST if it is not XGMI but only XGMI links may be used
-        if (useXgmiOnly && !isXgmiDst) continue;
+        if (dstList[k].first != MEM_NULL && useXgmiOnly && !isXgmiDst) continue;
 
         // Skip this DST if total XGMI distance (SRC + DST) is less than min limit
         if (ev.sweepXgmiMin > 0 && (numHopsSrc + numHopsDst < ev.sweepXgmiMin)) continue;
@@ -2919,6 +2919,9 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
 
         tinfo.dstType  = dstList[k].first;
         tinfo.dstIndex = dstList[k].second;
+
+        // Skip if there is no src and dst
+        if (tinfo.srcType == MEM_NULL && tinfo.dstType == MEM_NULL) continue;
 
         possibleTransfers.push_back(tinfo);
       }
@@ -2978,8 +2981,8 @@ void RunSweepPreset(EnvVars const& ev, size_t const numBytesPerTransfer, int con
       {
         // Convert integer value to (SRC->EXE->DST) triplet
         Transfer transfer;
-        transfer.numSrcs        = 1;
-        transfer.numDsts        = 1;
+        transfer.numSrcs        = (possibleTransfers[value].srcType == MEM_NULL ? 0 : 1);
+        transfer.numDsts        = (possibleTransfers[value].dstType == MEM_NULL ? 0 : 1);
         transfer.srcType        = {possibleTransfers[value].srcType};
         transfer.srcIndex       = {possibleTransfers[value].srcIndex};
         transfer.exeType        = possibleTransfers[value].exeType;
