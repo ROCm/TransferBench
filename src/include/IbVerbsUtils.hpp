@@ -22,28 +22,28 @@ const unsigned int rdma_flags = IBV_ACCESS_LOCAL_WRITE  |
 
 
 // Helper macro for catching RDMA errors
-#define IBV_CALL(func)                                                                  \
-    do {                                                                                \
-        int error = (func);                                                             \
-        if (error != 0)                                                                 \
-        {                                                                               \
-            std::cerr << "Encountered RDMA error " << error << " at line " << __LINE__  \
-            << " in file " << __FILE__ << " and function " << __func__ << "\n";         \
-            exit(-1);                                                                   \
-        }                                                                               \
-    } while (0)
+#define IBV_CALL(__func__, ...)                                                     \
+  do {                                                                              \
+    int error = __func__(__VA_ARGS__);                                              \
+    if (error != 0)                                                                 \
+    {                                                                               \
+      std::cerr << "Encountered RDMA error " << error << " at line " << __LINE__    \
+            << " in file " << __FILE__ << " during " << #__func__ << "\n";          \
+      exit(-1);                                                                     \
+    }                                                                               \
+  } while (0)
 
 // Helper macro for catching RDMA null return errors
-#define IBV_PTR_CALL(ptr, func)                                                         \
-    do {                                                                                \
-        ptr = (func);                                                                   \
-        if (ptr == NULL)                                                                \
-        {                                                                               \
-            std::cerr << "Encountered RDMA Null Pointer at line " << __LINE__           \
-            << " in file " << __FILE__ << " and function " << __func__ << "\n";         \
-            exit(-1);                                                                   \
-        }                                                                               \
-    } while (0)
+#define IBV_PTR_CALL(__ptr__, __func__, ...)                                        \
+  do {                                                                              \
+    __ptr__ = __func__(__VA_ARGS__);                                                \
+    if (__ptr__ == NULL)                                                            \
+    {                                                                               \
+      std::cerr << "Encountered RDMA Null Pointer at line " << __LINE__             \
+      << " in file " << __FILE__ << " during " << #__func__ << "\n";                \
+      exit(-1);                                                                     \
+    }                                                                               \
+  } while (0)
 
 
 /**
@@ -396,8 +396,8 @@ static int get_RoCE_version_number(const char* deviceName, int portNum, int gidI
 static int update_gid_index(struct ibv_context* context, uint8_t portNum, sa_family_t af, void* prefix, int prefixlen, int roceVer, int gidIndexCandidate, int* gidIndex)
 {
   union ibv_gid gid, gidCandidate;
-  IBV_CALL(ibv_query_gid(context, portNum, *gidIndex, &gid));
-  IBV_CALL(ibv_query_gid(context, portNum, gidIndexCandidate, &gidCandidate));
+  IBV_CALL(ibv_query_gid, context, portNum, *gidIndex, &gid);
+  IBV_CALL(ibv_query_gid, context, portNum, gidIndexCandidate, &gidCandidate);
 
   sa_family_t usrFam = af;
   sa_family_t gidFam = get_gid_address_family(&gid);
@@ -417,8 +417,8 @@ static int update_gid_index(struct ibv_context* context, uint8_t portNum, sa_fam
     int usrRoceVer = roceVer;
     int gidRoceVerNum, gidRoceVerNumCandidate;
     const char* deviceName = ibv_get_device_name(context->device);
-    IBV_CALL(get_RoCE_version_number(deviceName, portNum, *gidIndex, &gidRoceVerNum));
-    IBV_CALL(get_RoCE_version_number(deviceName, portNum, gidIndexCandidate, &gidRoceVerNumCandidate));
+    IBV_CALL(get_RoCE_version_number, deviceName, portNum, *gidIndex, &gidRoceVerNum);
+    IBV_CALL(get_RoCE_version_number, deviceName, portNum, gidIndexCandidate, &gidRoceVerNumCandidate);
     if ((gidRoceVerNum != gidRoceVerNumCandidate || !validGid(&gid)) && gidRoceVerNumCandidate == usrRoceVer)
     {
       *gidIndex = gidIndexCandidate;
@@ -443,7 +443,7 @@ int set_gid_index(struct ibv_context *context, uint8_t portNum, int gidTblLen, i
   *gidIndex = 0;
   for (int gidIndexNext = 1; gidIndexNext < gidTblLen; ++gidIndexNext)
   {
-    IBV_CALL(update_gid_index(context, portNum, userAddrFamily, prefix, 0, userRoceVersion, gidIndexNext, gidIndex));
+    IBV_CALL(update_gid_index, context, portNum, userAddrFamily, prefix, 0, userRoceVersion, gidIndexNext, gidIndex);
   }
   return 0;
 }

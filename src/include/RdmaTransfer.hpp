@@ -76,12 +76,12 @@ public:
     assert(src_rdma->port_attr.link_layer == dst_rdma->port_attr.link_layer);
     if(isRoce)
     {
-      IBV_CALL(set_gid_index(src_rdma->device_context, port_num, src_rdma->port_attr.gid_tbl_len, roce_version, ip_address_family, &src_gid_index));
-      IBV_CALL(set_gid_index(dst_rdma->device_context, port_num, dst_rdma->port_attr.gid_tbl_len, roce_version, ip_address_family, &dst_gid_index));
-      IBV_CALL(set_ibv_gid(src_rdma->device_context,
-                          port_num, src_gid_index, src_rdma->gid));
-      IBV_CALL(set_ibv_gid(dst_rdma->device_context,
-                          port_num, dst_gid_index, dst_rdma->gid));
+      IBV_CALL(set_gid_index, src_rdma->device_context, port_num, src_rdma->port_attr.gid_tbl_len, roce_version, ip_address_family, &src_gid_index);
+      IBV_CALL(set_gid_index, dst_rdma->device_context, port_num, dst_rdma->port_attr.gid_tbl_len, roce_version, ip_address_family, &dst_gid_index);
+      IBV_CALL(set_ibv_gid, src_rdma->device_context,
+                          port_num, src_gid_index, src_rdma->gid);
+      IBV_CALL(set_ibv_gid, dst_rdma->device_context,
+                          port_num, dst_gid_index, dst_rdma->gid);
     }
     assert(sender_qp == nullptr);
     assert(receiver_qp == nullptr);
@@ -90,39 +90,39 @@ public:
     receiver_qp = new ibv_qp* [qp_count];
     for(int i = 0; i < qp_count; ++i) {
       IBV_PTR_CALL(sender_qp[i],
-                qp_create(src_rdma->protection_domain,
-                          src_rdma->completion_queue));
+                qp_create, src_rdma->protection_domain,
+                           src_rdma->completion_queue);
 
       IBV_PTR_CALL(receiver_qp[i],
-                  qp_create(dst_rdma->protection_domain,
-                            dst_rdma->completion_queue));
+                  qp_create, dst_rdma->protection_domain,
+                             dst_rdma->completion_queue);
 
-      IBV_CALL(qp_init(sender_qp[i], port_num,
-                      rdma_flags));
+      IBV_CALL(qp_init, sender_qp[i], port_num,
+                      rdma_flags);
       
-      IBV_CALL(qp_init(receiver_qp[i], port_num,
-                      rdma_flags));
+      IBV_CALL(qp_init, receiver_qp[i], port_num,
+                      rdma_flags);
 
 
-      IBV_CALL(qp_transition_to_ready_to_receive(sender_qp[i],
+      IBV_CALL(qp_transition_to_ready_to_receive, sender_qp[i],
                                                   dst_rdma->port_attr.lid,
                                                   receiver_qp[i]->qp_num,
                                                   dst_rdma->gid, dst_gid_index,
                                                   ib_device_port, isRoce,
                                                   src_rdma->port_attr.active_mtu
-                                                ));
+                                                );
 
-      IBV_CALL(qp_transition_to_ready_to_send(sender_qp[i]));
+      IBV_CALL(qp_transition_to_ready_to_send, sender_qp[i]);
 
-      IBV_CALL(qp_transition_to_ready_to_receive(receiver_qp[i],
+      IBV_CALL(qp_transition_to_ready_to_receive, receiver_qp[i],
                                                 src_rdma->port_attr.lid,
                                                 sender_qp[i]->qp_num,
                                                 src_rdma->gid, src_gid_index,
                                                 ib_device_port, isRoce,
                                                 dst_rdma->port_attr.active_mtu
-                                                ));
+                                                );
 
-      IBV_CALL(qp_transition_to_ready_to_send(receiver_qp[i]));
+      IBV_CALL(qp_transition_to_ready_to_send, receiver_qp[i]);
     }
     
   }
@@ -141,8 +141,8 @@ public:
     auto&& dst_rdma_resource = ib_attribute_mapper[dst_device_id];
     struct ibv_mr *src_mr;
     struct ibv_mr *dst_mr;
-    IBV_PTR_CALL(src_mr, ibv_reg_mr(src_rdma_resource->protection_domain, src, numBytes, rdma_flags));        
-    IBV_PTR_CALL(dst_mr, ibv_reg_mr(dst_rdma_resource->protection_domain, dst, numBytes, rdma_flags));
+    IBV_PTR_CALL(src_mr, ibv_reg_mr, src_rdma_resource->protection_domain, src, numBytes, rdma_flags);
+    IBV_PTR_CALL(dst_mr, ibv_reg_mr, dst_rdma_resource->protection_domain, dst, numBytes, rdma_flags);
     return AppendResources(src_mr, src, dst_mr, dst, numBytes);
   }
 
@@ -182,10 +182,10 @@ public:
       wr.send_flags = IBV_SEND_SIGNALED;
       wr.wr.rdma.remote_addr = (uint64_t)destination_mr[mem_id].second + i * chunk_size;
       wr.wr.rdma.rkey = destination_mr[mem_id].first->rkey;
-      IBV_CALL(ibv_post_send(sender_qp[i], &wr, &bad_wr));
+      IBV_CALL(ibv_post_send, sender_qp[i], &wr, &bad_wr);
     }
     for(auto i = 0; i < qp_count; ++i) {
-       IBV_CALL(poll_completion_queue(src_rdma_resource->completion_queue, transferIdx + i, receiveStatuses));
+       IBV_CALL(poll_completion_queue, src_rdma_resource->completion_queue, transferIdx + i, receiveStatuses);
     }
   }
 
@@ -209,7 +209,7 @@ public:
     {
       for(auto mr : source_mr) 
       {
-        IBV_CALL(ibv_dereg_mr(mr.first));        
+        IBV_CALL(ibv_dereg_mr, mr.first);
       }
       source_mr.clear();
     }
@@ -217,7 +217,7 @@ public:
     {
       for(auto mr : destination_mr) 
       {
-        IBV_CALL(ibv_dereg_mr(mr.first));
+        IBV_CALL(ibv_dereg_mr, mr.first);
       }
       destination_mr.clear();
     }
@@ -226,7 +226,7 @@ public:
     if (sender_qp) 
     {
       for (int i = 0; i < qp_count; ++i) {
-        IBV_CALL(ibv_destroy_qp(sender_qp[i]));
+        IBV_CALL(ibv_destroy_qp, sender_qp[i]);
         sender_qp[i] = nullptr;
       }
       delete[] sender_qp;
@@ -235,7 +235,7 @@ public:
     if (receiver_qp) 
     {
       for (int i = 0; i < qp_count; ++i) {
-        IBV_CALL(ibv_destroy_qp(receiver_qp[i]));
+        IBV_CALL(ibv_destroy_qp, receiver_qp[i]);
         receiver_qp[i] = nullptr;
       }
       delete[] receiver_qp;
@@ -246,15 +246,15 @@ public:
 
     if (src_rdma_resource != nullptr) {
       if (src_rdma_resource->completion_queue) {
-        IBV_CALL(ibv_destroy_cq(src_rdma_resource->completion_queue));
+        IBV_CALL(ibv_destroy_cq, src_rdma_resource->completion_queue);
         src_rdma_resource->completion_queue = nullptr;
       }
       if (src_rdma_resource->protection_domain) {
-        IBV_CALL(ibv_dealloc_pd(src_rdma_resource->protection_domain));
+        IBV_CALL(ibv_dealloc_pd, src_rdma_resource->protection_domain);
         src_rdma_resource->protection_domain = nullptr;
       }
       if (src_rdma_resource->device_context) {
-        IBV_CALL(ibv_close_device(src_rdma_resource->device_context));
+        IBV_CALL(ibv_close_device, src_rdma_resource->device_context);
         src_rdma_resource->device_context = nullptr;
       }
       src_rdma_resource = nullptr;
@@ -262,15 +262,15 @@ public:
 
     if (dst_rdma_resource != nullptr) {
       if (dst_rdma_resource->completion_queue) {
-        IBV_CALL(ibv_destroy_cq(dst_rdma_resource->completion_queue));
+        IBV_CALL(ibv_destroy_cq, dst_rdma_resource->completion_queue);
         dst_rdma_resource->completion_queue = nullptr;
       }
       if (dst_rdma_resource->protection_domain) {
-        IBV_CALL(ibv_dealloc_pd(dst_rdma_resource->protection_domain));
+        IBV_CALL(ibv_dealloc_pd, dst_rdma_resource->protection_domain);
         dst_rdma_resource->protection_domain = nullptr;
       }
       if (dst_rdma_resource->device_context) {
-        IBV_CALL(ibv_close_device(dst_rdma_resource->device_context));
+        IBV_CALL(ibv_close_device, dst_rdma_resource->device_context);
         dst_rdma_resource->device_context = nullptr;
       }
       dst_rdma_resource = nullptr;
@@ -284,7 +284,7 @@ public:
   {
     if (device_list == NULL) 
     {
-      IBV_PTR_CALL(device_list, ibv_get_device_list(&ib_device_count));
+      IBV_PTR_CALL(device_list, ibv_get_device_list, &ib_device_count);
     }
   }
 
@@ -309,12 +309,12 @@ private:
     if (!ib_attribute_mapper[device_id]) {
       ib_attribute_mapper[device_id] = new RDMA_Resources();
       auto& rdma = ib_attribute_mapper[device_id];
-      IBV_PTR_CALL(rdma->device_context, ibv_open_device(device_list[device_id]));
+      IBV_PTR_CALL(rdma->device_context, ibv_open_device, device_list[device_id]);
 
-      IBV_PTR_CALL(rdma->protection_domain, ibv_alloc_pd(rdma->device_context));
+      IBV_PTR_CALL(rdma->protection_domain, ibv_alloc_pd, rdma->device_context);
 
-      IBV_PTR_CALL(rdma->completion_queue, ibv_create_cq(rdma->device_context, 100, NULL, NULL, 0));
-      IBV_CALL(ibv_query_port(rdma->device_context, port_num, &rdma->port_attr));
+      IBV_PTR_CALL(rdma->completion_queue, ibv_create_cq, rdma->device_context, 100, NULL, NULL, 0);
+      IBV_CALL(ibv_query_port, rdma->device_context, port_num, &rdma->port_attr);
 
       if (rdma->port_attr.state != IBV_PORT_ACTIVE) {
         std::cout << "[Error] selected RDMA device " << device_id << " is down. Select a different device" << std::endl;
