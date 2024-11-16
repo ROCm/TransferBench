@@ -22,20 +22,32 @@ THE SOFTWARE.
 
 #pragma once
 
-#define CLIENT_VERSION "1.54"
+// TransferBench client version
+#define CLIENT_VERSION "1.54.00"
 
-#include <iostream>
 #include "TransferBench.hpp"
 #include "EnvVars.hpp"
 
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);
+
 char const ExeTypeName[4][4] = {"CPU", "GPU", "DMA", "IBV"};
 
+// Display detected hardware
 void DisplayTopology(bool outputToCsv);
+
+// Display usage instructions
 void DisplayUsage(char const* cmdName);
+
+// Print TransferBench test results
 void PrintResults(EnvVars const& ev, int const testNum,
                   std::vector<Transfer> const& transfers,
                   TransferBench::TestResults const& results);
+
+// Helper function that converts MemDevices to a string
 std::string MemDevicesToStr(std::vector<MemDevice> const& memDevices);
+
+// Helper function to print warning / exit on fatal error
 void CheckForError(ErrResult const& error);
+
+// Helper function to print list of errors
 void PrintErrors(std::vector<ErrResult> const& errors);

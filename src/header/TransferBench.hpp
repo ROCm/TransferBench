@@ -23,7 +23,6 @@ THE SOFTWARE.
 #pragma once
 #include <cstring>
 #include <future>
-#include <immintrin.h>
 #include <map>
 #include <numa.h>
 #include <numaif.h>
@@ -165,6 +164,7 @@ namespace TransferBench
     vector<vector<int>> prefXccTable   = {};    ///< 2D table with preferred XCD to use for a specific [src][dst] GPU device
     int                 sharedMemBytes = 0;     ///< Amount of shared memory to use per threadblock
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
+    int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 1;     ///< Team all subExecutors across the data array
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
@@ -837,12 +837,6 @@ namespace {
     }
 
     // Misc warnings
-    char* enableSdma = getenv("HSA_ENABLE_SDMA");
-    if (enableSdma && !strcmp(enableSdma, "0"))
-      errors.push_back({ERR_WARN,
-                        "DMA functionality disabled due to environment variable HSA_ENABLE_SDMA=0. "
-                        "Copies will fallback to blit kernels"});
-
     int maxSharedMemBytes = 0;
     hipError_t err = hipDeviceGetAttribute(&maxSharedMemBytes,
                                            hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0);
@@ -963,50 +957,72 @@ namespace {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: DMA executor must have exactly 1 source and 1 destination", i});
         }
+
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numGpus) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: DMA index must be between 0 and %d (instead of %d)",
                             i, numGpus - 1, t.exeDevice.exeIndex});
-        } else {
-          if (t.exeSubIndex != -1) {
+          // Cannot proceed with any further checks
+          continue;
+        }
+
+        if (t.exeSubIndex != -1) {
 #if defined(__NVCC__)
-            errors.push_back({ERR_FATAL,
-                              "Transfer %d: DMA executor subindex not supported on NVIDIA hardware", i});
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: DMA executor subindex not supported on NVIDIA hardware", i});
 #else
-            useSubIndexCount[t.exeDevice]++;
-            int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
-            if (t.exeSubIndex >= numSubIndices)
-              errors.push_back({ERR_FATAL,
-                                "Transfer %d: DMA subIndex (engine) must be between 0 and %d",
-                                i, numSubIndices - 1});
+          useSubIndexCount[t.exeDevice]++;
+          int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
+          if (t.exeSubIndex >= numSubIndices)
+            errors.push_back({ERR_FATAL,
+                              "Transfer %d: DMA subIndex (engine) must be between 0 and %d",
+                              i, numSubIndices - 1});
 
-            // Check that engine Id exists between agents
-            hsa_agent_t srcAgent, dstAgent;
-            ErrResult err;
-            err = GetHsaAgent(t.srcs[0], srcAgent);
-            if (err.errType != ERR_NONE) {
-              errors.push_back(err);
-              if (err.errType == ERR_FATAL) break;
-            }
-            err = GetHsaAgent(t.dsts[0], dstAgent);
-            if (err.errType != ERR_NONE) {
-              errors.push_back(err);
-              if (err.errType == ERR_FATAL) break;
-            }
+          // Check that engine Id exists between agents
+          hsa_agent_t srcAgent, dstAgent;
+          ErrResult err;
+          err = GetHsaAgent(t.srcs[0], srcAgent);
+          if (err.errType != ERR_NONE) {
+            errors.push_back(err);
+            if (err.errType == ERR_FATAL) break;
+          }
+          err = GetHsaAgent(t.dsts[0], dstAgent);
+          if (err.errType != ERR_NONE) {
+            errors.push_back(err);
+            if (err.errType == ERR_FATAL) break;
+          }
 
-            uint32_t engineIdMask = 0;
-            err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
-            if (err.errType != ERR_NONE) {
-              errors.push_back(err);
-              if (err.errType == ERR_FATAL) break;
-            }
-            hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
-            if (!(sdmaEngineId & engineIdMask)) {
-              errors.push_back({ERR_FATAL,
-                                "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
-                                i, t.exeDevice.exeIndex, t.exeSubIndex});
-            }
+          uint32_t engineIdMask = 0;
+          err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
+          if (err.errType != ERR_NONE) {
+            errors.push_back(err);
+            if (err.errType == ERR_FATAL) break;
+          }
+          hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
+          if (!(sdmaEngineId & engineIdMask)) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
+                i, t.exeDevice.exeIndex, t.exeSubIndex});
+          }
 #endif
+        }
+
+        if (!IsGpuMemType(t.srcs[0].memType) || !IsGpuMemType(t.dsts[0].memType)) {
+          errors.push_back({ERR_WARN,
+              "Transfer %d: No GPU memory for source or destination.  Copy might not execute on DMA %d",
+              i, t.exeDevice.exeIndex});
+        } else {
+          // Currently HIP will use src agent if source memory is GPU, otherwise dst agent
+          if (IsGpuMemType(t.srcs[0].memType)) {
+            if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
+              errors.push_back({ERR_WARN,
+                  "Transfer %d: DMA executor will automatically switch to using the source memory device (%d) not (%d)",
+                  i, t.srcs[0].memIndex, t.exeDevice.exeIndex});
+            }
+          } else if (t.dsts[0].memIndex != t.exeDevice.exeIndex) {
+            errors.push_back({ERR_WARN,
+                "Transfer %d: DMA executor will automatically switch to using the destination memory device (%d) not (%d)",
+                i, t.dsts[0].memIndex, t.exeDevice.exeIndex});
           }
         }
         break;
@@ -1078,6 +1094,12 @@ namespace {
                            "DMA %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
                            exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
         }
+
+        char* enableSdma = getenv("HSA_ENABLE_SDMA");
+        if (enableSdma && !strcmp(enableSdma, "0"))
+          errors.push_back({ERR_WARN,
+                            "DMA functionality disabled due to environment variable HSA_ENABLE_SDMA=0. "
+                            "DMA %d copies will fallback to blit (GFX) kernels", exeDevice.exeIndex});
         break;
       }
       default:
@@ -1085,11 +1107,6 @@ namespace {
       }
     }
 
-    char* enableSdma = getenv("HSA_ENABLE_SDMA");
-    if (enableSdma && !strcmp(enableSdma, "0"))
-      errors.push_back({ERR_WARN,
-                        "DMA functionality disabled due to environment variable HSA_ENABLE_SDMA=0. "
-                        "Copies will fallback to blit kernels"});
 
     // Check for fatal errors
     for (auto const& err : errors)
@@ -1162,6 +1179,8 @@ namespace {
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
     vector<hipStream_t>        streams;           ///< HIP streams to launch on
+    vector<hipEvent_t>         startEvents;       ///< HIP start timing event
+    vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
   };
 
 // Data validation-related functions
@@ -1401,8 +1420,10 @@ namespace {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
-      int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream)
+      int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA ||
+                                   (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
         ? exeInfo.resources.size() : 1;
+
       exeInfo.streams.resize(numStreamsToUse);
 
       // Create streams
@@ -1417,6 +1438,15 @@ namespace {
 #endif
         } else {
           ERR_CHECK(hipStreamCreate(&exeInfo.streams[i]));
+        }
+      }
+
+      if (cfg.gfx.useHipEvents) {
+        exeInfo.startEvents.resize(numStreamsToUse);
+        exeInfo.stopEvents.resize(numStreamsToUse);
+        for (int i = 0; i < numStreamsToUse; ++i) {
+          ERR_CHECK(hipEventCreate(&exeInfo.startEvents[i]));
+          ERR_CHECK(hipEventCreate(&exeInfo.stopEvents[i]));
         }
       }
     }
@@ -1498,6 +1528,12 @@ namespace {
     if (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
+      if (cfg.gfx.useHipEvents) {
+        for (auto event : exeInfo.startEvents)
+          ERR_CHECK(hipEventDestroy(event));
+        for (auto event : exeInfo.stopEvents)
+          ERR_CHECK(hipEventDestroy(event));
+      }
     }
 
     if (exeDevice.exeType == EXE_GPU_GFX) {
@@ -1883,21 +1919,36 @@ namespace {
       hipStream_t stream = exeInfo.streams[0];
 
 #if defined(__NVCC__)
+      if (cfg.gfx.useHipEvents)
+        ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
+
       GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
         <<<gridSize, blockSize, cfg.gfx.sharedMemBytes, stream>>>
         (exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+
+      if (cfg.gfx.useHipEvents)
+        ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0]));
 #else
       hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
-                            gridSize, blockSize, cfg.gfx.sharedMemBytes, stream, NULL, NULL, 0,
+                            gridSize, blockSize, cfg.gfx.sharedMemBytes, stream,
+                            cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
                             exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
       ERR_CHECK(hipStreamSynchronize(stream));
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
     if (iteration >= 0) {
-      exeInfo.totalDurationMsec += deltaMsec;
+      if (cfg.gfx.useHipEvents) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        exeInfo.totalDurationMsec += gpuDeltaMsec;
+      } else {
+        exeInfo.totalDurationMsec += cpuDeltaMsec;
+      }
+
       // Determine timing for each of the individual transfers that were part of this launch
       for (int i = 0; i < exeInfo.resources.size(); i++) {
         TransferResources& resources = exeInfo.resources[i];

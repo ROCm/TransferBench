@@ -1,4 +1,5 @@
 # Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+
 if (DEFINED ENV{ROCM_PATH})
     set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE STRING "ROCm install directory")
 else()
@@ -6,13 +7,13 @@ else()
 endif()
 cmake_minimum_required(VERSION 3.5)
 
-project(TransferBench VERSION 1.51.0 LANGUAGES CXX)
-set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
+project(TransferBench VERSION 1.54.0 LANGUAGES CXX)
+set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 --std=c++20 -L${ROCM_PATH}/lib")
 include_directories(${ROCM_PATH}/include)
 link_libraries(numa hsa-runtime64 pthread)
-set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ..)
-add_executable(TransferBench src/TransferBench.cpp)
-target_include_directories(TransferBench PRIVATE src/include)
+set (CMAKE_RUNTIME_OUTPUT_DIRECTORY .)
+add_executable(TransferBench src/client/Client.cpp)
+target_include_directories(TransferBench PRIVATE src/header src/client src/client/Presets)
 
 find_package(ROCM 0.8 REQUIRED PATHS ${ROCM_PATH})
 include(ROCMInstallTargets)

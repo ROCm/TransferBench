@@ -132,10 +132,8 @@ int main(int argc, char **argv) {
         if (maxVarCount == 0) {
           if (TransferBench::RunTransfers(cfgOptions, transfers, results)) {
             PrintResults(ev, ++testNum, transfers, results);
-          } else {
-            PrintErrors(results.errResults);
-            exit(1);
           }
+          PrintErrors(results.errResults);
         } else {
           // Variable subexecutors - Determine how many subexecutors to sweep up to
           int maxNumVarSubExec = ev.maxNumVarSubExec;
@@ -154,7 +152,6 @@ int main(int argc, char **argv) {
             TransferBench::TestResults tempResults;
             if (!TransferBench::RunTransfers(cfgOptions, tempTransfers, tempResults)) {
               PrintErrors(tempResults.errResults);
-              exit(1);
             } else {
               if (tempResults.avgTotalBandwidthGbPerSec > bestResults.avgTotalBandwidthGbPerSec) {
                 bestResults = tempResults;
@@ -163,6 +160,7 @@ int main(int argc, char **argv) {
             }
           }
           PrintResults(ev, ++testNum, bestTransfers, bestResults);
+          PrintErrors(bestResults.errResults);
         }
         if (numBytesPerTransfer != 0) break;
         currBytes += deltaBytes;
@@ -174,7 +172,7 @@ int main(int argc, char **argv) {
 
 void DisplayUsage(char const* cmdName)
 {
-  printf("TransferBench Client v%s Backend v%s\n", CLIENT_VERSION, TransferBench::VERSION);
+  printf("TransferBench Client v%s (Backend v%s)\n", CLIENT_VERSION, TransferBench::VERSION);
   printf("========================================\n");
 
   if (numa_available() == -1)

@@ -127,11 +127,13 @@ void AllToAllPreset(EnvVars&           ev,
     for (auto const& err : results.errResults)
       printf("%s\n", err.errMsg.c_str());
     exit(0);
+  } else {
+    PrintResults(ev, 1, transfers, results);
   }
 
   // Print results
   char separator = (ev.outputToCsv ? ',' : ' ');
-  printf("\nSummary:\n");
+  printf("\nSummary: [%lu bytes per Transfer]\n", numBytesPerTransfer);
   printf("==========================================================\n");
   printf("SRC\\DST ");
   for (int dst = 0; dst < numGpus; dst++)

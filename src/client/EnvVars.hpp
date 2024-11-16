@@ -35,6 +35,7 @@ THE SOFTWARE.
   } while (0)
 
 #include <algorithm>
+#include <iostream>
 #include <numa.h>
 #include <random>
 #include <time.h>
@@ -51,36 +52,46 @@ public:
   int const DEFAULT_SAMPLING_FACTOR = 1;
 
   // Environment variables
-  int alwaysValidate;    // Validate after each iteration instead of once after all iterations
-  int blockBytes;        // Each subexecutor, except the last, gets a multiple of this many bytes to copy
-  int byteOffset;        // Byte-offset for memory allocations
-  int gfxBlockSize;      // Size of each threadblock (must be multiple of 64)
-  int gfxSingleTeam;     // Team all subExecutors across the data array
-  int gfxUnroll;         // GFX-kernel unroll factor
-  int gfxWaveOrder;      // GFX-kernel wavefront ordering
-  int hideEnv;           // Skip printing environment variable
-  int minNumVarSubExec;  // Minimum # of subexecutors to use for variable subExec Transfers
-  int maxNumVarSubExec;  // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
-  int numIterations;     // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
-  int numSubIterations;  // Number of subiterations to perform
-  int numWarmups;        // Number of un-timed warmup iterations to perform
-  int outputToCsv;       // Output in CSV format
-  int samplingFactor;    // Affects how many different values of N are generated (when N set to 0)
-  int sharedMemBytes;    // Amount of shared memory to use per threadblock
-  int showIterations;    // Show per-iteration timing info
-  int useHsaDma;         // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
-  int useInteractive;    // Pause for user-input before starting transfer loop
-  int usePcieIndexing;   // Base GPU indexing on PCIe address instead of HIP device
-  int useSingleStream;   // Use a single stream per GPU GFX executor instead of stream per Transfer
-  int validateDirect;    // Validate GPU destination memory directly instead of staging GPU memory on host
-  int validateSource;    // Validate source GPU memory immediately after preparation
+  // General options
+  int numIterations;                 // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
+  int numSubIterations;              // Number of subiterations to perform
+  int numWarmups;                    // Number of un-timed warmup iterations to perform
+  int showIterations;                // Show per-iteration timing info
+  int useInteractive;                // Pause for user-input before starting transfer loop
 
-  std::vector<float>            fillPattern;   // Pattern of floats used to fill source data
-  std::vector<uint32_t>         cuMask;        // Bit-vector representing the CU mask
-  std::vector<std::vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  // Data options
+  int alwaysValidate;                // Validate after each iteration instead of once after all iterations
+  int blockBytes;                    // Each subexecutor, except the last, gets a multiple of this many bytes to copy
+  int byteOffset;                    // Byte-offset for memory allocations
+  vector<float> fillPattern;         // Pattern of floats used to fill source data
+  int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
+  int validateSource;                // Validate source GPU memory immediately after preparation
+
+  // DMA options
+  int useHsaDma;                     // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
+
+  // GFX options
+  int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
+  vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
+  vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int sharedMemBytes;                // Amount of shared memory to use per threadblock
+  int gfxUnroll;                     // GFX-kernel unroll factor
+  int useHipEvents;                  // Use HIP events for timing GFX Executor
+  int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
+  int gfxSingleTeam;                 // Team all subExecutors across the data array
+  int gfxWaveOrder;                  // GFX-kernel wavefront ordering
+
+  // Client options
+  int hideEnv;                       // Skip printing environment variable
+  int minNumVarSubExec;              // Minimum # of subexecutors to use for variable subExec Transfers
+  int maxNumVarSubExec;              // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
+  int outputToCsv;                   // Output in CSV format
+  int samplingFactor;                // Affects how many different values of N are generated (when N set to 0)
+  int usePcieIndexing;               // Base GPU indexing on PCIe address instead of HIP device
+
 
   // Developer features
-  int gpuMaxHwQueues;    // Tracks GPU_MAX_HW_QUEUES environment variable
+  int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
 
   // Constructor that collects values
   EnvVars()
@@ -129,6 +140,7 @@ public:
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
     sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , defaultSharedMemBytes);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
+    useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
@@ -283,6 +295,7 @@ public:
     printf(" SAMPLING_FACTOR   - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHARED_MEM_BYTES  - Amount of shared mem bytes to use per threadblock\n");
     printf(" SHOW_ITERATIONS   - Show per-iteration timing info\n");
+    printf(" USE_HIP_EVENTS    - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA       - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE   - Pause for user-input before starting transfer loop\n");
     printf(" USE_PCIE_INDEX    - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
@@ -365,6 +378,8 @@ public:
           "Using %d shared mem per threadblock", sharedMemBytes);
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
+    Print("USE_HIP_EVENTS", useHipEvents,
+          "Using %s for GFX Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
           "Using %s for DMA execution", useHsaDma ? "hsa_amd_async_copy" : "hipMemcpyAsync");
     Print("USE_INTERACTIVE", useInteractive,
@@ -466,6 +481,7 @@ public:
     cfg.gfx.prefXccTable           = prefXccTable;
     cfg.gfx.sharedMemBytes         = sharedMemBytes;
     cfg.gfx.unrollFactor           = gfxUnroll;
+    cfg.gfx.useHipEvents           = useHipEvents;
     cfg.gfx.useMultiStream         = !useSingleStream;
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
     cfg.gfx.waveOrder              = gfxWaveOrder;
