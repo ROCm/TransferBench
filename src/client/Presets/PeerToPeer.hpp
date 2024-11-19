@@ -56,7 +56,6 @@ void PeerToPeerPreset(EnvVars&           ev,
   }
 
   char const separator = ev.outputToCsv ? ',' : ' ';
-  size_t N = numBytesPerTransfer / sizeof(float);
   printf("Bytes Per Direction%c%lu\n", separator, numBytesPerTransfer);
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();

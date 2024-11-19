@@ -31,7 +31,7 @@ void AllToAllPreset(EnvVars&           ev,
     A2A_COPY       = 0,
     A2A_READ_ONLY  = 1,
     A2A_WRITE_ONLY = 2
-  } A2AModes;
+  };
   char a2aModeStr[3][20] = {"Copy", "Read-Only", "Write-Only"};
 
   // Force single-stream mode for all-to-all benchmark

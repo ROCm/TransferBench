@@ -44,6 +44,19 @@ THE SOFTWARE.
 #include "TransferBench.hpp"
 using namespace TransferBench;
 
+// Redefinitions for CUDA compatibility
+//==========================================================================================
+#if defined(__NVCC__)
+  #define hipError_t                                         cudaError_t
+  #define hipGetErrorString                                  cudaGetErrorString
+  #define hipDeviceProp_t                                    cudaDeviceProp
+  #define hipDeviceGetPCIBusId                               cudaDeviceGetPCIBusId
+  #define hipGetDeviceProperties                             cudaGetDeviceProperties
+  #define hipSuccess                                         cudaSuccess
+  #define gcnArchName                                        name
+  #define hipGetDeviceCount                                  cudaGetDeviceCount
+#endif
+
 // This class manages environment variable that affect TransferBench
 class EnvVars
 {
@@ -96,15 +109,7 @@ public:
   // Constructor that collects values
   EnvVars()
   {
-    int maxSharedMemBytes = 0;
-    HIP_CALL(hipDeviceGetAttribute(&maxSharedMemBytes,
-                                   hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0));
-#if !defined(__NVCC__)
-    int defaultSharedMemBytes = maxSharedMemBytes / 2 + 1;
-#else
     int defaultSharedMemBytes = 0;
-#endif
-
     int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
     int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     int numDeviceCUs    = TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0});

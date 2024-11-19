@@ -136,8 +136,7 @@ void DisplayTopology(bool outputToCsv)
   }
   // No further topology detection done for NVIDIA platforms
   return;
-#endif
-
+#else
   // Print headers
   if (!outputToCsv) {
     printf("        |");
@@ -195,4 +194,5 @@ void DisplayTopology(bool outputToCsv)
            TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, deviceIdx}), sep,
            TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, deviceIdx}));
   }
+#endif
 }

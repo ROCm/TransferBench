@@ -24,9 +24,10 @@ THE SOFTWARE.
 #include <cstring>
 #include <future>
 #include <map>
-#include <numa.h>
+#include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
 #include <set>
+#include <sstream>
 #include <stdarg.h>
 #include <thread>
 #include <vector>
@@ -201,8 +202,12 @@ namespace TransferBench
     std::string errMsg;                         ///< Error details
 
     ErrResult() = default;
+#if defined(__NVCC__)
+    ErrResult(cudaError_t  err);
+#else
     ErrResult(hipError_t   err);
     ErrResult(hsa_status_t err);
+#endif
     ErrResult(ErrType      err);
     ErrResult(ErrType      errType, const char* format, ...);
   };
@@ -409,9 +414,6 @@ namespace TransferBench
     a.w += b.w;
     return a;
   }
-
-  // Define warpSize
-  static int constexpr warpSize = 32;
 #endif
 
 // Helper macro functions
@@ -460,7 +462,7 @@ namespace {
 // Constants
 //========================================================================================
   int   constexpr MAX_BLOCKSIZE  = 512;                       // Max threadblock size
-  int   constexpr MAX_WAVEGROUPS = MAX_BLOCKSIZE / warpSize;  // Max wavegroups/warps
+  int   constexpr MAX_WAVEGROUPS = MAX_BLOCKSIZE / 64;        // Max wavegroups/warps
   int   constexpr MAX_UNROLL     = 8;                         // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                         // Max # srcs per Transfer
   int   constexpr MAX_DSTS       = 8;                         // Max # dsts per Transfer
@@ -686,6 +688,7 @@ namespace {
 // HSA-related functions
 //========================================================================================
 
+#if !defined(__NVCC__)
   // Get the hsa_agent_t associated with a ExeDevice
   static ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent)
   {
@@ -753,6 +756,7 @@ namespace {
             "Unable to get HSA agent for memDevice (%d,%d)",
             memDevice.memType, memDevice.memIndex};
   }
+#endif
 
 // Setup validation-related functions
 //========================================================================================
@@ -1153,10 +1157,12 @@ namespace {
     SubExecParam*              subExecParamGpuPtr;
 
     // For targeted-SDMA
+#if !defined(__NVCC__)
     hsa_agent_t                dstAgent;          ///< DMA destination memory agent
     hsa_agent_t                srcAgent;          ///< DMA source memory agent
     hsa_signal_t               signal;            ///< HSA signal for completion
     hsa_amd_sdma_engine_id_t   sdmaEngineId;      ///< DMA engine ID
+#endif
 
     // Counters
     double                     totalDurationMsec; ///< Total duration for all iterations for this Transfer
@@ -1397,7 +1403,7 @@ namespace {
       }
 
       if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
-
+#if !defined(__NVCC__)
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
         info.size = sizeof(info);
@@ -1409,6 +1415,7 @@ namespace {
 
         // Create HSA completion signal
         ERR_CHECK(hsa_signal_create(1, 0, NULL, &resources.signal));
+#endif
       }
 
       // Prepare subexecutor parameters
@@ -1433,8 +1440,7 @@ namespace {
           ERR_CHECK(hipExtStreamCreateWithCUMask(&exeInfo.streams[i], cfg.gfx.cuMask.size(),
                                                  cfg.gfx.cuMask.data()));
 #else
-          errResults.push_back(ERR_FATAL, "CU Masking in not supported on NVIDIA hardware");
-          return false;
+          return {ERR_FATAL, "CU Masking in not supported on NVIDIA hardware"};
 #endif
         } else {
           ERR_CHECK(hipStreamCreate(&exeInfo.streams[i]));
@@ -1519,9 +1525,11 @@ namespace {
       }
 
       // Destroy HSA signal for DMA executor
+#if !defined(__NVCC__)
       if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
         ERR_CHECK(hsa_signal_destroy(resources.signal));
       }
+#endif
     }
 
     // Teardown additional requirements for GPU-based executors
@@ -1973,8 +1981,8 @@ namespace {
           resources.perIterMsec.push_back(deltaMsec);
 #if !defined(__NVCC__)
           resources.perIterCUs.push_back(CUs);
-        }
 #endif
+        }
       }
     }
 
@@ -2003,6 +2011,9 @@ namespace {
       } while (++subIterations != cfg.general.numSubIterations);
       ERR_CHECK(hipStreamSynchronize(stream));
     } else {
+#if defined(__NVCC__)
+      return {ERR_FATAL, "HSA copy not supported on NVIDIA hardware"};
+#else
       // Use HSA async copy
       do {
         hsa_signal_store_screlease(resources.signal, 1);
@@ -2023,6 +2034,7 @@ namespace {
                                         HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
                                         HSA_WAIT_STATE_ACTIVE) >= 1);
       } while (++subIterations != cfg.general.numSubIterations);
+#endif
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
@@ -2096,6 +2108,7 @@ namespace {
     }
   }
 
+#if !defined(__NVCC__)
   ErrResult::ErrResult(hsa_status_t err)
   {
     if (err == HSA_STATUS_SUCCESS) {
@@ -2108,6 +2121,7 @@ namespace {
       this->errMsg  = errString;
     }
   }
+#endif
 
   ErrResult::ErrResult(ErrType errType, const char* format, ...)
   {
@@ -2159,8 +2173,8 @@ namespace {
       resource.transferIdx = i;
       exeInfo.resources.push_back(resource);
 
-      minNumSrcs  = min(minNumSrcs, t.srcs.size());
-      maxNumSrcs  = max(maxNumSrcs, t.srcs.size());
+      minNumSrcs  = min(minNumSrcs, (int)t.srcs.size());
+      maxNumSrcs  = max(maxNumSrcs, (int)t.srcs.size());
       maxNumBytes = max(maxNumBytes, t.numBytes);
     }
 
@@ -2474,8 +2488,7 @@ namespace {
     // Executor subindices are not supported on NVIDIA hardware
 #if defined(__NVCC__)
     return 0;
-#endif
-
+#else
     int const& exeIndex = exeDevice.exeIndex;
 
     switch(exeDevice.exeType) {
@@ -2513,6 +2526,7 @@ namespace {
     default:
       return 0;
     }
+#endif
   }
 
   int GetClosestCpuNumaToGpu(int gpuIndex)
@@ -2520,8 +2534,7 @@ namespace {
     // Closest NUMA is not supported on NVIDIA hardware at this time
 #if defined(__NVCC__)
     return -1;
-#endif
-
+#else
     hsa_agent_t gpuAgent;
     ErrResult err = GetHsaAgent({EXE_GPU_GFX, gpuIndex}, gpuAgent);
     if (err.errType != ERR_NONE) return -1;
@@ -2538,11 +2551,11 @@ namespace {
       }
     }
     return -1;
+#endif
   }
 
 // Undefine CUDA compatibility macros
 #if defined(__NVCC__)
-#include <cuda_runtime.h>
 
 // ROCm specific
 #undef wall_clock64
