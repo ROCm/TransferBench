@@ -89,7 +89,7 @@ public:
   vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
   int sharedMemBytes;                // Amount of shared memory to use per threadblock
   int gfxUnroll;                     // GFX-kernel unroll factor
-  int useHipEvents;                  // Use HIP events for timing GFX Executor
+  int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
   int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
   int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxWaveOrder;                  // GFX-kernel wavefront ordering
@@ -384,7 +384,7 @@ public:
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("USE_HIP_EVENTS", useHipEvents,
-          "Using %s for GFX Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
+          "Using %s for GFX/DMA Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
           "Using %s for DMA execution", useHsaDma ? "hsa_amd_async_copy" : "hipMemcpyAsync");
     Print("USE_INTERACTIVE", useInteractive,
@@ -479,6 +479,7 @@ public:
     cfg.data.validateSource        = validateSource;
     cfg.data.fillPattern           = fillPattern;
 
+    cfg.dma.useHipEvents           = useHipEvents;
     cfg.dma.useHsaCopy             = useHsaDma;
 
     cfg.gfx.blockSize              = gfxBlockSize;

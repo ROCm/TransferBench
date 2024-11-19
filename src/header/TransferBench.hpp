@@ -152,7 +152,8 @@ namespace TransferBench
    */
   struct DmaOptions
   {
-    int useHsaCopy = 0;                         ///< Use HSA copy instead of HIP copy to perform DMA
+    int useHipEvents = 1;                       ///< Use HIP events for timing DMA Executor
+    int useHsaCopy   = 0;                       ///< Use HSA copy instead of HIP copy to perform DMA
   };
 
   /**
@@ -1447,7 +1448,7 @@ namespace {
         }
       }
 
-      if (cfg.gfx.useHipEvents) {
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -1536,7 +1537,7 @@ namespace {
     if (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
-      if (cfg.gfx.useHipEvents) {
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
         for (auto event : exeInfo.startEvents)
           ERR_CHECK(hipEventDestroy(event));
         for (auto event : exeInfo.stopEvents)
@@ -1997,6 +1998,8 @@ namespace {
   static ErrResult ExecuteDmaTransfer(int           const  iteration,
                                       bool          const  useSubIndices,
                                       hipStream_t   const  stream,
+                                      hipEvent_t    const  startEvent,
+                                      hipEvent_t    const  stopEvent,
                                       ConfigOptions const& cfg,
                                       TransferResources&   resources)
   {
@@ -2004,11 +2007,17 @@ namespace {
 
     int subIterations = 0;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
+      if (cfg.dma.useHipEvents)
+        ERR_CHECK(hipEventRecord(startEvent, stream));
+
       // Use hipMemcpy
       do {
         ERR_CHECK(hipMemcpyAsync(resources.dstMem[0], resources.srcMem[0], resources.numBytes,
                                  hipMemcpyDefault, stream));
       } while (++subIterations != cfg.general.numSubIterations);
+
+      if (cfg.dma.useHipEvents)
+        ERR_CHECK(hipEventRecord(stopEvent, stream));
       ERR_CHECK(hipStreamSynchronize(stream));
     } else {
 #if defined(__NVCC__)
@@ -2037,9 +2046,15 @@ namespace {
 #endif
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
     if (iteration >= 0) {
+      double deltaMsec = cpuDeltaMsec;
+      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        deltaMsec = gpuDeltaMsec;
+      }
       resources.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration)
         resources.perIterMsec.push_back(deltaMsec);
@@ -2063,6 +2078,8 @@ namespace {
                                              iteration,
                                              exeInfo.useSubIndices,
                                              exeInfo.streams[i],
+                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
                                              std::cref(cfg),
                                              std::ref(exeInfo.resources[i])));
     }
