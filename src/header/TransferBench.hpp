@@ -1936,7 +1936,7 @@ namespace {
         (exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 
       if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0]));
+        ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
       hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
                             gridSize, blockSize, cfg.gfx.sharedMemBytes, stream,
