@@ -846,7 +846,8 @@ namespace {
     hipError_t err = hipDeviceGetAttribute(&maxSharedMemBytes,
                                            hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0);
     if (err != hipSuccess) {
-      errors.push_back({ERR_FATAL, hipGetErrorString(err)});
+      errors.push_back({ERR_FATAL, "Unable to query amount of shared memory (%s)",
+          hipGetErrorString(err)});
       // Abort due to not having maxSharedMemBytes
     } else if (cfg.gfx.sharedMemBytes < 0 || cfg.gfx.sharedMemBytes > maxSharedMemBytes) {
       errors.push_back({ERR_FATAL,
@@ -1561,11 +1562,9 @@ namespace {
 //========================================================================================
 
   // Kernel for CPU execution (run by a single subexecutor)
-  static void CpuReduceKernel(int const exeIndex, SubExecParam const& p)
+  static void CpuReduceKernel(SubExecParam const& p)
   {
     if (p.N == 0) return;
-
-    numa_run_on_node(exeIndex);
 
     int const& numSrcs = p.numSrcs;
     int const& numDsts = p.numDsts;
@@ -1573,7 +1572,7 @@ namespace {
     if (numSrcs == 0) {
       for (int i = 0; i < numDsts; ++i) {
         memset(p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
-      //for (int j = 0; j < p.N; j++) p.dst[i][j] = MEMSET_VAL;
+        //for (int j = 0; j < p.N; j++) p.dst[i][j] = MEMSET_VAL;
       }
     } else if (numSrcs == 1) {
       float const* __restrict__ src = p.src[0];
@@ -1583,7 +1582,9 @@ namespace {
           sum += p.src[0][j];
 
         // Add a dummy check to ensure the read is not optimized out
-        if (sum != sum) return;
+        if (sum != sum) {
+          printf("[ERROR] Nan detected\n");
+        }
       } else {
         for (int i = 0; i < numDsts; ++i)
           memcpy(p.dst[i], src, p.N * sizeof(float));
@@ -1606,15 +1607,15 @@ namespace {
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    // Each sub-executor is executed by a different CPU thread
-    vector<std::future<void>> subExecutors;
+    vector<std::thread> childThreads;
     int subIteration = 0;
     do {
       for (auto const& subExecParam : resources.subExecParamCpu)
-        subExecutors.emplace_back(std::async(std::launch::async,
-                                             CpuReduceKernel, exeIndex, std::cref(subExecParam)));
-      for (auto& subExecutor : subExecutors)
-        subExecutor.wait();
+        childThreads.emplace_back(std::thread(CpuReduceKernel, std::cref(subExecParam)));
+
+      for (auto& subExecThread : childThreads)
+        subExecThread.join();
+      childThreads.clear();
     } while (++subIteration != cfg.general.numSubIterations);
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
@@ -1634,6 +1635,7 @@ namespace {
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
+    numa_run_on_node(exeIndex);
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     vector<std::future<ErrResult>> asyncTransfers;
@@ -2121,7 +2123,7 @@ namespace {
       this->errMsg  = "";
     } else {
       this->errType = ERR_FATAL;
-      this->errMsg  = hipGetErrorString(err);
+      this->errMsg  = std::string("HIP Error: ") + hipGetErrorString(err);
     }
   }
 
@@ -2135,7 +2137,7 @@ namespace {
       const char *errString = NULL;
       hsa_status_string(err, &errString);
       this->errType = ERR_FATAL;
-      this->errMsg  = errString;
+      this->errMsg  = std::string("HSA Error: ") + errString;
     }
   }
 #endif
