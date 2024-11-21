@@ -23,6 +23,7 @@ Documentation for TransferBench is available at
 - Removed GFX block-reordering (BLOCK_ORDER)
 - Removed NUM_CPU_DEVICES and NUM_GPU_DEVICES from common env vars and only into the presets they apply to.
 - Removed SHARED_MEM_BYTES option for GFX executor
+- Removed USE_PCIE_INDEX, and SHARED_MEM_BYTES
 ### Fixed
 - Fixed a potential timing reporting issue when DMA executed Transfers end up getting serialized.
 
