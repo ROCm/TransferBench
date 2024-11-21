@@ -13,6 +13,7 @@ Documentation for TransferBench is available at
   environment variables.  Details for each preset are printed
 - The a2a preset benchmark now defaults to using fine-grained memory and GFX unroll of 2
 - Refactored how Transfers are launched in parallel which has reduced some CPU-side overheads
+- CPU and DMA executor timing now use CPU wall clock timing instead of slowest Transfer time
 ### Added
 - New one2all preset which sweeps over all subests of parallel transfers from one GPU to others
 - Adding new warnings for DMA execution relating to how HIP will default to using agents from the source memory
@@ -21,6 +22,7 @@ Documentation for TransferBench is available at
 - Preparation of source data via GFX kernel has been removed (USE_PREP_KERNEL)
 - Removed GFX block-reordering (BLOCK_ORDER)
 - Removed NUM_CPU_DEVICES and NUM_GPU_DEVICES from common env vars and only into the presets they apply to.
+- Removed SHARED_MEM_BYTES option for GFX executor
 ### Fixed
 - Fixed a potential timing reporting issue when DMA executed Transfers end up getting serialized.
 

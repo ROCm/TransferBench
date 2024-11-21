@@ -87,7 +87,6 @@ public:
   int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
   vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
   vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
-  int sharedMemBytes;                // Amount of shared memory to use per threadblock
   int gfxUnroll;                     // GFX-kernel unroll factor
   int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
   int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
@@ -100,8 +99,6 @@ public:
   int maxNumVarSubExec;              // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int outputToCsv;                   // Output in CSV format
   int samplingFactor;                // Affects how many different values of N are generated (when N set to 0)
-  int usePcieIndexing;               // Base GPU indexing on PCIe address instead of HIP device
-
 
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
@@ -109,7 +106,6 @@ public:
   // Constructor that collects values
   EnvVars()
   {
-    int defaultSharedMemBytes = 0;
     int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
     int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     int numDeviceCUs    = TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0});
@@ -143,12 +139,10 @@ public:
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , 3);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
-    sharedMemBytes    = GetEnvVar("SHARED_MEM_BYTES"    , defaultSharedMemBytes);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
-    usePcieIndexing   = GetEnvVar("USE_PCIE_INDEX"      , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     validateSource    = GetEnvVar("VALIDATE_SOURCE"     , 0);
@@ -298,12 +292,10 @@ public:
     printf(" NUM_WARMUPS       - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV     - Outputs to CSV format if set\n");
     printf(" SAMPLING_FACTOR   - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
-    printf(" SHARED_MEM_BYTES  - Amount of shared mem bytes to use per threadblock\n");
     printf(" SHOW_ITERATIONS   - Show per-iteration timing info\n");
     printf(" USE_HIP_EVENTS    - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA       - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE   - Pause for user-input before starting transfer loop\n");
-    printf(" USE_PCIE_INDEX    - Index GPUs by PCIe address-ordering instead of HIP-provided indexing\n");
     printf(" USE_SINGLE_STREAM - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
     printf(" VALIDATE_DIRECT   - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" VALIDATE_SOURCE   - Validate GPU src memory immediately after preparation\n");
@@ -379,8 +371,6 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
-    Print("SHARED_MEM_BYTES", sharedMemBytes,
-          "Using %d shared mem per threadblock", sharedMemBytes);
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("USE_HIP_EVENTS", useHipEvents,
@@ -389,8 +379,6 @@ public:
           "Using %s for DMA execution", useHsaDma ? "hsa_amd_async_copy" : "hipMemcpyAsync");
     Print("USE_INTERACTIVE", useInteractive,
           "Running in %s mode", useInteractive ? "interactive" : "non-interactive");
-    Print("USE_PCIE_INDEX", usePcieIndexing,
-          "Using %s GPU device indexing", usePcieIndexing ? "PCIe" : "HIP");
     Print("USE_SINGLE_STREAM", useSingleStream,
           "Using single stream per GFX %s", useSingleStream ? "device" : "Transfer");
 
@@ -485,7 +473,6 @@ public:
     cfg.gfx.blockSize              = gfxBlockSize;
     cfg.gfx.cuMask                 = cuMask;
     cfg.gfx.prefXccTable           = prefXccTable;
-    cfg.gfx.sharedMemBytes         = sharedMemBytes;
     cfg.gfx.unrollFactor           = gfxUnroll;
     cfg.gfx.useHipEvents           = useHipEvents;
     cfg.gfx.useMultiStream         = !useSingleStream;

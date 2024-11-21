@@ -164,7 +164,6 @@ namespace TransferBench
     int                 blockSize      = 256;   ///< Size of each threadblock (must be multiple of 64)
     vector<uint32_t>    cuMask         = {};    ///< Bit-vector representing the CU mask
     vector<vector<int>> prefXccTable   = {};    ///< 2D table with preferred XCD to use for a specific [src][dst] GPU device
-    int                 sharedMemBytes = 0;     ///< Amount of shared memory to use per threadblock
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
@@ -369,7 +368,6 @@ namespace TransferBench
 
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
-  #define hipDeviceAttributeMaxSharedMemoryPerMultiprocessor cudaDevAttrMaxSharedMemoryPerMultiprocessor
   #define hipDeviceAttributeMultiprocessorCount              cudaDevAttrMultiProcessorCount
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
@@ -841,20 +839,6 @@ namespace {
       }
     }
 
-    // Misc warnings
-    int maxSharedMemBytes = 0;
-    hipError_t err = hipDeviceGetAttribute(&maxSharedMemBytes,
-                                           hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, 0);
-    if (err != hipSuccess) {
-      errors.push_back({ERR_FATAL, "Unable to query amount of shared memory (%s)",
-          hipGetErrorString(err)});
-      // Abort due to not having maxSharedMemBytes
-    } else if (cfg.gfx.sharedMemBytes < 0 || cfg.gfx.sharedMemBytes > maxSharedMemBytes) {
-      errors.push_back({ERR_FATAL,
-                        "[gfx.sharedMemBytes] must be positive and less than or equal to %d",
-                        maxSharedMemBytes});
-    }
-
     // NVIDIA specific
 #if defined(__NVCC__)
     if (cfg.data.validateDirect)
@@ -864,7 +848,7 @@ namespace {
     // Check for largeBar enablement on GPUs
     for (int i = 0; i < numGpus; i++) {
       int isLargeBar = 0;
-      err = hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, i);
+      hipError_t err = hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, i);
       if (err != hipSuccess) {
         errors.push_back({ERR_FATAL, "Unable to query if GPU %d has largeBAR enabled", i});
       } else if (!isLargeBar) {
@@ -1861,12 +1845,11 @@ namespace {
 
 #if defined(__NVCC__)
     GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
-      <<<gridSize, blockSize, cfg.gfx.sharedMemBytes, stream>>>
+      <<<gridSize, blockSize, 0, stream>>>
       (resources.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #else
     hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
-                          gridSize, blockSize,
-                          cfg.gfx.sharedMemBytes, stream,
+                          gridSize, blockSize, 0, stream,
                           NULL, NULL,
                           0, resources.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
@@ -1930,14 +1913,14 @@ namespace {
         ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
 
       GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
-        <<<gridSize, blockSize, cfg.gfx.sharedMemBytes, stream>>>
+        <<<gridSize, blockSize, 0 , stream>>>
         (exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
       hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
-                            gridSize, blockSize, cfg.gfx.sharedMemBytes, stream,
+                            gridSize, blockSize, 0, stream,
                             cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                             cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
                             exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);

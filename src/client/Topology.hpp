@@ -38,41 +38,6 @@ static int RemappedCpuIndex(int origIdx)
   return remappingCpu[origIdx];
 }
 
-static int RemappedGpuIndex(int origIdx)
-{
-  static std::vector<int> remappingGpu;
-
-  // Build GPU remapping on first use
-  if (remappingGpu.empty()) {
-    int numGpuDevices;
-    HIP_CALL(hipGetDeviceCount(&numGpuDevices));
-    remappingGpu.resize(numGpuDevices);
-
-    int const usePcieIndexing = getenv("USE_PCIE_INDEX") ? atoi(getenv("USE_PCIE_INDEX")) : 0;
-
-    if (!usePcieIndexing) {
-      // For HIP-based indexing no remappingGpu is necessary
-      for (int i = 0; i < numGpuDevices; ++i)
-        remappingGpu[i] = i;
-    } else {
-      // Collect PCIe address for each GPU
-      std::vector<std::pair<std::string, int>> mapping;
-      char pciBusId[20];
-      for (int i = 0; i < numGpuDevices; ++i)
-      {
-        HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
-        mapping.push_back(std::make_pair(pciBusId, i));
-      }
-
-      // Sort GPUs by PCIe address then use that as mapping
-      std::sort(mapping.begin(), mapping.end());
-      for (int i = 0; i < numGpuDevices; ++i)
-        remappingGpu[i] = mapping[i].second;
-    }
-  }
-  return remappingGpu[origIdx];
-}
-
 void DisplayTopology(bool outputToCsv)
 {
   int numCpus = TransferBench::GetNumExecutors(EXE_CPU);
@@ -118,7 +83,7 @@ void DisplayTopology(bool outputToCsv)
     printf(" %5d %c", numCpuCores, sep);
 
     for (int j = 0; j < numGpus; j++) {
-      if (TransferBench::GetClosestCpuNumaToGpu(RemappedGpuIndex(j)) == nodeI) {
+      if (TransferBench::GetClosestCpuNumaToGpu(j) == nodeI) {
         printf(" %d", j);
       }
     }
@@ -131,7 +96,7 @@ void DisplayTopology(bool outputToCsv)
 #if defined(__NVCC__)
   for (int i = 0; i < numGpus; i++) {
     hipDeviceProp_t prop;
-    HIP_CALL(hipGetDeviceProperties(&prop, RemappedGpuIndex(i)));
+    HIP_CALL(hipGetDeviceProperties(&prop, i));
     printf(" GPU %02d | %s\n", i, prop.name);
   }
   // No further topology detection done for NVIDIA platforms
@@ -142,7 +107,7 @@ void DisplayTopology(bool outputToCsv)
     printf("        |");
     for (int j = 0; j < numGpus; j++) {
       hipDeviceProp_t prop;
-      HIP_CALL(hipGetDeviceProperties(&prop, RemappedGpuIndex(j)));
+      HIP_CALL(hipGetDeviceProperties(&prop, j));
       std::string fullName = prop.gcnArchName;
       std::string archName = fullName.substr(0, fullName.find(':'));
       printf(" %6s |", archName.c_str());
@@ -163,7 +128,6 @@ void DisplayTopology(bool outputToCsv)
 
   // Loop over each GPU device
   for (int i = 0; i < numGpus; i++) {
-    int const deviceIdx = RemappedGpuIndex(i);
     printf(" GPU %02d %c", i, sep);
 
     // Print off link information
@@ -172,9 +136,7 @@ void DisplayTopology(bool outputToCsv)
         printf("    N/A %c", sep);
       } else {
         uint32_t linkType, hopCount;
-        HIP_CALL(hipExtGetLinkTypeAndHopCount(deviceIdx,
-                                              RemappedGpuIndex(j),
-                                              &linkType, &hopCount));
+        HIP_CALL(hipExtGetLinkTypeAndHopCount(i, j, &linkType, &hopCount));
         printf(" %s-%d %c",
                linkType == HSA_AMD_LINK_INFO_TYPE_HYPERTRANSPORT ? "  HT" :
                linkType == HSA_AMD_LINK_INFO_TYPE_QPI            ? " QPI" :
@@ -186,13 +148,13 @@ void DisplayTopology(bool outputToCsv)
     }
 
     char pciBusId[20];
-    HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, deviceIdx));
+    HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
     printf(" %11s %c %4d %c %4d %c %4d %c %4d\n",
            pciBusId, sep,
-           TransferBench::GetNumSubExecutors({EXE_GPU_GFX, deviceIdx}), sep,
-           TransferBench::GetClosestCpuNumaToGpu(deviceIdx), sep,
-           TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, deviceIdx}), sep,
-           TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, deviceIdx}));
+           TransferBench::GetNumSubExecutors({EXE_GPU_GFX, i}), sep,
+           TransferBench::GetClosestCpuNumaToGpu(i), sep,
+           TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, i}), sep,
+           TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}));
   }
 #endif
 }
