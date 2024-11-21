@@ -904,8 +904,8 @@ namespace {
       if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU) {
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
-        int    const maxSubExecToUse = min((size_t)(N + targetMultiple - 1) / targetMultiple,
-                                           (size_t)t.numSubExecs);
+        int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
+                                                (size_t)t.numSubExecs);
 
         if (maxSubExecToUse < t.numSubExecs)
           errors.push_back({ERR_WARN,
@@ -1600,13 +1600,12 @@ namespace {
   }
 
   // Execution of a single CPU Transfers
-  static ErrResult ExecuteCpuTransfer(int           const  iteration,
-                                      ConfigOptions const& cfg,
-                                      int           const  exeIndex,
-                                      TransferResources&   resources)
+  static void ExecuteCpuTransfer(int           const  iteration,
+                                 ConfigOptions const& cfg,
+                                 int           const  exeIndex,
+                                 TransferResources&   resources)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
-
     vector<std::thread> childThreads;
     int subIteration = 0;
     do {
@@ -1626,7 +1625,6 @@ namespace {
       if (cfg.general.recordPerIteration)
         resources.perIterMsec.push_back(deltaMsec);
     }
-    return ERR_NONE;
   }
 
   // Execution of a single CPU executor
@@ -1638,18 +1636,16 @@ namespace {
     numa_run_on_node(exeIndex);
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    vector<std::future<ErrResult>> asyncTransfers;
+    vector<std::thread> asyncTransfers;
     for (auto& resource : exeInfo.resources) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteCpuTransfer,
-                                             iteration,
-                                             std::cref(cfg),
-                                             exeIndex,
-                                             std::ref(resource)));
+      asyncTransfers.emplace_back(std::thread(ExecuteCpuTransfer,
+                                              iteration,
+                                              std::cref(cfg),
+                                              exeIndex,
+                                              std::ref(resource)));
     }
-
     for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+      asyncTransfer.join();
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
@@ -2192,9 +2188,9 @@ namespace {
       resource.transferIdx = i;
       exeInfo.resources.push_back(resource);
 
-      minNumSrcs  = min(minNumSrcs, (int)t.srcs.size());
-      maxNumSrcs  = max(maxNumSrcs, (int)t.srcs.size());
-      maxNumBytes = max(maxNumBytes, t.numBytes);
+      minNumSrcs  = std::min(minNumSrcs, (int)t.srcs.size());
+      maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());
+      maxNumBytes = std::max(maxNumBytes, t.numBytes);
     }
 
     // Loop over each executor and prepare
@@ -2236,8 +2232,6 @@ namespace {
                                hipMemcpyDefault), errResults);
         }
       }
-
-
     }
 
     // Perform iterations
