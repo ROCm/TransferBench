@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.55
+### Fixed
+- Fixed missing header error when compiling on CentOS
+- Fixed issues when using multi-stream mode for GFX executor
+
 ## v1.54
 ### Modified
 - Refactored TransferBench into a header-only library combined with a thin client to facilitate the

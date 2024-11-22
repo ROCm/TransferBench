@@ -30,6 +30,7 @@ THE SOFTWARE.
 #include <sstream>
 #include <stdarg.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #if defined(__NVCC__)
@@ -1416,7 +1417,6 @@ namespace {
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA ||
                                    (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
         ? exeInfo.resources.size() : 1;
-
       exeInfo.streams.resize(numStreamsToUse);
 
       // Create streams
@@ -1833,6 +1833,8 @@ namespace {
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
                                       hipStream_t   const  stream,
+                                      hipEvent_t    const  startEvent,
+                                      hipEvent_t    const  stopEvent,
                                       int           const  xccDim,
                                       ConfigOptions const& cfg,
                                       TransferResources&   resources)
@@ -1844,33 +1846,41 @@ namespace {
     dim3 const blockSize(cfg.gfx.blockSize, 1);
 
 #if defined(__NVCC__)
+    if (startEvent != NULL)
+      ERR_CHECK(hipEventRecord(startEvent, stream));
+
     GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
       <<<gridSize, blockSize, 0, stream>>>
       (resources.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+    if (stopEvent != NULL)
+      ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
-                          gridSize, blockSize, 0, stream,
-                          NULL, NULL,
+                          gridSize, blockSize, 0, stream, startEvent, stopEvent,
                           0, resources.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
     if (iteration >= 0) {
+      double deltaMsec = cpuDeltaMsec;
+      if (startEvent != NULL) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        deltaMsec = gpuDeltaMsec;
+      }
       resources.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration) {
         resources.perIterMsec.push_back(deltaMsec);
-#if !defined(__NVCC__)
         std::set<std::pair<int,int>> CUs;
         for (int i = 0; i < numSubExecs; i++) {
           CUs.insert(std::make_pair(resources.subExecParamGpuPtr[i].xccId,
                                     GetId(resources.subExecParamGpuPtr[i].hwId)));
         }
         resources.perIterCUs.push_back(CUs);
-#endif
       }
     }
     return ERR_NONE;
@@ -1895,6 +1905,8 @@ namespace {
                                                ExecuteGpuTransfer,
                                                iteration,
                                                exeInfo.streams[i],
+                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
                                                xccDim,
                                                std::cref(cfg),
                                                std::ref(exeInfo.resources[i])));
@@ -1931,7 +1943,7 @@ namespace {
     double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
     if (iteration >= 0) {
-      if (cfg.gfx.useHipEvents) {
+      if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
         exeInfo.totalDurationMsec += gpuDeltaMsec;
@@ -1940,34 +1952,31 @@ namespace {
       }
 
       // Determine timing for each of the individual transfers that were part of this launch
-      for (int i = 0; i < exeInfo.resources.size(); i++) {
-        TransferResources& resources = exeInfo.resources[i];
-        long long minStartCycle = std::numeric_limits<long long>::max();
-        long long maxStopCycle  = std::numeric_limits<long long>::min();
-        std::set<std::pair<int, int>> CUs;
+      if (!cfg.gfx.useMultiStream) {
+        for (int i = 0; i < exeInfo.resources.size(); i++) {
+          TransferResources& resources = exeInfo.resources[i];
+          long long minStartCycle = std::numeric_limits<long long>::max();
+          long long maxStopCycle  = std::numeric_limits<long long>::min();
+          std::set<std::pair<int, int>> CUs;
 
-        for (auto subExecIdx : resources.subExecIdx) {
-          minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-          maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
-          if (cfg.general.recordPerIteration) {
-#if !defined(__NVCC__)
-            CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                      GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
-#endif
+          for (auto subExecIdx : resources.subExecIdx) {
+            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+            if (cfg.general.recordPerIteration) {
+              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+            }
           }
-        }
-        double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
+          double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
 
-        resources.totalDurationMsec += deltaMsec;
-        if (cfg.general.recordPerIteration) {
-          resources.perIterMsec.push_back(deltaMsec);
-#if !defined(__NVCC__)
-          resources.perIterCUs.push_back(CUs);
-#endif
+          resources.totalDurationMsec += deltaMsec;
+          if (cfg.general.recordPerIteration) {
+            resources.perIterMsec.push_back(deltaMsec);
+            resources.perIterCUs.push_back(CUs);
+          }
         }
       }
     }
-
     return ERR_NONE;
   }
 
