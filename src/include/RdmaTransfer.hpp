@@ -293,7 +293,7 @@ public:
    */
   static int GetNicCount()
   {
-    if (device_list == NULL && ib_device_count == 0)
+    if (device_list == NULL && ib_device_count < 0)
     {
       InitDeviceList();
     }
@@ -358,7 +358,7 @@ private:
 };
 // Initialize the static member device_list
 struct ibv_device **RdmaTransfer::device_list = NULL;
-int RdmaTransfer::ib_device_count = 0;
+int RdmaTransfer::ib_device_count = -1;
 //std::vector<RdmaTransfer::RDMA_Resources*> RdmaTransfer::ib_attribute_mapper;
 #else
 #warning "LIB Ibverbs is not installed. RDMA Executor is therefore disabled."
