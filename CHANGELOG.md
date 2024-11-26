@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.56
+### Fixed
+- Fixed bug when using interactive mode
+
 ## v1.55
 ### Fixed
 - Fixed missing header error when compiling on CentOS

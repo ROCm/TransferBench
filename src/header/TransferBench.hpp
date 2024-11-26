@@ -49,7 +49,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.54";
+  constexpr char VERSION[] = "1.56";
 
   /**
    * Enumeration of supported Executor types
@@ -2242,9 +2242,9 @@ namespace {
           ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
           printf("Transfer %03d:\n", i);
           for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
-            printf("  SRC %0d: %p\n", iSrc, exeInfo.resources[i].srcMem[iSrc]);
+            printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
           for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
-            printf("  DST %0d: %p\n", iDst, exeInfo.resources[i].dstMem[iDst]);
+            printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
         }
         printf("Hit <Enter> to continue: ");
         if (scanf("%*c") != 0) {
