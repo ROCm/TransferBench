@@ -2226,6 +2226,26 @@ namespace {
       }
     }
 
+    // Pause before starting when running in iteractive mode
+    if (cfg.general.useInteractive) {
+      printf("Memory prepared:\n");
+
+      for (int i = 0; i < transfers.size(); i++) {
+        ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
+        printf("Transfer %03d:\n", i);
+        for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
+          printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
+        for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
+          printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+      }
+      printf("Hit <Enter> to continue: ");
+      if (scanf("%*c") != 0) {
+        printf("[ERROR] Unexpected input\n");
+        exit(1);
+      }
+      printf("\n");
+    }
+
     // Perform iterations
     size_t numTimedIterations = 0;
     double totalCpuTimeSec = 0.0;
@@ -2234,25 +2254,6 @@ namespace {
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
       if (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations) break;
 
-      // Pause before starting first timed iteration in iteractive mode
-      if (cfg.general.useInteractive && iteration == 0) {
-        printf("Memory prepared:\n");
-
-        for (int i = 0; i < transfers.size(); i++) {
-          ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
-          printf("Transfer %03d:\n", i);
-          for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
-            printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
-          for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
-            printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
-        }
-        printf("Hit <Enter> to continue: ");
-        if (scanf("%*c") != 0) {
-          printf("[ERROR] Unexpected input\n");
-          exit(1);
-        }
-        printf("\n");
-      }
 
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
