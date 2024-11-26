@@ -5,7 +5,7 @@ Documentation for TransferBench is available at
 
 ## v1.56
 ### Fixed
-- Fixed bug when using interactive mode
+- Fixed bug when using interactive mode.  Interactive mode now starts prior to all warmup iterations
 
 ## v1.55
 ### Fixed
