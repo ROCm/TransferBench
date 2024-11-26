@@ -34,21 +34,21 @@ if (BUILD_LOCAL_GPU_TARGET_ONLY)
 endif()
 
 # Determine which GPU architectures to build for
-set(AMDGPU_TARGETS "${DEFAULT_GPUS}" CACHE STRING "Target default GPUs if AMDGPU_TARGETS is not defined.")
+set(GPU_TARGETS "${DEFAULT_GPUS}" CACHE STRING "Target default GPUs if GPU_TARGETS is not defined.")
 
-# Check if clang compiler can offload to AMDGPU_TARGETS
+# Check if clang compiler can offload to GPU_TARGETS
 if (COMMAND rocm_check_target_ids)
-  message(STATUS "Checking for ROCm support for GPU targets: " "${AMDGPU_TARGETS}")
-  rocm_check_target_ids(SUPPORTED_GPUS TARGETS ${AMDGPU_TARGETS})
+  message(STATUS "Checking for ROCm support for GPU targets: " "${GPU_TARGETS}")
+  rocm_check_target_ids(SUPPORTED_GPUS TARGETS ${GPU_TARGETS})
 else()
   message(WARNING "Unable to check for supported GPU targets. Falling back to default GPUs.")
   set(SUPPORTED_GPUS ${DEFAULT_GPUS})
 endif()
 
-set(GPU_TARGETS "${SUPPORTED_GPUS}" CACHE STRING "GPU targets to compile for.")
-message(STATUS "Compiling for ${GPU_TARGETS}")
+set(COMPILING_TARGETS "${SUPPORTED_GPUS}" CACHE STRING "GPU targets to compile for.")
+message(STATUS "Compiling for ${COMPILING_TARGETS}")
 
-foreach(target ${GPU_TARGETS})
+foreach(target ${COMPILING_TARGETS})
  list(APPEND static_link_flags --offload-arch=${target})
 endforeach()
 list(JOIN static_link_flags " " flags_str)
