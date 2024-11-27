@@ -172,11 +172,10 @@ int main(int argc, char **argv) {
 
 void DisplayUsage(char const* cmdName)
 {
-  printf("TransferBench Client v%s (Backend v%s)\n", CLIENT_VERSION, TransferBench::VERSION);
+  printf("TransferBench v%s.%s\n", TransferBench::VERSION, CLIENT_VERSION);
   printf("========================================\n");
 
-  if (numa_available() == -1)
-  {
+  if (numa_available() == -1) {
     printf("[ERROR] NUMA library not supported. Check to see if libnuma has been installed on this system\n");
     exit(1);
   }

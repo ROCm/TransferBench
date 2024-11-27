@@ -7,7 +7,7 @@ else()
 endif()
 cmake_minimum_required(VERSION 3.5)
 
-project(TransferBench VERSION 1.56.0 LANGUAGES CXX)
+project(TransferBench VERSION 1.57.0 LANGUAGES CXX)
 
 # Default GPU architectures to build
 #==================================================================================================
@@ -54,7 +54,7 @@ endforeach()
 list(JOIN static_link_flags " " flags_str)
 set( CMAKE_CXX_FLAGS "${flags_str}${CMAKE_CXX_FLAGS}")
 
-set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 --std=c++20 -L${ROCM_PATH}/lib")
+set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
 include_directories(${ROCM_PATH}/include)
 link_libraries(numa hsa-runtime64 pthread)
 set (CMAKE_RUNTIME_OUTPUT_DIRECTORY .)

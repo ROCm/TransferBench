@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.57.00
+### Modified
+- Removing use of default starship operator / C++20 requirement to enable compilation of more OSs
+- Changing how version is reported.  Client version is now just last two digits, and increments only if
+  no changes are made to the backend header-only library file, and resets to 0 when header is updated
+
 ## v1.56
 ### Fixed
 - Fixed bug when using interactive mode.  Interactive mode now starts prior to all warmup iterations

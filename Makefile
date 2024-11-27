@@ -18,7 +18,7 @@ endif
 
 CXXFLAGS = -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
 NVFLAGS  = -x cu -lnuma -arch=native
-COMMON_FLAGS = -O3 --std=c++20 -I./src/header -I./src/client -I./src/client/Presets
+COMMON_FLAGS = -O3 -I./src/header -I./src/client -I./src/client/Presets
 LDFLAGS += -lpthread
 
 all: $(EXE)
