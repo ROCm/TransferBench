@@ -8,6 +8,7 @@ Documentation for TransferBench is available at
 - Removing use of default starship operator / C++20 requirement to enable compilation of more OSs
 - Changing how version is reported.  Client version is now just last two digits, and increments only if
   no changes are made to the backend header-only library file, and resets to 0 when header is updated
+- GFX_SINGLE_TEAM=0 is set by default
 
 ## v1.56
 ### Fixed

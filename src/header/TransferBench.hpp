@@ -172,7 +172,7 @@ namespace TransferBench
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
-    int                 useSingleTeam  = 1;     ///< Team all subExecutors across the data array
+    int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
   };
 
