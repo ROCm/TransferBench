@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.57.01
+### Added
+- Re-added "scaling" GPU GFX preset benchmark, which tests copies from GPU to other devices using varying
+  number of CUs.
+
 ## v1.57.00
 ### Modified
 - Removing use of default starship operator / C++20 requirement to enable compilation of more OSs

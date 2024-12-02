@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include "HealthCheck.hpp"
 #include "OneToAll.hpp"
 #include "PeerToPeer.hpp"
+#include "Scaling.hpp"
 #include "Schmoo.hpp"
 #include "Sweep.hpp"
 #include <map>
@@ -42,6 +43,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"one2all",     {OneToAllPreset,   "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset, "Peer-to-peer device memory bandwidth test"}},
   {"rsweep",      {SweepPreset,      "Randomly sweep through sets of Transfers"}},
+  {"scaling",     {ScalingPreset,    "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,     "Scaling tests for local/remote read/write/copy"}},
   {"sweep",       {SweepPreset,      "Ordered sweep through sets of Transfers"}},
 };
