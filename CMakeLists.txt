@@ -52,7 +52,7 @@ foreach(target ${COMPILING_TARGETS})
  list(APPEND static_link_flags --offload-arch=${target})
 endforeach()
 list(JOIN static_link_flags " " flags_str)
-set( CMAKE_CXX_FLAGS "${flags_str}${CMAKE_CXX_FLAGS}")
+set( CMAKE_CXX_FLAGS "${flags_str} ${CMAKE_CXX_FLAGS}")
 
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
 include_directories(${ROCM_PATH}/include)
