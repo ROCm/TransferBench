@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.58.00
+### Fixed
+- Fixed broken specific DMA-engine copies
+
 ## v1.57.01
 ### Added
 - Re-added "scaling" GPU GFX preset benchmark, which tests copies from GPU to other devices using varying

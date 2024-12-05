@@ -327,7 +327,7 @@ public:
     int numGpuDevices = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
     if (!outputToCsv) {
-      printf("TransferBench Client v%s Backend v%s\n", CLIENT_VERSION, TransferBench::VERSION);
+      printf("TransferBench v%s.%s\n", TransferBench::VERSION, CLIENT_VERSION);
       printf("===============================================================\n");
       if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }

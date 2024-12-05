@@ -7,7 +7,7 @@ else()
 endif()
 cmake_minimum_required(VERSION 3.5)
 
-project(TransferBench VERSION 1.57.0 LANGUAGES CXX)
+project(TransferBench VERSION 1.58.00 LANGUAGES CXX)
 
 # Default GPU architectures to build
 #==================================================================================================
