@@ -62,7 +62,7 @@ struct SubExecParam
 };
 
 // Macro for collecting HW_REG_HW_ID
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__)
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1200__) || defined(__gfx1201__)
 #define GetHwId(hwId) \
   hwId = 0
 #elif defined(__NVCC__)
