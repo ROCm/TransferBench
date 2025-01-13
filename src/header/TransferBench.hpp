@@ -195,15 +195,16 @@ namespace TransferBench
    */
   struct NicOptions
   {
-    int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
-    int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
-    int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
-    uint8_t     ibPort          = 1;            ///< NIC port number to be used
     vector<int> closestNics     = {};           ///< Overrides the auto-detected closest NIC per GPU
-    int         maxSendWorkReq  = 1;            ///< Maximum number of send work requests per queue pair
-    int         maxRecvWorkReq  = 1;            ///< Maximum number of recv work requests per queue pair
+    int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
+    uint8_t     ibPort          = 1;            ///< NIC port number to be used
+    int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
+    int         maxRecvWorkReq  = 16;           ///< Maximum number of recv work requests per queue pair
+    int         maxSendWorkReq  = 16;           ///< Maximum number of send work requests per queue pair
     int         queueSize       = 100;          ///< Completion queue size
-    int         useNuma         = 1;            ///< Switch to closest numa thread for execution
+    int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
+    int         useRelaxedOrder = 1;            ///< Use relaxed ordering
+    int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
 
@@ -484,7 +485,7 @@ namespace TransferBench
 #endif
 
 // Macro for collecting XCC GFX kernel is running on
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__)
 #define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val));
 #else
 #define GetXccId(val) val = 0
@@ -680,7 +681,7 @@ namespace {
     if (mistakeCount > 0) {
       return {ERR_FATAL,
               "%lu out of %lu pages for memory allocation were not on NUMA node %d."
-              " This could be due to hardware memory issues",
+              " This could be due to hardware memory issues, or the use of numa-rebalancing daemons such as numad",
               mistakeCount, numPages, targetId};
     }
     return ERR_NONE;
@@ -1775,43 +1776,6 @@ namespace {
     return ERR_NONE;
   }
 
-  static ErrResult PollIbvCQ(struct ibv_cq*     cq,
-                             int                transferIdx,
-                             std::vector<bool>& sendRecvStat)
-  {
-    int nc = 0;
-    struct ibv_wc wc;
-
-    // Loop until at least one completion is found
-    while (nc <= 0 && !sendRecvStat[transferIdx]) {
-      nc = ibv_poll_cq(cq, 1, &wc);  // Poll the completion queue
-      if (nc > 0) {
-        // Ensure the status of the work completion is successful
-        if (wc.status != IBV_WC_SUCCESS)
-          return {ERR_FATAL, "Received unsuccessful IBV work completion"};
-
-        if (wc.wr_id == transferIdx) break;
-        else {
-          // Lock is not needed.  ibv_poll_cq is thread-safe
-          sendRecvStat[wc.wr_id] = true;
-          // reset to keep looping until my data is at least received
-          nc = 0;
-        }
-      }
-      // Ensure the number of completions polled is non-negative
-      if (nc < 0)
-        return {ERR_FATAL, "Received negative IBV work completion. ibv_poll_cq returned %d", nc};
-    }
-    // No need to lock the shared vector. There are two cases
-    //   1. If my receive was accomplished by another thread, my loop won't exit
-    //      unless the memory location has been successefully set by the receiving thread
-    //   2. If my receive was accomplished by my thread, then it is guaranteed that I am the only
-    //      one trying to access this location
-    // All of this will change if ibv_poll_cq was not thread-safe
-    sendRecvStat[transferIdx] = false;
-    return ERR_NONE;
-  }
-
   static bool IsConfiguredGid(union ibv_gid* gid)
   {
     const struct in6_addr *a = (struct in6_addr *)gid->raw;
@@ -2005,10 +1969,11 @@ namespace {
 
 
     // Queue pair flags
-    const unsigned int rdmaFlags = (IBV_ACCESS_LOCAL_WRITE    |
-                                    IBV_ACCESS_REMOTE_READ    |
-                                    IBV_ACCESS_REMOTE_WRITE   |
-                                    IBV_ACCESS_REMOTE_ATOMIC);
+    unsigned int rdmaFlags = (IBV_ACCESS_LOCAL_WRITE    |
+                              IBV_ACCESS_REMOTE_READ    |
+                              IBV_ACCESS_REMOTE_WRITE   |
+                              IBV_ACCESS_REMOTE_ATOMIC);
+    if (cfg.nic.useRelaxedOrder) rdmaFlags |= IBV_ACCESS_RELAXED_ORDERING;
 
     // Open NIC contexts
     IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
@@ -2634,12 +2599,12 @@ namespace {
         numa_run_on_node(numaNode);
     }
 
-    std::vector<ibv_send_wr*> bad_wr(rss.qpCount, nullptr);
     int subIteration = 0;
     do {
       // Loop over each of the queue pairs and post the send
+      ibv_send_wr* badWorkReq;
       for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &bad_wr[qpIndex]);
+        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
         if (error)
           return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
             rss.transferIdx, qpIndex, error};
