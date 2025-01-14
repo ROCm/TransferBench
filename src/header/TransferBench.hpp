@@ -1966,14 +1966,14 @@ namespace {
     if (!GetIbvDeviceList()[rss.dstNicIndex].hasActivePort)
       return {ERR_FATAL, "DST NIC %d is not active\n", rss.dstNicIndex};
 
-
-
     // Queue pair flags
-    unsigned int rdmaFlags = (IBV_ACCESS_LOCAL_WRITE    |
-                              IBV_ACCESS_REMOTE_READ    |
-                              IBV_ACCESS_REMOTE_WRITE   |
-                              IBV_ACCESS_REMOTE_ATOMIC);
-    if (cfg.nic.useRelaxedOrder) rdmaFlags |= IBV_ACCESS_RELAXED_ORDERING;
+    unsigned int rdmaAccessFlags = (IBV_ACCESS_LOCAL_WRITE    |
+                                    IBV_ACCESS_REMOTE_READ    |
+                                    IBV_ACCESS_REMOTE_WRITE   |
+                                    IBV_ACCESS_REMOTE_ATOMIC);
+
+    unsigned int rdmaMemRegFlags = rdmaAccessFlags;
+    if (cfg.nic.useRelaxedOrder) rdmaMemRegFlags |= IBV_ACCESS_RELAXED_ORDERING;
 
     // Open NIC contexts
     IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
@@ -1984,8 +1984,8 @@ namespace {
     IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
 
     // Register memory region
-    IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaFlags);
-    IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaFlags);
+    IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+    IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
 
     // Create completion queues
     IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
@@ -2044,8 +2044,8 @@ namespace {
       ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
 
       // Initialize SRC/DST queue pairs
-      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaFlags));
-      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaFlags));
+      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
+      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
 
       // Transition the SRC queue pair to ready to receive
       ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
