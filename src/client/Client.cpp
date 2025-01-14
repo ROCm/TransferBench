@@ -121,13 +121,23 @@ int main(int argc, char **argv) {
       }
     }
 
+    // Track which transfers have already numBytes specified
+    std::vector<bool> bytesSpecified(transfers.size());
+    int hasUnspecified = false;
+    for (int i = 0; i < transfers.size(); i++) {
+      bytesSpecified[i] = (transfers[i].numBytes != 0);
+      if (transfers[i].numBytes == 0) hasUnspecified = true;
+    }
+
     // Run the specified numbers of bytes otherwise generate a range of values
     for (size_t bytes = (1<<10); bytes <= (1<<29); bytes *= 2) {
       size_t deltaBytes = std::max(1UL, bytes / ev.samplingFactor);
       size_t currBytes = (numBytesPerTransfer == 0) ? bytes : numBytesPerTransfer;
       do {
-        for (auto& t : transfers)
-          t.numBytes = currBytes;
+        for (int i = 0; i < transfers.size(); i++) {
+          if (!bytesSpecified[i])
+            transfers[i].numBytes = currBytes;
+        }
 
         if (maxVarCount == 0) {
           if (TransferBench::RunTransfers(cfgOptions, transfers, results)) {
@@ -162,10 +172,10 @@ int main(int argc, char **argv) {
           PrintResults(ev, ++testNum, bestTransfers, bestResults);
           PrintErrors(bestResults.errResults);
         }
-        if (numBytesPerTransfer != 0) break;
+        if (numBytesPerTransfer != 0 || !hasUnspecified) break;
         currBytes += deltaBytes;
       } while (currBytes < bytes * 2);
-      if (numBytesPerTransfer != 0) break;
+      if (numBytesPerTransfer != 0 || !hasUnspecified) break;
     }
   }
 }

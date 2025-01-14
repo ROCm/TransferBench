@@ -133,7 +133,7 @@ namespace TransferBench
    */
   struct Transfer
   {
-    size_t            numBytes    = (1<<26);    ///< # of bytes to Transfer
+    size_t            numBytes    = 0;          ///< # of bytes to Transfer
     vector<MemDevice> srcs        = {};         ///< List of source memory devices
     vector<MemDevice> dsts        = {};         ///< List of destination memory devices
     ExeDevice         exeDevice   = {};         ///< Executor to use
@@ -3453,6 +3453,7 @@ namespace {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet", i+1};
         }
+        transfer.numBytes = 0;
       } else {
         iss >> srcStr >> exeStr >> dstStr >> transfer.numSubExecs >> numBytesToken;
         if (iss.fail()) {
