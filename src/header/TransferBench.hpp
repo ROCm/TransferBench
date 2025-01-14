@@ -40,10 +40,10 @@ THE SOFTWARE.
 #include <stdint.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
-#include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <filesystem>
+#include <fstream>
 #endif
 
 #if defined(__NVCC__)
@@ -62,7 +62,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.58";
+  constexpr char VERSION[] = "1.59";
 
   /**
    * Enumeration of supported Executor types
@@ -75,13 +75,13 @@ namespace TransferBench
     EXE_CPU          = 0,                       ///<  CPU executor              (subExecutor = CPU thread)
     EXE_GPU_GFX      = 1,                       ///<  GPU kernel-based executor (subExecutor = threadblock/CU)
     EXE_GPU_DMA      = 2,                       ///<  GPU SDMA executor         (subExecutor = not supported)
-    EXE_NIC          = 3,                       ///<  RDMA NIC executor         (subExecutor = queue pair)
-    EXE_NIC_NEAREST  = 4                        ///<  RDMA NIC nearest executor (subExecutor = queue pair)
+    EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
+    EXE_NIC_NEAREST  = 4                        ///<  NIC RDMA nearest executor (subExecutor = queue pair)
   };
   char const ExeTypeStr[6] = "CGDIN";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
   inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA; }
-  inline bool IsRdmaExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
+  inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
    * A ExeDevice defines a specific Executor
@@ -167,29 +167,6 @@ namespace TransferBench
   };
 
   /**
-   * DMA Executor options
-   */
-  struct DmaOptions
-  {
-    int useHipEvents = 1;                       ///< Use HIP events for timing DMA Executor
-    int useHsaCopy   = 0;                       ///< Use HSA copy instead of HIP copy to perform DMA
-  };
-
-  /**
-   * RDMA Executor options
-   */
-  struct RdmaOptions
-  {
-    int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
-    int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
-    int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
-    uint8_t     ibPort          = 1;            ///< NIC port number to be used
-    vector<int> closestNics     = {};           ///< Overrides the auto-detected closest NIC per GPU
-    int         maxSendWorkReq  = 1;            ///< Maximum number of send work requests per queue pair
-    int         maxRecvWorkReq  = 1;            ///< Maximum number of recv work requests per queue pair
-  };
-
-  /**
    * GFX Executor options
    */
   struct GfxOptions
@@ -205,6 +182,33 @@ namespace TransferBench
   };
 
   /**
+   * DMA Executor options
+   */
+  struct DmaOptions
+  {
+    int useHipEvents = 1;                       ///< Use HIP events for timing DMA Executor
+    int useHsaCopy   = 0;                       ///< Use HSA copy instead of HIP copy to perform DMA
+  };
+
+  /**
+   * NIC Executor options
+   */
+  struct NicOptions
+  {
+    vector<int> closestNics     = {};           ///< Overrides the auto-detected closest NIC per GPU
+    int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
+    uint8_t     ibPort          = 1;            ///< NIC port number to be used
+    int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
+    int         maxRecvWorkReq  = 16;           ///< Maximum number of recv work requests per queue pair
+    int         maxSendWorkReq  = 16;           ///< Maximum number of send work requests per queue pair
+    int         queueSize       = 100;          ///< Completion queue size
+    int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
+    int         useRelaxedOrder = 1;            ///< Use relaxed ordering
+    int         useNuma         = 0;            ///< Switch to closest numa thread for execution
+  };
+
+
+  /**
    * Configuration options for performing Transfers
    */
   struct ConfigOptions
@@ -214,7 +218,7 @@ namespace TransferBench
 
     GfxOptions     gfx;                         ///< GFX executor options
     DmaOptions     dma;                         ///< DMA executor options
-    RdmaOptions    rdma;                        ///< RDMA executor options
+    NicOptions     nic;                         ///< NIC executor options
   };
 
   /**
@@ -272,7 +276,7 @@ namespace TransferBench
     vector<set<pair<int,int>>> perIterCUs;      ///< GFX-Executor only. XCC:CU used per iteration
 
     ExeDevice exeDevice;                        ///< Tracks which executor performed this Transfer (e.g. for EXE_NIC_NEAREST)
-    ExeDevice exeDstDevice;                     ///< Tracks actual destination executor (e.g. for EXE_NIC_NEAREST)
+    ExeDevice exeDstDevice;                     ///< Tracks actual destination executor (only valid for EXE_NIC/EXE_NIC_NEAREST)
   };
 
   /**
@@ -374,7 +378,15 @@ namespace TransferBench
    */
   int GetClosestCpuNumaToGpu(int gpuIndex);
 
- /**
+  /**
+   * Returns the index of the NUMA node closest to the given NIC
+   *
+   * @param[in] nicIndex Index of the NIC to query
+   * @returns NUMA node index closest to the NIC nicIndex, or -1 if unable to detect
+   */
+  int GetClosestCpuNumaToNic(int nicIndex);
+
+  /**
    * Returns the index of the NIC closest to the given GPU
    *
    * @param[in] gpuIndex Index of the GPU to query
@@ -473,7 +485,7 @@ namespace TransferBench
 #endif
 
 // Macro for collecting XCC GFX kernel is running on
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__)
 #define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val));
 #else
 #define GetXccId(val) val = 0
@@ -669,7 +681,7 @@ namespace {
     if (mistakeCount > 0) {
       return {ERR_FATAL,
               "%lu out of %lu pages for memory allocation were not on NUMA node %d."
-              " This could be due to hardware memory issues",
+              " This could be due to hardware memory issues, or the use of numa-rebalancing daemons such as numad",
               mistakeCount, numPages, targetId};
     }
     return ERR_NONE;
@@ -819,6 +831,7 @@ namespace {
       break;
     case EXE_GPU_GFX: case EXE_GPU_DMA:
       if (exeIndex < 0 || exeIndex >= numGpus)
+
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
       break;
@@ -843,6 +856,29 @@ namespace {
 
 // Setup validation-related functions
 //========================================================================================
+
+  static ErrResult GetActualExecutor(ConfigOptions const& cfg,
+                                     ExeDevice     const& origExeDevice,
+                                     ExeDevice&           actualExeDevice)
+  {
+    // By default, nothing needs to change
+    actualExeDevice = origExeDevice;
+
+    // When using NIC_NEAREST, remap to the closest NIC to the GPU
+    if (origExeDevice.exeType == EXE_NIC_NEAREST) {
+      actualExeDevice.exeType  = EXE_NIC;
+
+      if (cfg.nic.closestNics.size() > 0) {
+        if (origExeDevice.exeIndex < 0 || origExeDevice.exeIndex >= cfg.nic.closestNics.size())
+          return {ERR_FATAL, "NIC index is out of range (%d)", origExeDevice.exeIndex};
+
+        actualExeDevice.exeIndex = cfg.nic.closestNics[origExeDevice.exeIndex];
+      } else {
+        actualExeDevice.exeIndex = GetClosestNicToGpu(origExeDevice.exeIndex);
+      }
+    }
+    return ERR_NONE;
+  }
 
   // Validate that MemDevice exists
   static ErrResult CheckMemDevice(MemDevice const& memDevice)
@@ -926,12 +962,12 @@ namespace {
     // Check NIC options
 #ifdef NIC_EXEC_ENABLED
     int numNics = GetNumExecutors(EXE_NIC);
-    for (auto const& nic : cfg.rdma.closestNics)
+    for (auto const& nic : cfg.nic.closestNics)
       if (nic < 0 || nic >= numNics)
         errors.push_back({ERR_FATAL, "NIC index (%d) in user-specified closest NIC list must be between 0 and %d",
             nic, numNics - 1});
 
-    size_t closetNicsSize = cfg.rdma.closestNics.size();
+    size_t closetNicsSize = cfg.nic.closestNics.size();
     if (closetNicsSize > 0 && closetNicsSize < numGpus)
       errors.push_back({ERR_FATAL, "User-specified closest NIC list must match GPU count of %d",
           numGpus});
@@ -1115,14 +1151,30 @@ namespace {
           }
         }
         break;
-      case EXE_NIC: case EXE_NIC_NEAREST:
+      case EXE_NIC:
 #ifdef NIC_EXEC_ENABLED
+      {
         int srcIndex = t.exeDevice.exeIndex;
         int dstIndex = t.exeSubIndex;
-        if (srcIndex < 0 || srcIndex >= numGpus)
-          errors.push_back({ERR_FATAL, "Transfer %d: src NIC executor indexes an out-of-range GPU (%d)", i, srcIndex});
-        if (dstIndex < 0 || dstIndex >= numGpus)
-          errors.push_back({ERR_FATAL, "Transfer %d: dst NIC executor indexes an out-of-range GPU (%d)", i, dstIndex});
+        if (srcIndex < 0 || srcIndex >= numNics)
+          errors.push_back({ERR_FATAL, "Transfer %d: src NIC executor indexes an out-of-range NIC (%d)", i, srcIndex});
+        if (dstIndex < 0 || dstIndex >= numNics)
+          errors.push_back({ERR_FATAL, "Transfer %d: dst NIC executor indexes an out-of-range NIC (%d)", i, dstIndex});
+      }
+#else
+        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available", i});
+#endif
+        break;
+      case EXE_NIC_NEAREST:
+#ifdef NIC_EXEC_ENABLED
+      {
+        ExeDevice srcExeDevice;
+        ErrResult errSrc = GetActualExecutor(cfg, t.exeDevice, srcExeDevice);
+        if (errSrc.errType != ERR_NONE) errors.push_back(errSrc);
+        ExeDevice dstExeDevice;
+        ErrResult errDst = GetActualExecutor(cfg, {t.exeDevice.exeType, t.exeSubIndex}, dstExeDevice);
+        if (errDst.errType != ERR_NONE) errors.push_back(errDst);
+      }
 #else
         errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available", i});
 #endif
@@ -1205,7 +1257,6 @@ namespace {
       }
     }
 
-
     // Check for fatal errors
     for (auto const& err : errors)
       if (err.errType == ERR_FATAL) return true;
@@ -1237,18 +1288,6 @@ namespace {
     uint32_t                   xccId;             ///< XCC ID
   };
 
-  // RDMA NIC resource
-#ifdef NIC_EXEC_ENABLED
-  struct NicResources
-  {
-    ibv_pd*                    protectionDomain;  ///< Protection domain for RDMA operations
-    ibv_cq*                    completionQueue;   ///< Completion queue for RDMA operations
-    ibv_context*               context;           ///< Device context for the RDMA capable NIC
-    ibv_port_attr              portAttr;          ///< Port attributes for the RDMA capable NIC
-    ibv_gid                    gid;               ///< GID handler
-  };
-#endif
-
   // Internal resources allocated per Transfer
   struct TransferResources
   {
@@ -1258,6 +1297,7 @@ namespace {
     vector<float*>             dstMem;            ///< Destination memory
     vector<SubExecParam>       subExecParamCpu;   ///< Defines subarrays for each subexecutor
     vector<int>                subExecIdx;        ///< Indices into subExecParamGpu
+    int                        numaNode;          ///< NUMA node to use for this Transfer
 
     // For GFX executor
     SubExecParam*              subExecParamGpuPtr;
@@ -1272,17 +1312,25 @@ namespace {
 
 // For IBV executor
 #ifdef NIC_EXEC_ENABLED
-    vector<NicResources*> rdmaResourceMapper;    ///< Store resource sensitive RDMA fields
-    vector<pair<ibv_mr*, void*>> sourceMr;       ///< Memory region for the source buffer
-    vector<pair<ibv_mr*, void*>> destinationMr;  ///< Memory region for the destination buffer
-    vector<bool> receiveStatuses;                ///< Keep track of send/recv statuses
-    vector<size_t> messageSizes;                 ///< Keep track of message sizes
-    ibv_qp** senderQp = nullptr;                 ///< Queue pair for sending RDMA requests
-    ibv_qp** receiverQp = nullptr;               ///< Queue pair for receiving RDMA requests
-    int port;                                    ///< Port ID
-    uint8_t qpCount;                             ///< Number of QPs to be used for transferring data
-    int srcNic;                                  ///< Source NIC
-    int dstNic;                                  ///< Destination NIC
+    int                        srcNicIndex;       ///< SRC NIC index
+    int                        dstNicIndex;       ///< DST NIC index
+    ibv_context*               srcContext;        ///< Device context for SRC NIC
+    ibv_context*               dstContext;        ///< Device context for DST NIC
+    ibv_pd*                    srcProtect;        ///< Protection domain for SRC NIC
+    ibv_pd*                    dstProtect;        ///< Protection domain for DST NIC
+    ibv_cq*                    srcCompQueue;      ///< Completion queue for SRC NIC
+    ibv_cq*                    dstCompQueue;      ///< Completion queue for DST NIC
+    ibv_port_attr              srcPortAttr;       ///< Port attributes for SRC NIC
+    ibv_port_attr              dstPortAttr;       ///< Port attributes for DST NIC
+    ibv_gid                    srcGid;            ///< GID handle for SRC NIC
+    ibv_gid                    dstGid;            ///< GID handle for DST NIC
+    vector<ibv_qp*>            srcQueuePairs;     ///< Queue pairs for SRC NIC
+    vector<ibv_qp*>            dstQueuePairs;     ///< Queue pairs for DST NIC
+    ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
+    ibv_mr*                    dstMemRegion;      ///< Memory region for DST
+    uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
+    vector<ibv_sge>            sgePerQueuePair;   ///< Scatter-gather elements per queue pair
+    vector<ibv_send_wr>        sendWorkRequests;  ///< Send work requests per queue pair
 #endif
 
     // Counters
@@ -1299,7 +1347,6 @@ namespace {
     int                        totalSubExecs;     ///< Total number of subExecutors to use
     bool                       useSubIndices;     ///< Use subexecutor indicies
     int                        numSubIndices;     ///< Number of subindices this ExeDevice has
-    int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
     vector<SubExecParam>       subExecParamCpu;   ///< Subexecutor parameters for this executor
     vector<TransferResources>  resources;         ///< Per-Transfer resources
 
@@ -1308,6 +1355,7 @@ namespace {
     vector<hipStream_t>        streams;           ///< HIP streams to launch on
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
+    int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
   };
 
   // Structure to track PCIe topology
@@ -1341,6 +1389,7 @@ namespace {
     std::string name;
     std::string busId;
     bool        hasActivePort;
+    int         numaNode;
   };
 #endif
 
@@ -1391,6 +1440,23 @@ namespace {
               if (pos != std::string::npos) {
                 ibvDevice.busId = pciPath.substr(pos + 1);
               }
+            }
+          }
+
+          // Get nearest numa node for this device
+          ibvDevice.numaNode = -1;
+          std::filesystem::path devicePath = "/sys/bus/pci/devices/" + ibvDevice.busId + "/numa_node";
+          std::string canonicalPath = std::filesystem::canonical(devicePath).string();
+
+          if (std::filesystem::exists(canonicalPath)) {
+            std::ifstream file(canonicalPath);
+            if (file.is_open()) {
+              std::string numaNodeStr;
+              std::getline(file, numaNodeStr);
+              int numaNodeVal;
+              if (sscanf(numaNodeStr.c_str(), "%d", &numaNodeVal) == 1)
+                ibvDevice.numaNode = numaNodeVal;
+              file.close();
             }
           }
           ibvDeviceList.push_back(ibvDevice);
@@ -1591,24 +1657,20 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
 // IB Verbs-related functions
 //========================================================================================
-  const unsigned int rdmaFlags = IBV_ACCESS_LOCAL_WRITE    |
-                                 IBV_ACCESS_REMOTE_READ    |
-                                 IBV_ACCESS_REMOTE_WRITE   |
-                                 IBV_ACCESS_REMOTE_ATOMIC;
 
   // Create a queue pair
-  static ErrResult CreateQueuePair(RdmaOptions const& rdmaOptions,
-                                   struct ibv_pd*     pd,
-                                   struct ibv_cq*     cq,
-                                   struct ibv_qp*&    qp)
+  static ErrResult CreateQueuePair(ConfigOptions const& cfg,
+                                   struct ibv_pd*       pd,
+                                   struct ibv_cq*       cq,
+                                   struct ibv_qp*&      qp)
   {
     // Set queue pair attributes
     struct ibv_qp_init_attr attr = {};
     attr.qp_type          = IBV_QPT_RC;                  // Set type to reliable connection
     attr.send_cq          = cq;                          // Send completion queue
     attr.recv_cq          = cq;                          // Recv completion queue
-    attr.cap.max_send_wr  = rdmaOptions.maxSendWorkReq;  // Max send work requests
-    attr.cap.max_recv_wr  = rdmaOptions.maxRecvWorkReq;  // Max recv work requests
+    attr.cap.max_send_wr  = cfg.nic.maxSendWorkReq;      // Max send work requests
+    attr.cap.max_recv_wr  = cfg.nic.maxRecvWorkReq;      // Max recv work requests
     attr.cap.max_send_sge = 1;                           // Max send scatter-gather entries
     attr.cap.max_recv_sge = 1;                           // Max recv scatter-gather entries
 
@@ -1714,43 +1776,6 @@ namespace {
     return ERR_NONE;
   }
 
-  static ErrResult PollIbvCQ(struct ibv_cq*     cq,
-                             int                transferIdx,
-                             std::vector<bool>& sendRecvStat)
-  {
-    int nc = 0;
-    struct ibv_wc wc;
-
-    // Loop until at least one completion is found
-    while (nc <= 0 && !sendRecvStat[transferIdx]) {
-      nc = ibv_poll_cq(cq, 1, &wc);  // Poll the completion queue
-      if (nc > 0) {
-        // Ensure the status of the work completion is successful
-        if (wc.status != IBV_WC_SUCCESS)
-          return {ERR_FATAL, "Received unsuccessful IBV work completion"};
-
-        if (wc.wr_id == transferIdx) break;
-        else {
-          // Lock is not needed.  ibv_poll_cq is thread-safe
-          sendRecvStat[wc.wr_id] = true;
-          // reset to keep looping until my data is at least received
-          nc = 0;
-        }
-      }
-      // Ensure the number of completions polled is non-negative
-      if (nc < 0)
-        return {ERR_FATAL, "Received negative IBV work completion. ibv_poll_cq returned %d", nc};
-    }
-    // No need to lock the shared vector. There are two cases
-    //   1. If my receive was accomplished by another thread, my loop won't exit
-    //      unless the memory location has been successefully set by the receiving thread
-    //   2. If my receive was accomplished by my thread, then it is guaranteed that I am the only
-    //      one trying to access this location
-    // All of this will change if ibv_poll_cq was not thread-safe
-    sendRecvStat[transferIdx] = false;
-    return ERR_NONE;
-  }
-
   static bool IsConfiguredGid(union ibv_gid* gid)
   {
     const struct in6_addr *a = (struct in6_addr *)gid->raw;
@@ -1789,7 +1814,7 @@ namespace {
 
   static bool MatchGidAddressFamily(sa_family_t const& af,
                                     void*              prefix,
-                                    int                prefixlen,
+                                    int                prefixLen,
                                     union ibv_gid*     gid)
   {
     struct in_addr  *base  = NULL;
@@ -1803,39 +1828,37 @@ namespace {
     addr6 = (struct in6_addr *)gid->raw;
 #define NETMASK(bits) (htonl(0xffffffff ^ ((1 << (32 - bits)) - 1)))
     int i = 0;
-    while (prefixlen > 0 && i < 4) {
+    while (prefixLen > 0 && i < 4) {
       if (af == AF_INET) {
-        int mask = NETMASK(prefixlen);
-        if ((base->s_addr & mask) ^ (addr6->s6_addr32[3] & mask)) {
+        int mask = NETMASK(prefixLen);
+        if ((base->s_addr & mask) ^ (addr6->s6_addr32[3] & mask))
           break;
-        }
-        prefixlen = 0;
+        prefixLen = 0;
         break;
       } else {
-        if (prefixlen >= 32) {
-          if (base6->s6_addr32[i] ^ addr6->s6_addr32[i]) {
+        if (prefixLen >= 32) {
+          if (base6->s6_addr32[i] ^ addr6->s6_addr32[i])
             break;
-          }
-          prefixlen -= 32;
+          prefixLen -= 32;
           ++i;
         } else {
-          int mask = NETMASK(prefixlen);
-          if ((base6->s6_addr32[i] & mask) ^ (addr6->s6_addr32[i] & mask)) {
+          int mask = NETMASK(prefixLen);
+          if ((base6->s6_addr32[i] & mask) ^ (addr6->s6_addr32[i] & mask))
             break;
-          }
-          prefixlen = 0;
+          prefixLen = 0;
         }
       }
     }
-    return (prefixlen == 0) ? true : false;
+    return (prefixLen == 0) ? true : false;
 #undef NETMASK
   }
 
-  static ErrResult GetRoceVersionNumber(char const* deviceName,
+  static ErrResult GetRoceVersionNumber(struct ibv_context* const& context,
                                         int const&  portNum,
                                         int const&  gidIndex,
                                         int*        version)
   {
+    char const* deviceName = ibv_get_device_name(context->device);
     char gidRoceVerStr[16]      = {};
     char roceTypePath[PATH_MAX] = {};
     sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
@@ -1863,291 +1886,215 @@ namespace {
     return ERR_NONE;
   }
 
-  static ErrResult UpdateGidIndex(struct ibv_context* const& context,
-                                  uint8_t const&             portNum,
-                                  sa_family_t const&         af,
-                                  void* const&               prefix,
-                                  int const&                 prefixlen,
-                                  int const&                 roceVer,
-                                  int const&                 gidIndexCandidate,
-                                  int*&                      gidIndex)
+  static ErrResult GetGidIndex(ConfigOptions const& cfg,
+                               struct ibv_context*  context,
+                               int const&           gidTblLen,
+                               int&                 gidIndex)
   {
-    union ibv_gid gid, gidCandidate;
-    IBV_CALL(ibv_query_gid, context, portNum, *gidIndex, &gid);
-    IBV_CALL(ibv_query_gid, context, portNum, gidIndexCandidate, &gidCandidate);
+    // Use GID index if user specified
+    if (gidIndex >= 0) return ERR_NONE;
 
-    sa_family_t usrFam = af;
-    sa_family_t gidFam = GetGidAddressFamily(&gid);
-    sa_family_t gidCandidateFam = GetGidAddressFamily(&gidCandidate);
-    bool gidCandidateMatchSubnet = MatchGidAddressFamily(usrFam, prefix, prefixlen, &gidCandidate);
+    // Try to find the best GID index
+    int         port          = cfg.nic.ibPort;
+    sa_family_t targetAddrFam = (cfg.nic.ipAddressFamily == 6)? AF_INET6 : AF_INET;
+    int         targetRoCEVer = cfg.nic.roceVersion;
 
-    if (gidCandidateFam != gidFam && gidCandidateFam == usrFam && gidCandidateMatchSubnet) {
-      *gidIndex = gidIndexCandidate;
-    }
-    else {
-      if (gidCandidateFam != usrFam || !IsValidGid(&gidCandidate) || !gidCandidateMatchSubnet) {
-        return ERR_NONE;
+    // Initially assume gidIndex = 0
+    int gidIndexCurr = 0;
+    union ibv_gid gidCurr;
+    IBV_CALL(ibv_query_gid, context, port, gidIndexCurr, &gidCurr);
+    sa_family_t gidCurrFam = GetGidAddressFamily(&gidCurr);
+    bool gidCurrIsValid = IsValidGid(&gidCurr);
+    int  gidCurrRoceVersion;
+    ERR_CHECK(GetRoceVersionNumber(context, port, gidIndexCurr, &gidCurrRoceVersion));
+
+    // Loop over GID table to find the best match
+    for (int gidIndexTest = 1; gidIndexTest < gidTblLen; ++gidIndexTest) {
+      union ibv_gid gidTest;
+      IBV_CALL(ibv_query_gid, context, cfg.nic.ibPort, gidIndexTest, &gidTest);
+      if (!IsValidGid(&gidTest)) continue;
+
+      sa_family_t gidTestFam = GetGidAddressFamily(&gidTest);
+      bool gidTestMatchSubnet = MatchGidAddressFamily(targetAddrFam, NULL, 0, &gidTest);
+      int  gidTestRoceVersion;
+      ERR_CHECK(GetRoceVersionNumber(context, port, gidIndexTest, &gidTestRoceVersion));
+
+      if (!gidCurrIsValid ||
+          (gidTestFam == targetAddrFam && gidTestMatchSubnet &&
+           (gidCurrFam != targetAddrFam || gidTestRoceVersion == targetRoCEVer))) {
+        // Switch to better match
+        gidIndexCurr       = gidIndexTest;
+        gidCurrFam         = gidTestFam;
+        gidCurrIsValid     = true;
+        gidCurrRoceVersion = gidTestRoceVersion;
       }
-      int usrRoceVer = roceVer;
-      int gidRoceVerNum, gidRoceVerNumCandidate;
-      const char* deviceName = ibv_get_device_name(context->device);
-      ERR_CHECK(GetRoceVersionNumber(deviceName, portNum, *gidIndex, &gidRoceVerNum));
-      ERR_CHECK(GetRoceVersionNumber(deviceName, portNum, gidIndexCandidate, &gidRoceVerNumCandidate));
-      if ((gidRoceVerNum != gidRoceVerNumCandidate || !IsValidGid(&gid)) && gidRoceVerNumCandidate == usrRoceVer)
-      {
-        *gidIndex = gidIndexCandidate;
-      }
     }
+
+    gidIndex = gidIndexCurr;
     return ERR_NONE;
   }
 
-  static ErrResult SetGidIndex(struct ibv_context* context,
-                               uint8_t const&      portNum,
-                               int const&          gidTblLen,
-                               int const&          roceVersion,
-                               int const&          ipAddressFamily,
-                               int*                gidIndex)
+  static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
+                                               ExeDevice     const& srcExeDevice,
+                                               Transfer      const& t,
+                                               TransferResources&   rss)
+
   {
-    if (*gidIndex >= 0) return ERR_NONE;
+    // Switch to the closest NUMA node to this NIC
+    int numaNode = GetIbvDeviceList()[srcExeDevice.exeIndex].numaNode;
+    if (numaNode != -1)
+      numa_run_on_node(numaNode);
 
-    sa_family_t userAddrFamily = (ipAddressFamily == 6)? AF_INET6 : AF_INET;
+    int const port = cfg.nic.ibPort;
 
-    int userRoceVersion = roceVersion;
+    // Figure out destination NIC (Accounts for possible remap due to use of EXE_NIC_NEAREST)
+    ExeDevice dstExeDevice;
+    ERR_CHECK(GetActualExecutor(cfg, {t.exeDevice.exeType, t.exeSubIndex}, dstExeDevice));
 
-    // TODO: Get address range from user
-    void *prefix = NULL;
+    rss.srcNicIndex = srcExeDevice.exeIndex;
+    rss.dstNicIndex = dstExeDevice.exeIndex;
+    rss.qpCount     = t.numSubExecs;
 
-    *gidIndex = 0;
-    for (int gidIndexNext = 1; gidIndexNext < gidTblLen; ++gidIndexNext) {
-      ERR_CHECK(UpdateGidIndex(context, portNum, userAddrFamily,
-                               prefix, 0, userRoceVersion, gidIndexNext,
-                               gidIndex));
+    // Check for valid NICs and active ports
+    int numNics = GetNumExecutors(EXE_NIC);
+    if (rss.srcNicIndex < 0 || rss.srcNicIndex >= numNics)
+      return {ERR_FATAL, "SRC NIC index is out of range (%d)", rss.srcNicIndex};
+    if (rss.dstNicIndex < 0 || rss.dstNicIndex >= numNics)
+      return {ERR_FATAL, "DST NIC index is out of range (%d)", rss.dstNicIndex};
+    if (!GetIbvDeviceList()[rss.srcNicIndex].hasActivePort)
+      return {ERR_FATAL, "SRC NIC %d is not active\n", rss.srcNicIndex};
+    if (!GetIbvDeviceList()[rss.dstNicIndex].hasActivePort)
+      return {ERR_FATAL, "DST NIC %d is not active\n", rss.dstNicIndex};
+
+    // Queue pair flags
+    unsigned int rdmaAccessFlags = (IBV_ACCESS_LOCAL_WRITE    |
+                                    IBV_ACCESS_REMOTE_READ    |
+                                    IBV_ACCESS_REMOTE_WRITE   |
+                                    IBV_ACCESS_REMOTE_ATOMIC);
+
+    unsigned int rdmaMemRegFlags = rdmaAccessFlags;
+    if (cfg.nic.useRelaxedOrder) rdmaMemRegFlags |= IBV_ACCESS_RELAXED_ORDERING;
+
+    // Open NIC contexts
+    IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
+    IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
+
+    // Open protection domains
+    IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
+    IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
+
+    // Register memory region
+    IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+    IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+
+    // Create completion queues
+    IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+    IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+
+    // Get port attributes
+    IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
+    IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
+
+
+    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer)
+      return {ERR_FATAL, "SRC NIC (%d) and DST NIC (%d) do not have the same link layer", rss.srcNicIndex, rss.dstNicIndex};
+
+    // Prepare GID index
+    int srcGidIndex = cfg.nic.ibGidIndex;
+    int dstGidIndex = cfg.nic.ibGidIndex;
+
+    // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+    bool isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+    if (isRoCE) {
+      // Try to auto-detect the GID index
+      ERR_CHECK(GetGidIndex(cfg, rss.srcContext, rss.srcPortAttr.gid_tbl_len, srcGidIndex));
+      ERR_CHECK(GetGidIndex(cfg, rss.dstContext, rss.dstPortAttr.gid_tbl_len, dstGidIndex));
+      IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
+      IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
     }
+
+    // Prepare queue pairs and send elements
+    rss.srcQueuePairs.resize(rss.qpCount);
+    rss.dstQueuePairs.resize(rss.qpCount);
+    rss.sgePerQueuePair.resize(rss.qpCount);
+    rss.sendWorkRequests.resize(rss.qpCount);
+
+    for (int i = 0; i < rss.qpCount; ++i) {
+
+      // Create scatter-gather element for the portion of memory assigned to this queue pair
+      ibv_sge sg = {};
+      sg.addr   = (uint64_t)rss.subExecParamCpu[i].src[0];
+      sg.length = rss.subExecParamCpu[i].N * sizeof(float);
+      sg.lkey   = rss.srcMemRegion->lkey;
+      rss.sgePerQueuePair[i] = sg;
+
+      // Create send work request
+      ibv_send_wr wr = {};
+      wr.wr_id                = i;
+      wr.sg_list              = &rss.sgePerQueuePair[i];
+      wr.num_sge              = 1;
+      wr.opcode               = IBV_WR_RDMA_WRITE;
+      wr.send_flags           = IBV_SEND_SIGNALED;
+      wr.wr.rdma.remote_addr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
+      wr.wr.rdma.rkey         = rss.dstMemRegion->rkey;
+      rss.sendWorkRequests[i] = wr;
+
+      // Create SRC/DST queue pairs
+      ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
+      ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
+
+      // Initialize SRC/DST queue pairs
+      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
+      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
+
+      // Transition the SRC queue pair to ready to receive
+      ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
+                                  rss.dstQueuePairs[i]->qp_num, rss.dstGid,
+                                  dstGidIndex, port, isRoCE,
+                                  rss.srcPortAttr.active_mtu));
+
+      // Transition the SRC queue pair to ready to send
+      ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+
+      // Transition the DST queue pair to ready to receive
+      ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], rss.srcPortAttr.lid,
+                                  rss.srcQueuePairs[i]->qp_num, rss.srcGid,
+                                  srcGidIndex, port, isRoCE,
+                                  rss.dstPortAttr.active_mtu));
+
+      // Transition the DST queue pair to ready to send
+      ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+    }
+
     return ERR_NONE;
   }
 
-  static ErrResult InitRdmaResources(int const&             deviceID,
-                                     uint8_t const&         port,
-                                     vector<NicResources*>& resourceMapper)
+  static ErrResult TeardownNicTransferResources(TransferResources& rss)
   {
-    if (resourceMapper.size() <= deviceID) {
-      resourceMapper.resize(deviceID + 1);
-      resourceMapper[deviceID] = nullptr;
-    }
-    if (resourceMapper[deviceID] == nullptr) {
-      resourceMapper[deviceID] = new NicResources();
-      auto& rdma = resourceMapper[deviceID];
-      IBV_PTR_CALL(rdma->context, ibv_open_device, GetIbvDeviceList()[deviceID].devicePtr);
-      IBV_PTR_CALL(rdma->protectionDomain, ibv_alloc_pd, rdma->context);
-      IBV_PTR_CALL(rdma->completionQueue, ibv_create_cq, rdma->context, 100, NULL, NULL, 0);
-      IBV_CALL(ibv_query_port, rdma->context, port, &rdma->portAttr);
-      if (rdma->portAttr.state != IBV_PORT_ACTIVE) {
-        return {ERR_FATAL, "Selected RDMA device %d is down", deviceID};
-      }
-    }
-    return ERR_NONE;
-  }
+    // Deregister memory regions
+    IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
+    IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
-  static ErrResult InitRdmaTransferResources(RdmaOptions const& rdmaOptions,
-                                             TransferResources& resources)
-  {
-    //InitDeviceList();
-    auto && port            = rdmaOptions.ibPort;
-    auto srcGidIndex        = rdmaOptions.ibGidIndex;
-    auto dstGidIndex        = rdmaOptions.ibGidIndex;
-    auto && roceVersion     = rdmaOptions.roceVersion;
-    auto && ipAddrFamily    = rdmaOptions.ipAddressFamily;
-    auto && qpCount         = resources.qpCount;
-    auto && srcDeviceId     = resources.srcNic;
-    auto && dstDeviceId     = resources.dstNic;
-    resources.qpCount       = qpCount;
-    ERR_CHECK(InitRdmaResources(srcDeviceId, port, resources.rdmaResourceMapper));
-    ERR_CHECK(InitRdmaResources(dstDeviceId, port, resources.rdmaResourceMapper));
-    auto && srcRdmaResources = resources.rdmaResourceMapper[srcDeviceId];
-    auto && dstRdmaResources = resources.rdmaResourceMapper[dstDeviceId];
-    auto && senderQp         = resources.senderQp;
-    auto && receiverQp       = resources.receiverQp;
+    // Destroy queue pairs
+    for (auto srcQueuePair : rss.srcQueuePairs)
+      IBV_CALL(ibv_destroy_qp, srcQueuePair);
+    rss.srcQueuePairs.clear();
+    for (auto dstQueuePair : rss.dstQueuePairs)
+      IBV_CALL(ibv_destroy_qp, dstQueuePair);
+    rss.dstQueuePairs.clear();
 
-    bool isRoce = srcRdmaResources->portAttr.link_layer == IBV_LINK_LAYER_ETHERNET;
-    assert(srcRdmaResources->portAttr.link_layer == dstRdmaResources->portAttr.link_layer);
-    if (isRoce) {
-      ERR_CHECK(SetGidIndex(srcRdmaResources->context, port,
-                            srcRdmaResources->portAttr.gid_tbl_len,
-                            roceVersion, ipAddrFamily, &srcGidIndex));
+    // Destroy completion queues
+    IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
+    IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
 
-      ERR_CHECK(SetGidIndex(dstRdmaResources->context, port,
-                            dstRdmaResources->portAttr.gid_tbl_len,
-                            roceVersion, ipAddrFamily, &dstGidIndex));
+    // Deallocate protection domains
+    IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
+    IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
 
+    // Destroy context
+    IBV_CALL(ibv_close_device, rss.srcContext);
+    IBV_CALL(ibv_close_device, rss.dstContext);
 
-      IBV_CALL(ibv_query_gid, srcRdmaResources->context, port, srcGidIndex, &srcRdmaResources->gid);
-      IBV_CALL(ibv_query_gid, dstRdmaResources->context, port, dstGidIndex, &dstRdmaResources->gid);
-    }
-
-    assert(senderQp == nullptr);
-    assert(receiverQp == nullptr);
-    assert(qpCount >= 1);
-    senderQp   = new ibv_qp* [qpCount];
-    receiverQp = new ibv_qp* [qpCount];
-    for (int i = 0; i < qpCount; ++i) {
-      ERR_CHECK(CreateQueuePair(rdmaOptions, srcRdmaResources->protectionDomain,
-                                srcRdmaResources->completionQueue, senderQp[i]));
-
-      ERR_CHECK(CreateQueuePair(rdmaOptions, dstRdmaResources->protectionDomain,
-                                dstRdmaResources->completionQueue, receiverQp[i]));
-
-      ERR_CHECK(InitQueuePair(senderQp[i], port, rdmaFlags));
-      ERR_CHECK(InitQueuePair(receiverQp[i], port, rdmaFlags));
-
-      ERR_CHECK(TransitionQpToRtr(senderQp[i], dstRdmaResources->portAttr.lid,
-                                  receiverQp[i]->qp_num, dstRdmaResources->gid,
-                                  dstGidIndex, port, isRoce,
-                                  srcRdmaResources->portAttr.active_mtu));
-
-      ERR_CHECK(TransitionQpToRts(senderQp[i]));
-
-      ERR_CHECK(TransitionQpToRtr(receiverQp[i], srcRdmaResources->portAttr.lid,
-                                  senderQp[i]->qp_num, srcRdmaResources->gid,
-                                  srcGidIndex, port, isRoce,
-                                  dstRdmaResources->portAttr.active_mtu));
-
-      ERR_CHECK(TransitionQpToRts(receiverQp[i]));
-    }
-    return ERR_NONE;
-  }
-
-  static ErrResult RegisterRdmaMemoryTransfer(TransferResources& resources,
-                                              int&               transferId)
-  {
-    auto && srcDeviceId     = resources.srcNic;
-    auto && dstDeviceId     = resources.dstNic;
-    auto && qpCount         = resources.qpCount;
-    auto && srcRdmaResource = resources.rdmaResourceMapper[srcDeviceId];
-    auto && dstRdmaResource = resources.rdmaResourceMapper[dstDeviceId];
-    struct ibv_mr *src_mr;
-    struct ibv_mr *dst_mr;
-    IBV_PTR_CALL(src_mr, ibv_reg_mr, srcRdmaResource->protectionDomain, resources.srcMem[0],
-                 resources.numBytes, rdmaFlags);
-    IBV_PTR_CALL(dst_mr, ibv_reg_mr, dstRdmaResource->protectionDomain, resources.dstMem[0],
-                 resources.numBytes, rdmaFlags);
-    resources.sourceMr.push_back(std::make_pair(src_mr, resources.srcMem[0]));
-    resources.destinationMr.push_back(std::make_pair(dst_mr, resources.dstMem[0]));
-    for (int i = 0; i < qpCount; ++i) {
-      resources.receiveStatuses.push_back(false);
-    }
-    resources.messageSizes.push_back(resources.numBytes);
-    transferId = resources.receiveStatuses.size() - qpCount;
-    return ERR_NONE;
-  }
-
-  static ErrResult TransferRdma(TransferResources& resources,
-                                int         const& transferIdx)
-  {
-    int const& qpCount     = resources.qpCount;
-    int const& srcDeviceId = resources.srcNic;
-    assert((transferIdx % qpCount) == 0);
-    uint64_t memIndex = transferIdx / qpCount;
-    auto && srcRdmaResource = resources.rdmaResourceMapper[srcDeviceId];
-    size_t chunkSize = resources.messageSizes[memIndex] / qpCount;
-    size_t remaining_size = resources.messageSizes[memIndex] % qpCount;
-    for (auto i = 0; i < qpCount; ++i) {
-      struct ibv_sge sg = {};
-      struct ibv_send_wr wr = {};
-      size_t currentChunkSize = chunkSize + (i == qpCount - 1 ? remaining_size : 0);
-      sg.addr = (uint64_t)resources.sourceMr[memIndex].second + i * chunkSize;
-      sg.length = currentChunkSize;
-      sg.lkey = resources.sourceMr[memIndex].first->lkey;
-      struct ibv_send_wr *bad_wr;
-      wr.wr_id = transferIdx + i;
-      assert(wr.wr_id < resources.receiveStatuses.size());
-      wr.sg_list = &sg;
-      wr.num_sge = 1;
-      wr.opcode = IBV_WR_RDMA_WRITE;
-      wr.send_flags = IBV_SEND_SIGNALED;
-      wr.wr.rdma.remote_addr = (uint64_t)resources.destinationMr[memIndex].second + i * chunkSize;
-      wr.wr.rdma.rkey = resources.destinationMr[memIndex].first->rkey;
-      IBV_CALL(ibv_post_send, resources.senderQp[i], &wr, &bad_wr);
-    }
-    for (auto i = 0; i < qpCount; ++i) {
-      ERR_CHECK(PollIbvCQ(srcRdmaResource->completionQueue, transferIdx + i, resources.receiveStatuses));
-    }
-    return ERR_NONE;
-  }
-
-  static ErrResult TeardownRdma(TransferResources& resources)
-  {
-    auto&& sourceMr    = resources.sourceMr;
-    auto&& dstMr       = resources.destinationMr;
-    auto&& senderQp    = resources.senderQp;
-    auto&& receiverQp  = resources.receiverQp;
-    auto&& srcDeviceId = resources.srcNic;
-    auto&& dstDeviceId = resources.dstNic;
-    auto&& qpCount     = resources.qpCount;
-    if (sourceMr.size() > 0) {
-      for (auto mr : sourceMr) {
-        IBV_CALL(ibv_dereg_mr, mr.first);
-      }
-      sourceMr.clear();
-    }
-    if (dstMr.size() > 0) {
-      for (auto mr : dstMr) {
-        IBV_CALL(ibv_dereg_mr, mr.first);
-      }
-      dstMr.clear();
-    }
-    resources.receiveStatuses.clear();
-    resources.messageSizes.clear();
-
-    if (senderQp) {
-      for (int i = 0; i < qpCount; ++i) {
-        IBV_CALL(ibv_destroy_qp, senderQp[i]);
-        senderQp[i] = nullptr;
-      }
-      delete[] senderQp;
-      senderQp = nullptr;
-    }
-    if (receiverQp) {
-      for (int i = 0; i < qpCount; ++i) {
-        IBV_CALL(ibv_destroy_qp, receiverQp[i]);
-        receiverQp[i] = nullptr;
-      }
-      delete[] receiverQp;
-      receiverQp = nullptr;
-    }
-    auto& srcRdmaResource = resources.rdmaResourceMapper[srcDeviceId];
-    auto& dstRdmaResource = resources.rdmaResourceMapper[dstDeviceId];
-
-    if (srcRdmaResource != nullptr) {
-      if (srcRdmaResource->completionQueue) {
-        IBV_CALL(ibv_destroy_cq, srcRdmaResource->completionQueue);
-        srcRdmaResource->completionQueue = nullptr;
-      }
-      if (srcRdmaResource->protectionDomain) {
-        IBV_CALL(ibv_dealloc_pd, srcRdmaResource->protectionDomain);
-        srcRdmaResource->protectionDomain = nullptr;
-      }
-      if (srcRdmaResource->context) {
-        IBV_CALL(ibv_close_device, srcRdmaResource->context);
-        srcRdmaResource->context = nullptr;
-      }
-      srcRdmaResource = nullptr;
-    }
-
-    if (dstRdmaResource != nullptr) {
-      if (dstRdmaResource->completionQueue) {
-        IBV_CALL(ibv_destroy_cq, dstRdmaResource->completionQueue);
-        dstRdmaResource->completionQueue = nullptr;
-      }
-      if (dstRdmaResource->protectionDomain) {
-        IBV_CALL(ibv_dealloc_pd, dstRdmaResource->protectionDomain);
-        dstRdmaResource->protectionDomain = nullptr;
-      }
-      if (dstRdmaResource->context) {
-        IBV_CALL(ibv_close_device, dstRdmaResource->context);
-        dstRdmaResource->context = nullptr;
-      }
-      dstRdmaResource = nullptr;
-    }
     return ERR_NONE;
   }
 #endif // NIC_EXEC_ENABLED
@@ -2206,31 +2153,6 @@ namespace {
     }
   }
 
-  // Update NIC ExeDevice and Transfer Resources
-  static void UpdateNicExeDeviceAndTxResource(ConfigOptions const& cfg,
-                                              Transfer      const& transfer,
-                                              TransferResources&     resource,
-                                              ExeDevice& exeDevice)
-  {
-    if (exeDevice.exeType == EXE_NIC_NEAREST) {
-      if (cfg.rdma.closestNics.size() > 0) {
-        exeDevice.exeIndex = cfg.rdma.closestNics[exeDevice.exeIndex];
-        resource.srcNic    = exeDevice.exeIndex;
-        resource.dstNic    = cfg.rdma.closestNics[transfer.exeSubIndex];
-      } else {
-        exeDevice.exeIndex = GetClosestNicToGpu(exeDevice.exeIndex);
-        resource.srcNic    = exeDevice.exeIndex;
-        resource.dstNic    = GetClosestNicToGpu(transfer.exeSubIndex);
-      }
-      resource.qpCount  = transfer.numSubExecs;
-      exeDevice.exeType = EXE_NIC;
-    } else if (exeDevice.exeType == EXE_NIC) {
-      resource.srcNic  = exeDevice.exeIndex;
-      resource.dstNic  = transfer.exeSubIndex;
-      resource.qpCount = transfer.numSubExecs;
-    }
-  }
-
   // Checks that destination buffers match expected values
   static ErrResult ValidateAllTransfers(ConfigOptions              const& cfg,
                                         vector<Transfer>           const& transfers,
@@ -2241,17 +2163,17 @@ namespace {
     float* output;
     size_t initOffset = cfg.data.byteOffset / sizeof(float);
 
-    for (auto resource : transferResources) {
-      int transferIdx = resource->transferIdx;
+    for (auto rss : transferResources) {
+      int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
       size_t N = t.numBytes / sizeof(float);
 
       float const* expected = dstReference[t.srcs.size()].data();
-      for (int dstIdx = 0; dstIdx < resource->dstMem.size(); dstIdx++) {
+      for (int dstIdx = 0; dstIdx < rss->dstMem.size(); dstIdx++) {
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
-          output = (resource->dstMem[dstIdx]) + initOffset;
+          output = (rss->dstMem[dstIdx]) + initOffset;
         } else {
-          ERR_CHECK(hipMemcpy(outputBuffer.data(), (resource->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
+          ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
           ERR_CHECK(hipDeviceSynchronize());
           output = outputBuffer.data();
         }
@@ -2279,7 +2201,7 @@ namespace {
   // Initializes counters
   static ErrResult PrepareSubExecParams(ConfigOptions const& cfg,
                                         Transfer      const& transfer,
-                                        TransferResources&   resources)
+                                        TransferResources&   rss)
   {
     // Each subExecutor needs to know src/dst pointers and how many elements to transfer
     // Figure out the sub-array each subExecutor works on for this Transfer
@@ -2293,15 +2215,15 @@ namespace {
     int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                          (size_t)transfer.numSubExecs);
 
-    vector<SubExecParam>& subExecParam = resources.subExecParamCpu;
+    vector<SubExecParam>& subExecParam = rss.subExecParamCpu;
     subExecParam.clear();
     subExecParam.resize(transfer.numSubExecs);
 
     size_t assigned = 0;
     for (int i = 0; i < transfer.numSubExecs; ++i) {
       SubExecParam& p  = subExecParam[i];
-      p.numSrcs        = resources.srcMem.size();
-      p.numDsts        = resources.dstMem.size();
+      p.numSrcs        = rss.srcMem.size();
+      p.numDsts        = rss.dstMem.size();
       p.startCycle     = 0;
       p.stopCycle      = 0;
       p.hwId           = 0;
@@ -2312,8 +2234,8 @@ namespace {
         p.N        = N;
         p.teamSize = transfer.numSubExecs;
         p.teamIdx  = i;
-        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = resources.srcMem[iSrc] + initOffset;
-        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = resources.dstMem[iDst] + initOffset;
+        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = rss.srcMem[iSrc] + initOffset;
+        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = rss.dstMem[iDst] + initOffset;
       } else {
         // Otherwise, each subexecutor works on separate subarrays
         int    const subExecLeft = std::max(0, maxSubExecToUse - i);
@@ -2323,8 +2245,8 @@ namespace {
         p.N        = subExecLeft ? std::min(leftover, ((roundedN / subExecLeft) * targetMultiple)) : 0;
         p.teamSize = 1;
         p.teamIdx  = 0;
-        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = resources.srcMem[iSrc] + initOffset + assigned;
-        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = resources.dstMem[iDst] + initOffset + assigned;
+        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = rss.srcMem[iSrc] + initOffset + assigned;
+        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = rss.dstMem[iDst] + initOffset + assigned;
         assigned += p.N;
       }
 
@@ -2345,7 +2267,7 @@ namespace {
     }
 
     // Clear counters
-    resources.totalDurationMsec = 0.0;
+    rss.totalDurationMsec = 0.0;
 
     return ERR_NONE;
   }
@@ -2360,12 +2282,12 @@ namespace {
     exeInfo.totalDurationMsec = 0.0;
 
     // Loop over each transfer this executor is involved in
-    for (auto& resources : exeInfo.resources) {
-      Transfer const& t = transfers[resources.transferIdx];
-      resources.numBytes = t.numBytes;
+    for (auto& rss : exeInfo.resources) {
+      Transfer const& t = transfers[rss.transferIdx];
+      rss.numBytes = t.numBytes;
 
       // Allocate source memory
-      resources.srcMem.resize(t.srcs.size());
+      rss.srcMem.resize(t.srcs.size());
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         MemDevice const& srcMemDevice = t.srcs[iSrc];
 
@@ -2374,11 +2296,11 @@ namespace {
             srcMemDevice.memIndex != exeDevice.exeIndex) {
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, srcMemDevice.memIndex));
         }
-        ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&resources.srcMem[iSrc]));
+        ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
       }
 
       // Allocate destination memory
-      resources.dstMem.resize(t.dsts.size());
+      rss.dstMem.resize(t.dsts.size());
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         MemDevice const& dstMemDevice = t.dsts[iDst];
 
@@ -2387,7 +2309,7 @@ namespace {
             dstMemDevice.memIndex != exeDevice.exeIndex) {
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, dstMemDevice.memIndex));
         }
-        ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&resources.dstMem[iDst]));
+        ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
       }
 
       if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
@@ -2395,22 +2317,22 @@ namespace {
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
         info.size = sizeof(info);
-        ERR_CHECK(hsa_amd_pointer_info(resources.dstMem[0], &info, NULL, NULL, NULL));
-        resources.dstAgent = info.agentOwner;
+        ERR_CHECK(hsa_amd_pointer_info(rss.dstMem[0], &info, NULL, NULL, NULL));
+        rss.dstAgent = info.agentOwner;
 
-        ERR_CHECK(hsa_amd_pointer_info(resources.srcMem[0], &info, NULL, NULL, NULL));
-        resources.srcAgent = info.agentOwner;
+        ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
+        rss.srcAgent = info.agentOwner;
 
         // Create HSA completion signal
-        ERR_CHECK(hsa_signal_create(1, 0, NULL, &resources.signal));
+        ERR_CHECK(hsa_signal_create(1, 0, NULL, &rss.signal));
 
         if (t.exeSubIndex != -1)
-          resources.sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
+          rss.sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
 #endif
       }
 
       // Prepare subexecutor parameters
-      ERR_CHECK(PrepareSubExecParams(cfg, t, resources));
+      ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
     }
 
     // Prepare additional requirements for GPU-based executors
@@ -2469,11 +2391,11 @@ namespace {
                                       exeDevice.exeIndex));
 #endif
       int transferOffset = 0;
-      for (auto& resources : exeInfo.resources) {
-        Transfer const& t = transfers[resources.transferIdx];
-        resources.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
-        for (auto p : resources.subExecParamCpu) {
-          resources.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
+      for (auto& rss : exeInfo.resources) {
+        Transfer const& t = transfers[rss.transferIdx];
+        rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
+        for (auto p : rss.subExecParamCpu) {
+          rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
           exeInfo.subExecParamCpu.push_back(p);
           transferOffset++;
         }
@@ -2487,17 +2409,14 @@ namespace {
                           hipMemcpyHostToDevice));
       ERR_CHECK(hipDeviceSynchronize());
     }
-    if (IsRdmaExeType(exeDevice.exeType)) {
+
+    // Prepare for NIC-based executors
+    if (IsNicExeType(exeDevice.exeType)) {
 #ifdef NIC_EXEC_ENABLED
-    for (auto& resources : exeInfo.resources) {
-      Transfer const& t = transfers[resources.transferIdx];
-      ERR_CHECK(InitRdmaTransferResources(cfg.rdma, resources));
-      // Workaround until RDMA resource sharing
-      // (i.e., multi-threading) is required
-      int rdmaTransferId;
-      ERR_CHECK(RegisterRdmaMemoryTransfer(resources, rdmaTransferId));
-      assert(rdmaTransferId == 0);
-    }
+      for (auto& rss : exeInfo.resources) {
+        Transfer const& t = transfers[rss.transferIdx];
+        ERR_CHECK(PrepareNicTransferResources(cfg, exeDevice, t, rss));
+      }
 #else
       return {ERR_FATAL, "RDMA executor is not supported"};
 #endif
@@ -2515,29 +2434,31 @@ namespace {
                                     ExeInfo&                exeInfo)
   {
     // Loop over each transfer this executor is involved in
-    for (auto& resources : exeInfo.resources) {
-      Transfer const& t = transfers[resources.transferIdx];
+    for (auto& rss : exeInfo.resources) {
+      Transfer const& t = transfers[rss.transferIdx];
 
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, resources.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
+        ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
       }
 
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, resources.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
+        ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
       }
 
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
       if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
-        ERR_CHECK(hsa_signal_destroy(resources.signal));
+        ERR_CHECK(hsa_signal_destroy(rss.signal));
       }
 #endif
+
+      // Destroy NIC related resources
 #ifdef NIC_EXEC_ENABLED
-      if (IsRdmaExeType(exeDevice.exeType)) {
-        ERR_CHECK(TeardownRdma(resources));
-     }
+      if (IsNicExeType(exeDevice.exeType)) {
+        ERR_CHECK(TeardownNicTransferResources(rss));
+      }
 #endif
     }
 
@@ -2569,68 +2490,69 @@ namespace {
 //========================================================================================
 
   // Kernel for CPU execution (run by a single subexecutor)
-  static void CpuReduceKernel(SubExecParam const& p)
+  static void CpuReduceKernel(SubExecParam const& p, int numSubIterations)
   {
     if (p.N == 0) return;
 
-    int const& numSrcs = p.numSrcs;
-    int const& numDsts = p.numDsts;
+    int subIteration = 0;
+    do {
+      int const& numSrcs = p.numSrcs;
+      int const& numDsts = p.numDsts;
 
-    if (numSrcs == 0) {
-      for (int i = 0; i < numDsts; ++i) {
-        memset(p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
-        //for (int j = 0; j < p.N; j++) p.dst[i][j] = MEMSET_VAL;
-      }
-    } else if (numSrcs == 1) {
-      float const* __restrict__ src = p.src[0];
-      if (numDsts == 0) {
-        float sum = 0.0;
-        for (int j = 0; j < p.N; j++)
-          sum += p.src[0][j];
+      if (numSrcs == 0) {
+        for (int i = 0; i < numDsts; ++i) {
+          memset(p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
+          //for (int j = 0; j < p.N; j++) p.dst[i][j] = MEMSET_VAL;
+        }
+      } else if (numSrcs == 1) {
+        float const* __restrict__ src = p.src[0];
+        if (numDsts == 0) {
+          float sum = 0.0;
+          for (int j = 0; j < p.N; j++)
+            sum += p.src[0][j];
 
-        // Add a dummy check to ensure the read is not optimized out
-        if (sum != sum) {
-          printf("[ERROR] Nan detected\n");
+          // Add a dummy check to ensure the read is not optimized out
+          if (sum != sum) {
+            printf("[ERROR] Nan detected\n");
+          }
+        } else {
+          for (int i = 0; i < numDsts; ++i)
+            memcpy(p.dst[i], src, p.N * sizeof(float));
         }
       } else {
-        for (int i = 0; i < numDsts; ++i)
-          memcpy(p.dst[i], src, p.N * sizeof(float));
+        float sum = 0.0f;
+        for (int j = 0; j < p.N; j++) {
+          sum = p.src[0][j];
+          for (int i = 1; i < numSrcs; i++) sum += p.src[i][j];
+          for (int i = 0; i < numDsts; i++) p.dst[i][j] = sum;
+        }
       }
-    } else {
-      float sum = 0.0f;
-      for (int j = 0; j < p.N; j++) {
-        sum = p.src[0][j];
-        for (int i = 1; i < numSrcs; i++) sum += p.src[i][j];
-        for (int i = 0; i < numDsts; i++) p.dst[i][j] = sum;
-      }
-    }
+    } while (++subIteration != numSubIterations);
   }
 
   // Execution of a single CPU Transfers
   static void ExecuteCpuTransfer(int           const  iteration,
                                  ConfigOptions const& cfg,
                                  int           const  exeIndex,
-                                 TransferResources&   resources)
+                                 TransferResources&   rss)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
     vector<std::thread> childThreads;
-    int subIteration = 0;
-    do {
-      for (auto const& subExecParam : resources.subExecParamCpu)
-        childThreads.emplace_back(std::thread(CpuReduceKernel, std::cref(subExecParam)));
 
-      for (auto& subExecThread : childThreads)
-        subExecThread.join();
-      childThreads.clear();
-    } while (++subIteration != cfg.general.numSubIterations);
+    for (auto const& subExecParam : rss.subExecParamCpu)
+      childThreads.emplace_back(std::thread(CpuReduceKernel, std::cref(subExecParam), cfg.general.numSubIterations));
+
+    for (auto& subExecThread : childThreads)
+      subExecThread.join();
+    childThreads.clear();
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
     if (iteration >= 0) {
-      resources.totalDurationMsec += deltaMsec;
+      rss.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration)
-        resources.perIterMsec.push_back(deltaMsec);
+        rss.perIterMsec.push_back(deltaMsec);
     }
   }
 
@@ -2644,12 +2566,12 @@ namespace {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     vector<std::thread> asyncTransfers;
-    for (auto& resource : exeInfo.resources) {
+    for (auto& rss : exeInfo.resources) {
       asyncTransfers.emplace_back(std::thread(ExecuteCpuTransfer,
                                               iteration,
                                               std::cref(cfg),
                                               exeIndex,
-                                              std::ref(resource)));
+                                              std::ref(rss)));
     }
     for (auto& asyncTransfer : asyncTransfers)
       asyncTransfer.join();
@@ -2662,21 +2584,46 @@ namespace {
   }
 
 #ifdef NIC_EXEC_ENABLED
-  // Execution of a single Rdma Transfer
-  static void ExecuteRdmaTransfer(int           const  iteration,
-                                  ConfigOptions const& cfg,
-                                  int           const  exeIndex,
-                                  TransferResources&   resources)
+  // Execution of a single NIC Transfer
+  static ErrResult ExecuteNicTransfer(int           const  iteration,
+                                      ConfigOptions const& cfg,
+                                      int           const  exeIndex,
+                                      TransferResources&   rss)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    // Switch to the closest NUMA node to this NIC
+    if (cfg.nic.useNuma) {
+      int numaNode = GetIbvDeviceList()[exeIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
+    }
+
     int subIteration = 0;
     do {
-      ErrResult err = TransferRdma(resources, 0);
-      if (err.errType == ERR_FATAL) {
-        printf("Fatal error during RDMA transfer. Error: %s\n",err.errMsg.c_str());
-        return;
-      } else if (err.errType != ERR_NONE) {
-        printf("Non-fatal error during RDMA transfer. Error: %s\n",err.errMsg.c_str());
+      // Loop over each of the queue pairs and post the send
+      ibv_send_wr* badWorkReq;
+      for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
+        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
+        if (error)
+          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
+            rss.transferIdx, qpIndex, error};
+      }
+
+      // Poll the completion queue until all queue pairs are complete
+      // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
+      int numComplete = 0;
+      ibv_wc wc;
+      while (numComplete < rss.qpCount) {
+        int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+        if (nc > 0) {
+          numComplete++;
+          if (wc.status != IBV_WC_SUCCESS) {
+            return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
+          }
+        } else if (nc < 0) {
+          return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
+        }
       }
     } while (++subIteration != cfg.general.numSubIterations);
 
@@ -2684,10 +2631,11 @@ namespace {
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
 
     if (iteration >= 0) {
-      resources.totalDurationMsec += deltaMsec;
+      rss.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration)
-        resources.perIterMsec.push_back(deltaMsec);
+        rss.perIterMsec.push_back(deltaMsec);
     }
+    return ERR_NONE;
   }
 
   // Execution of a single NIC executor
@@ -2696,23 +2644,26 @@ namespace {
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    vector<std::future<ErrResult>> asyncTransfers;
 
-    vector<std::thread> asyncTransfers;
-    for (auto& resource : exeInfo.resources) {
-      asyncTransfers.emplace_back(std::thread(ExecuteRdmaTransfer,
-                                              iteration,
-                                              std::cref(cfg),
-                                              exeIndex,
-                                              std::ref(resource)));
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < exeInfo.resources.size(); i++) {
+      asyncTransfers.emplace_back(std::async(std::launch::async,
+                                             ExecuteNicTransfer,
+                                             iteration,
+                                             std::cref(cfg),
+                                             exeIndex,
+                                             std::ref(exeInfo.resources[i])));
     }
     for (auto& asyncTransfer : asyncTransfers)
-      asyncTransfer.join();
+      ERR_CHECK(asyncTransfer.get());
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+
     if (iteration >= 0)
       exeInfo.totalDurationMsec += deltaMsec;
+
     return ERR_NONE;
   }
 #endif
@@ -2915,11 +2866,11 @@ namespace {
                                       hipEvent_t    const  stopEvent,
                                       int           const  xccDim,
                                       ConfigOptions const& cfg,
-                                      TransferResources&   resources)
+                                      TransferResources&   rss)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    int numSubExecs = resources.subExecParamCpu.size();
+    int numSubExecs = rss.subExecParamCpu.size();
     dim3 const gridSize(xccDim, numSubExecs, 1);
     dim3 const blockSize(cfg.gfx.blockSize, 1);
 
@@ -2929,13 +2880,13 @@ namespace {
 
     GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
       <<<gridSize, blockSize, 0, stream>>>
-      (resources.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+      (rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
     if (stopEvent != NULL)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
                           gridSize, blockSize, 0, stream, startEvent, stopEvent,
-                          0, resources.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+                          0, rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
@@ -2950,15 +2901,15 @@ namespace {
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
         deltaMsec = gpuDeltaMsec;
       }
-      resources.totalDurationMsec += deltaMsec;
+      rss.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration) {
-        resources.perIterMsec.push_back(deltaMsec);
+        rss.perIterMsec.push_back(deltaMsec);
         std::set<std::pair<int,int>> CUs;
         for (int i = 0; i < numSubExecs; i++) {
-          CUs.insert(std::make_pair(resources.subExecParamGpuPtr[i].xccId,
-                                    GetId(resources.subExecParamGpuPtr[i].hwId)));
+          CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
+                                    GetId(rss.subExecParamGpuPtr[i].hwId)));
         }
-        resources.perIterCUs.push_back(CUs);
+        rss.perIterCUs.push_back(CUs);
       }
     }
     return ERR_NONE;
@@ -3032,12 +2983,12 @@ namespace {
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
         for (int i = 0; i < exeInfo.resources.size(); i++) {
-          TransferResources& resources = exeInfo.resources[i];
+          TransferResources& rss = exeInfo.resources[i];
           long long minStartCycle = std::numeric_limits<long long>::max();
           long long maxStopCycle  = std::numeric_limits<long long>::min();
           std::set<std::pair<int, int>> CUs;
 
-          for (auto subExecIdx : resources.subExecIdx) {
+          for (auto subExecIdx : rss.subExecIdx) {
             minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
             maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
             if (cfg.general.recordPerIteration) {
@@ -3047,10 +2998,10 @@ namespace {
           }
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
 
-          resources.totalDurationMsec += deltaMsec;
+          rss.totalDurationMsec += deltaMsec;
           if (cfg.general.recordPerIteration) {
-            resources.perIterMsec.push_back(deltaMsec);
-            resources.perIterCUs.push_back(CUs);
+            rss.perIterMsec.push_back(deltaMsec);
+            rss.perIterCUs.push_back(CUs);
           }
         }
       }
@@ -3173,7 +3124,7 @@ namespace {
     case EXE_GPU_GFX: return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_DMA: return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef NIC_EXEC_ENABLED
-    case EXE_NIC: case EXE_NIC_NEAREST: return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_NIC:     return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
     default:          return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
@@ -3250,11 +3201,12 @@ namespace {
     std::map<ExeDevice, ExeInfo> executorMap;
     for (int i = 0; i < transfers.size(); i++) {
       Transfer const& t = transfers[i];
-      ExeDevice exeDevice = t.exeDevice;
+      ExeDevice exeDevice;
+      ERR_APPEND(GetActualExecutor(cfg, t.exeDevice, exeDevice), errResults);
+
       TransferResources resource = {};
       resource.transferIdx = i;
-      if (IsRdmaExeType(exeDevice.exeType))
-        UpdateNicExeDeviceAndTxResource(cfg, t, resource, exeDevice);
+
       ExeInfo& exeInfo = executorMap[exeDevice];
       exeInfo.totalBytes    += t.numBytes;
       exeInfo.totalSubExecs += t.numSubExecs;
@@ -3390,8 +3342,8 @@ namespace {
     results.tfrResults.resize(transfers.size());
     results.numTimedIterations = numTimedIterations;
     results.totalBytesTransferred = 0;
-    results.avgTotalDurationMsec = (totalCpuTimeSec * 1000.0) / numTimedIterations;
-    results.overheadMsec = 0.0;
+    results.avgTotalDurationMsec = (totalCpuTimeSec * 1000.0) / (numTimedIterations * cfg.general.numSubIterations);
+    results.overheadMsec = results.avgTotalDurationMsec;
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
@@ -3399,27 +3351,32 @@ namespace {
       // Copy over executor results
       ExeResult& exeResult = results.exeResults[exeDevice];
       exeResult.numBytes = exeInfo.totalBytes;
-      exeResult.avgDurationMsec = exeInfo.totalDurationMsec / numTimedIterations;
+      exeResult.avgDurationMsec = exeInfo.totalDurationMsec / (numTimedIterations * cfg.general.numSubIterations);
       exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
       exeResult.sumBandwidthGbPerSec = 0.0;
       exeResult.transferIdx.clear();
       results.totalBytesTransferred += exeInfo.totalBytes;
-      results.overheadMsec = std::max(results.overheadMsec, (results.avgTotalDurationMsec -
+      results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
                                                              exeResult.avgDurationMsec));
 
       // Copy over transfer results
-      for (auto const& resources : exeInfo.resources) {
-        int const transferIdx = resources.transferIdx;
-        TransferResult& tfrResult = results.tfrResults[transferIdx];
-        tfrResult.exeDevice = exeDevice;
-        tfrResult.exeDstDevice = {exeDevice.exeType, resources.dstNic};
+      for (auto const& rss : exeInfo.resources) {
+        int const transferIdx = rss.transferIdx;
         exeResult.transferIdx.push_back(transferIdx);
-        tfrResult.numBytes = resources.numBytes;
-        tfrResult.avgDurationMsec = resources.totalDurationMsec / numTimedIterations;
-        tfrResult.avgBandwidthGbPerSec = (resources.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
+
+        TransferResult& tfrResult      = results.tfrResults[transferIdx];
+        tfrResult.exeDevice            = exeDevice;
+#ifdef NIC_EXEC_ENABLED
+        tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
+#else
+        tfrResult.exeDstDevice         = exeDevice;
+#endif
+        tfrResult.numBytes             = rss.numBytes;
+        tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
+        tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
         if (cfg.general.recordPerIteration) {
-          tfrResult.perIterMsec = resources.perIterMsec;
-          tfrResult.perIterCUs  = resources.perIterCUs;
+          tfrResult.perIterMsec = rss.perIterMsec;
+          tfrResult.perIterCUs  = rss.perIterCUs;
         }
         exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
       }
@@ -3646,6 +3603,18 @@ namespace {
     return -1;
 #endif
   }
+
+  int GetClosestCpuNumaToNic(int nicIndex)
+  {
+#ifdef NIC_EXEC_ENABLED
+    int numNics = GetNumExecutors(EXE_NIC);
+    if (nicIndex < 0 || nicIndex >= numNics) return -1;
+    return GetIbvDeviceList()[nicIndex].numaNode;
+#else
+    return -1;
+#endif
+  }
+
 
   int GetClosestNicToGpu(int gpuIndex)
   {

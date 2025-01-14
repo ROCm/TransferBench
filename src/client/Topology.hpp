@@ -41,53 +41,13 @@ static int RemappedCpuIndex(int origIdx)
 static void PrintNicToGPUTopo(bool outputToCsv)
 {
 #ifdef NIC_EXEC_ENABLED
-  printf("Device Index | Device Name | Port Active | Closest GPU(s) | PCIe Bus ID\n");
+  printf(" NIC | Device Name | Active | PCIe Bus ID  | NUMA | Closest GPU(s)\n");
   if(!outputToCsv)
-    printf("-------------+-------------+-------------+----------------+------------\n");
-
-  std::vector<std::string> devBusIds;
-  std::vector<std::string> devNames;
-  std::vector<bool> devPortsActive;
-  int devCount;
-  struct ibv_device **deviceList = ibv_get_device_list(&devCount);
-  if (deviceList && devCount > 0) {
-    devBusIds.resize(devCount, "");
-    devNames.resize(devCount, "");
-    devPortsActive.resize(devCount, false);
-    for (int i = 0; i < devCount; ++i) {
-      struct ibv_context *ctx = ibv_open_device(deviceList[i]);
-      if (ctx) {
-        struct ibv_device_attr deviceAttr;
-        if (ibv_query_device(ctx, &deviceAttr) == 0) {
-          devNames[i] = deviceList[i]->name;
-          for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
-            struct ibv_port_attr portAttr;
-            if (ibv_query_port(ctx, port, &portAttr) == 0 && portAttr.state == IBV_PORT_ACTIVE) {
-              devPortsActive[i] = true;
-              break;
-            }
-          }
-        }
-
-        std::string devicePath(deviceList[i]->dev_path);
-        if (std::filesystem::exists(devicePath)) {
-          std::string pciPath = std::filesystem::canonical(devicePath + "/device").string();
-          std::size_t pos = pciPath.find_last_of('/');
-          if (pos != std::string::npos) {
-            std::string nicBusId = pciPath.substr(pos + 1);
-            devBusIds[i] = nicBusId;
-          }
-        }
-        ibv_close_device(ctx);
-      }
-    }
-    ibv_free_device_list(deviceList);
-  }
+    printf("-----+-------------+--------+--------------+------+---------------\n");
 
   int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
-  for (int i = 0; i < devBusIds.size(); ++i) {
-    std::string nicDevice = devNames[i];
-    bool portActive = devPortsActive[i];
+  auto const& ibvDeviceList = GetIbvDeviceList();
+  for (int i = 0; i < ibvDeviceList.size(); i++) {
 
     std::string closestGpusStr = "";
     for (int j = 0; j < numGpus; j++) {
@@ -97,11 +57,12 @@ static void PrintNicToGPUTopo(bool outputToCsv)
       }
     }
 
-    printf("%-12d | %-11s | %-11s | %-14s | %-11s\n",
-           i, nicDevice.c_str(),
-           portActive ? "Yes" : "No",
-           closestGpusStr.c_str(),
-           devBusIds[i].c_str());
+    printf(" %-3d | %-11s | %-6s | %-12s | %-4d | %-20s\n",
+           i, ibvDeviceList[i].name.c_str(),
+           ibvDeviceList[i].hasActivePort ? "Yes" : "No",
+           ibvDeviceList[i].busId.c_str(),
+           ibvDeviceList[i].numaNode,
+           closestGpusStr.c_str());
   }
   printf("\n");
 #endif
@@ -191,12 +152,12 @@ void DisplayTopology(bool outputToCsv)
   printf("        %c", sep);
   for (int j = 0; j < numGpus; j++)
     printf(" GPU %02d %c", j, sep);
-  printf(" PCIe Bus ID  %c #CUs %c NUMA %c #DMA %c #XCC\n", sep, sep, sep, sep);
+  printf(" PCIe Bus ID  %c #CUs %c NUMA %c #DMA %c #XCC %c NIC\n", sep, sep, sep, sep, sep);
 
   if (!outputToCsv) {
     for (int j = 0; j <= numGpus; j++)
       printf("--------+");
-    printf("--------------+------+------+------+------\n");
+    printf("--------------+------+------+------+------+------\n");
   }
 
   // Loop over each GPU device
@@ -222,12 +183,13 @@ void DisplayTopology(bool outputToCsv)
 
     char pciBusId[20];
     HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
-    printf(" %11s %c %4d %c %4d %c %4d %c %4d\n",
+    printf(" %-11s %c %-4d %c %-4d %c %-4d %c %-4d %c %-4d\n",
            pciBusId, sep,
            TransferBench::GetNumSubExecutors({EXE_GPU_GFX, i}), sep,
            TransferBench::GetClosestCpuNumaToGpu(i), sep,
            TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, i}), sep,
-           TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}));
+           TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}), sep,
+           TransferBench::GetClosestNicToGpu(i));
   }
 #endif
 }

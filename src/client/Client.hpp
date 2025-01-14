@@ -28,7 +28,7 @@ THE SOFTWARE.
 #include "TransferBench.hpp"
 #include "EnvVars.hpp"
 
-size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);
+size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<28);
 
 char const ExeTypeName[5][4] = {"CPU", "GPU", "DMA", "NIC", "NIC"};
 

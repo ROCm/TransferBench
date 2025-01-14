@@ -3,6 +3,23 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.59.00
+### Added
+- Adding in support for NIC executor, which allows for RDMA copies on NICs that support IBVerbs
+  By default, NIC executor will be enabled if IBVerbs is found in the dynamic linker cache
+- NIC executor can be indexed in two methods
+  - "I"   Ix.y will use NIC x as the source and NIC y as the destination.
+          E.g. (G0 I0.5 G4)
+  - "N"   Nx.y will use NIC closest to GPU x as source, and NIC closest to GPU y as destination
+          E.g. (G0 N0.4 N4)
+- The closest NIC can be overridden by the environment variable CLOSEST_NIC, which should be a comma-separated
+  list of NIC indices to use for the corresponding GPU
+### Modified
+- Changing default data size to 256M from 64M
+- Adding NUM_QUEUE_PAIRS which enables NIC traffic in A2A.  Each GPU will talk to the next GPU via the closest NIC
+### Fixed
+- Fixed bug with reporting when using subiterations
+
 ## v1.58.00
 ### Fixed
 - Fixed broken specific DMA-engine copies

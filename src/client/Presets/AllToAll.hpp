@@ -47,6 +47,7 @@ void AllToAllPreset(EnvVars&           ev,
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
   int a2aMode       = EnvVars::GetEnvVar("A2A_MODE"       , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
+  int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
   int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
@@ -60,6 +61,7 @@ void AllToAllPreset(EnvVars&           ev,
     ev.Print("A2A_LOCAL"      , a2aLocal     , "%s local transfers", a2aLocal ? "Include" : "Exclude");
     ev.Print("A2A_MODE"       , a2aMode      , a2aModeStr[a2aMode]);
     ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
+    ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
     ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
     ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
     ev.Print("USE_FINE_GRAIN" , useFineGrain , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
@@ -114,6 +116,23 @@ void AllToAllPreset(EnvVars&           ev,
     }
   }
 
+  // Create a ring using NICs
+  std::vector<int> nicTransferIdx(numGpus);
+  if (numQueuePairs > 0) {
+    int numNics = TransferBench::GetNumExecutors(EXE_NIC);
+    for (int i = 0; i < numGpus; i++) {
+      TransferBench::Transfer transfer;
+      transfer.numBytes = numBytesPerTransfer;
+      transfer.srcs.push_back({memType, i});
+      transfer.dsts.push_back({memType, (i+1) % numGpus});
+      transfer.exeDevice = {TransferBench::EXE_NIC_NEAREST, i};
+      transfer.exeSubIndex = (i+1) % numGpus;
+      transfer.numSubExecs = numQueuePairs;
+      nicTransferIdx[i] = transfers.size();
+      transfers.push_back(transfer);
+    }
+  }
+
   printf("GPU-GFX All-To-All benchmark:\n");
   printf("==========================\n");
   printf("- Copying %lu bytes between %s pairs of GPUs using %d CUs (%lu Transfers)\n",
@@ -138,15 +157,18 @@ void AllToAllPreset(EnvVars&           ev,
   printf("SRC\\DST ");
   for (int dst = 0; dst < numGpus; dst++)
     printf("%cGPU %02d    ", separator, dst);
+  if (numQueuePairs > 0)
+    printf("%cNIC(%02d QP)", separator, numQueuePairs);
   printf("   %cSTotal     %cActual\n", separator, separator);
 
   double totalBandwidthGpu = 0.0;
-  double minExecutorBandwidth = std::numeric_limits<double>::max();
-  double maxExecutorBandwidth = 0.0;
-  std::vector<double> colTotalBandwidth(numGpus+1, 0.0);
+  double minActualBandwidth = std::numeric_limits<double>::max();
+  double maxActualBandwidth = 0.0;
+  std::vector<double> colTotalBandwidth(numGpus+2, 0.0);
   for (int src = 0; src < numGpus; src++) {
     double rowTotalBandwidth = 0;
-    double executorBandwidth = 0;
+    int    transferCount = 0;
+    double minBandwidth = std::numeric_limits<double>::max();
     printf("GPU %02d", src);
     for (int dst = 0; dst < numGpus; dst++) {
       if (reIndex.count(std::make_pair(src, dst))) {
@@ -155,24 +177,38 @@ void AllToAllPreset(EnvVars&           ev,
         colTotalBandwidth[dst]  += r.avgBandwidthGbPerSec;
         rowTotalBandwidth       += r.avgBandwidthGbPerSec;
         totalBandwidthGpu       += r.avgBandwidthGbPerSec;
-        executorBandwidth        = std::max(executorBandwidth,
-                                            results.exeResults[transfers[transferIdx].exeDevice].avgBandwidthGbPerSec);
+        minBandwidth             = std::min(minBandwidth, r.avgBandwidthGbPerSec);
+        transferCount++;
         printf("%c%8.3f  ", separator, r.avgBandwidthGbPerSec);
       } else {
         printf("%c%8s  ", separator, "N/A");
       }
     }
-    printf("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, executorBandwidth);
-    minExecutorBandwidth = std::min(minExecutorBandwidth, executorBandwidth);
-    maxExecutorBandwidth = std::max(maxExecutorBandwidth, executorBandwidth);
-    colTotalBandwidth[numGpus] += rowTotalBandwidth;
+
+    if (numQueuePairs > 0) {
+      TransferBench::TransferResult const& r = results.tfrResults[nicTransferIdx[src]];
+      colTotalBandwidth[numGpus]  += r.avgBandwidthGbPerSec;
+      rowTotalBandwidth           += r.avgBandwidthGbPerSec;
+      totalBandwidthGpu           += r.avgBandwidthGbPerSec;
+      minBandwidth                 = std::min(minBandwidth, r.avgBandwidthGbPerSec);
+      transferCount++;
+      printf("%c%8.3f  ", separator, r.avgBandwidthGbPerSec);
+    }
+    double actualBandwidth = minBandwidth * transferCount;
+    printf("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, actualBandwidth);
+    minActualBandwidth = std::min(minActualBandwidth, actualBandwidth);
+    maxActualBandwidth = std::max(maxActualBandwidth, actualBandwidth);
+    colTotalBandwidth[numGpus+1] += rowTotalBandwidth;
   }
   printf("\nRTotal");
   for (int dst = 0; dst < numGpus; dst++) {
     printf("%c%8.3f  ", separator, colTotalBandwidth[dst]);
   }
-  printf("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus],
-         separator, minExecutorBandwidth, separator, maxExecutorBandwidth);
+  if (numQueuePairs > 0) {
+    printf("%c%8.3f  ", separator, colTotalBandwidth[numGpus]);
+  }
+  printf("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus+1],
+         separator, minActualBandwidth, separator, maxActualBandwidth);
   printf("\n");
 
   printf("Average   bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());

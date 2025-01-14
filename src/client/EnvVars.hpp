@@ -100,11 +100,12 @@ public:
   int outputToCsv;                   // Output in CSV format
   int samplingFactor;                // Affects how many different values of N are generated (when N set to 0)
 
-  // Rdma options
+  // NIC options
   int ibGidIndex;                    // GID Index for RoCE NICs
   int roceVersion;                   // RoCE version number
   int ipAddressFamily;               // IP Address Famliy
   uint8_t ibPort;                    // NIC port number to be used
+  int nicRelaxedOrder;               // Use relaxed ordering for RDMA
   std::string closestNicStr;         // Holds the user-specified list of closest NICs
 
   // Developer features
@@ -158,6 +159,7 @@ public:
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
     roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
     ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
+    nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
     closestNicStr     = GetEnvVar("CLOSEST_NIC"         , "");
 
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
@@ -293,18 +295,32 @@ public:
     printf(" BLOCK_SIZE        - # of threads per threadblock (Must be multiple of 64)\n");
     printf(" BLOCK_BYTES       - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET       - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
+#if NIC_EXEC_ENABLED
+    printf(" CLOSEST_NIC       - Comma-separated list of per-GPU closest NIC (default=auto)\n");
+#endif
     printf(" CU_MASK           - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
     printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
     printf(" GFX_UNROLL        - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
     printf(" GFX_SINGLE_TEAM   - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER    - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
     printf(" HIDE_ENV          - Hide environment variable value listing\n");
+#if NIC_EXEC_ENABLED
+    printf(" IB_GID_INDEX      - Required for RoCE NICs (default=-1/auto)\n");
+    printf(" IB_PORT_NUMBER    - RDMA port count for RDMA NIC (default=1)\n");
+    printf(" IP_ADDRESS_FAMILY - IP address family (4=v4, 6=v6, default=v4)\n");
+#endif
     printf(" MIN_VAR_SUBEXEC   - Minumum # of subexecutors to use for variable subExec Transfers\n");
     printf(" MAX_VAR_SUBEXEC   - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
+#if NIC_EXEC_ENABLED
+    printf(" NIC_RELAX_ORDER   - Set to non-zero to use relaxed ordering");
+#endif
     printf(" NUM_ITERATIONS    - # of timed iterations per test. If negative, run for this many seconds instead\n");
     printf(" NUM_SUBITERATIONS - # of sub-iterations to run per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS       - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV     - Outputs to CSV format if set\n");
+#if NIC_EXEC_ENABLED
+    printf(" ROCE_VERSION      - RoCE version (default=2)\n");
+#endif
     printf(" SAMPLING_FACTOR   - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_ITERATIONS   - Show per-iteration timing info\n");
     printf(" USE_HIP_EVENTS    - Use HIP events for GFX executor timing\n");
@@ -313,12 +329,8 @@ public:
     printf(" USE_SINGLE_STREAM - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
     printf(" VALIDATE_DIRECT   - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" VALIDATE_SOURCE   - Validate GPU src memory immediately after preparation\n");
-    printf(" IB_GID_INDEX      - Required for RoCE NICs (default=-1/auto)\n");
-    printf(" IB_PORT_NUMBER    - RDMA port count for RDMA NIC (default=1)\n");
-    printf(" IP_ADDRESS_FAMILY - IP address family (4=v4, 6=v6, default=v4)\n");
-    printf(" ROCE_VERSION      - RoCE version (default=2)\n");
-    printf(" CLOSEST_NIC       - Comma-separated list of per-GPU closest NIC (default=auto)\n");
   }
+
 
   void Print(std::string const& name, int32_t const value, const char* format, ...) const
   {
@@ -344,9 +356,12 @@ public:
   void DisplayEnvVars() const
   {
     int numGpuDevices = TransferBench::GetNumExecutors(EXE_GPU_GFX);
-
+    std::string nicSupport = "";
+#if NIC_EXEC_ENABLED
+    nicSupport = " (with NIC support)";
+#endif
     if (!outputToCsv) {
-      printf("TransferBench v%s.%s\n", TransferBench::VERSION, CLIENT_VERSION);
+      printf("TransferBench v%s.%s%s\n", TransferBench::VERSION, CLIENT_VERSION, nicSupport.c_str());
       printf("===============================================================\n");
       if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }
@@ -360,6 +375,10 @@ public:
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,
           "Using byte offset of %d", byteOffset);
+#if NIC_EXEC_ENABLED
+    Print("CLOSEST_NIC", (closestNicStr == "" ? "auto" : "user-input"),
+          "Per-GPU closest NIC is set as %s", (closestNicStr == "" ? "auto" : closestNicStr.c_str()));
+#endif
     Print("CU_MASK", getenv("CU_MASK") ? 1 : 0,
           "%s", (cuMask.size() ? GetCuMaskDesc().c_str() : "All"));
     Print("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
@@ -378,11 +397,24 @@ public:
                                             gfxWaveOrder == 3 ? "Wavefront,CU,Unroll" :
                                             gfxWaveOrder == 4 ? "CU,Unroll,Wavefront" :
                                                                 "CU,Wavefront,Unroll"));
+#if NIC_EXEC_ENABLED
+    Print("IP_ADDRESS_FAMILY", ipAddressFamily,
+          "IP address family is set to IPv%d", ipAddressFamily);
+
+    Print("IB_GID_INDEX", ibGidIndex,
+          "RoCE GID index is set to %s", (ibGidIndex < 0 ? "auto" : std::to_string(ibGidIndex).c_str()));
+    Print("IB_PORT_NUMBER", ibPort,
+          "IB port number is set to %d", ibPort);
+#endif
     Print("MIN_VAR_SUBEXEC", minNumVarSubExec,
           "Using at least %d subexecutor(s) for variable subExec tranfers", minNumVarSubExec);
     Print("MAX_VAR_SUBEXEC", maxNumVarSubExec,
           "Using up to %s subexecutors for variable subExec transfers",
           maxNumVarSubExec ? std::to_string(maxNumVarSubExec).c_str() : "all available");
+#if NIC_EXEC_ENABLED
+    Print("NIC_RELAX_ORDER", nicRelaxedOrder,
+          "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
+#endif
     Print("NUM_ITERATIONS", numIterations,
           (numIterations == 0) ? "Running infinitely" :
           "Running %d %s", abs(numIterations), (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
@@ -390,6 +422,10 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
+#if NIC_EXEC_ENABLED
+    Print("ROCE_VERSION", roceVersion,
+          "RoCE version is set to %d", roceVersion);
+#endif
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("USE_HIP_EVENTS", useHipEvents,
@@ -400,17 +436,6 @@ public:
           "Running in %s mode", useInteractive ? "interactive" : "non-interactive");
     Print("USE_SINGLE_STREAM", useSingleStream,
           "Using single stream per GFX %s", useSingleStream ? "device" : "Transfer");
-    Print("IB_GID_INDEX", ibGidIndex,
-          "RoCE GID index is set to %s", (ibGidIndex < 0 ? "auto" : std::to_string(ibGidIndex).c_str()));
-    Print("IB_PORT_NUMBER", ibPort,
-          "IB port number is set to %d", ibPort);
-    Print("ROCE_VERSION", roceVersion,
-          "RoCE version is set to %d", roceVersion);
-    Print("IP_ADDRESS_FAMILY", ipAddressFamily,
-          "IP address family is set to IPv%d", ipAddressFamily);
-    Print("CLOSEST_NIC", (closestNicStr == "" ? "auto" : "user-input"),
-          "Per-GPU closest NIC is set as %s", (closestNicStr == "" ? "auto" : closestNicStr.c_str()));
-
     if (getenv("XCC_PREF_TABLE")) {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
       printf("%36s:         ", "");
@@ -508,10 +533,12 @@ public:
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
     cfg.gfx.waveOrder              = gfxWaveOrder;
 
-    cfg.rdma.ibGidIndex            = ibGidIndex;
-    cfg.rdma.ibPort                = ibPort;
-    cfg.rdma.ipAddressFamily       = ipAddressFamily;
-    cfg.rdma.roceVersion           = roceVersion;
+    cfg.nic.ibGidIndex            = ibGidIndex;
+    cfg.nic.ibPort                = ibPort;
+    cfg.nic.ipAddressFamily       = ipAddressFamily;
+    cfg.nic.useRelaxedOrder       = nicRelaxedOrder;
+    cfg.nic.roceVersion           = roceVersion;
+
     std::vector<int> closestNics;
     if(closestNicStr != "") {
       std::stringstream ss(closestNicStr);
@@ -525,7 +552,7 @@ public:
           exit(1);
         }
       }
-      cfg.rdma.closestNics = closestNics;
+      cfg.nic.closestNics = closestNics;
     }
     return cfg;
   }
