@@ -3210,7 +3210,7 @@ namespace {
       ExeInfo& exeInfo = executorMap[exeDevice];
       exeInfo.totalBytes    += t.numBytes;
       exeInfo.totalSubExecs += t.numSubExecs;
-      exeInfo.useSubIndices |= (t.exeSubIndex != -1);
+      exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
       exeInfo.resources.push_back(resource);
       minNumSrcs  = std::min(minNumSrcs, (int)t.srcs.size());
       maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());

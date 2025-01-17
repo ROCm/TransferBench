@@ -19,6 +19,8 @@ Documentation for TransferBench is available at
 - Adding NUM_QUEUE_PAIRS which enables NIC traffic in A2A.  Each GPU will talk to the next GPU via the closest NIC
 ### Fixed
 - Fixed bug with reporting when using subiterations
+- Fixed bug with per-Transfer data size specification
+- Fixed bug when using XCC prefered table
 
 ## v1.58.00
 ### Fixed
