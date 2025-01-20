@@ -17,10 +17,12 @@ Documentation for TransferBench is available at
 ### Modified
 - Changing default data size to 256M from 64M
 - Adding NUM_QUEUE_PAIRS which enables NIC traffic in A2A.  Each GPU will talk to the next GPU via the closest NIC
+- Sweep preset now saves last sweep run configuration to /tmp/lastSweep.cfg and can be changed via SWEEP_FILE
 ### Fixed
 - Fixed bug with reporting when using subiterations
 - Fixed bug with per-Transfer data size specification
 - Fixed bug when using XCC prefered table
+
 
 ## v1.58.00
 ### Fixed
