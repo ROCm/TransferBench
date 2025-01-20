@@ -14,10 +14,13 @@ Documentation for TransferBench is available at
           E.g. (G0 N0.4 N4)
 - The closest NIC can be overridden by the environment variable CLOSEST_NIC, which should be a comma-separated
   list of NIC indices to use for the corresponding GPU
+- This feature can be explicitly disabled at compile time by specifying DISABLE_NIC_EXEC=1
+
 ### Modified
 - Changing default data size to 256M from 64M
 - Adding NUM_QUEUE_PAIRS which enables NIC traffic in A2A.  Each GPU will talk to the next GPU via the closest NIC
 - Sweep preset now saves last sweep run configuration to /tmp/lastSweep.cfg and can be changed via SWEEP_FILE
+
 ### Fixed
 - Fixed bug with reporting when using subiterations
 - Fixed bug with per-Transfer data size specification
