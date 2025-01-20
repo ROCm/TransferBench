@@ -1,6 +1,6 @@
 .. meta::
   :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
-  :keywords: Build TransferBench, Install TransferBench, API, ROCm, HIP
+  :keywords: Build TransferBench, Install TransferBench
 
 .. _install-transferbench:
 
