@@ -24,8 +24,11 @@ LDFLAGS += -lpthread
 # Compile RDMA executor if IBVerbs is found in the Dynamic Linker cache
 ifneq ($(DISABLE_NIC_EXEC),1)
   ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
+    $(info IBVerbs library found.  Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable)
     LDFLAGS += -libverbs -DNIC_EXEC_ENABLED
     NVFLAGS += -libverbs -DNIC_EXEC_ENABLED
+  else
+    $(info "IBVerbs library not found.  Building without NIC executor support")
   endif
 endif
 
