@@ -74,7 +74,9 @@ void AllToAllPreset(EnvVars&           ev,
     if (!ev.outputToCsv) printf("[AllToAll Related]\n");
     ev.Print("A2A_DIRECT"     , a2aDirect    , a2aDirect ? "Only using direct links" : "Full all-to-all");
     ev.Print("A2A_LOCAL"      , a2aLocal     , "%s local transfers", a2aLocal ? "Include" : "Exclude");
-    ev.Print("A2A_MODE"       , a2aMode      , (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
+    ev.Print("A2A_MODE"       , (a2aMode == A2A_CUSTOM) ?  std::to_string(numSrcs) + ":" + std::to_string(numDsts) : std::to_string(a2aMode),
+                                (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
+                                                           std::to_string(numDsts) + " write(s)").c_str(): a2aModeStr[a2aMode]);
                                                                           std::to_string(numDsts) + " write(s)").c_str() :
                                                a2aModeStr[a2aMode]);
     ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
