@@ -77,8 +77,6 @@ void AllToAllPreset(EnvVars&           ev,
     ev.Print("A2A_MODE"       , (a2aMode == A2A_CUSTOM) ?  std::to_string(numSrcs) + ":" + std::to_string(numDsts) : std::to_string(a2aMode),
                                 (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
                                                            std::to_string(numDsts) + " write(s)").c_str(): a2aModeStr[a2aMode]);
-                                                                          std::to_string(numDsts) + " write(s)").c_str() :
-                                               a2aModeStr[a2aMode]);
     ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
     ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
     ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
