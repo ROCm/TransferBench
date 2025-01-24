@@ -30,9 +30,10 @@ void AllToAllPreset(EnvVars&           ev,
   {
     A2A_COPY       = 0,
     A2A_READ_ONLY  = 1,
-    A2A_WRITE_ONLY = 2
+    A2A_WRITE_ONLY = 2,
+    A2A_CUSTOM     = 3,
   };
-  char a2aModeStr[3][20] = {"Copy", "Read-Only", "Write-Only"};
+  char a2aModeStr[4][20] = {"Copy", "Read-Only", "Write-Only", "Custom"};
 
   // Force single-stream mode for all-to-all benchmark
   ev.useSingleStream = 1;
@@ -45,7 +46,6 @@ void AllToAllPreset(EnvVars&           ev,
   // Collect env vars for this preset
   int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , 1);
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
-  int a2aMode       = EnvVars::GetEnvVar("A2A_MODE"       , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
@@ -53,13 +53,30 @@ void AllToAllPreset(EnvVars&           ev,
   int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
+  // A2A_MODE may be 0,1,2 or else custom numSrcs:numDsts
+  int numSrcs, numDsts;
+  int a2aMode = 0;
+  if (getenv("A2A_MODE") && sscanf(getenv("A2A_MODE"), "%d:%d", &numSrcs, &numDsts) == 2) {
+    a2aMode = A2A_CUSTOM;
+  } else {
+    a2aMode = EnvVars::GetEnvVar("A2A_MODE", 0);
+    if (a2aMode < 0 || a2aMode > 2) {
+      printf("[ERROR] a2aMode must be between 0 and 2, or else numSrcs:numDsts\n");
+      exit(1);
+    }
+    numSrcs = (a2aMode == A2A_WRITE_ONLY ? 0 : 1);
+    numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
+  }
+
   // Print off environment variables
   ev.DisplayEnvVars();
   if (!ev.hideEnv) {
     if (!ev.outputToCsv) printf("[AllToAll Related]\n");
     ev.Print("A2A_DIRECT"     , a2aDirect    , a2aDirect ? "Only using direct links" : "Full all-to-all");
     ev.Print("A2A_LOCAL"      , a2aLocal     , "%s local transfers", a2aLocal ? "Include" : "Exclude");
-    ev.Print("A2A_MODE"       , a2aMode      , a2aModeStr[a2aMode]);
+    ev.Print("A2A_MODE"       , a2aMode      , (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
+                                                                          std::to_string(numDsts) + " write(s)").c_str() :
+                                               a2aModeStr[a2aMode]);
     ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
     ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
     ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
@@ -70,19 +87,16 @@ void AllToAllPreset(EnvVars&           ev,
   }
 
   // Validate env vars
-  if (a2aMode < 0 || a2aMode > 2) {
-    printf("[ERROR] a2aMode must be between 0 and 2\n");
-    exit(1);
-  }
   if (numGpus < 0 || numGpus > numDetectedGpus) {
     printf("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     exit(1);
   }
+  if (useDmaExec && (numSrcs != 1 || numDsts != 1)) {
+    printf("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
+    exit(1);
+  }
 
   // Collect the number of GPU devices to use
-  int const numSrcs = (a2aMode == A2A_WRITE_ONLY ? 0 : 1);
-  int const numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
-
   MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
@@ -105,8 +119,11 @@ void AllToAllPreset(EnvVars&           ev,
       // Build Transfer and add it to list
       TransferBench::Transfer transfer;
       transfer.numBytes = numBytesPerTransfer;
-      if (numSrcs) transfer.srcs.push_back({memType, i});
+      for (int x = 0; x < numSrcs; x++) transfer.srcs.push_back({memType, i});
+
+      // When using multiple destinations, the additional destinations are "local"
       if (numDsts) transfer.dsts.push_back({memType, j});
+      for (int x = 1; x < numDsts; x++) transfer.dsts.push_back({memType, i});
       transfer.exeDevice = {exeType, (useRemoteRead ? j : i)};
       transfer.exeSubIndex = -1;
       transfer.numSubExecs = numSubExecs;

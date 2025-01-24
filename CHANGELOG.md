@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.59.01
+### Added
+- The a2a preset A2A_MODE variable has been enhanced to allow for customizing the number of srcs/dsts to use
+  This is specified by setting A2A_MODE to numSrcs:numDsts.  Extra destinations past 1 will be "local" writes
+  to simulate similar conditions normally used during collective algorithms such as ring-based AllReduce
+
 ## v1.59.00
 ### Added
 - Adding in support for NIC executor, which allows for RDMA copies on NICs that support IBVerbs
