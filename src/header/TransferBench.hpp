@@ -2661,11 +2661,7 @@ namespace {
       do {
         for (int i = 0; i < transferCount; i++) {
           if(exeInfo.resources[i].qpRecvCount == exeInfo.resources[i].qpCount) continue;
-          if(postSends) {
-            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i], true));
-          } else {
-            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i], false));
-          }
+          ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i], postSends));
           if(exeInfo.resources[i].qpRecvCount == exeInfo.resources[i].qpCount) completed++;
         }
         if(postSends) postSends = false;
