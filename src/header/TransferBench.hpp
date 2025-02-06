@@ -2663,11 +2663,10 @@ namespace {
     for (auto& asyncTransfer : asyncTransfers)
       ERR_CHECK(asyncTransfer.get());
 
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-
     if (iteration >= 0)
-      exeInfo.totalDurationMsec += deltaMsec;
+      for (auto& rss : exeInfo.resources) {
+        exeInfo.totalDurationMsec = std::max(exeInfo.totalDurationMsec, rss.totalDurationMsec);
+      }
 
     return ERR_NONE;
   }
