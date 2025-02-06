@@ -40,7 +40,7 @@ typedef void (*PresetFunc)(EnvVars&          ev,
 std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 {
   {"a2a",         {AllToAllPreset,    "Tests parallel transfers between all pairs of GPU devices"}},
-  {"a2a_n",       {AllToAllRdmaPreset,"Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
+  {"a2a_n",       {AllToAllRdmaPreset,"Tests parallel transfers between all pairs of GPU devices on Nearest NIC executor"}},
   {"healthcheck", {HealthCheckPreset, "Simple bandwidth health check (MI300X series only)"}},
   {"one2all",     {OneToAllPreset,    "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset,  "Peer-to-peer device memory bandwidth test"}},
