@@ -1334,8 +1334,6 @@ namespace {
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
-    uint8_t                    qpRecvCount;       ///< Data received per QP
-    double                     timeStamp;         ///< Keep track of CPU timestamp for transfer
     vector<ibv_sge>            sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<ibv_send_wr>        sendWorkRequests;  ///< Send work requests per queue pair
 #endif
@@ -2596,12 +2594,11 @@ namespace {
                                       ConfigOptions const& cfg,
                                       int           const  exeIndex,
                                       TransferResources&   rss,
-                                      bool          const  postSends)
+                                      bool          const  postSends,
+                                      uint8_t&             qpTransfersCompleted)
   {
 
     if(postSends) {
-      auto cpuStart = std::chrono::high_resolution_clock::now();
-      rss.timeStamp = cpuStart.time_since_epoch().count();
       // Loop over each of the queue pairs and post the send
       ibv_send_wr* badWorkReq;
       for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
@@ -2611,30 +2608,17 @@ namespace {
             rss.transferIdx, qpIndex, error};
       }
     }
-    if (rss.qpRecvCount == rss.qpCount) {
-      return {ERR_FATAL, "Transfer %d: attempting to poll a completed transfer", rss.transferIdx};
-    }
     // Poll the completion queue until all queue pairs are complete
     // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
     ibv_wc wc;
-
     int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
     if (nc > 0) {
-      rss.qpRecvCount++;
+      qpTransfersCompleted++;
       if (wc.status != IBV_WC_SUCCESS) {
         return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
       }
     } else if (nc < 0) {
       return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
-    }
-
-    if(rss.qpRecvCount == rss.qpCount) {
-      double deltaMsec = (std::chrono::high_resolution_clock::now().time_since_epoch().count() - rss.timeStamp) / 1e6;
-      if (iteration >= 0) {
-        rss.totalDurationMsec += deltaMsec;
-        if (cfg.general.recordPerIteration)
-          rss.perIterMsec.push_back(deltaMsec);
-      }
     }
     return ERR_NONE;
   }
@@ -2655,24 +2639,33 @@ namespace {
     int subIterations = 0;
     do {
       auto cpuStart = std::chrono::high_resolution_clock::now();
-      int completed = 0;
+      size_t completedTransfers = 0;
       auto transferCount = exeInfo.resources.size();
+      std::vector<uint8_t> receivedQPs(transferCount, 0);
+      std::vector<double> transferTimers(transferCount, 0);;
       bool postSends = true;
       do {
         for (int i = 0; i < transferCount; i++) {
-          if(exeInfo.resources[i].qpRecvCount == exeInfo.resources[i].qpCount) continue;
-          ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i], postSends));
-          if(exeInfo.resources[i].qpRecvCount == exeInfo.resources[i].qpCount) completed++;
+          if(postSends) transferTimers[i] = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+          if(receivedQPs[i] >= exeInfo.resources[i].qpCount) continue;
+          auto& rss = exeInfo.resources[i];
+          ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss, postSends, receivedQPs[i]));
+          if(receivedQPs[i] == rss.qpCount) {
+            double deltaMsec = (std::chrono::high_resolution_clock::now().time_since_epoch().count() - transferTimers[i]) / 1e6;
+            if (iteration >= 0) {
+              rss.totalDurationMsec += deltaMsec;
+              if (cfg.general.recordPerIteration)
+                rss.perIterMsec.push_back(deltaMsec);
+            }
+            completedTransfers++;
+          }
         }
         if(postSends) postSends = false;
-      } while(completed < transferCount);
+      } while(completedTransfers < transferCount);
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
       if (iteration >= 0)
         exeInfo.totalDurationMsec += deltaMsec;
-      for (int i = 0; i < transferCount; i++) {
-        exeInfo.resources[i].qpRecvCount = 0;
-      }
     } while(++subIterations < cfg.general.numSubIterations);
     return ERR_NONE;
   }
