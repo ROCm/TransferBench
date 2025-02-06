@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.60.01
+### Added
+- Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
+
 ## v1.60.00
 ### Modified
 - Reverted GFX_SINGLE_TEAM default back to 1
