@@ -1334,6 +1334,8 @@ namespace {
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
+    uint8_t                    qpRecvCount;       ///< Data received per QP
+    double                     timeStamp;         ///< Keep track of CPU timestamp for transfer
     vector<ibv_sge>            sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<ibv_send_wr>        sendWorkRequests;  ///< Send work requests per queue pair
 #endif
@@ -2593,19 +2595,13 @@ namespace {
   static ErrResult ExecuteNicTransfer(int           const  iteration,
                                       ConfigOptions const& cfg,
                                       int           const  exeIndex,
-                                      TransferResources&   rss)
+                                      TransferResources&   rss,
+                                      bool          const  postSends)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    // Switch to the closest NUMA node to this NIC
-    if (cfg.nic.useNuma) {
-      int numaNode = GetIbvDeviceList()[exeIndex].numaNode;
-      if (numaNode != -1)
-        numa_run_on_node(numaNode);
-    }
-
-    int subIteration = 0;
-    do {
+    if(postSends) {
+      auto cpuStart = std::chrono::high_resolution_clock::now();
+      rss.timeStamp = std::chrono::duration_cast<std::chrono::milliseconds>(cpuStart.time_since_epoch()).count();
       // Loop over each of the queue pairs and post the send
       ibv_send_wr* badWorkReq;
       for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
@@ -2614,31 +2610,33 @@ namespace {
           return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
             rss.transferIdx, qpIndex, error};
       }
+    }
+    if (rss.qpRecvCount == rss.qpCount) {
+      return {ERR_FATAL, "Transfer %d: attempting to poll a completed transfer", rss.transferIdx};
+    }
+    // Poll the completion queue until all queue pairs are complete
+    // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
+    ibv_wc wc;
 
-      // Poll the completion queue until all queue pairs are complete
-      // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-      int numComplete = 0;
-      ibv_wc wc;
-      while (numComplete < rss.qpCount) {
-        int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
-        if (nc > 0) {
-          numComplete++;
-          if (wc.status != IBV_WC_SUCCESS) {
-            return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
-          }
-        } else if (nc < 0) {
-          return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
-        }
+    int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+    if (nc > 0) {
+      rss.qpRecvCount++;
+      if (wc.status != IBV_WC_SUCCESS) {
+        return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
       }
-    } while (++subIteration != cfg.general.numSubIterations);
+    } else if (nc < 0) {
+      return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
+    }
 
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-
-    if (iteration >= 0) {
-      rss.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration)
-        rss.perIterMsec.push_back(deltaMsec);
+    if(rss.qpRecvCount == rss.qpCount) {
+      auto cpuNow  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+      auto cpuDelta = cpuNow - rss.timeStamp;
+      double deltaMsec = cpuDelta;
+      if (iteration >= 0) {
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration)
+          rss.perIterMsec.push_back(deltaMsec);
+      }
     }
     return ERR_NONE;
   }
@@ -2650,24 +2648,38 @@ namespace {
                                   ExeInfo&             exeInfo)
   {
     vector<std::future<ErrResult>> asyncTransfers;
-
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteNicTransfer,
-                                             iteration,
-                                             std::cref(cfg),
-                                             exeIndex,
-                                             std::ref(exeInfo.resources[i])));
+    // Switch to the closest NUMA node to this NIC
+    if (cfg.nic.useNuma) {
+      int numaNode = GetIbvDeviceList()[exeIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
     }
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
-
-    if (iteration >= 0)
-      for (auto& rss : exeInfo.resources) {
-        exeInfo.totalDurationMsec = std::max(exeInfo.totalDurationMsec, rss.totalDurationMsec);
+    int subIterations = 0;
+    do {
+      auto cpuStart = std::chrono::high_resolution_clock::now();
+      int completed = 0;
+      auto transferCount = exeInfo.resources.size();
+      bool postSends = true;
+      do {
+        for (int i = 0; i < transferCount; i++) {
+          if(exeInfo.resources[i].qpRecvCount == exeInfo.resources[i].qpCount) continue;
+          if(postSends) {
+            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i], true));
+          } else {
+            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i], false));
+          }
+          if(exeInfo.resources[i].qpRecvCount == exeInfo.resources[i].qpCount) completed++;
+        }
+        if(postSends) postSends = false;
+      } while(completed < transferCount);
+      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+      double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+      if (iteration >= 0)
+        exeInfo.totalDurationMsec += deltaMsec;
+      for (int i = 0; i < transferCount; i++) {
+        exeInfo.resources[i].qpRecvCount = 0;
       }
-
+    } while(++subIterations < cfg.general.numSubIterations);
     return ERR_NONE;
   }
 #endif
