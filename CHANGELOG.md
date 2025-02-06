@@ -3,9 +3,14 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
-## v1.60.01
+## v1.61.01
 ### Added
 - Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
+
+## v1.61.00
+### Added
+- Re-implemented GFX_BLOCK_ORDER which allows for control over how threadblocks of multiple transfers are ordered
+  - 0 = sequential, 1 = interleaved, 2 = random
 
 ## v1.60.00
 ### Modified

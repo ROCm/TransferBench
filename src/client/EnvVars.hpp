@@ -84,6 +84,7 @@ public:
   int useHsaDma;                     // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
 
   // GFX options
+  int gfxBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
   int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
   vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
   vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
@@ -135,6 +136,7 @@ public:
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
+    gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
     gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
@@ -292,7 +294,6 @@ public:
     printf("Environment variables:\n");
     printf("======================\n");
     printf(" ALWAYS_VALIDATE   - Validate after each iteration instead of once after all iterations\n");
-    printf(" BLOCK_SIZE        - # of threads per threadblock (Must be multiple of 64)\n");
     printf(" BLOCK_BYTES       - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET       - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
 #if NIC_EXEC_ENABLED
@@ -300,6 +301,8 @@ public:
 #endif
     printf(" CU_MASK           - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
     printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
+    printf(" GFX_BLOCK_ORDER   - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" GFX_BLOCK_SIZE    - # of threads per threadblock (Must be multiple of 64)\n");
     printf(" GFX_UNROLL        - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
     printf(" GFX_SINGLE_TEAM   - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER    - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
@@ -383,6 +386,8 @@ public:
           "%s", (cuMask.size() ? GetCuMaskDesc().c_str() : "All"));
     Print("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
           "%s", (fillPattern.size() ? getenv("FILL_PATTERN") : TransferBench::GetStrAttribute(ATR_SRC_PREP_DESCRIPTION).c_str()));
+    Print("GFX_BLOCK_ORDER", gfxBlockOrder,
+          "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential" : "Interleaved");
     Print("GFX_BLOCK_SIZE", gfxBlockSize,
           "Threadblock size of %d", gfxBlockSize);
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
@@ -524,6 +529,7 @@ public:
     cfg.dma.useHipEvents           = useHipEvents;
     cfg.dma.useHsaCopy             = useHsaDma;
 
+    cfg.gfx.blockOrder             = gfxBlockOrder;
     cfg.gfx.blockSize              = gfxBlockSize;
     cfg.gfx.cuMask                 = cuMask;
     cfg.gfx.prefXccTable           = prefXccTable;
