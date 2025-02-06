@@ -2629,7 +2629,6 @@ namespace {
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    vector<std::future<ErrResult>> asyncTransfers;
     // Switch to the closest NUMA node to this NIC
     if (cfg.nic.useNuma) {
       int numaNode = GetIbvDeviceList()[exeIndex].numaNode;
