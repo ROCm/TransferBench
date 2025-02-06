@@ -2601,7 +2601,7 @@ namespace {
 
     if(postSends) {
       auto cpuStart = std::chrono::high_resolution_clock::now();
-      rss.timeStamp = std::chrono::duration_cast<std::chrono::milliseconds>(cpuStart.time_since_epoch()).count();
+      rss.timeStamp = cpuStart.time_since_epoch().count();
       // Loop over each of the queue pairs and post the send
       ibv_send_wr* badWorkReq;
       for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
@@ -2629,9 +2629,7 @@ namespace {
     }
 
     if(rss.qpRecvCount == rss.qpCount) {
-      auto cpuNow  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-      auto cpuDelta = cpuNow - rss.timeStamp;
-      double deltaMsec = cpuDelta;
+      double deltaMsec = (std::chrono::high_resolution_clock::now().time_since_epoch().count() - rss.timeStamp) / 1e6;
       if (iteration >= 0) {
         rss.totalDurationMsec += deltaMsec;
         if (cfg.general.recordPerIteration)
