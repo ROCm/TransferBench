@@ -2640,23 +2640,24 @@ namespace {
       auto cpuStart = std::chrono::high_resolution_clock::now();
       size_t completedTransfers = 0;
       auto transferCount = exeInfo.resources.size();
-      std::vector<uint8_t> receivedQPs(transferCount, 0);
-      std::vector<double> transferTimers(transferCount, 0);;
+      std::vector<uint8_t> receivedQPs(transferCount);
+      std::vector<double> transferTimers(transferCount);;
       bool postSends = true;
       do {
         for (int i = 0; i < transferCount; i++) {
           if(postSends) transferTimers[i] = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-          if(receivedQPs[i] >= exeInfo.resources[i].qpCount) continue;
-          auto& rss = exeInfo.resources[i];
-          ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss, postSends, receivedQPs[i]));
-          if(receivedQPs[i] == rss.qpCount) {
-            double deltaMsec = (std::chrono::high_resolution_clock::now().time_since_epoch().count() - transferTimers[i]) / 1e6;
-            if (iteration >= 0) {
-              rss.totalDurationMsec += deltaMsec;
-              if (cfg.general.recordPerIteration)
-                rss.perIterMsec.push_back(deltaMsec);
+          if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
+            auto& rss = exeInfo.resources[i];
+            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss, postSends, receivedQPs[i]));
+            if(receivedQPs[i] == rss.qpCount) {
+              double deltaMsec = (std::chrono::high_resolution_clock::now().time_since_epoch().count() - transferTimers[i]) / 1e6;
+              if (iteration >= 0) {
+                rss.totalDurationMsec += deltaMsec;
+                if (cfg.general.recordPerIteration)
+                  rss.perIterMsec.push_back(deltaMsec);
+              }
+              completedTransfers++;
             }
-            completedTransfers++;
           }
         }
         if(postSends) postSends = false;
