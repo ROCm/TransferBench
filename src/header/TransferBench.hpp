@@ -2641,7 +2641,7 @@ namespace {
       size_t completedTransfers = 0;
       auto transferCount = exeInfo.resources.size();
       std::vector<uint8_t> receivedQPs(transferCount);
-      std::vector<double> transferTimers(transferCount);;
+      std::vector<double> transferTimers(transferCount);
       bool postSends = true;
       do {
         for (int i = 0; i < transferCount; i++) {
