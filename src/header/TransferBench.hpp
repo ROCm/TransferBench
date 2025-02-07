@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include <map>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdarg.h>
@@ -64,7 +65,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.60";
+  constexpr char VERSION[] = "1.61";
 
   /**
    * Enumeration of supported Executor types
@@ -173,6 +174,7 @@ namespace TransferBench
    */
   struct GfxOptions
   {
+    int                 blockOrder     = 0;     ///< Determines how threadblocks are ordered (0=sequential, 1=interleaved, 2=random)
     int                 blockSize      = 256;   ///< Size of each threadblock (must be multiple of 64)
     vector<uint32_t>    cuMask         = {};    ///< Bit-vector representing the CU mask
     vector<vector<int>> prefXccTable   = {};    ///< 2D table with preferred XCD to use for a specific [src][dst] GPU device
@@ -924,6 +926,13 @@ namespace {
       errors.push_back({ERR_FATAL, "[data.byteOffset] must be positive multiple of %lu", sizeof(float)});
 
     // Check GFX options
+    if (cfg.gfx.blockOrder < 0 || cfg.gfx.blockOrder > 2)
+      errors.push_back({ERR_FATAL,
+          "[gfx.blockOrder] must be 0 for sequential, 1 for interleaved, or 2 for random"});
+
+    if (cfg.gfx.useMultiStream && cfg.gfx.blockOrder > 0)
+      errors.push_back({ERR_WARN, "[gfx.blockOrder] will be ignored when running in multi-stream mode"});
+
     int gfxMaxBlockSize = GetIntAttribute(ATR_GFX_MAX_BLOCKSIZE);
     if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > gfxMaxBlockSize)
       errors.push_back({ERR_FATAL,
@@ -2396,13 +2405,47 @@ namespace {
                                       exeDevice.exeIndex));
 #endif
       int transferOffset = 0;
-      for (auto& rss : exeInfo.resources) {
-        Transfer const& t = transfers[rss.transferIdx];
-        rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
-        for (auto p : rss.subExecParamCpu) {
+      if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
+        // Threadblocks are ordered sequentially one transfer at a time
+        for (auto& rss : exeInfo.resources) {
+          Transfer const& t = transfers[rss.transferIdx];
+          rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
+          for (auto p : rss.subExecParamCpu) {
+            rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
+            exeInfo.subExecParamCpu.push_back(p);
+            transferOffset++;
+          }
+        }
+      } else if (cfg.gfx.blockOrder == 1) {
+        // Interleave threadblocks of different Transfers
+        for (int subExecIdx = 0; exeInfo.subExecParamCpu.size() < exeInfo.totalSubExecs; ++subExecIdx) {
+          for (auto& rss : exeInfo.resources) {
+            Transfer const& t = transfers[rss.transferIdx];
+            if (subExecIdx < t.numSubExecs) {
+              rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
+              exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[subExecIdx]);
+            }
+          }
+        }
+      } else if (cfg.gfx.blockOrder == 2) {
+        // Build randomized threadblock list
+        std::vector<std::pair<int,int>> indices;
+        for (int i = 0; i < exeInfo.resources.size(); i++) {
+          auto const& rss = exeInfo.resources[i];
+          Transfer const& t = transfers[rss.transferIdx];
+          for (int j = 0; j < t.numSubExecs; j++)
+            indices.push_back(std::make_pair(i,j));
+        }
+
+        std::random_device rd;
+        std::default_random_engine gen(rd());
+        std::shuffle(indices.begin(), indices.end(), gen);
+
+        // Build randomized threadblock list
+        for (auto p : indices) {
+          auto& rss = exeInfo.resources[p.first];
           rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
-          exeInfo.subExecParamCpu.push_back(p);
-          transferOffset++;
+          exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[p.second]);
         }
       }
 
