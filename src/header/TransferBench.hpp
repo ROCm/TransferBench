@@ -2684,16 +2684,17 @@ namespace {
       size_t completedTransfers = 0;
       auto transferCount = exeInfo.resources.size();
       std::vector<uint8_t> receivedQPs(transferCount);
-      std::vector<double> transferTimers(transferCount);
+      std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
       bool postSends = true;
       do {
         for (int i = 0; i < transferCount; i++) {
-          if(postSends) transferTimers[i] = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+          if(postSends) transferTimers[i] = std::chrono::high_resolution_clock::now();
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
             ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss, postSends, receivedQPs[i]));
             if(receivedQPs[i] == rss.qpCount) {
-              double deltaMsec = (std::chrono::high_resolution_clock::now().time_since_epoch().count() - transferTimers[i]) / 1e6;
+              auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
+              double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
               if (iteration >= 0) {
                 rss.totalDurationMsec += deltaMsec;
                 if (cfg.general.recordPerIteration)
