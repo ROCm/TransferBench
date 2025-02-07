@@ -2638,50 +2638,15 @@ namespace {
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    // Switch to the closest NUMA node to this NIC
-    if (cfg.nic.useNuma) {
-      int numaNode = GetIbvDeviceList()[exeIndex].numaNode;
-      if (numaNode != -1)
-        numa_run_on_node(numaNode);
-    }
 
-    int subIteration = 0;
-    do {
-      // Loop over each of the queue pairs and post the send
-      ibv_send_wr* badWorkReq;
-      for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
-        if (error)
-          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
-            rss.transferIdx, qpIndex, error};
-      }
-
-      // Poll the completion queue until all queue pairs are complete
-      // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-      int numComplete = 0;
-      ibv_wc wc;
-      while (numComplete < rss.qpCount) {
-        int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
-        if (nc > 0) {
-          numComplete++;
-          if (wc.status != IBV_WC_SUCCESS) {
-            return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
-          }
-        } else if (nc < 0) {
-          return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
-        }
-      }
-    } while (++subIteration != cfg.general.numSubIterations);
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-
-    if (iteration >= 0) {
-      rss.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration)
-        rss.perIterMsec.push_back(deltaMsec);
+    // Loop over each of the queue pairs and post the send
+    ibv_send_wr* badWorkReq;
+    for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
+      int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
+      if (error)
+        return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
+          rss.transferIdx, qpIndex, error};
     }
     return ERR_NONE;
   }
@@ -2692,26 +2657,59 @@ namespace {
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    vector<std::future<ErrResult>> asyncTransfers;
-
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteNicTransfer,
-                                             iteration,
-                                             std::cref(cfg),
-                                             exeIndex,
-                                             std::ref(exeInfo.resources[i])));
+    // Switch to the closest NUMA node to this NIC
+    if (cfg.nic.useNuma) {
+      int numaNode = GetIbvDeviceList()[exeIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
     }
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-
-    if (iteration >= 0)
-      exeInfo.totalDurationMsec += deltaMsec;
-
+    int subIterations = 0;
+    do {
+      auto cpuStart = std::chrono::high_resolution_clock::now();
+      size_t completedTransfers = 0;
+      auto transferCount = exeInfo.resources.size();
+      std::vector<uint8_t> receivedQPs(transferCount);
+      std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
+      // post the sends
+      for (auto i = 0; i < transferCount; i++) {
+        transferTimers[i] = std::chrono::high_resolution_clock::now();
+        ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
+      }
+      // poll for completions
+      do {
+        for (auto i = 0; i < transferCount; i++) {
+          if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
+            auto& rss = exeInfo.resources[i];
+            // Poll the completion queue until all queue pairs are complete
+            // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
+            ibv_wc wc;
+            int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+            if (nc > 0) {
+              receivedQPs[i]++;
+              if (wc.status != IBV_WC_SUCCESS) {
+                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
+              }
+            } else if (nc < 0) {
+              return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
+            }
+            if(receivedQPs[i] == rss.qpCount) {
+              auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
+              double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+              if (iteration >= 0) {
+                rss.totalDurationMsec += deltaMsec;
+                if (cfg.general.recordPerIteration)
+                  rss.perIterMsec.push_back(deltaMsec);
+              }
+              completedTransfers++;
+            }
+          }
+        }
+      } while(completedTransfers < transferCount);
+      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+      double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+      if (iteration >= 0)
+        exeInfo.totalDurationMsec += deltaMsec;
+    } while(++subIterations < cfg.general.numSubIterations);
     return ERR_NONE;
   }
 #endif
