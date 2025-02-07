@@ -2636,32 +2636,17 @@ namespace {
   static ErrResult ExecuteNicTransfer(int           const  iteration,
                                       ConfigOptions const& cfg,
                                       int           const  exeIndex,
-                                      TransferResources&   rss,
-                                      bool          const  postSends,
-                                      uint8_t&             qpTransfersCompleted)
+                                      TransferResources&   rss)
   {
 
-    if(postSends) {
-      // Loop over each of the queue pairs and post the send
-      ibv_send_wr* badWorkReq;
-      for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
-        if (error)
-          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
-            rss.transferIdx, qpIndex, error};
-      }
-    }
-    // Poll the completion queue until all queue pairs are complete
-    // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-    ibv_wc wc;
-    int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
-    if (nc > 0) {
-      qpTransfersCompleted++;
-      if (wc.status != IBV_WC_SUCCESS) {
-        return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
-      }
-    } else if (nc < 0) {
-      return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
+
+    // Loop over each of the queue pairs and post the send
+    ibv_send_wr* badWorkReq;
+    for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
+      int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
+      if (error)
+        return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
+          rss.transferIdx, qpIndex, error};
     }
     return ERR_NONE;
   }
@@ -2685,13 +2670,28 @@ namespace {
       auto transferCount = exeInfo.resources.size();
       std::vector<uint8_t> receivedQPs(transferCount);
       std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
-      bool postSends = true;
+      // post the sends
+      for (auto i = 0; i < transferCount; i++) {
+        transferTimers[i] = std::chrono::high_resolution_clock::now();
+        ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
+      }
+      // poll for completions
       do {
-        for (int i = 0; i < transferCount; i++) {
-          if(postSends) transferTimers[i] = std::chrono::high_resolution_clock::now();
+        for (auto i = 0; i < transferCount; i++) {
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
-            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss, postSends, receivedQPs[i]));
+            // Poll the completion queue until all queue pairs are complete
+            // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
+            ibv_wc wc;
+            int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+            if (nc > 0) {
+              receivedQPs[i]++;
+              if (wc.status != IBV_WC_SUCCESS) {
+                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
+              }
+            } else if (nc < 0) {
+              return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
+            }
             if(receivedQPs[i] == rss.qpCount) {
               auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
               double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
@@ -2704,7 +2704,6 @@ namespace {
             }
           }
         }
-        if(postSends) postSends = false;
       } while(completedTransfers < transferCount);
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
