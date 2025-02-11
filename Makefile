@@ -12,8 +12,10 @@ NVCC=$(CUDA_PATH)/bin/nvcc
 # Compile TransferBenchCuda if nvcc detected
 ifeq ("$(shell test -e $(NVCC) && echo found)", "found")
   EXE=TransferBenchCuda
+  CXX=$(NVCC)
 else
   EXE=TransferBench
+  CXX=$(HIPCC)
 endif
 
 CXXFLAGS = -I$(ROCM_PATH)/include -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64
