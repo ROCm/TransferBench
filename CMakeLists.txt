@@ -56,11 +56,8 @@ set( CMAKE_CXX_FLAGS "${flags_str} ${CMAKE_CXX_FLAGS}")
 
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
 include_directories(${ROCM_PATH}/include)
-
 find_library(IBVERBS_LIBRARY ibverbs)
 find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
-
-
 if (DEFINED ENV{DISABLE_NIC_EXEC})
   message(STATUS "Disabling NIC Executor support")
 elseif(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
