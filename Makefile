@@ -23,7 +23,10 @@ NVFLAGS  = -x cu -lnuma -arch=native
 COMMON_FLAGS = -O3 -I./src/header -I./src/client -I./src/client/Presets
 LDFLAGS += -lpthread
 
-# Compile RDMA executor if IBVerbs is found in the Dynamic Linker cache
+# Compile RDMA executor if
+# 1) DISABLE_NIC_EXEC is not set to 1
+# 2) IBVerbs is found in the Dynamic Linker cache
+# 3) infiniband/verbs.h is found in the default include path
 NIC_ENABLED = 0
 ifneq ($(DISABLE_NIC_EXEC),1)
  ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
