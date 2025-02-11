@@ -7,6 +7,9 @@ Documentation for TransferBench is available at
 ### Added
 - Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
 
+### Fixed
+- Avoid build errors for CMake and Makefile if infiniband/verbs.h header is not present and disable NIC executor in such case
+
 ## v1.61.00
 ### Added
 - Re-implemented GFX_BLOCK_ORDER which allows for control over how threadblocks of multiple transfers are ordered
