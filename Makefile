@@ -30,13 +30,16 @@ LDFLAGS += -lpthread
 NIC_ENABLED = 0
 ifneq ($(DISABLE_NIC_EXEC),1)
   ifeq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
-    $(info lib IBVerbs not found. To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
+    $(info lib IBVerbs not found)
   else ifeq ("$(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'infiniband/verbs.h')", "0")
-    $(info infiniband/verbs.h not found. To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
+    $(info infiniband/verbs.h not found)
   else
     LDFLAGS += -libverbs -DNIC_EXEC_ENABLED
     NVFLAGS += -libverbs -DNIC_EXEC_ENABLED
     NIC_ENABLED = 1
+  endif
+  ifeq ($(NIC_ENABLED), 0)
+    $(info To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
   endif
 endif
 
