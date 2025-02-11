@@ -24,10 +24,12 @@ LDFLAGS += -lpthread
 # Compile RDMA executor if IBVerbs is found in the Dynamic Linker cache
 NIC_ENABLED = 0
 ifneq ($(DISABLE_NIC_EXEC),1)
-  ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
-    LDFLAGS += -libverbs -DNIC_EXEC_ENABLED
-    NVFLAGS += -libverbs -DNIC_EXEC_ENABLED
-    NIC_ENABLED = 1
+ ifneq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
+    ifneq ("$(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'infiniband/verbs.h')", "0")
+      LDFLAGS += -libverbs -DNIC_EXEC_ENABLED
+      NVFLAGS += -libverbs -DNIC_EXEC_ENABLED
+      NIC_ENABLED = 1
+    endif
   endif
 endif
 
