@@ -178,27 +178,36 @@ void AllToAllSweepPreset(EnvVars&           ev,
   std::map<std::pair<int, int>, TransferBench::TestResults> results;
 
   // Display summary
-  printf("  #CUs  ");
-  for (int u : unrollList) printf(" Unroll %d  ", u);
+  printf("#CUs\\Unroll");
+  for (int u : unrollList) {
+    printf("  %d(Min) ", u);
+    printf("  %d(Max) ", u);
+  }
   printf("\n");
   for (int c : numCusList) {
-    printf("  %4d  ", c);  fflush(stdout);
+    printf("   %5d   ", c);  fflush(stdout);
     for (int u : unrollList) {
       ev.gfxUnroll = cfg.gfx.unrollFactor = u;
       for (auto& transfer : transfers)
         transfer.numSubExecs = useSpray ? (c * targetCount) : targetCount;
 
       double minBandwidth = std::numeric_limits<double>::max();
+      double maxBandwidth = std::numeric_limits<double>::min();
       TransferBench::TestResults result;
       if (TransferBench::RunTransfers(cfg, transfers, result)) {
-        for (auto const& exeResult : result.exeResults)
+        for (auto const& exeResult : result.exeResults) {
           minBandwidth = std::min(minBandwidth, exeResult.second.avgBandwidthGbPerSec);
-        if (useSpray) minBandwidth *= targetCount;
+	  maxBandwidth = std::max(maxBandwidth, exeResult.second.avgBandwidthGbPerSec);
+	}
+        if (useSpray) {
+	  minBandwidth *= targetCount;
+	  maxBandwidth *= targetCount;
+	}
         results[std::make_pair(c,u)] = result;
       } else {
         minBandwidth = 0.0;
       }
-      printf(" %8.2f  ", minBandwidth); fflush(stdout);
+      printf(" %7.2f  %7.2f ", minBandwidth, maxBandwidth); fflush(stdout);
     }
     printf("\n"); fflush(stdout);
   }
