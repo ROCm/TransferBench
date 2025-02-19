@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021-2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2021-2025 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -288,6 +288,17 @@ public:
     }
   }
 
+  static std::string ToStr(std::vector<int> const& values) {
+    std::string result = "";
+    bool isFirst = true;
+    for (int v : values) {
+      if (isFirst) isFirst = false;
+      else result += ",";
+      result += std::to_string(v);
+    }
+    return result;
+  }
+
   // Display info on the env vars that can be used
   static void DisplayUsage()
   {
@@ -464,6 +475,31 @@ public:
   {
     if (getenv(varname.c_str()))
       return atoi(getenv(varname.c_str()));
+    return defaultValue;
+  }
+
+  static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
+  {
+    if (getenv(varname.c_str())) {
+      char* rangeStr = getenv(varname.c_str());
+      std::set<int> values;
+      char* token = strtok(rangeStr, ",");
+      while (token) {
+        int start, end;
+        if (sscanf(token, "%d-%d", &start, &end) == 2) {
+          for (int i = start; i <= end; i++) values.insert(i);
+        } else if (sscanf(token, "%d", &start) == 1) {
+          values.insert(start);
+        } else {
+          printf("[ERROR] Unrecognized token [%s]\n", token);
+          exit(1);
+        }
+        token = strtok(NULL, ",");
+      }
+      std::vector<int> result;
+      for (auto v : values) result.push_back(v);
+      return result;
+    }
     return defaultValue;
   }
 

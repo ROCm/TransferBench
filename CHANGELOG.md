@@ -6,6 +6,7 @@ Documentation for TransferBench is available at
 ## v1.61.01
 ### Added
 - Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
+- Added a2asweep preset which tries various CU/unroll options for GFX-executed all-to-all
 
 ## v1.61.00
 ### Added
