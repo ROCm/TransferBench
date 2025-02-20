@@ -81,7 +81,7 @@ void AllToAllSweepPreset(EnvVars&           ev,
     ev.Print("UNROLLS"        , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
     ev.Print("USE_FINE_GRAIN" , useFineGrain     , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
     ev.Print("USE_REMOTE_READ", useRemoteRead    , "Using %s as executor", useRemoteRead ? "DST" : "SRC");
-    ev.Print("USE_SPRAY"      , useSpray         , "%s per CU\n", useSpray ? "All targets" : "One target");
+    ev.Print("USE_SPRAY"      , useSpray         , "%s per CU", useSpray ? "All targets" : "One target");
     ev.Print("VERBOSE"        , verbose          , verbose ? "Display test results" : "Display summary only");
     printf("\n");
   }
@@ -189,7 +189,7 @@ void AllToAllSweepPreset(EnvVars&           ev,
     for (int u : unrollList) {
       ev.gfxUnroll = cfg.gfx.unrollFactor = u;
       for (auto& transfer : transfers)
-        transfer.numSubExecs = useSpray ? (c * targetCount) : targetCount;
+        transfer.numSubExecs = useSpray ? (c * targetCount) : c;
 
       double minBandwidth = std::numeric_limits<double>::max();
       double maxBandwidth = std::numeric_limits<double>::min();
