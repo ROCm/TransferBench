@@ -1801,9 +1801,9 @@ namespace {
     return true;
   }
 
-  static bool LinkLocalGid(union ibv_gid* gid)
+  static bool LinkLocalGid(union ibv_gid const& gid)
   {
-    const struct in6_addr *a = (struct in6_addr *)gid->raw;
+    const struct in6_addr *a = (struct in6_addr *) gid.raw;
     if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL) {
       return true;
     }
@@ -1843,9 +1843,19 @@ namespace {
     return ERR_NONE;
   }
 
-  static bool isIPv4MappedIPv6(const union ibv_gid &gid)
+  static bool IsIPv4MappedIPv6(const union ibv_gid &gid)
   {
-    return (gid.raw[10] == 0xff && gid.raw[11] == 0xff); // ::ffff:x.x.x.x format
+    // look for ::ffff:x.x.x.x format
+    // From Broadcom documentation
+    // https://techdocs.broadcom.com/us/en/storage-and-ethernet-connectivity/ethernet-nic-controllers/bcm957xxx/adapters/frequently-asked-questions1.html
+    // "The IPv4 address is really an IPv4 address mapped into the IPv6 address space.
+    // This can be identified by 80 “0” bits, followed by 16 “1” bits (“FFFF” in hexadecimal)"
+    // followed by the original 32-bit IPv4 address.
+    return (gid.global.subnet_prefix == 0    &&
+            gid.raw[8]               == 0    &&
+            gid.raw[9]               == 0    &&
+            gid.raw[10]              == 0xff &&
+            gid.raw[11]              == 0xff);
   }
 
   static ErrResult GetGidIndex(ConfigOptions const& cfg,
@@ -1867,13 +1877,13 @@ namespace {
       if (!IsConfiguredGid(&gid)) continue;
       int gidCurrRoceVersion;
       ERR_CHECK(GetRoceVersionNumber(context, cfg.nic.ibPort, i, gidCurrRoceVersion));
-      if (isIPv4MappedIPv6(gid)) {
+      if (IsIPv4MappedIPv6(gid)) {
         if (gidCurrRoceVersion == 2) {
           v2_ipv4_mapped_index = i;  // Highest priority
         } else {
           v1_ipv4_mapped_index = i;
         }
-      } else if (!LinkLocalGid(&gid)) {
+      } else if (!LinkLocalGid(gid)) {
         if (gidCurrRoceVersion == 2) {
           v2_ipv6_index = i;
         } else {
