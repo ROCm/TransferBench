@@ -1860,8 +1860,8 @@ namespace {
 
   static ErrResult GetGidIndex(ConfigOptions const& cfg,
                                struct ibv_context* context,
-                              const int& gidTblLen,
-                              int& gidIndex)
+                               const int& gidTblLen,
+                               int& gidIndex)
   {
     if(gidIndex >= 0) return ERR_NONE; // honor user choice
     union ibv_gid gid;
