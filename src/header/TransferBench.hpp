@@ -183,6 +183,7 @@ namespace TransferBench
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
+    int                 wordSize       = 4;     ///< GFX-kernel packed data size (4=dwordx4, 2=dwordx2, 1=dwordx1)
   };
 
   /**
@@ -947,6 +948,9 @@ namespace {
     if (cfg.gfx.waveOrder < 0 || cfg.gfx.waveOrder >= 6)
       errors.push_back({ERR_FATAL,
                         "[gfx.waveOrder] must be non-negative and less than 6"});
+
+    if (!(cfg.gfx.wordSize == 1 || cfg.gfx.wordSize == 2 || cfg.gfx.wordSize == 4))
+      errors.push_back({ERR_FATAL, "[gfx.wordSize] must be either 1, 2 or 4"});
 
     int numGpus = GetNumExecutors(EXE_GPU_GFX);
     int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
@@ -2745,13 +2749,16 @@ namespace {
   // Helper function for memset
   template <typename T> __device__ __forceinline__ T      MemsetVal();
   template <>           __device__ __forceinline__ float  MemsetVal(){ return MEMSET_VAL; };
+  template <>           __device__ __forceinline__ float2 MemsetVal(){ return make_float2(MEMSET_VAL,
+                                                                                          MEMSET_VAL); };
   template <>           __device__ __forceinline__ float4 MemsetVal(){ return make_float4(MEMSET_VAL,
                                                                                           MEMSET_VAL,
                                                                                           MEMSET_VAL,
                                                                                           MEMSET_VAL); }
 
-  // Kernel for GFX execution
-  template <int BLOCKSIZE, int UNROLL>
+
+// Kernel for GFX execution
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL>
   __global__ void __launch_bounds__(BLOCKSIZE)
     GpuReduceKernel(SubExecParam* params, int waveOrder, int numSubIterations)
   {
@@ -2770,10 +2777,10 @@ namespace {
     // Collect data information
     int32_t const  numSrcs  = p.numSrcs;
     int32_t const  numDsts  = p.numDsts;
-    float4  const* __restrict__ srcFloat4[MAX_SRCS];
-    float4*        __restrict__ dstFloat4[MAX_DSTS];
-    for (int i = 0; i < numSrcs; i++) srcFloat4[i] = (float4*)p.src[i];
-    for (int i = 0; i < numDsts; i++) dstFloat4[i] = (float4*)p.dst[i];
+    PACKED_FLOAT const* __restrict__ srcFloatPacked[MAX_SRCS];
+    PACKED_FLOAT*       __restrict__ dstFloatPacked[MAX_DSTS];
+    for (int i = 0; i < numSrcs; i++) srcFloatPacked[i] = (PACKED_FLOAT const*)p.src[i];
+    for (int i = 0; i < numDsts; i++) dstFloatPacked[i] = (PACKED_FLOAT*)p.dst[i];
 
     // Operate on wavefront granularity
     int32_t const nTeams   = p.teamSize;             // Number of threadblocks working together on this subarray
@@ -2782,7 +2789,7 @@ namespace {
     int32_t const waveIdx  = threadIdx.x / warpSize; // Index of this wavefront within the threadblock
     int32_t const tIdx     = threadIdx.x % warpSize; // Thread index within wavefront
 
-    size_t  const numFloat4 = p.N / 4;
+    size_t  const numPackedFloat = p.N / (sizeof(PACKED_FLOAT)/sizeof(float));
 
     int32_t teamStride, waveStride, unrlStride, teamStride2, waveStride2;
     switch (waveOrder) {
@@ -2796,64 +2803,64 @@ namespace {
 
     int subIterations = 0;
     while (1) {
-      // First loop: Each wavefront in the team works on UNROLL float4s per thread
+      // First loop: Each wavefront in the team works on UNROLL PACKED_FLOAT per thread
       size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
-      size_t const loop1Limit  = numFloat4 / loop1Stride * loop1Stride;
+      size_t const loop1Limit  = numPackedFloat / loop1Stride * loop1Stride;
       {
-        float4 val[UNROLL];
+        PACKED_FLOAT val[UNROLL];
         if (numSrcs == 0) {
           #pragma unroll
           for (int u = 0; u < UNROLL; u++)
-            val[u] = MemsetVal<float4>();
+            val[u] = MemsetVal<PACKED_FLOAT>();
         }
 
         for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride) {
           // Read sources into memory and accumulate in registers
           if (numSrcs) {
             for (int u = 0; u < UNROLL; u++)
-              val[u] = srcFloat4[0][idx + u * unrlStride * warpSize];
+              val[u] = srcFloatPacked[0][idx + u * unrlStride * warpSize];
             for (int s = 1; s < numSrcs; s++)
               for (int u = 0; u < UNROLL; u++)
-                val[u] += srcFloat4[s][idx + u * unrlStride * warpSize];
+                val[u] += srcFloatPacked[s][idx + u * unrlStride * warpSize];
           }
 
           // Write accumulation to all outputs
           for (int d = 0; d < numDsts; d++) {
             #pragma unroll
             for (int u = 0; u < UNROLL; u++)
-              dstFloat4[d][idx + u * unrlStride * warpSize] = val[u];
+              dstFloatPacked[d][idx + u * unrlStride * warpSize] = val[u];
           }
         }
       }
 
-      // Second loop: Deal with remaining float4s
+      // Second loop: Deal with remaining PACKED_FLOAT
       {
-        if (loop1Limit < numFloat4) {
-          float4 val;
-          if (numSrcs == 0) val = MemsetVal<float4>();
+        if (loop1Limit < numPackedFloat) {
+          PACKED_FLOAT val;
+          if (numSrcs == 0) val = MemsetVal<PACKED_FLOAT>();
 
           size_t const loop2Stride = nTeams * nWaves * warpSize;
           for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx;
-               idx < numFloat4; idx += loop2Stride) {
+               idx < numPackedFloat; idx += loop2Stride) {
             if (numSrcs) {
-              val = srcFloat4[0][idx];
+              val = srcFloatPacked[0][idx];
               for (int s = 1; s < numSrcs; s++)
-                val += srcFloat4[s][idx];
+                val += srcFloatPacked[s][idx];
             }
             for (int d = 0; d < numDsts; d++)
-              dstFloat4[d][idx] = val;
+              dstFloatPacked[d][idx] = val;
           }
         }
       }
 
       // Third loop; Deal with remaining floats
       {
-        if (numFloat4 * 4 < p.N) {
+        if (numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) < p.N) {
           float val;
           if (numSrcs == 0) val = MemsetVal<float>();
 
           size_t const loop3Stride = nTeams * nWaves * warpSize;
-          for ( size_t idx = numFloat4 * 4 + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
+          for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
             if (numSrcs) {
               val = p.src[0][idx];
               for (int s = 1; s < numSrcs; s++)
@@ -2880,19 +2887,24 @@ namespace {
     }
   }
 
-#define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE)   \
-    {GpuReduceKernel<BLOCKSIZE, 1>,         \
-     GpuReduceKernel<BLOCKSIZE, 2>,         \
-     GpuReduceKernel<BLOCKSIZE, 3>,         \
-     GpuReduceKernel<BLOCKSIZE, 4>,         \
-     GpuReduceKernel<BLOCKSIZE, 5>,         \
-     GpuReduceKernel<BLOCKSIZE, 6>,         \
-     GpuReduceKernel<BLOCKSIZE, 7>,         \
-     GpuReduceKernel<BLOCKSIZE, 8>}
+#define GPU_KERNEL_DWORD_DECL(BLOCKSIZE, UNROLL) \
+  {GpuReduceKernel<float,  BLOCKSIZE, UNROLL>,   \
+   GpuReduceKernel<float2, BLOCKSIZE, UNROLL>,   \
+   GpuReduceKernel<float4, BLOCKSIZE, UNROLL>}
 
-  // Table of all GPU Reduction kernel functions (templated blocksize / unroll)
+#define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE)    \
+  {GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 1),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 2),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 3),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 4),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 5),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 6),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 7),      \
+   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 8)}
+
+  // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int);
-  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL] =
+  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3] =
   {
     GPU_KERNEL_UNROLL_DECL(64),
     GPU_KERNEL_UNROLL_DECL(128),
@@ -2920,18 +2932,19 @@ namespace {
     dim3 const gridSize(xccDim, numSubExecs, 1);
     dim3 const blockSize(cfg.gfx.blockSize, 1);
 
+    int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
+                      cfg.gfx.wordSize == 2 ? 1 :
+                                              2;
+    auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
+
 #if defined(__NVCC__)
     if (startEvent != NULL)
       ERR_CHECK(hipEventRecord(startEvent, stream));
-
-    GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
-      <<<gridSize, blockSize, 0, stream>>>
-      (rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+    gpuKernel<<<gridSize, blockSize, 0, stream>>>(rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
     if (stopEvent != NULL)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
-                          gridSize, blockSize, 0, stream, startEvent, stopEvent,
+    hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream, startEvent, stopEvent,
                           0, rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
@@ -2995,19 +3008,19 @@ namespace {
       dim3 const blockSize(cfg.gfx.blockSize, 1);
       hipStream_t stream = exeInfo.streams[0];
 
+      int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
+                        cfg.gfx.wordSize == 2 ? 1 :
+                                                2;
+      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
+
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
-
-      GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1]
-        <<<gridSize, blockSize, 0 , stream>>>
-        (exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-
+      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
-      hipExtLaunchKernelGGL(GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1],
-                            gridSize, blockSize, 0, stream,
+      hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
                             cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                             cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
                             exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);

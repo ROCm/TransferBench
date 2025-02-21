@@ -3,18 +3,16 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
-## v1.61.01
+## v1.61.00
 ### Added
 - Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
+- Re-implemented GFX_BLOCK_ORDER which allows for control over how threadblocks of multiple transfers are ordered
+  - 0 = sequential, 1 = interleaved, 2 = random
 - Added a2asweep preset which tries various CU/unroll options for GFX-executed all-to-all
+- Added GFX_WORD_SIZE to allow for different packed float sizes to use for GFX kernel.  Must be either 4 (default), 2 or 1
 
 ### Fixed
 - Avoid build errors for CMake and Makefile if infiniband/verbs.h header is not present and disable NIC executor in such case
-
-## v1.61.00
-### Added
-- Re-implemented GFX_BLOCK_ORDER which allows for control over how threadblocks of multiple transfers are ordered
-  - 0 = sequential, 1 = interleaved, 2 = random
 
 ## v1.60.00
 ### Modified
