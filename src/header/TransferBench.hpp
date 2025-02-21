@@ -1849,8 +1849,8 @@ namespace {
     // From Broadcom documentation
     // https://techdocs.broadcom.com/us/en/storage-and-ethernet-connectivity/ethernet-nic-controllers/bcm957xxx/adapters/frequently-asked-questions1.html
     // "The IPv4 address is really an IPv4 address mapped into the IPv6 address space.
-    // This can be identified by 80 “0” bits, followed by 16 “1” bits (“FFFF” in hexadecimal)"
-    // followed by the original 32-bit IPv4 address.
+    // This can be identified by 80 “0” bits, followed by 16 “1” bits (“FFFF” in hexadecimal)
+    // followed by the original 32-bit IPv4 address."
     return (gid.global.subnet_prefix == 0    &&
             gid.raw[8]               == 0    &&
             gid.raw[9]               == 0    &&
