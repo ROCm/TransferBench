@@ -1810,67 +1810,10 @@ namespace {
     return false;
   }
 
-  static bool IsValidGid(union ibv_gid* gid)
-  {
-    return (IsConfiguredGid(gid) && !LinkLocalGid(gid));
-  }
-
-  static sa_family_t GetGidAddressFamily(union ibv_gid* gid)
-  {
-    const struct in6_addr *a = (struct in6_addr *)gid->raw;
-    bool isIpV4Mapped = ((a->s6_addr32[0] | a->s6_addr32[1]) |
-                         (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL;
-    bool isIpV4MappedMulticast = (a->s6_addr32[0] == htonl(0xff0e0000) &&
-                                  ((a->s6_addr32[1] |
-                                    (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
-    return (isIpV4Mapped || isIpV4MappedMulticast) ? AF_INET : AF_INET6;
-  }
-
-  static bool MatchGidAddressFamily(sa_family_t const& af,
-                                    void*              prefix,
-                                    int                prefixLen,
-                                    union ibv_gid*     gid)
-  {
-    struct in_addr  *base  = NULL;
-    struct in6_addr *base6 = NULL;
-    struct in6_addr *addr6 = NULL;;
-    if (af == AF_INET) {
-      base = (struct in_addr *)prefix;
-    } else {
-      base6 = (struct in6_addr *)prefix;
-    }
-    addr6 = (struct in6_addr *)gid->raw;
-#define NETMASK(bits) (htonl(0xffffffff ^ ((1 << (32 - bits)) - 1)))
-    int i = 0;
-    while (prefixLen > 0 && i < 4) {
-      if (af == AF_INET) {
-        int mask = NETMASK(prefixLen);
-        if ((base->s_addr & mask) ^ (addr6->s6_addr32[3] & mask))
-          break;
-        prefixLen = 0;
-        break;
-      } else {
-        if (prefixLen >= 32) {
-          if (base6->s6_addr32[i] ^ addr6->s6_addr32[i])
-            break;
-          prefixLen -= 32;
-          ++i;
-        } else {
-          int mask = NETMASK(prefixLen);
-          if ((base6->s6_addr32[i] & mask) ^ (addr6->s6_addr32[i] & mask))
-            break;
-          prefixLen = 0;
-        }
-      }
-    }
-    return (prefixLen == 0) ? true : false;
-#undef NETMASK
-  }
-
   static ErrResult GetRoceVersionNumber(struct ibv_context* const& context,
                                         int const&  portNum,
                                         int const&  gidIndex,
-                                        int*        version)
+                                        int&        version)
   {
     char const* deviceName = ibv_get_device_name(context->device);
     char gidRoceVerStr[16]      = {};
@@ -1891,60 +1834,85 @@ namespace {
     if (strlen(gidRoceVerStr)) {
       if (strncmp(gidRoceVerStr, "IB/RoCE v1", strlen("IB/RoCE v1")) == 0
           || strncmp(gidRoceVerStr, "RoCE v1", strlen("RoCE v1")) == 0) {
-        *version = 1;
+        version = 1;
       }
       else if (strncmp(gidRoceVerStr, "RoCE v2", strlen("RoCE v2")) == 0) {
-        *version = 2;
+        version = 2;
       }
     }
     return ERR_NONE;
   }
 
-  static ErrResult GetGidIndex(ConfigOptions const& cfg,
-                               struct ibv_context*  context,
-                               int const&           gidTblLen,
-                               int&                 gidIndex)
+  static bool isIPv4MappedIPv6(const union ibv_gid &gid)
   {
-    // Use GID index if user specified
-    if (gidIndex >= 0) return ERR_NONE;
+    return (gid.raw[10] == 0xff && gid.raw[11] == 0xff); // ::ffff:x.x.x.x format
+  }
 
-    // Try to find the best GID index
-    int         port          = cfg.nic.ibPort;
-    sa_family_t targetAddrFam = (cfg.nic.ipAddressFamily == 6)? AF_INET6 : AF_INET;
-    int         targetRoCEVer = cfg.nic.roceVersion;
+  static ErrResult GetGidIndex(ConfigOptions const& cfg,
+                               struct ibv_context* context,
+                              const int& gidTblLen,
+                              int& gidIndex)
+  {
+    if(gidIndex >= 0) return ERR_NONE; // honor user choice
+    union ibv_gid gid;
+    int v2_ipv4_mapped_index = -1;
+    int v1_ipv4_mapped_index = -1;
+    int v2_ipv6_index = -1;
+    int v1_ipv6_index = -1;
+    int v2_link_local_index = -1;
+    int v1_link_local_index = -1;
 
-    // Initially assume gidIndex = 0
-    int gidIndexCurr = 0;
-    union ibv_gid gidCurr;
-    IBV_CALL(ibv_query_gid, context, port, gidIndexCurr, &gidCurr);
-    sa_family_t gidCurrFam = GetGidAddressFamily(&gidCurr);
-    bool gidCurrIsValid = IsValidGid(&gidCurr);
-    int  gidCurrRoceVersion;
-    ERR_CHECK(GetRoceVersionNumber(context, port, gidIndexCurr, &gidCurrRoceVersion));
-
-    // Loop over GID table to find the best match
-    for (int gidIndexTest = 1; gidIndexTest < gidTblLen; ++gidIndexTest) {
-      union ibv_gid gidTest;
-      IBV_CALL(ibv_query_gid, context, cfg.nic.ibPort, gidIndexTest, &gidTest);
-      if (!IsValidGid(&gidTest)) continue;
-
-      sa_family_t gidTestFam = GetGidAddressFamily(&gidTest);
-      bool gidTestMatchSubnet = MatchGidAddressFamily(targetAddrFam, NULL, 0, &gidTest);
-      int  gidTestRoceVersion;
-      ERR_CHECK(GetRoceVersionNumber(context, port, gidIndexTest, &gidTestRoceVersion));
-
-      if (!gidCurrIsValid ||
-          (gidTestFam == targetAddrFam && gidTestMatchSubnet &&
-           (gidCurrFam != targetAddrFam || gidTestRoceVersion == targetRoCEVer))) {
-        // Switch to better match
-        gidIndexCurr       = gidIndexTest;
-        gidCurrFam         = gidTestFam;
-        gidCurrIsValid     = true;
-        gidCurrRoceVersion = gidTestRoceVersion;
+    for (int i = 0; i < gidTblLen; ++i) {
+      IBV_CALL(ibv_query_gid, context, cfg.nic.ibPort , i, &gid);
+      if (!IsConfiguredGid(&gid)) continue;
+      int gidCurrRoceVersion;
+      ERR_CHECK(GetRoceVersionNumber(context, cfg.nic.ibPort, i, gidCurrRoceVersion));
+      if (isIPv4MappedIPv6(gid)) {
+        if (gidCurrRoceVersion == 2) {
+          v2_ipv4_mapped_index = i;  // Highest priority
+        } else {
+          v1_ipv4_mapped_index = i;
+        }
+      } else if (!LinkLocalGid(&gid)) {
+        if (gidCurrRoceVersion == 2) {
+          v2_ipv6_index = i;
+        } else {
+          v1_ipv6_index = i;
+        }
+      } else {
+        if (gidCurrRoceVersion == 2) {
+          v2_link_local_index = i;
+        } else {
+          v1_link_local_index = i;
+        }
       }
     }
 
-    gidIndex = gidIndexCurr;
+    // Select the best available GID based on priority
+    // * Priority Order:
+    // * 1. RoCE v2 (IPv4-mapped): ::ffff:192.168.x.x
+    // * 2. RoCE v2 (Not IPv4-mapped)
+    // * 3. RoCE v1 (IPv4-mapped)
+    // * 4. RoCE v1 (Not IPv4-mapped)
+    // * 5. RoCE v2 (Link-local): fe80::/10
+    // * 6. RoCE v1 (Link-local)
+
+    if (v2_ipv4_mapped_index != -1) {
+      gidIndex = v2_ipv4_mapped_index;
+    } else if (v2_ipv6_index != -1) {
+      gidIndex = v2_ipv6_index;
+    } else if (v1_ipv4_mapped_index != -1) {
+      gidIndex = v1_ipv4_mapped_index;
+    } else if (v1_ipv6_index != -1) {
+      gidIndex = v1_ipv6_index;
+    } else if (v2_link_local_index != -1) {
+      gidIndex = v2_link_local_index;
+    } else if (v1_link_local_index != -1) {
+      gidIndex = v1_link_local_index;
+    } else {
+      gidIndex = -1;
+      return {ERR_FATAL, "Failed to auto-detect a valid GID index. Try setting it manually through IB_GID_INDEX"};
+    }
     return ERR_NONE;
   }
 
