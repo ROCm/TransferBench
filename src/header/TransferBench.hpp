@@ -1865,12 +1865,12 @@ namespace {
   {
     if(gidIndex >= 0) return ERR_NONE; // honor user choice
     union ibv_gid gid;
-    int v2_ipv4_mapped_index = -1;
-    int v1_ipv4_mapped_index = -1;
-    int v2_ipv6_index = -1;
-    int v1_ipv6_index = -1;
-    int v2_link_local_index = -1;
-    int v1_link_local_index = -1;
+    int roceV2Ipv4MappedIndex = -1;
+    int roceV1Ipv4MappedIndex = -1;
+    int roceV2Ipv6Index = -1;
+    int roceV1Ipv6Index = -1;
+    int rocev2LinkLocalIndex = -1;
+    int rocev1LinkLocalIndex = -1;
 
     for (int i = 0; i < gidTblLen; ++i) {
       IBV_CALL(ibv_query_gid, context, cfg.nic.ibPort , i, &gid);
@@ -1879,21 +1879,21 @@ namespace {
       ERR_CHECK(GetRoceVersionNumber(context, cfg.nic.ibPort, i, gidCurrRoceVersion));
       if (IsIPv4MappedIPv6(gid)) {
         if (gidCurrRoceVersion == 2) {
-          v2_ipv4_mapped_index = i;  // Highest priority
+          roceV2Ipv4MappedIndex = i;  // Highest priority
         } else {
-          v1_ipv4_mapped_index = i;
+          roceV1Ipv4MappedIndex = i;
         }
       } else if (!LinkLocalGid(gid)) {
         if (gidCurrRoceVersion == 2) {
-          v2_ipv6_index = i;
+          roceV2Ipv6Index = i;
         } else {
-          v1_ipv6_index = i;
+          roceV1Ipv6Index = i;
         }
       } else {
         if (gidCurrRoceVersion == 2) {
-          v2_link_local_index = i;
+          rocev2LinkLocalIndex = i;
         } else {
-          v1_link_local_index = i;
+          rocev1LinkLocalIndex = i;
         }
       }
     }
@@ -1907,18 +1907,18 @@ namespace {
     // * 5. RoCE v2 (Link-local): fe80::/10
     // * 6. RoCE v1 (Link-local)
 
-    if (v2_ipv4_mapped_index != -1) {
-      gidIndex = v2_ipv4_mapped_index;
-    } else if (v2_ipv6_index != -1) {
-      gidIndex = v2_ipv6_index;
-    } else if (v1_ipv4_mapped_index != -1) {
-      gidIndex = v1_ipv4_mapped_index;
-    } else if (v1_ipv6_index != -1) {
-      gidIndex = v1_ipv6_index;
-    } else if (v2_link_local_index != -1) {
-      gidIndex = v2_link_local_index;
-    } else if (v1_link_local_index != -1) {
-      gidIndex = v1_link_local_index;
+    if (roceV2Ipv4MappedIndex != -1) {
+      gidIndex = roceV2Ipv4MappedIndex;
+    } else if (roceV2Ipv6Index != -1) {
+      gidIndex = roceV2Ipv6Index;
+    } else if (roceV1Ipv4MappedIndex != -1) {
+      gidIndex = roceV1Ipv4MappedIndex;
+    } else if (roceV1Ipv6Index != -1) {
+      gidIndex = roceV1Ipv6Index;
+    } else if (rocev2LinkLocalIndex != -1) {
+      gidIndex = rocev2LinkLocalIndex;
+    } else if (rocev1LinkLocalIndex != -1) {
+      gidIndex = rocev1LinkLocalIndex;
     } else {
       gidIndex = -1;
       return {ERR_FATAL, "Failed to auto-detect a valid GID index. Try setting it manually through IB_GID_INDEX"};
