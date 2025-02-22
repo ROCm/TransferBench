@@ -7,9 +7,13 @@ Documentation for TransferBench is available at
 ### Added
 - Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
 - Added a2asweep preset which tries various CU/unroll options for GFX-executed all-to-all
+- Rewrite main GID index detection logic
+- Show the GID index in the topology table. It is helpful for debugging purposes
 
 ### Fixed
 - Avoid build errors for CMake and Makefile if infiniband/verbs.h header is not present and disable NIC executor in such case
+- Have a priority list of which GID entry to go for instead of hardcoding choices based on underdocumented user input (such as RoCE version and IP address family)
+- Use link-local when it is the only choice (i.e. when routing information is not available beyond local link)
 
 ## v1.61.00
 ### Added
