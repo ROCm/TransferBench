@@ -1408,12 +1408,150 @@ namespace {
     std::string busId;
     bool        hasActivePort;
     int         numaNode;
+    int         gidIndex;
+    bool        isRoce;
   };
 #endif
 
 #ifdef NIC_EXEC_ENABLED
 // Function to collect information about IBV devices
 //========================================================================================
+static bool IsConfiguredGid(union ibv_gid* gid)
+  {
+    const struct in6_addr *a = (struct in6_addr *)gid->raw;
+    int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
+    if (((a->s6_addr32[0] | trailer) == 0UL) ||
+        ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL))) {
+      return false;
+    }
+    return true;
+  }
+
+  static bool LinkLocalGid(union ibv_gid const& gid)
+  {
+    const struct in6_addr *a = (struct in6_addr *) gid.raw;
+    if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL) {
+      return true;
+    }
+    return false;
+  }
+
+  static ErrResult GetRoceVersionNumber(struct ibv_context* const& context,
+                                        int const&  portNum,
+                                        int const&  gidIndex,
+                                        int&        version)
+  {
+    char const* deviceName = ibv_get_device_name(context->device);
+    char gidRoceVerStr[16]      = {};
+    char roceTypePath[PATH_MAX] = {};
+    sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
+            deviceName, portNum, gidIndex);
+
+    int fd = open(roceTypePath, O_RDONLY);
+    if (fd == -1)
+      return {ERR_FATAL, "Failed while opening RoCE file path (%s)", roceTypePath};
+
+    int ret = read(fd, gidRoceVerStr, 15);
+    close(fd);
+
+    if (ret == -1)
+      return {ERR_FATAL, "Failed while reading RoCE version"};
+
+    if (strlen(gidRoceVerStr)) {
+      if (strncmp(gidRoceVerStr, "IB/RoCE v1", strlen("IB/RoCE v1")) == 0
+          || strncmp(gidRoceVerStr, "RoCE v1", strlen("RoCE v1")) == 0) {
+        version = 1;
+      }
+      else if (strncmp(gidRoceVerStr, "RoCE v2", strlen("RoCE v2")) == 0) {
+        version = 2;
+      }
+    }
+    return ERR_NONE;
+  }
+
+  static bool IsIPv4MappedIPv6(const union ibv_gid &gid)
+  {
+    // look for ::ffff:x.x.x.x format
+    // From Broadcom documentation
+    // https://techdocs.broadcom.com/us/en/storage-and-ethernet-connectivity/ethernet-nic-controllers/bcm957xxx/adapters/frequently-asked-questions1.html
+    // "The IPv4 address is really an IPv4 address mapped into the IPv6 address space.
+    // This can be identified by 80 “0” bits, followed by 16 “1” bits (“FFFF” in hexadecimal)
+    // followed by the original 32-bit IPv4 address."
+    return (gid.global.subnet_prefix == 0    &&
+            gid.raw[8]               == 0    &&
+            gid.raw[9]               == 0    &&
+            gid.raw[10]              == 0xff &&
+            gid.raw[11]              == 0xff);
+  }
+
+  static ErrResult GetGidIndex(struct ibv_context* context,
+                               int const& gidTblLen,
+                               int const& portNum,
+                               int& gidIndex)
+  {
+    if(gidIndex >= 0) return ERR_NONE; // honor user choice
+    union ibv_gid gid;
+    int roceV2Ipv4MappedIndex = -1;
+    int roceV1Ipv4MappedIndex = -1;
+    int roceV2Ipv6Index = -1;
+    int roceV1Ipv6Index = -1;
+    int rocev2LinkLocalIndex = -1;
+    int rocev1LinkLocalIndex = -1;
+
+    for (int i = 0; i < gidTblLen; ++i) {
+      IBV_CALL(ibv_query_gid, context, portNum, i, &gid);
+      if (!IsConfiguredGid(&gid)) continue;
+      int gidCurrRoceVersion;
+      ERR_CHECK(GetRoceVersionNumber(context, portNum, i, gidCurrRoceVersion));
+      if (IsIPv4MappedIPv6(gid)) {
+        if (gidCurrRoceVersion == 2) {
+          roceV2Ipv4MappedIndex = i;  // Highest priority
+        } else {
+          roceV1Ipv4MappedIndex = i;
+        }
+      } else if (!LinkLocalGid(gid)) {
+        if (gidCurrRoceVersion == 2) {
+          roceV2Ipv6Index = i;
+        } else {
+          roceV1Ipv6Index = i;
+        }
+      } else {
+        if (gidCurrRoceVersion == 2) {
+          rocev2LinkLocalIndex = i;
+        } else {
+          rocev1LinkLocalIndex = i;
+        }
+      }
+    }
+
+    // Select the best available GID based on priority
+    // * Priority Order:
+    // * 1. RoCE v2 (IPv4-mapped): ::ffff:192.168.x.x
+    // * 2. RoCE v2 (Not IPv4-mapped)
+    // * 3. RoCE v1 (IPv4-mapped)
+    // * 4. RoCE v1 (Not IPv4-mapped)
+    // * 5. RoCE v2 (Link-local): fe80::/10
+    // * 6. RoCE v1 (Link-local)
+
+    if (roceV2Ipv4MappedIndex != -1) {
+      gidIndex = roceV2Ipv4MappedIndex;
+    } else if (roceV2Ipv6Index != -1) {
+      gidIndex = roceV2Ipv6Index;
+    } else if (roceV1Ipv4MappedIndex != -1) {
+      gidIndex = roceV1Ipv4MappedIndex;
+    } else if (roceV1Ipv6Index != -1) {
+      gidIndex = roceV1Ipv6Index;
+    } else if (rocev2LinkLocalIndex != -1) {
+      gidIndex = rocev2LinkLocalIndex;
+    } else if (rocev1LinkLocalIndex != -1) {
+      gidIndex = rocev1LinkLocalIndex;
+    } else {
+      gidIndex = -1;
+      return {ERR_FATAL, "Failed to auto-detect a valid GID index. Try setting it manually through IB_GID_INDEX"};
+    }
+    return ERR_NONE;
+  }
+
   static vector<IbvDevice>& GetIbvDeviceList()
   {
     static bool isInitialized = false;
@@ -1438,12 +1576,24 @@ namespace {
             if (context) {
               struct ibv_device_attr deviceAttr;
               if (!ibv_query_device(context, &deviceAttr)) {
+                int activePort;
+                ibvDevice.gidIndex = -1;
                 for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
                   struct ibv_port_attr portAttr;
                   if (ibv_query_port(context, port, &portAttr)) continue;
-                  if (portAttr.state == IBV_PORT_ACTIVE)
+                  if (portAttr.state == IBV_PORT_ACTIVE) {
+                    activePort = port;
                     ibvDevice.hasActivePort = true;
-                  break;
+                    if(portAttr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+                      ibvDevice.isRoce = true;
+                      int gidIndex = -1;
+                      auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidIndex);
+                      if (res.errType == ERR_NONE) {
+                        ibvDevice.gidIndex = gidIndex;
+                      }
+                    }
+                    break;
+                  }
                 }
               }
               ibv_close_device(context);
@@ -1794,164 +1944,6 @@ namespace {
     return ERR_NONE;
   }
 
-  static bool IsConfiguredGid(union ibv_gid* gid)
-  {
-    const struct in6_addr *a = (struct in6_addr *)gid->raw;
-    int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
-    if (((a->s6_addr32[0] | trailer) == 0UL) ||
-        ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL))) {
-      return false;
-    }
-    return true;
-  }
-
-  static bool LinkLocalGid(union ibv_gid* gid)
-  {
-    const struct in6_addr *a = (struct in6_addr *)gid->raw;
-    if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL) {
-      return true;
-    }
-    return false;
-  }
-
-  static bool IsValidGid(union ibv_gid* gid)
-  {
-    return (IsConfiguredGid(gid) && !LinkLocalGid(gid));
-  }
-
-  static sa_family_t GetGidAddressFamily(union ibv_gid* gid)
-  {
-    const struct in6_addr *a = (struct in6_addr *)gid->raw;
-    bool isIpV4Mapped = ((a->s6_addr32[0] | a->s6_addr32[1]) |
-                         (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL;
-    bool isIpV4MappedMulticast = (a->s6_addr32[0] == htonl(0xff0e0000) &&
-                                  ((a->s6_addr32[1] |
-                                    (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
-    return (isIpV4Mapped || isIpV4MappedMulticast) ? AF_INET : AF_INET6;
-  }
-
-  static bool MatchGidAddressFamily(sa_family_t const& af,
-                                    void*              prefix,
-                                    int                prefixLen,
-                                    union ibv_gid*     gid)
-  {
-    struct in_addr  *base  = NULL;
-    struct in6_addr *base6 = NULL;
-    struct in6_addr *addr6 = NULL;;
-    if (af == AF_INET) {
-      base = (struct in_addr *)prefix;
-    } else {
-      base6 = (struct in6_addr *)prefix;
-    }
-    addr6 = (struct in6_addr *)gid->raw;
-#define NETMASK(bits) (htonl(0xffffffff ^ ((1 << (32 - bits)) - 1)))
-    int i = 0;
-    while (prefixLen > 0 && i < 4) {
-      if (af == AF_INET) {
-        int mask = NETMASK(prefixLen);
-        if ((base->s_addr & mask) ^ (addr6->s6_addr32[3] & mask))
-          break;
-        prefixLen = 0;
-        break;
-      } else {
-        if (prefixLen >= 32) {
-          if (base6->s6_addr32[i] ^ addr6->s6_addr32[i])
-            break;
-          prefixLen -= 32;
-          ++i;
-        } else {
-          int mask = NETMASK(prefixLen);
-          if ((base6->s6_addr32[i] & mask) ^ (addr6->s6_addr32[i] & mask))
-            break;
-          prefixLen = 0;
-        }
-      }
-    }
-    return (prefixLen == 0) ? true : false;
-#undef NETMASK
-  }
-
-  static ErrResult GetRoceVersionNumber(struct ibv_context* const& context,
-                                        int const&  portNum,
-                                        int const&  gidIndex,
-                                        int*        version)
-  {
-    char const* deviceName = ibv_get_device_name(context->device);
-    char gidRoceVerStr[16]      = {};
-    char roceTypePath[PATH_MAX] = {};
-    sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
-            deviceName, portNum, gidIndex);
-
-    int fd = open(roceTypePath, O_RDONLY);
-    if (fd == -1)
-      return {ERR_FATAL, "Failed while opening RoCE file path (%s)", roceTypePath};
-
-    int ret = read(fd, gidRoceVerStr, 15);
-    close(fd);
-
-    if (ret == -1)
-      return {ERR_FATAL, "Failed while reading RoCE version"};
-
-    if (strlen(gidRoceVerStr)) {
-      if (strncmp(gidRoceVerStr, "IB/RoCE v1", strlen("IB/RoCE v1")) == 0
-          || strncmp(gidRoceVerStr, "RoCE v1", strlen("RoCE v1")) == 0) {
-        *version = 1;
-      }
-      else if (strncmp(gidRoceVerStr, "RoCE v2", strlen("RoCE v2")) == 0) {
-        *version = 2;
-      }
-    }
-    return ERR_NONE;
-  }
-
-  static ErrResult GetGidIndex(ConfigOptions const& cfg,
-                               struct ibv_context*  context,
-                               int const&           gidTblLen,
-                               int&                 gidIndex)
-  {
-    // Use GID index if user specified
-    if (gidIndex >= 0) return ERR_NONE;
-
-    // Try to find the best GID index
-    int         port          = cfg.nic.ibPort;
-    sa_family_t targetAddrFam = (cfg.nic.ipAddressFamily == 6)? AF_INET6 : AF_INET;
-    int         targetRoCEVer = cfg.nic.roceVersion;
-
-    // Initially assume gidIndex = 0
-    int gidIndexCurr = 0;
-    union ibv_gid gidCurr;
-    IBV_CALL(ibv_query_gid, context, port, gidIndexCurr, &gidCurr);
-    sa_family_t gidCurrFam = GetGidAddressFamily(&gidCurr);
-    bool gidCurrIsValid = IsValidGid(&gidCurr);
-    int  gidCurrRoceVersion;
-    ERR_CHECK(GetRoceVersionNumber(context, port, gidIndexCurr, &gidCurrRoceVersion));
-
-    // Loop over GID table to find the best match
-    for (int gidIndexTest = 1; gidIndexTest < gidTblLen; ++gidIndexTest) {
-      union ibv_gid gidTest;
-      IBV_CALL(ibv_query_gid, context, cfg.nic.ibPort, gidIndexTest, &gidTest);
-      if (!IsValidGid(&gidTest)) continue;
-
-      sa_family_t gidTestFam = GetGidAddressFamily(&gidTest);
-      bool gidTestMatchSubnet = MatchGidAddressFamily(targetAddrFam, NULL, 0, &gidTest);
-      int  gidTestRoceVersion;
-      ERR_CHECK(GetRoceVersionNumber(context, port, gidIndexTest, &gidTestRoceVersion));
-
-      if (!gidCurrIsValid ||
-          (gidTestFam == targetAddrFam && gidTestMatchSubnet &&
-           (gidCurrFam != targetAddrFam || gidTestRoceVersion == targetRoCEVer))) {
-        // Switch to better match
-        gidIndexCurr       = gidIndexTest;
-        gidCurrFam         = gidTestFam;
-        gidCurrIsValid     = true;
-        gidCurrRoceVersion = gidTestRoceVersion;
-      }
-    }
-
-    gidIndex = gidIndexCurr;
-    return ERR_NONE;
-  }
-
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
                                                ExeDevice     const& srcExeDevice,
                                                Transfer      const& t,
@@ -2025,8 +2017,8 @@ namespace {
     bool isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
     if (isRoCE) {
       // Try to auto-detect the GID index
-      ERR_CHECK(GetGidIndex(cfg, rss.srcContext, rss.srcPortAttr.gid_tbl_len, srcGidIndex));
-      ERR_CHECK(GetGidIndex(cfg, rss.dstContext, rss.dstPortAttr.gid_tbl_len, dstGidIndex));
+      ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, cfg.nic.ibPort, srcGidIndex));
+      ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, cfg.nic.ibPort, dstGidIndex));
       IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
       IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
     }

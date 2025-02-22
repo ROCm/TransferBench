@@ -9,10 +9,15 @@ Documentation for TransferBench is available at
 - Re-implemented GFX_BLOCK_ORDER which allows for control over how threadblocks of multiple transfers are ordered
   - 0 = sequential, 1 = interleaved, 2 = random
 - Added a2asweep preset which tries various CU/unroll options for GFX-executed all-to-all
+- Rewrite main GID index detection logic
+- Show the GID index in the topology table. It is helpful for debugging purposes
 - Added GFX_WORD_SIZE to allow for different packed float sizes to use for GFX kernel.  Must be either 4 (default), 2 or 1
+
 
 ### Fixed
 - Avoid build errors for CMake and Makefile if infiniband/verbs.h header is not present and disable NIC executor in such case
+- Have a priority list of which GID entry to go for instead of hardcoding choices based on underdocumented user input (such as RoCE version and IP address family)
+- Use link-local when it is the only choice (i.e. when routing information is not available beyond local link)
 
 ## v1.60.00
 ### Modified
