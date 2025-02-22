@@ -93,6 +93,7 @@ public:
   int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
   int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxWaveOrder;                  // GFX-kernel wavefront ordering
+  int gfxWordSize;                   // GFX-kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)
 
   // Client options
   int hideEnv;                       // Skip printing environment variable
@@ -141,6 +142,7 @@ public:
     gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
+    gfxWordSize       = GetEnvVar("GFX_WORD_SIZE"       , 4);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
     minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
     maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
@@ -317,6 +319,7 @@ public:
     printf(" GFX_UNROLL        - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
     printf(" GFX_SINGLE_TEAM   - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER    - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
+    printf(" GFX_WORD_SIZE     - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
     printf(" HIDE_ENV          - Hide environment variable value listing\n");
 #if NIC_EXEC_ENABLED
     printf(" IB_GID_INDEX      - Required for RoCE NICs (default=-1/auto)\n");
@@ -413,6 +416,9 @@ public:
                                             gfxWaveOrder == 3 ? "Wavefront,CU,Unroll" :
                                             gfxWaveOrder == 4 ? "CU,Unroll,Wavefront" :
                                                                 "CU,Wavefront,Unroll"));
+    Print("GFX_WORD_SIZE", gfxWordSize,
+          "Using GFX word size of %d (DWORDx%d)", gfxWordSize, gfxWordSize);
+
 #if NIC_EXEC_ENABLED
     Print("IP_ADDRESS_FAMILY", ipAddressFamily,
           "IP address family is set to IPv%d", ipAddressFamily);
@@ -574,12 +580,13 @@ public:
     cfg.gfx.useMultiStream         = !useSingleStream;
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
     cfg.gfx.waveOrder              = gfxWaveOrder;
+    cfg.gfx.wordSize               = gfxWordSize;
 
-    cfg.nic.ibGidIndex            = ibGidIndex;
-    cfg.nic.ibPort                = ibPort;
-    cfg.nic.ipAddressFamily       = ipAddressFamily;
-    cfg.nic.useRelaxedOrder       = nicRelaxedOrder;
-    cfg.nic.roceVersion           = roceVersion;
+    cfg.nic.ibGidIndex             = ibGidIndex;
+    cfg.nic.ibPort                 = ibPort;
+    cfg.nic.ipAddressFamily        = ipAddressFamily;
+    cfg.nic.useRelaxedOrder        = nicRelaxedOrder;
+    cfg.nic.roceVersion            = roceVersion;
 
     std::vector<int> closestNics;
     if(closestNicStr != "") {
