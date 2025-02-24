@@ -1409,6 +1409,7 @@ namespace {
     bool        hasActivePort;
     int         numaNode;
     int         gidIndex;
+    std::string gidDescriptor;
     bool        isRoce;
   };
 #endif
@@ -1484,19 +1485,19 @@ static bool IsConfiguredGid(union ibv_gid* gid)
             gid.raw[11]              == 0xff);
   }
 
-  static ErrResult GetGidIndex(struct ibv_context* context,
-                               int const& gidTblLen,
-                               int const& portNum,
-                               int& gidIndex)
+  static ErrResult GetGidIndex(struct ibv_context*          context,
+                               int const&                   gidTblLen,
+                               int const&                   portNum,
+                               std::pair<int, std::string>& gidInfo)
   {
-    if(gidIndex >= 0) return ERR_NONE; // honor user choice
+    if(gidInfo.first >= 0) return ERR_NONE; // honor user choice
     union ibv_gid gid;
-    int roceV2Ipv4MappedIndex = -1;
-    int roceV1Ipv4MappedIndex = -1;
-    int roceV2Ipv6Index = -1;
-    int roceV1Ipv6Index = -1;
-    int rocev2LinkLocalIndex = -1;
-    int rocev1LinkLocalIndex = -1;
+    std::pair<int, std::string> roceV2Ipv4MappedIndex = {-1, "RoCEv2 IPv4-mapped"};
+    std::pair<int, std::string> roceV1Ipv4MappedIndex = {-1, "RoCEv1 IPv4-mapped"};
+    std::pair<int, std::string> roceV2Ipv6Index = {-1, "RoCEv2 IPv6"};
+    std::pair<int, std::string> roceV1Ipv6Index = {-1, "RoCEv1 IPv6"};
+    std::pair<int, std::string> rocev2LinkLocalIndex = {-1, "RoCEv2 Link-local"};
+    std::pair<int, std::string> rocev1LinkLocalIndex = {-1, "RoCEv1 Link-local"};
 
     for (int i = 0; i < gidTblLen; ++i) {
       IBV_CALL(ibv_query_gid, context, portNum, i, &gid);
@@ -1505,21 +1506,21 @@ static bool IsConfiguredGid(union ibv_gid* gid)
       ERR_CHECK(GetRoceVersionNumber(context, portNum, i, gidCurrRoceVersion));
       if (IsIPv4MappedIPv6(gid)) {
         if (gidCurrRoceVersion == 2) {
-          roceV2Ipv4MappedIndex = i;  // Highest priority
+          roceV2Ipv4MappedIndex.first = i;  // Highest priority
         } else {
-          roceV1Ipv4MappedIndex = i;
+          roceV1Ipv4MappedIndex.first = i;
         }
       } else if (!LinkLocalGid(gid)) {
         if (gidCurrRoceVersion == 2) {
-          roceV2Ipv6Index = i;
+          roceV2Ipv6Index.first = i;
         } else {
-          roceV1Ipv6Index = i;
+          roceV1Ipv6Index.first = i;
         }
       } else {
         if (gidCurrRoceVersion == 2) {
-          rocev2LinkLocalIndex = i;
+          rocev2LinkLocalIndex.first = i;
         } else {
-          rocev1LinkLocalIndex = i;
+          rocev1LinkLocalIndex.first = i;
         }
       }
     }
@@ -1533,20 +1534,20 @@ static bool IsConfiguredGid(union ibv_gid* gid)
     // * 5. RoCE v2 (Link-local): fe80::/10
     // * 6. RoCE v1 (Link-local)
 
-    if (roceV2Ipv4MappedIndex != -1) {
-      gidIndex = roceV2Ipv4MappedIndex;
-    } else if (roceV2Ipv6Index != -1) {
-      gidIndex = roceV2Ipv6Index;
-    } else if (roceV1Ipv4MappedIndex != -1) {
-      gidIndex = roceV1Ipv4MappedIndex;
-    } else if (roceV1Ipv6Index != -1) {
-      gidIndex = roceV1Ipv6Index;
-    } else if (rocev2LinkLocalIndex != -1) {
-      gidIndex = rocev2LinkLocalIndex;
-    } else if (rocev1LinkLocalIndex != -1) {
-      gidIndex = rocev1LinkLocalIndex;
+    if (roceV2Ipv4MappedIndex.first != -1) {
+      gidInfo = roceV2Ipv4MappedIndex;
+    } else if (roceV2Ipv6Index.first != -1) {
+      gidInfo = roceV2Ipv6Index;
+    } else if (roceV1Ipv4MappedIndex.first != -1) {
+      gidInfo = roceV1Ipv4MappedIndex;
+    } else if (roceV1Ipv6Index.first != -1) {
+      gidInfo = roceV1Ipv6Index;
+    } else if (rocev2LinkLocalIndex.first != -1) {
+      gidInfo = rocev2LinkLocalIndex;
+    } else if (rocev1LinkLocalIndex.first != -1) {
+      gidInfo = rocev1LinkLocalIndex;
     } else {
-      gidIndex = -1;
+      gidInfo.first = -1;
       return {ERR_FATAL, "Failed to auto-detect a valid GID index. Try setting it manually through IB_GID_INDEX"};
     }
     return ERR_NONE;
@@ -1586,10 +1587,11 @@ static bool IsConfiguredGid(union ibv_gid* gid)
                     ibvDevice.hasActivePort = true;
                     if(portAttr.link_layer == IBV_LINK_LAYER_ETHERNET) {
                       ibvDevice.isRoce = true;
-                      int gidIndex = -1;
-                      auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidIndex);
+                      std::pair<int, std::string> gidInfo (-1, "");
+                      auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidInfo);
                       if (res.errType == ERR_NONE) {
-                        ibvDevice.gidIndex = gidIndex;
+                        ibvDevice.gidIndex = gidInfo.first;
+                        ibvDevice.gidDescriptor = gidInfo.second;
                       }
                     }
                     break;
@@ -2017,8 +2019,12 @@ static bool IsConfiguredGid(union ibv_gid* gid)
     bool isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
     if (isRoCE) {
       // Try to auto-detect the GID index
-      ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, cfg.nic.ibPort, srcGidIndex));
-      ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, cfg.nic.ibPort, dstGidIndex));
+      std::pair<int, std::string> srcGidInfo (srcGidIndex, "");
+      std::pair<int, std::string> dstGidInfo (dstGidIndex, "");
+      ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, cfg.nic.ibPort, srcGidInfo));
+      ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, cfg.nic.ibPort, dstGidInfo));
+      srcGidIndex = srcGidInfo.first;
+      dstGidIndex = dstGidInfo.first;
       IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
       IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
     }
