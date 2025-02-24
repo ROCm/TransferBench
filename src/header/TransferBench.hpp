@@ -250,7 +250,7 @@ namespace TransferBench
     ROCEV2_IPV6       = 3,                       ///< RoCEv2 IPv6
     ROCEV1_IPV4       = 4,                       ///< RoCEv1 IPv4-mapped IPv6
     ROCEV2_IPV4       = 5,                       ///< RoCEv2 IPv4-mapped IPv6 ::ffff:192.168.x.x
-  };;
+  };
 
   const char* GidPriorityStr[] = {
     "RoCEv1 Link-local",
