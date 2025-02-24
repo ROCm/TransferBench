@@ -1442,9 +1442,9 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
 // Function to collect information about IBV devices
 //========================================================================================
-static bool IsConfiguredGid(union ibv_gid* gid)
+static bool IsConfiguredGid(union ibv_gid const& gid)
   {
-    const struct in6_addr *a = (struct in6_addr *)gid->raw;
+    const struct in6_addr *a = (struct in6_addr *) gid.raw;
     int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
     if (((a->s6_addr32[0] | trailer) == 0UL) ||
         ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL))) {
@@ -1523,9 +1523,9 @@ static bool IsConfiguredGid(union ibv_gid* gid)
 
     for (int i = 0; i < gidTblLen; ++i) {
       IBV_CALL(ibv_query_gid, context, portNum, i, &gid);
-      if (!IsConfiguredGid(&gid)) continue;
+      if (!IsConfiguredGid(gid)) continue;
       int gidCurrRoceVersion;
-      ERR_CHECK(GetRoceVersionNumber(context, portNum, i, gidCurrRoceVersion));
+      if(GetRoceVersionNumber(context, portNum, i, gidCurrRoceVersion).errType != ERR_NONE) continue;
       GidPriority currPriority;
       if (IsIPv4MappedIPv6(gid)) {
         currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV4 : GidPriority::ROCEV1_IPV4;
