@@ -1543,10 +1543,9 @@ static bool IsConfiguredGid(union ibv_gid* gid)
     if (highestPriority == GidPriority::UNKNOWN) {
       gidInfo.first = -1;
       return {ERR_FATAL, "Failed to auto-detect a valid GID index. Try setting it manually through IB_GID_INDEX"};
-    } else {
-      gidInfo.first = gidIndex;
-      gidInfo.second = GidPriorityStr[highestPriority];
     }
+    gidInfo.first = gidIndex;
+    gidInfo.second = GidPriorityStr[highestPriority];
     return ERR_NONE;
   }
 
