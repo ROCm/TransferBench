@@ -10,7 +10,7 @@ Documentation for TransferBench is available at
   - 0 = sequential, 1 = interleaved, 2 = random
 - Added a2asweep preset which tries various CU/unroll options for GFX-executed all-to-all
 - Rewrite main GID index detection logic
-- Show the GID index in the topology table. It is helpful for debugging purposes
+- Show the GID index and description in the topology table. It is helpful for debugging purposes
 - Added GFX_WORD_SIZE to allow for different packed float sizes to use for GFX kernel.  Must be either 4 (default), 2 or 1
 
 
