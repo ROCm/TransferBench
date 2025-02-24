@@ -237,6 +237,31 @@ namespace TransferBench
   };
 
   /**
+   * Enumeration of GID priority
+   *
+   * @note These are the GID types ordered in priority from lowest (0) to highest
+   */
+  enum GidPriority
+  {
+    UNKNOWN           = -1,                      ///< Default
+    ROCEV1_LINK_LOCAL = 0,                       ///< RoCEv1 Link-local
+    ROCEV2_LINK_LOCAL = 1,                       ///< RoCEv2 Link-local fe80::/10
+    ROCEV1_IPV6       = 2,                       ///< RoCEv1 IPv6
+    ROCEV2_IPV6       = 3,                       ///< RoCEv2 IPv6
+    ROCEV1_IPV4       = 4,                       ///< RoCEv1 IPv4-mapped IPv6
+    ROCEV2_IPV4       = 5,                       ///< RoCEv2 IPv4-mapped IPv6 ::ffff:192.168.x.x
+  };;
+
+  const char* GidPriorityStr[] = {
+    "RoCEv1 Link-local",
+    "RoCEv2 Link-local",
+    "RoCEv1 IPv6",
+    "RoCEv2 IPv6",
+    "RoCEv1 IPv4-mapped IPv6",
+    "RoCEv2 IPv4-mapped IPv6"
+  };
+
+  /**
    * ErrResult consists of error type and error message
    */
   struct ErrResult
@@ -1492,63 +1517,35 @@ static bool IsConfiguredGid(union ibv_gid* gid)
   {
     if(gidInfo.first >= 0) return ERR_NONE; // honor user choice
     union ibv_gid gid;
-    std::pair<int, std::string> roceV2Ipv4MappedIndex = {-1, "RoCEv2 IPv4-mapped"};
-    std::pair<int, std::string> roceV1Ipv4MappedIndex = {-1, "RoCEv1 IPv4-mapped"};
-    std::pair<int, std::string> roceV2Ipv6Index = {-1, "RoCEv2 IPv6"};
-    std::pair<int, std::string> roceV1Ipv6Index = {-1, "RoCEv1 IPv6"};
-    std::pair<int, std::string> rocev2LinkLocalIndex = {-1, "RoCEv2 Link-local"};
-    std::pair<int, std::string> rocev1LinkLocalIndex = {-1, "RoCEv1 Link-local"};
+
+    GidPriority highestPriority = GidPriority::UNKNOWN;
+    int gidIndex = -1;
 
     for (int i = 0; i < gidTblLen; ++i) {
       IBV_CALL(ibv_query_gid, context, portNum, i, &gid);
       if (!IsConfiguredGid(&gid)) continue;
       int gidCurrRoceVersion;
       ERR_CHECK(GetRoceVersionNumber(context, portNum, i, gidCurrRoceVersion));
+      GidPriority currPriority;
       if (IsIPv4MappedIPv6(gid)) {
-        if (gidCurrRoceVersion == 2) {
-          roceV2Ipv4MappedIndex.first = i;  // Highest priority
-        } else {
-          roceV1Ipv4MappedIndex.first = i;
-        }
+        currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV4 : GidPriority::ROCEV1_IPV4;
       } else if (!LinkLocalGid(gid)) {
-        if (gidCurrRoceVersion == 2) {
-          roceV2Ipv6Index.first = i;
-        } else {
-          roceV1Ipv6Index.first = i;
-        }
+        currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_IPV6 : GidPriority::ROCEV1_IPV6;
       } else {
-        if (gidCurrRoceVersion == 2) {
-          rocev2LinkLocalIndex.first = i;
-        } else {
-          rocev1LinkLocalIndex.first = i;
-        }
+        currPriority = (gidCurrRoceVersion == 2) ? GidPriority::ROCEV2_LINK_LOCAL : GidPriority::ROCEV1_LINK_LOCAL;
+      }
+      if(currPriority > highestPriority) {
+        highestPriority = currPriority;
+        gidIndex = i;
       }
     }
 
-    // Select the best available GID based on priority
-    // * Priority Order:
-    // * 1. RoCE v2 (IPv4-mapped): ::ffff:192.168.x.x
-    // * 2. RoCE v2 (Not IPv4-mapped)
-    // * 3. RoCE v1 (IPv4-mapped)
-    // * 4. RoCE v1 (Not IPv4-mapped)
-    // * 5. RoCE v2 (Link-local): fe80::/10
-    // * 6. RoCE v1 (Link-local)
-
-    if (roceV2Ipv4MappedIndex.first != -1) {
-      gidInfo = roceV2Ipv4MappedIndex;
-    } else if (roceV2Ipv6Index.first != -1) {
-      gidInfo = roceV2Ipv6Index;
-    } else if (roceV1Ipv4MappedIndex.first != -1) {
-      gidInfo = roceV1Ipv4MappedIndex;
-    } else if (roceV1Ipv6Index.first != -1) {
-      gidInfo = roceV1Ipv6Index;
-    } else if (rocev2LinkLocalIndex.first != -1) {
-      gidInfo = rocev2LinkLocalIndex;
-    } else if (rocev1LinkLocalIndex.first != -1) {
-      gidInfo = rocev1LinkLocalIndex;
-    } else {
+    if (highestPriority == GidPriority::UNKNOWN) {
       gidInfo.first = -1;
       return {ERR_FATAL, "Failed to auto-detect a valid GID index. Try setting it manually through IB_GID_INDEX"};
+    } else {
+      gidInfo.first = gidIndex;
+      gidInfo.second = GidPriorityStr[highestPriority];
     }
     return ERR_NONE;
   }
