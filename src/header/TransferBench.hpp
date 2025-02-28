@@ -492,6 +492,14 @@ namespace TransferBench
   #define hipStreamDestroy                                   cudaStreamDestroy
   #define hipStreamSynchronize                               cudaStreamSynchronize
 
+  // Define float2 addition operator for NVIDIA platform
+  __device__ inline float2& operator +=(float2& a, const float2& b)
+  {
+    a.x += b.x;
+    a.y += b.y;
+    return a;
+  }
+
   // Define float4 addition operator for NVIDIA platform
   __device__ inline float4& operator +=(float4& a, const float4& b)
   {
