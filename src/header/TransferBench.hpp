@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 /// @cond
 #pragma once
+#include <algorithm>
 #include <cstring>
 #include <future>
 #include <map>
