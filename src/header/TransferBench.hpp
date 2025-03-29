@@ -179,6 +179,7 @@ namespace TransferBench
     int                 blockSize      = 256;   ///< Size of each threadblock (must be multiple of 64)
     vector<uint32_t>    cuMask         = {};    ///< Bit-vector representing the CU mask
     vector<vector<int>> prefXccTable   = {};    ///< 2D table with preferred XCD to use for a specific [src][dst] GPU device
+    int                 temporalMode   = 0;     ///< Non-temporal load/store mode 0=none, 1=load, 2=store, 3=both
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
@@ -974,6 +975,9 @@ namespace {
                         "[gfx.blockSize] must be positive multiple of 64 less than or equal to %d",
                         gfxMaxBlockSize});
 
+    if (cfg.gfx.temporalMode < 0 || cfg.gfx.temporalMode > 3)
+      errors.push_back({ERR_FATAL,
+                        "[gfx.temporalMode] must be non-negative and less than or equal to 3"});
     int gfxMaxUnroll = GetIntAttribute(ATR_GFX_MAX_UNROLL);
     if (cfg.gfx.unrollFactor < 0 || cfg.gfx.unrollFactor > gfxMaxUnroll)
       errors.push_back({ERR_FATAL,
@@ -2760,8 +2764,75 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                                                                           MEMSET_VAL); }
 
 
-// Kernel for GFX execution
-  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL>
+  // Helper function for temporal/non-temporal reads / writes
+  #define TEMPORAL_NONE  0
+  #define TEMPORAL_LOAD  1
+  #define TEMPORAL_STORE 2
+  #define TEMPORAL_BOTH  3
+
+  template <int TEMPORAL_MODE>
+  __device__ __forceinline__ void Load(float const* src, float& dst) {
+    if (TEMPORAL_MODE & TEMPORAL_LOAD)
+      dst = __builtin_nontemporal_load(src);
+    else
+      dst = *src;
+  }
+
+  template <int TEMPORAL_MODE>
+  __device__ __forceinline__ void Load(float2 const* src, float2& dst) {
+    if (TEMPORAL_MODE & TEMPORAL_LOAD) {
+      dst.x = __builtin_nontemporal_load(&(src->x));
+      dst.y = __builtin_nontemporal_load(&(src->y));
+    } else {
+      dst = *src;
+    }
+  }
+
+  template <int TEMPORAL_MODE>
+  __device__ __forceinline__ void Load(float4 const* src, float4& dst) {
+    if (TEMPORAL_MODE & TEMPORAL_LOAD) {
+      dst.x = __builtin_nontemporal_load(&(src->x));
+      dst.y = __builtin_nontemporal_load(&(src->y));
+      dst.z = __builtin_nontemporal_load(&(src->z));
+      dst.w = __builtin_nontemporal_load(&(src->w));
+    } else {
+      dst = *src;
+    }
+  }
+
+  template <int TEMPORAL_MODE>
+  __device__ __forceinline__ void Store(float const& src, float* dst) {
+    if (TEMPORAL_MODE & TEMPORAL_STORE) {
+      __builtin_nontemporal_store(src, dst);
+    } else {
+      *dst = src;
+    }
+  }
+
+  template <int TEMPORAL_MODE>
+  __device__ __forceinline__ void Store(float2 const& src, float2* dst) {
+    if (TEMPORAL_MODE & TEMPORAL_STORE) {
+      __builtin_nontemporal_store(src.x, &(dst->x));
+      __builtin_nontemporal_store(src.y, &(dst->y));
+    } else {
+      *dst = src;
+    }
+  }
+
+  template <int TEMPORAL_MODE>
+  __device__ __forceinline__ void Store(float4 const& src, float4* dst) {
+    if (TEMPORAL_MODE & TEMPORAL_STORE) {
+      __builtin_nontemporal_store(src.x, &(dst->x));
+      __builtin_nontemporal_store(src.y, &(dst->y));
+      __builtin_nontemporal_store(src.z, &(dst->z));
+      __builtin_nontemporal_store(src.w, &(dst->w));
+    } else {
+      *dst = src;
+    }
+  }
+
+  // Kernel for GFX execution
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
   __global__ void __launch_bounds__(BLOCKSIZE)
     GpuReduceKernel(SubExecParam* params, int waveOrder, int numSubIterations)
   {
@@ -2811,6 +2882,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       size_t const loop1Limit  = numPackedFloat / loop1Stride * loop1Stride;
       {
         PACKED_FLOAT val[UNROLL];
+        PACKED_FLOAT tmp[UNROLL];
         if (numSrcs == 0) {
           #pragma unroll
           for (int u = 0; u < UNROLL; u++)
@@ -2820,18 +2892,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride) {
           // Read sources into memory and accumulate in registers
           if (numSrcs) {
+            #pragma unroll
             for (int u = 0; u < UNROLL; u++)
-              val[u] = srcFloatPacked[0][idx + u * unrlStride * warpSize];
-            for (int s = 1; s < numSrcs; s++)
+              Load<TEMPORAL_MODE>(&srcFloatPacked[0][idx + u * unrlStride * warpSize], val[u]);
+
+            for (int s = 1; s < numSrcs; s++) {
+              #pragma unroll
               for (int u = 0; u < UNROLL; u++)
-                val[u] += srcFloatPacked[s][idx + u * unrlStride * warpSize];
+                Load<TEMPORAL_MODE>(&srcFloatPacked[s][idx + u * unrlStride * warpSize], tmp[u]);
+              #pragma unroll
+              for (int u = 0; u < UNROLL; u++)
+                val[u] += tmp[u];
+            }
           }
 
           // Write accumulation to all outputs
           for (int d = 0; d < numDsts; d++) {
             #pragma unroll
             for (int u = 0; u < UNROLL; u++)
-              dstFloatPacked[d][idx + u * unrlStride * warpSize] = val[u];
+              Store<TEMPORAL_MODE>(val[u], &dstFloatPacked[d][idx + u * unrlStride * warpSize]);
           }
         }
       }
@@ -2839,19 +2918,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Second loop: Deal with remaining PACKED_FLOAT
       {
         if (loop1Limit < numPackedFloat) {
-          PACKED_FLOAT val;
+          PACKED_FLOAT val, tmp;
           if (numSrcs == 0) val = MemsetVal<PACKED_FLOAT>();
 
           size_t const loop2Stride = nTeams * nWaves * warpSize;
           for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx;
                idx < numPackedFloat; idx += loop2Stride) {
             if (numSrcs) {
-              val = srcFloatPacked[0][idx];
-              for (int s = 1; s < numSrcs; s++)
-                val += srcFloatPacked[s][idx];
+              Load<TEMPORAL_MODE>(&srcFloatPacked[0][idx], val);
+              for (int s = 1; s < numSrcs; s++) {
+                Load<TEMPORAL_MODE>(&srcFloatPacked[s][idx], tmp);
+                val += tmp;
+              }
             }
             for (int d = 0; d < numDsts; d++)
-              dstFloatPacked[d][idx] = val;
+              Store<TEMPORAL_MODE>(val, &dstFloatPacked[d][idx]);
           }
         }
       }
@@ -2859,19 +2940,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Third loop; Deal with remaining floats
       {
         if (numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) < p.N) {
-          float val;
+          float val, tmp;
           if (numSrcs == 0) val = MemsetVal<float>();
 
           size_t const loop3Stride = nTeams * nWaves * warpSize;
           for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
             if (numSrcs) {
-              val = p.src[0][idx];
-              for (int s = 1; s < numSrcs; s++)
-                val += p.src[s][idx];
+              Load<TEMPORAL_MODE>(&p.src[0][idx], val);
+              for (int s = 1; s < numSrcs; s++) {
+                Load<TEMPORAL_MODE>(&p.src[s][idx], tmp);
+                val += tmp;
+              }
             }
 
             for (int d = 0; d < numDsts; d++)
-              p.dst[d][idx] = val;
+              Store<TEMPORAL_MODE>(val, &p.dst[d][idx]);
           }
         }
       }
@@ -2890,10 +2973,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#define GPU_KERNEL_DWORD_DECL(BLOCKSIZE, UNROLL) \
-  {GpuReduceKernel<float,  BLOCKSIZE, UNROLL>,   \
-   GpuReduceKernel<float2, BLOCKSIZE, UNROLL>,   \
-   GpuReduceKernel<float4, BLOCKSIZE, UNROLL>}
+#define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)    \
+  {GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_NONE>,  \
+   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_LOAD>,  \
+   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_STORE>, \
+   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_BOTH>}
+
+#define GPU_KERNEL_DWORD_DECL(BLOCKSIZE, UNROLL)        \
+  {GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float),  \
+   GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float2), \
+   GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float4)}
 
 #define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE)    \
   {GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 1),      \
@@ -2907,7 +2996,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int);
-  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3] =
+  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
   {
     GPU_KERNEL_UNROLL_DECL(64),
     GPU_KERNEL_UNROLL_DECL(128),
@@ -2919,6 +3008,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     GPU_KERNEL_UNROLL_DECL(512)
   };
   #undef GPU_KERNEL_UNROLL_DECL
+  #undef GPU_KERNEL_DWORD_DECL
+  #undef GPU_KERNEL_TEMPORAL_DECL
 
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
@@ -2938,7 +3029,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                       cfg.gfx.wordSize == 2 ? 1 :
                                               2;
-    auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
+    auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
 
 #if defined(__NVCC__)
     if (startEvent != NULL)
@@ -3014,7 +3105,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                         cfg.gfx.wordSize == 2 ? 1 :
                                                 2;
-      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx];
+      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
 
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
