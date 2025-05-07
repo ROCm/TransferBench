@@ -66,7 +66,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.61";
+  constexpr char VERSION[] = "1.62";
 
   /**
    * Enumeration of supported Executor types
