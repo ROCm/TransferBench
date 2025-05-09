@@ -72,7 +72,6 @@ namespace TransferBench
    * Enumeration of supported Executor types
    *
    * @note The Executor is the device used to perform a Transfer
-   * @note IBVerbs executor is currently not implemented yet
    */
   enum ExeType
   {
@@ -113,10 +112,11 @@ namespace TransferBench
     MEM_GPU_FINE     = 3,                       ///< Fine-grained global GPU memory
     MEM_CPU_UNPINNED = 4,                       ///< Unpinned CPU memory
     MEM_NULL         = 5,                       ///< NULL memory - used for empty
-    MEM_MANAGED      = 6                        ///< Managed memory
+    MEM_MANAGED      = 6,                       ///< Managed memory
+    MEM_CPU_CLOSEST  = 7,                       ///< Coarse-grained pinned CPU memory indexed by closest GPU
   };
-  char const MemTypeStr[8] = "CGBFUNM";
-  inline bool IsCpuMemType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED); }
+  char const MemTypeStr[9] = "CGBFUNMP";
+  inline bool IsCpuMemType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED || m == MEM_CPU_CLOSEST); }
   inline bool IsGpuMemType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
 
   /**
@@ -741,8 +741,14 @@ namespace {
     MemType const& memType = memDevice.memType;
 
     if (IsCpuMemType(memType)) {
-      // Set numa policy prior to call to hipHostMalloc
-      numa_set_preferred(memDevice.memIndex);
+      // Determine which NUMA device to use
+      int numaIdx = memDevice.memIndex;
+      if (memType == MEM_CPU_CLOSEST) {
+        numaIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
+      }
+
+      // Set NUMA policy prior to call to hipHostMalloc
+      numa_set_preferred(numaIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       if (memType == MEM_CPU_FINE) {
@@ -751,19 +757,19 @@ namespace {
 #else
         ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser));
 #endif
-      } else if (memType == MEM_CPU) {
+      } else if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
 #if defined (__NVCC__)
         ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, 0));
 #else
         ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent));
 #endif
       } else if (memType == MEM_CPU_UNPINNED) {
-        *memPtr = numa_alloc_onnode(numBytes, memDevice.memIndex);
+        *memPtr = numa_alloc_onnode(numBytes, numaIdx);
       }
 
       // Check that the allocated pages are actually on the correct NUMA node
       memset(*memPtr, 0, numBytes);
-      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, memDevice.memIndex));
+      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, numaIdx));
 
       // Reset to default numa mem policy
       numa_set_preferred(-1);
@@ -802,7 +808,7 @@ namespace {
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
     switch (memType) {
-    case MEM_CPU: case MEM_CPU_FINE:
+    case MEM_CPU: case MEM_CPU_FINE: case MEM_CPU_CLOSEST:
     {
       ERR_CHECK(hipHostFree(memPtr));
       break;
@@ -929,7 +935,7 @@ namespace {
     if (memDevice.memType == MEM_NULL)
       return ERR_NONE;
 
-    if (IsCpuMemType(memDevice.memType)) {
+    if (IsCpuMemType(memDevice.memType) && memDevice.memType != MEM_CPU_CLOSEST) {
       int numCpus = GetNumExecutors(EXE_CPU);
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numCpus)
         return {ERR_FATAL,
@@ -937,11 +943,16 @@ namespace {
       return ERR_NONE;
     }
 
-    if (IsGpuMemType(memDevice.memType)) {
+    if (IsGpuMemType(memDevice.memType) || memDevice.memType == MEM_CPU_CLOSEST) {
     int numGpus = GetNumExecutors(EXE_GPU_GFX);
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numGpus)
         return {ERR_FATAL,
                 "GPU index must be between 0 and %d (instead of %d)", numGpus - 1, memDevice.memIndex};
+      if (memDevice.memType == MEM_CPU_CLOSEST) {
+        if (GetClosestCpuNumaToGpu(memDevice.memIndex) == -1) {
+          return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d", memDevice.memIndex};
+        }
+      }
       return ERR_NONE;
     }
     return {ERR_FATAL, "Unsupported memory type (%d)", memDevice.memType};

@@ -7,6 +7,8 @@ Documentation for TransferBench is available at
 ### Added
 - Adding GFX_TEMPORAL to allow for use for use of non-temporal loads/stores
   - (0 = none [default], 1 = load, 2 = store, 3 = both)
+- Addding "P" memory type which maps to CPU memory but is indexed by closest GPU
+  - For example, P4 refers to CPU memory on NUMA node closest to GPU 4
 ### Modified
 - Adding some additional summary details to a2a preset
 
