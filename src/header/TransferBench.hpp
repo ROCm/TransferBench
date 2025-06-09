@@ -989,6 +989,13 @@ namespace {
     if (cfg.gfx.temporalMode < 0 || cfg.gfx.temporalMode > 3)
       errors.push_back({ERR_FATAL,
                         "[gfx.temporalMode] must be non-negative and less than or equal to 3"});
+
+#if defined(__NVCC__)
+    if (cfg.gfx.temporalMode > 0)
+      errors.push_back({ERR_FATAL,
+          "[gfx.temporalMode] is not supported on NVIDIA hardware"});
+#endif
+
     int gfxMaxUnroll = GetIntAttribute(ATR_GFX_MAX_UNROLL);
     if (cfg.gfx.unrollFactor < 0 || cfg.gfx.unrollFactor > gfxMaxUnroll)
       errors.push_back({ERR_FATAL,
@@ -2784,7 +2791,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Load(float const* src, float& dst) {
     if (TEMPORAL_MODE & TEMPORAL_LOAD)
+#if !defined(__NVCC__)
       dst = __builtin_nontemporal_load(src);
+#endif
     else
       dst = *src;
   }
@@ -2792,8 +2801,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Load(float2 const* src, float2& dst) {
     if (TEMPORAL_MODE & TEMPORAL_LOAD) {
+#if !defined(__NVCC__)
       dst.x = __builtin_nontemporal_load(&(src->x));
       dst.y = __builtin_nontemporal_load(&(src->y));
+#endif
     } else {
       dst = *src;
     }
@@ -2802,10 +2813,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Load(float4 const* src, float4& dst) {
     if (TEMPORAL_MODE & TEMPORAL_LOAD) {
+#if !defined(__NVCC__)
       dst.x = __builtin_nontemporal_load(&(src->x));
       dst.y = __builtin_nontemporal_load(&(src->y));
       dst.z = __builtin_nontemporal_load(&(src->z));
       dst.w = __builtin_nontemporal_load(&(src->w));
+#endif
     } else {
       dst = *src;
     }
@@ -2814,7 +2827,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Store(float const& src, float* dst) {
     if (TEMPORAL_MODE & TEMPORAL_STORE) {
+#if !defined(__NVCC__)
       __builtin_nontemporal_store(src, dst);
+#endif
     } else {
       *dst = src;
     }
@@ -2823,8 +2838,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Store(float2 const& src, float2* dst) {
     if (TEMPORAL_MODE & TEMPORAL_STORE) {
+#if !defined(__NVCC__)
       __builtin_nontemporal_store(src.x, &(dst->x));
       __builtin_nontemporal_store(src.y, &(dst->y));
+#endif
     } else {
       *dst = src;
     }
@@ -2833,10 +2850,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Store(float4 const& src, float4* dst) {
     if (TEMPORAL_MODE & TEMPORAL_STORE) {
+#if !defined(__NVCC__)
       __builtin_nontemporal_store(src.x, &(dst->x));
       __builtin_nontemporal_store(src.y, &(dst->y));
       __builtin_nontemporal_store(src.z, &(dst->z));
       __builtin_nontemporal_store(src.w, &(dst->w));
+#endif
     } else {
       *dst = src;
     }
