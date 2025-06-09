@@ -2790,12 +2790,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   template <int TEMPORAL_MODE>
   __device__ __forceinline__ void Load(float const* src, float& dst) {
-    if (TEMPORAL_MODE & TEMPORAL_LOAD)
+    if (TEMPORAL_MODE & TEMPORAL_LOAD) {
 #if !defined(__NVCC__)
       dst = __builtin_nontemporal_load(src);
+
 #endif
-    else
+    } else {
       dst = *src;
+    }
   }
 
   template <int TEMPORAL_MODE>
