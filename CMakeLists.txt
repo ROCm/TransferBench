@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 
 if (DEFINED ENV{ROCM_PATH})
     set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE STRING "ROCm install directory")
@@ -7,7 +7,7 @@ else()
 endif()
 cmake_minimum_required(VERSION 3.5)
 
-project(TransferBench VERSION 1.59.00 LANGUAGES CXX)
+project(TransferBench VERSION 1.62.00 LANGUAGES CXX)
 
 # Default GPU architectures to build
 #==================================================================================================

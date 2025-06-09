@@ -44,6 +44,7 @@ void AllToAllSweepPreset(EnvVars&           ev,
   int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , 1);
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
+  int showMinOnly   = EnvVars::GetEnvVar("SHOW_MIN_ONLY",   1);
   int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int useSpray      = EnvVars::GetEnvVar("USE_SPRAY",       0);
@@ -76,6 +77,7 @@ void AllToAllSweepPreset(EnvVars&           ev,
     ev.Print("A2A_MODE"       , (a2aMode == A2A_CUSTOM) ?  std::to_string(numSrcs) + ":" + std::to_string(numDsts) : std::to_string(a2aMode),
                                 (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
                                                            std::to_string(numDsts) + " write(s)").c_str(): a2aModeStr[a2aMode]);
+    ev.Print("SHOW_MIN_ONLY"  , showMinOnly      , showMinOnly ? "Showing only slowest GPU results" : "Showing slowest and fastest GPU results");
     ev.Print("NUM_CUS"        , numCusList.size(), EnvVars::ToStr(numCusList).c_str());
     ev.Print("NUM_GPU_DEVICES", numGpus          , "Using %d GPUs", numGpus);
     ev.Print("UNROLLS"        , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
@@ -181,7 +183,7 @@ void AllToAllSweepPreset(EnvVars&           ev,
   printf("#CUs\\Unroll");
   for (int u : unrollList) {
     printf("  %d(Min) ", u);
-    printf("  %d(Max) ", u);
+    if (!showMinOnly) printf("  %d(Max) ", u);
   }
   printf("\n");
   for (int c : numCusList) {
@@ -207,7 +209,9 @@ void AllToAllSweepPreset(EnvVars&           ev,
       } else {
         minBandwidth = 0.0;
       }
-      printf(" %7.2f  %7.2f ", minBandwidth, maxBandwidth); fflush(stdout);
+      printf(" %7.2f ", minBandwidth);
+      if (!showMinOnly) printf(" %7.2f ", maxBandwidth);
+      fflush(stdout);
     }
     printf("\n"); fflush(stdout);
   }

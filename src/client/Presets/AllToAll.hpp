@@ -169,8 +169,9 @@ void AllToAllPreset(EnvVars&           ev,
 
   // Print results
   char separator = (ev.outputToCsv ? ',' : ' ');
-  printf("\nSummary: [%lu bytes per Transfer]\n", numBytesPerTransfer);
-  printf("==========================================================\n");
+  printf("\nSummary: [%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)]\n",
+         numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts);
+  printf("===========================================================================\n");
   printf("SRC\\DST ");
   for (int dst = 0; dst < numGpus; dst++)
     printf("%cGPU %02d    ", separator, dst);
