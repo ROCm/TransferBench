@@ -22,19 +22,21 @@ THE SOFTWARE.
 
 void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& transfers)
 {
-  fprintf(fp, "# Test %d\n", testNum);
-  fprintf(fp, "%d", -1 * (int)transfers.size());
-  for (auto const& transfer : transfers)
-  {
-    fprintf(fp, " (%s->%c%d->%s %d %lu)",
-            MemDevicesToStr(transfer.srcs).c_str(),
-            ExeTypeStr[transfer.exeDevice.exeType], transfer.exeDevice.exeIndex,
-            MemDevicesToStr(transfer.dsts).c_str(),
-            transfer.numSubExecs,
-            transfer.numBytes);
+  if (fp) {
+    fprintf(fp, "# Test %d\n", testNum);
+    fprintf(fp, "%d", -1 * (int)transfers.size());
+    for (auto const& transfer : transfers)
+    {
+      fprintf(fp, " (%s->%c%d->%s %d %lu)",
+              MemDevicesToStr(transfer.srcs).c_str(),
+              ExeTypeStr[transfer.exeDevice.exeType], transfer.exeDevice.exeIndex,
+              MemDevicesToStr(transfer.dsts).c_str(),
+              transfer.numSubExecs,
+              transfer.numBytes);
+    }
+    fprintf(fp, "\n");
+    fflush(fp);
   }
-  fprintf(fp, "\n");
-  fflush(fp);
 }
 
 void SweepPreset(EnvVars&           ev,
@@ -54,6 +56,7 @@ void SweepPreset(EnvVars&           ev,
   int         numGpuSubExecs = EnvVars::GetEnvVar("NUM_GPU_SE"          , 4);
   std::string sweepDst       = EnvVars::GetEnvVar("SWEEP_DST"           , "CG");
   std::string sweepExe       = EnvVars::GetEnvVar("SWEEP_EXE"           , "CDG");
+  std::string sweepFile      = EnvVars::GetEnvVar("SWEEP_FILE"          , "/tmp/lastSweep.cfg");
   int         sweepMax       = EnvVars::GetEnvVar("SWEEP_MAX"           , 24);
   int         sweepMin       = EnvVars::GetEnvVar("SWEEP_MIN"           , 1);
   int         sweepRandBytes = EnvVars::GetEnvVar("SWEEP_RAND_BYTES"    , 0);
@@ -78,6 +81,7 @@ void SweepPreset(EnvVars&           ev,
     ev.Print("NUM_GPU_SE",        numGpuSubExecs,   "Using %d subExecutors/CUs per GPU executed Transfer", numGpuSubExecs);
     ev.Print("SWEEP_DST",         sweepDst.c_str(), "Destination Memory Types to sweep");
     ev.Print("SWEEP_EXE",         sweepExe.c_str(), "Executor Types to sweep");
+    ev.Print("SWEEP_FILE",        sweepFile.c_str(),"File to store the executing sweep configuration");
     ev.Print("SWEEP_MAX",         sweepMax,         "Max simultaneous transfers (0 = no limit)");
     ev.Print("SWEEP_MIN",         sweepMin,         "Min simultaenous transfers");
     ev.Print("SWEEP_RAND_BYTES",  sweepRandBytes,   "Using %s number of bytes per Transfer", (sweepRandBytes ? "random" : "constant"));
@@ -283,10 +287,14 @@ void SweepPreset(EnvVars&           ev,
   std::uniform_int_distribution<int> distribution(sweepMin, maxParallelTransfers);
 
   // Log sweep to configuration file
-  FILE *fp = fopen("lastSweep.cfg", "w");
+  char absPath[1024];
+  auto const res = realpath(sweepFile.c_str(), absPath);
+
+  FILE *fp = fopen(sweepFile.c_str(), "w");
   if (!fp) {
-    printf("[ERROR] Unable to open lastSweep.cfg.  Check permissions\n");
-    exit(1);
+    printf("[WARN] Unable to open %s.  Skipping output of sweep configuration file\n", res ? absPath : sweepFile.c_str());
+  } else {
+    printf("Sweep configuration saved to: %s\n", res ? absPath : sweepFile.c_str());
   }
 
   // Create bitmask of numPossible triplets, of which M will be chosen
@@ -333,7 +341,7 @@ void SweepPreset(EnvVars&           ev,
 
     // Check for test limit
     if (numTestsRun == sweepTestLimit) {
-      printf("Test limit reached\n");
+      printf("Sweep Test limit reached\n");
       break;
     }
 
@@ -341,7 +349,7 @@ void SweepPreset(EnvVars&           ev,
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double totalCpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
     if (sweepTimeLimit && totalCpuTime > sweepTimeLimit) {
-      printf("Time limit exceeded\n");
+      printf("Sweep Time limit exceeded\n");
       break;
     }
 
@@ -357,5 +365,5 @@ void SweepPreset(EnvVars&           ev,
         bitmask[i] = (i < M) ? 1 : 0;
     }
   }
-  fclose(fp);
+  if (fp) fclose(fp);
 }

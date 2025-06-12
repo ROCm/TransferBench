@@ -23,14 +23,14 @@ THE SOFTWARE.
 #pragma once
 
 // TransferBench client version
-#define CLIENT_VERSION "01"
+#define CLIENT_VERSION "00"
 
 #include "TransferBench.hpp"
 #include "EnvVars.hpp"
 
-size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<26);
+size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<28);
 
-char const ExeTypeName[4][4] = {"CPU", "GPU", "DMA", "IBV"};
+char const ExeTypeName[5][4] = {"CPU", "GPU", "DMA", "NIC", "NIC"};
 
 // Display detected hardware
 void DisplayTopology(bool outputToCsv);

@@ -1,6 +1,6 @@
 .. meta::
   :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
-  :keywords: TransferBench, API, ROCm, documentation, HIP
+  :keywords: Benchmarking utility, Memory transfers, Device transfers
 
 ****************************
 TransferBench documentation

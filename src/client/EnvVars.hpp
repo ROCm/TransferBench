@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021-2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) 2021-2025 Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -84,14 +84,17 @@ public:
   int useHsaDma;                     // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
 
   // GFX options
+  int gfxBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
   int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
   vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
   vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int gfxTemporal;                   // Non-temporal load/store mode (0=none, 1=load, 2=store, 3=both)
   int gfxUnroll;                     // GFX-kernel unroll factor
   int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
   int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
   int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxWaveOrder;                  // GFX-kernel wavefront ordering
+  int gfxWordSize;                   // GFX-kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)
 
   // Client options
   int hideEnv;                       // Skip printing environment variable
@@ -99,6 +102,14 @@ public:
   int maxNumVarSubExec;              // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int outputToCsv;                   // Output in CSV format
   int samplingFactor;                // Affects how many different values of N are generated (when N set to 0)
+
+  // NIC options
+  int ibGidIndex;                    // GID Index for RoCE NICs
+  int roceVersion;                   // RoCE version number
+  int ipAddressFamily;               // IP Address Famliy
+  uint8_t ibPort;                    // NIC port number to be used
+  int nicRelaxedOrder;               // Use relaxed ordering for RDMA
+  std::string closestNicStr;         // Holds the user-specified list of closest NICs
 
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
@@ -127,10 +138,13 @@ public:
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
+    gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
-    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
+    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
+    gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
+    gfxWordSize       = GetEnvVar("GFX_WORD_SIZE"       , 4);
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
     minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
     maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
@@ -147,7 +161,15 @@ public:
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
     validateSource    = GetEnvVar("VALIDATE_SOURCE"     , 0);
 
+    ibGidIndex        = GetEnvVar("IB_GID_INDEX"        ,-1);
+    ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
+    roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
+    ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
+    nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
+    closestNicStr     = GetEnvVar("CLOSEST_NIC"         , "");
+
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
+
 
     // Check for fill pattern
     char* pattern = getenv("FILL_PATTERN");
@@ -270,27 +292,55 @@ public:
     }
   }
 
+  static std::string ToStr(std::vector<int> const& values) {
+    std::string result = "";
+    bool isFirst = true;
+    for (int v : values) {
+      if (isFirst) isFirst = false;
+      else result += ",";
+      result += std::to_string(v);
+    }
+    return result;
+  }
+
   // Display info on the env vars that can be used
   static void DisplayUsage()
   {
     printf("Environment variables:\n");
     printf("======================\n");
     printf(" ALWAYS_VALIDATE   - Validate after each iteration instead of once after all iterations\n");
-    printf(" BLOCK_SIZE        - # of threads per threadblock (Must be multiple of 64)\n");
     printf(" BLOCK_BYTES       - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET       - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
+#if NIC_EXEC_ENABLED
+    printf(" CLOSEST_NIC       - Comma-separated list of per-GPU closest NIC (default=auto)\n");
+#endif
     printf(" CU_MASK           - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
     printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
+    printf(" GFX_BLOCK_ORDER   - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" GFX_BLOCK_SIZE    - # of threads per threadblock (Must be multiple of 64)\n");
+    printf(" GFX_TEMPORAL      - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
     printf(" GFX_UNROLL        - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
     printf(" GFX_SINGLE_TEAM   - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER    - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
+    printf(" GFX_WORD_SIZE     - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
     printf(" HIDE_ENV          - Hide environment variable value listing\n");
+#if NIC_EXEC_ENABLED
+    printf(" IB_GID_INDEX      - Required for RoCE NICs (default=-1/auto)\n");
+    printf(" IB_PORT_NUMBER    - RDMA port count for RDMA NIC (default=1)\n");
+    printf(" IP_ADDRESS_FAMILY - IP address family (4=v4, 6=v6, default=v4)\n");
+#endif
     printf(" MIN_VAR_SUBEXEC   - Minumum # of subexecutors to use for variable subExec Transfers\n");
     printf(" MAX_VAR_SUBEXEC   - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
+#if NIC_EXEC_ENABLED
+    printf(" NIC_RELAX_ORDER   - Set to non-zero to use relaxed ordering");
+#endif
     printf(" NUM_ITERATIONS    - # of timed iterations per test. If negative, run for this many seconds instead\n");
     printf(" NUM_SUBITERATIONS - # of sub-iterations to run per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS       - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV     - Outputs to CSV format if set\n");
+#if NIC_EXEC_ENABLED
+    printf(" ROCE_VERSION      - RoCE version (default=2)\n");
+#endif
     printf(" SAMPLING_FACTOR   - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_ITERATIONS   - Show per-iteration timing info\n");
     printf(" USE_HIP_EVENTS    - Use HIP events for GFX executor timing\n");
@@ -300,6 +350,7 @@ public:
     printf(" VALIDATE_DIRECT   - Validate GPU destination memory directly instead of staging GPU memory on host\n");
     printf(" VALIDATE_SOURCE   - Validate GPU src memory immediately after preparation\n");
   }
+
 
   void Print(std::string const& name, int32_t const value, const char* format, ...) const
   {
@@ -325,9 +376,12 @@ public:
   void DisplayEnvVars() const
   {
     int numGpuDevices = TransferBench::GetNumExecutors(EXE_GPU_GFX);
-
+    std::string nicSupport = "";
+#if NIC_EXEC_ENABLED
+    nicSupport = " (with NIC support)";
+#endif
     if (!outputToCsv) {
-      printf("TransferBench Client v%s Backend v%s\n", CLIENT_VERSION, TransferBench::VERSION);
+      printf("TransferBench v%s.%s%s\n", TransferBench::VERSION, CLIENT_VERSION, nicSupport.c_str());
       printf("===============================================================\n");
       if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }
@@ -341,15 +395,27 @@ public:
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,
           "Using byte offset of %d", byteOffset);
+#if NIC_EXEC_ENABLED
+    Print("CLOSEST_NIC", (closestNicStr == "" ? "auto" : "user-input"),
+          "Per-GPU closest NIC is set as %s", (closestNicStr == "" ? "auto" : closestNicStr.c_str()));
+#endif
     Print("CU_MASK", getenv("CU_MASK") ? 1 : 0,
           "%s", (cuMask.size() ? GetCuMaskDesc().c_str() : "All"));
     Print("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
           "%s", (fillPattern.size() ? getenv("FILL_PATTERN") : TransferBench::GetStrAttribute(ATR_SRC_PREP_DESCRIPTION).c_str()));
+    Print("GFX_BLOCK_ORDER", gfxBlockOrder,
+          "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential" : "Interleaved");
     Print("GFX_BLOCK_SIZE", gfxBlockSize,
           "Threadblock size of %d", gfxBlockSize);
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
           "%s", (gfxSingleTeam ? "Combining CUs to work across entire data array" :
                                  "Each CUs operates on its own disjoint subarray"));
+    Print("GFX_TEMPORAL", gfxTemporal,
+          "%s", (gfxTemporal == 0 ? "Not using non-temporal loads/stores" :
+                 gfxTemporal == 1 ? "Using non-temporal loads" :
+                 gfxTemporal == 2 ? "Using non-temporal stores" :
+                                    "Using non-temporal loads and stores"));
+
     Print("GFX_UNROLL", gfxUnroll,
           "Using GFX unroll factor of %d", gfxUnroll);
     Print("GFX_WAVE_ORDER", gfxWaveOrder,
@@ -359,11 +425,27 @@ public:
                                             gfxWaveOrder == 3 ? "Wavefront,CU,Unroll" :
                                             gfxWaveOrder == 4 ? "CU,Unroll,Wavefront" :
                                                                 "CU,Wavefront,Unroll"));
+    Print("GFX_WORD_SIZE", gfxWordSize,
+          "Using GFX word size of %d (DWORDx%d)", gfxWordSize, gfxWordSize);
+
+#if NIC_EXEC_ENABLED
+    Print("IP_ADDRESS_FAMILY", ipAddressFamily,
+          "IP address family is set to IPv%d", ipAddressFamily);
+
+    Print("IB_GID_INDEX", ibGidIndex,
+          "RoCE GID index is set to %s", (ibGidIndex < 0 ? "auto" : std::to_string(ibGidIndex).c_str()));
+    Print("IB_PORT_NUMBER", ibPort,
+          "IB port number is set to %d", ibPort);
+#endif
     Print("MIN_VAR_SUBEXEC", minNumVarSubExec,
           "Using at least %d subexecutor(s) for variable subExec tranfers", minNumVarSubExec);
     Print("MAX_VAR_SUBEXEC", maxNumVarSubExec,
           "Using up to %s subexecutors for variable subExec transfers",
           maxNumVarSubExec ? std::to_string(maxNumVarSubExec).c_str() : "all available");
+#if NIC_EXEC_ENABLED
+    Print("NIC_RELAX_ORDER", nicRelaxedOrder,
+          "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
+#endif
     Print("NUM_ITERATIONS", numIterations,
           (numIterations == 0) ? "Running infinitely" :
           "Running %d %s", abs(numIterations), (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
@@ -371,6 +453,10 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
+#if NIC_EXEC_ENABLED
+    Print("ROCE_VERSION", roceVersion,
+          "RoCE version is set to %d", roceVersion);
+#endif
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("USE_HIP_EVENTS", useHipEvents,
@@ -381,7 +467,6 @@ public:
           "Running in %s mode", useInteractive ? "interactive" : "non-interactive");
     Print("USE_SINGLE_STREAM", useSingleStream,
           "Using single stream per GFX %s", useSingleStream ? "device" : "Transfer");
-
     if (getenv("XCC_PREF_TABLE")) {
       printf("%36s: Preferred XCC Table (XCC_PREF_TABLE)\n", "");
       printf("%36s:         ", "");
@@ -405,6 +490,31 @@ public:
   {
     if (getenv(varname.c_str()))
       return atoi(getenv(varname.c_str()));
+    return defaultValue;
+  }
+
+  static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
+  {
+    if (getenv(varname.c_str())) {
+      char* rangeStr = getenv(varname.c_str());
+      std::set<int> values;
+      char* token = strtok(rangeStr, ",");
+      while (token) {
+        int start, end;
+        if (sscanf(token, "%d-%d", &start, &end) == 2) {
+          for (int i = start; i <= end; i++) values.insert(i);
+        } else if (sscanf(token, "%d", &start) == 1) {
+          values.insert(start);
+        } else {
+          printf("[ERROR] Unrecognized token [%s]\n", token);
+          exit(1);
+        }
+        token = strtok(NULL, ",");
+      }
+      std::vector<int> result;
+      for (auto v : values) result.push_back(v);
+      return result;
+    }
     return defaultValue;
   }
 
@@ -470,15 +580,39 @@ public:
     cfg.dma.useHipEvents           = useHipEvents;
     cfg.dma.useHsaCopy             = useHsaDma;
 
+    cfg.gfx.blockOrder             = gfxBlockOrder;
     cfg.gfx.blockSize              = gfxBlockSize;
     cfg.gfx.cuMask                 = cuMask;
     cfg.gfx.prefXccTable           = prefXccTable;
     cfg.gfx.unrollFactor           = gfxUnroll;
+    cfg.gfx.temporalMode           = gfxTemporal;
     cfg.gfx.useHipEvents           = useHipEvents;
     cfg.gfx.useMultiStream         = !useSingleStream;
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
     cfg.gfx.waveOrder              = gfxWaveOrder;
+    cfg.gfx.wordSize               = gfxWordSize;
 
+    cfg.nic.ibGidIndex             = ibGidIndex;
+    cfg.nic.ibPort                 = ibPort;
+    cfg.nic.ipAddressFamily        = ipAddressFamily;
+    cfg.nic.useRelaxedOrder        = nicRelaxedOrder;
+    cfg.nic.roceVersion            = roceVersion;
+
+    std::vector<int> closestNics;
+    if(closestNicStr != "") {
+      std::stringstream ss(closestNicStr);
+      std::string item;
+      while (std::getline(ss, item, ',')) {
+        try {
+          int nic = std::stoi(item);
+          closestNics.push_back(nic);
+        } catch (const std::invalid_argument& e) {
+          printf("[ERROR] Invalid NIC index (%s) by user in %s\n", item.c_str(), closestNicStr.c_str());
+          exit(1);
+        }
+      }
+      cfg.nic.closestNics = closestNics;
+    }
     return cfg;
   }
 };

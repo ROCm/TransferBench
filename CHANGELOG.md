@@ -3,6 +3,72 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.62.00
+### Added
+- Adding GFX_TEMPORAL to allow for use for use of non-temporal loads/stores
+  - (0 = none [default], 1 = load, 2 = store, 3 = both)
+- Addding "P" memory type which maps to CPU memory but is indexed by closest GPU
+  - For example, P4 refers to CPU memory on NUMA node closest to GPU 4
+### Modified
+- Adding some additional summary details to a2a preset
+
+## v1.61.00
+### Added
+- Added a2a_n preset which conducts alltoall GPU-to-GPU tranfers over nearest NIC executors
+- Re-implemented GFX_BLOCK_ORDER which allows for control over how threadblocks of multiple transfers are ordered
+  - 0 = sequential, 1 = interleaved, 2 = random
+- Added a2asweep preset which tries various CU/unroll options for GFX-executed all-to-all
+- Rewrite main GID index detection logic
+- Show the GID index and description in the topology table. It is helpful for debugging purposes
+- Added GFX_WORD_SIZE to allow for different packed float sizes to use for GFX kernel.  Must be either 4 (default), 2 or 1
+
+
+### Fixed
+- Avoid build errors for CMake and Makefile if infiniband/verbs.h header is not present and disable NIC executor in such case
+- Have a priority list of which GID entry to go for instead of hardcoding choices based on underdocumented user input (such as RoCE version and IP address family)
+- Use link-local when it is the only choice (i.e. when routing information is not available beyond local link)
+
+## v1.60.00
+### Modified
+- Reverted GFX_SINGLE_TEAM default back to 1
+
+### Fixed
+- Fixed bug where peer memory access was not enabled for DMA transfers, which would break specific DMA engine transfers
+
+## v1.59.01
+### Added
+- The a2a preset A2A_MODE variable has been enhanced to allow for customizing the number of srcs/dsts to use
+  This is specified by setting A2A_MODE to numSrcs:numDsts.  Extra destinations past 1 will be "local" writes (i.e. if one sets A2A_MODE=1:3, then transfers will follow this pattern: Fx Gx FyFxFx)
+  to simulate similar conditions normally used during collective algorithms such as ring-based AllReduce
+
+## v1.59.00
+### Added
+- Adding in support for NIC executor, which allows for RDMA copies on NICs that support IBVerbs
+  By default, NIC executor will be enabled if IBVerbs is found in the dynamic linker cache
+- NIC executor can be indexed in two methods
+  - "I"   Ix.y will use NIC x as the source and NIC y as the destination.
+          E.g. (G0 I0.5 G4)
+  - "N"   Nx.y will use NIC closest to GPU x as source, and NIC closest to GPU y as destination
+          E.g. (G0 N0.4 N4)
+- The closest NIC can be overridden by the environment variable CLOSEST_NIC, which should be a comma-separated
+  list of NIC indices to use for the corresponding GPU
+- This feature can be explicitly disabled at compile time by specifying DISABLE_NIC_EXEC=1
+
+### Modified
+- Changing default data size to 256M from 64M
+- Adding NUM_QUEUE_PAIRS which enables NIC traffic in A2A.  Each GPU will talk to the next GPU via the closest NIC
+- Sweep preset now saves last sweep run configuration to /tmp/lastSweep.cfg and can be changed via SWEEP_FILE
+
+### Fixed
+- Fixed bug with reporting when using subiterations
+- Fixed bug with per-Transfer data size specification
+- Fixed bug when using XCC prefered table
+
+
+## v1.58.00
+### Fixed
+- Fixed broken specific DMA-engine copies
+
 ## v1.57.01
 ### Added
 - Re-added "scaling" GPU GFX preset benchmark, which tests copies from GPU to other devices using varying
