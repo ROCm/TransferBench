@@ -66,7 +66,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.62";
+  constexpr char VERSION[] = "1.63";
 
   /**
    * Enumeration of supported Executor types
@@ -895,6 +895,8 @@ namespace {
   // Get the hsa_agent_t associated with a MemDevice
   static ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent)
   {
+    if (memDevice.memType == MEM_CPU_CLOSEST)
+      return GetHsaAgent({EXE_CPU, GetClosestCpuNumaToGpu(memDevice.memIndex)}, agent);
     if (IsCpuMemType(memDevice.memType)) return GetHsaAgent({EXE_CPU, memDevice.memIndex}, agent);
     if (IsGpuMemType(memDevice.memType)) return GetHsaAgent({EXE_GPU_GFX, memDevice.memIndex}, agent);
     return {ERR_FATAL,

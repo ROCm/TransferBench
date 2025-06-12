@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.63.00
+### Fixed
+- Fixed issue when using "P" memory type and specific DMA subengines
+
 ## v1.62.00
 ### Added
 - Adding GFX_TEMPORAL to allow for use for use of non-temporal loads/stores
