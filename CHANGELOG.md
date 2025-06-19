@@ -4,6 +4,12 @@ Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
 ## v1.63.00
+### Added
+- Added `gfx950`, `gfx1150`, and `gfx1151` to default GPU targets list in CMake builds
+
+### Modified
+- Switched to amdclang++ as primary compiler
+
 ### Fixed
 - Fixed issue when using "P" memory type and specific DMA subengines
 
