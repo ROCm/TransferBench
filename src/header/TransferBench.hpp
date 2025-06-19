@@ -516,7 +516,7 @@ namespace TransferBench
 //==========================================================================================
 
 // Macro for collecting CU/SM GFX kernel is running on
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1200__) || defined(__gfx1201__)
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__)
 #define GetHwId(hwId) hwId = 0
 #elif defined(__NVCC__)
 #define GetHwId(hwId) asm("mov.u32 %0, %smid;" : "=r"(hwId))
@@ -525,7 +525,7 @@ namespace TransferBench
 #endif
 
 // Macro for collecting XCC GFX kernel is running on
-#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__)
+#if defined(__gfx942__) || defined(__gfx950__)
 #define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val));
 #else
 #define GetXccId(val) val = 0

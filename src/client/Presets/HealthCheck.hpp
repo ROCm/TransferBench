@@ -49,7 +49,7 @@ void HealthCheckPreset(EnvVars&           ev,
     HIP_CALL(hipGetDeviceProperties(&prop, gpuId));
     std::string fullName = prop.gcnArchName;
     std::string archName = fullName.substr(0, fullName.find(':'));
-    if (!(archName == "gfx940" || archName == "gfx941" || archName == "gfx942"))
+    if (!(archName == "gfx942"))
     {
       printf("[WARN] healthcheck preset is currently only supported on 8-GPU MI300X hardware\n");
       exit(1);
