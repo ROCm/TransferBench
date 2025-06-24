@@ -4,6 +4,8 @@ Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
 ## v1.63.00
+### Modified
+- Removing self-GPU check for DMA engine copies
 ### Fixed
 - Fixed issue when using "P" memory type and specific DMA subengines
 
