@@ -1193,17 +1193,20 @@ namespace {
             if (err.errType == ERR_FATAL) break;
           }
 
-          uint32_t engineIdMask = 0;
-          err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
-          if (err.errType != ERR_NONE) {
-            errors.push_back(err);
-            if (err.errType == ERR_FATAL) break;
-          }
-          hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
-          if (!(sdmaEngineId & engineIdMask)) {
-            errors.push_back({ERR_FATAL,
-                "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
-                i, t.exeDevice.exeIndex, t.exeSubIndex});
+          // Skip check of engine Id mask for self copies
+          if (srcAgent.handle != dstAgent.handle) {
+            uint32_t engineIdMask = 0;
+            err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
+            if (err.errType != ERR_NONE) {
+              errors.push_back(err);
+              if (err.errType == ERR_FATAL) break;
+            }
+            hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
+            if (!(sdmaEngineId & engineIdMask)) {
+              errors.push_back({ERR_FATAL,
+                  "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
+                  i, t.exeDevice.exeIndex, t.exeSubIndex});
+            }
           }
 #endif
         }

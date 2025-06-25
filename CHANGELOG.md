@@ -8,6 +8,7 @@ Documentation for TransferBench is available at
 - Added `gfx950`, `gfx1150`, and `gfx1151` to default GPU targets list in CMake builds
 
 ### Modified
+- Removing self-GPU check for DMA engine copies
 - Switched to amdclang++ as primary compiler
 
 ### Fixed
