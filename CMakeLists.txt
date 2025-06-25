@@ -1,13 +1,29 @@
 # Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 
-if (DEFINED ENV{ROCM_PATH})
-    set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE STRING "ROCm install directory")
-else()
-    set(ROCM_PATH "/opt/rocm" CACHE STRING "ROCm install directory")
-endif()
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
 
-project(TransferBench VERSION 1.63.00 LANGUAGES CXX)
+# CMake Toolchain file to define compilers and path to ROCm
+#==================================================================================================
+if (NOT CMAKE_TOOLCHAIN_FILE)
+  set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/toolchain-linux.cmake")
+  message(STATUS "CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
+endif()
+
+set(VERSION_STRING "1.63.00")
+project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
+
+## Load CMake modules
+#==================================================================================================
+include(CheckIncludeFiles)
+include(CheckSymbolExists)
+include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# Build options
+#==================================================================================================
+option(BUILD_LOCAL_GPU_TARGET_ONLY "Build only for GPUs detected on this machine" OFF)
+option(ENABLE_NIC_EXEC             "Enable RDMA NIC Executor in TransferBench"    OFF)
 
 # Default GPU architectures to build
 #==================================================================================================
@@ -16,15 +32,18 @@ set(DEFAULT_GPUS
       gfx908
       gfx90a
       gfx942
+      gfx950
       gfx1030
       gfx1100
       gfx1101
       gfx1102
+      gfx1150
+      gfx1151
       gfx1200
       gfx1201)
 
-# Build only for local GPU architecture
-if (BUILD_LOCAL_GPU_TARGET_ONLY)
+## Build only for local GPU architecture
+if(BUILD_LOCAL_GPU_TARGET_ONLY)
   message(STATUS "Building only for local GPU target")
   if (COMMAND rocm_local_targets)
     rocm_local_targets(DEFAULT_GPUS)
@@ -33,10 +52,10 @@ if (BUILD_LOCAL_GPU_TARGET_ONLY)
   endif()
 endif()
 
-# Determine which GPU architectures to build for
+## Determine which GPU architectures to build for
 set(GPU_TARGETS "${DEFAULT_GPUS}" CACHE STRING "Target default GPUs if GPU_TARGETS is not defined.")
 
-# Check if clang compiler can offload to GPU_TARGETS
+## Check if clang compiler can offload to GPU_TARGETS
 if (COMMAND rocm_check_target_ids)
   message(STATUS "Checking for ROCm support for GPU targets: " "${GPU_TARGETS}")
   rocm_check_target_ids(SUPPORTED_GPUS TARGETS ${GPU_TARGETS})
@@ -45,58 +64,127 @@ else()
   set(SUPPORTED_GPUS ${DEFAULT_GPUS})
 endif()
 
-set(COMPILING_TARGETS "${SUPPORTED_GPUS}" CACHE STRING "GPU targets to compile for.")
-message(STATUS "Compiling for ${COMPILING_TARGETS}")
+set(GPU_TARGETS "${SUPPORTED_GPUS}")
+message(STATUS "Compiling for ${GPU_TARGETS}")
 
-foreach(target ${COMPILING_TARGETS})
- list(APPEND static_link_flags --offload-arch=${target})
-endforeach()
-list(JOIN static_link_flags " " flags_str)
-set( CMAKE_CXX_FLAGS "${flags_str} ${CMAKE_CXX_FLAGS}")
+## NOTE: Reload rocm-cmake in order to update GPU_TARGETS
+include(cmake/Dependencies.cmake) # Reloading to use desired GPU_TARGETS instead of defaults
 
-set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -L${ROCM_PATH}/lib")
-include_directories(${ROCM_PATH}/include)
-
-find_library(IBVERBS_LIBRARY ibverbs)
-find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
-if (DEFINED ENV{DISABLE_NIC_EXEC})
-  message(STATUS "Disabling NIC Executor support")
-elseif(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
-  message(STATUS "Found ibverbs: ${IBVERBS_LIBRARY}. Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable")
-  if (DEFINED ENV{ENABLE_NIC_EXEC})
-    add_definitions(-DNIC_EXEC_ENABLED)
-    link_libraries(ibverbs)
-  else()
-    message(STATUS "For CMake builds, NIC executor also requires explicit opt-in by setting NIC_EXEC_ENABLE=1")
-  endif()
+# Check for required dependencies
+#==================================================================================================
+## Try to establish ROCM_PATH (for find_package)
+if(NOT DEFINED ROCM_PATH)
+  # Guess default location
+  set(ROCM_PATH "/opt/rocm")
+  message(WARNING "Unable to find ROCM_PATH: Falling back to ${ROCM_PATH}")
 else()
-  if (NOT IBVERBS_LIBRARY)
-    message(WARNING "IBVerbs library not found")
-  elseif (NOT IBVERBS_INCLUDE_DIR)
-    message(WARNING "infiniband/verbs.h not found")
-  endif()
-  message(WARNING "Building without NIC executor support. To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed")
+  message(STATUS "ROCM_PATH found: ${ROCM_PATH}")
+endif()
+set(ENV{ROCM_PATH} ${ROCM_PATH})
+
+## Set CMAKE flags
+if (NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+list(APPEND CMAKE_PREFIX_PATH  # Add ROCM_PATH to CMake search paths for finding HIP / HSA
+            ${ROCM_PATH}
+            ${ROCM_PATH}/llvm
+            ${ROCM_PATH}/hip
+            /opt/rocm
+            /opt/rocm/llvm
+            /opt/rocm/hip)
+
+## Check for HIP
+find_package(hip REQUIRED CONFIG PATHS ${CMAKE_PREFIX_PATH})
+message(STATUS "HIP compiler: ${HIP_COMPILER}")
+
+## Ensuring that CXX compiler meets expectations
+if(NOT (("${CMAKE_CXX_COMPILER}" MATCHES ".*hipcc") OR ("${CMAKE_CXX_COMPILER}" MATCHES ".*clang\\+\\+")))
+  message(FATAL_ERROR "On ROCm platform 'hipcc' or HIP-aware Clang must be used as C++ compiler.")
 endif()
 
-link_libraries(numa hsa-runtime64 pthread)
-set (CMAKE_RUNTIME_OUTPUT_DIRECTORY .)
-add_executable(TransferBench src/client/Client.cpp)
-target_include_directories(TransferBench PRIVATE src/header src/client src/client/Presets)
+## Check for Threads
+find_package(Threads REQUIRED)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-find_package(ROCM 0.8 REQUIRED PATHS ${ROCM_PATH})
-include(ROCMInstallTargets)
-include(ROCMCreatePackage)
-set(ROCMCHECKS_WARN_TOOLCHAIN_VAR OFF)
+## Check for numa support
+find_library(NUMA_LIBRARY numa)
+find_path(NUMA_INCLUDE_DIR numa.h)
+if(NUMA_LIBRARY AND NUMA_INCLUDE_DIR)
+  add_library(numa SHARED IMPORTED)
+  set_target_properties(numa PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${NUMA_INCLUDE_DIR}" IMPORTED_LOCATION "${NUMA_LIBRARY}" INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${NUMA_INCLUDE_DIR}")
+endif()
+
+## Check for hsa support
+find_library(HSA_LIBRARY hsa-runtime64 PATHS ${ROCM_PATH} ${ROCM_PATH}/lib)
+find_path(HSA_INCLUDE_DIR hsa.h PATHS ${ROCM_PATH}/include ${ROCM_PATH}/include/hsa)
+if(HSA_LIBRARY AND HSA_INCLUDE_DIR)
+  add_library(hsa-runtime64 SHARED IMPORTED)
+  set_target_properties(hsa-runtime64 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${HSA_INCLUDE_DIR}" IMPORTED_LOCATION "${HSA_LIBRARY}" INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${HSA_INCLUDE_DIR}")
+endif()
+
+## Check for infiniband verbs support
+if(DEFINED ENV{ENABLE_NIC_EXEC} OR DEFINED ENABLE_NIC_EXEC)
+  message(STATUS "For CMake builds, NIC executor also requires explicit opt-in by setting CMake flag -DENABLE_NIC_EXEC=1 or environment flag ENABLE_NIC_EXEC=1")
+  find_library(IBVERBS_LIBRARY ibverbs)
+  find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+  if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
+    add_library(ibverbs SHARED IMPORTED)
+    set_target_properties(ibverbs PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${IBVERBS_INCLUDE_DIR}" IMPORTED_LOCATION "${IBVERBS_LIBRARY}" INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${IBVERBS_INCLUDE_DIR}")
+    set(IBVERBS_FOUND 1)
+    message(STATUS "Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable")
+  else()
+    if(NOT IBVERBS_LIBRARY)
+      message(WARNING "IBVerbs library not found")
+    elseif(NOT IBVERBS_INCLUDE_DIR)
+      message(WARNING "infiniband/verbs.h not found")
+    endif()
+    message(WARNING "Building without NIC executor support. To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed")
+  endif()
+else()
+  message(STATUS "Disabling NIC Executor support")
+  message(WARNING "For CMake builds, NIC executor requires explicit opt-in by setting ENABLE_NIC_EXEC=1")
+endif()
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY .)
+
+add_executable(TransferBench src/client/Client.cpp)
+
+target_include_directories(TransferBench PRIVATE src/header)
+target_include_directories(TransferBench PRIVATE src/client)
+target_include_directories(TransferBench PRIVATE src/client/Presets)
+target_include_directories(TransferBench PRIVATE ${NUMA_INCLUDE_DIR})
+target_include_directories(TransferBench PRIVATE ${HSA_INCLUDE_DIR})
+if(IBVERBS_FOUND)
+  target_include_directories(TransferBench PRIVATE ${IBVERBS_INCLUDE_DIR})
+  target_link_libraries(TransferBench PRIVATE ${IBVERBS_LIBRARY})
+  target_compile_definitions(TransferBench PRIVATE NIC_EXEC_ENABLED)
+endif()
+
+target_link_libraries(TransferBench PRIVATE -fgpu-rdc)             # Required when linking relocatable device code
+target_link_libraries(TransferBench PRIVATE Threads::Threads)
+target_link_libraries(TransferBench INTERFACE hip::host)
+target_link_libraries(TransferBench PRIVATE hip::device)
+target_link_libraries(TransferBench PRIVATE dl)
+target_link_libraries(TransferBench PRIVATE ${NUMA_LIBRARY})
+target_link_libraries(TransferBench PRIVATE ${HSA_LIBRARY})
+
+rocm_install(TARGETS TransferBench COMPONENT devel)
+rocm_setup_version(VERSION ${VERSION_STRING})
+
+# Package specific CPACK vars
+rocm_package_add_dependencies(DEPENDS "numactl" "hsa-rocr")
+
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
+set(CPACK_RPM_PACKAGE_LICENSE "MIT")
 
 set(PACKAGE_NAME TB)
 set(LIBRARY_NAME TransferBench)
 
-rocm_install(TARGETS TransferBench COMPONENT devel)
-
-rocm_package_add_dependencies(DEPENDS numactl hsa-rocr)
-
 rocm_create_package(
-    NAME ${LIBRARY_NAME}
-    DESCRIPTION "TransferBench package"
-    MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
+  NAME ${LIBRARY_NAME}
+  DESCRIPTION "TransferBench package"
+  MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
 )
