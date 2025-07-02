@@ -10,6 +10,7 @@ Documentation for TransferBench is available at
 ### Modified
 - Removing self-GPU check for DMA engine copies
 - Switched to amdclang++ as primary compiler
+- healthcheck preset adds HBM testing and support for more MI3XX variants
 
 ### Fixed
 - Fixed issue when using "P" memory type and specific DMA subengines
