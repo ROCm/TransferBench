@@ -77,7 +77,7 @@ TestConfig Config_08_GFX0942_304 = {
   .hbmBlockSize                  = { 384,  256,  320,  256},
   .hbmUnrollFactor               = {   7,    4,    8,    7},
   .hbmTemporalMode               = {   3,    3,    3,    3},
-  .hbmLimit                      = {4980, 48550, 2045, 1405},
+  .hbmLimit                      = {4980, 4850, 2045, 1405},
 };
 
 TestConfig Config_08_GFX0942_064 = {
