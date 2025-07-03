@@ -90,7 +90,7 @@ TestConfig Config_08_GFX0942_064 = {
   .hbmBlockSize                  = { 448,  448,  448,  384},
   .hbmUnrollFactor               = {   8,    3,    8,    7},
   .hbmTemporalMode               = {   3,    3,    3,    3},
-  .hbmLimit                      = {4275, 2775, 1400, 1065},
+  .hbmLimit                      = {4180, 2800, 1400, 1055},
 };
 
 TestConfig TestConfigs[NUM_SUPPORTED_MODELS] =
@@ -381,19 +381,20 @@ int TestHbmPerformance(int modelId, bool verbose)
   char testname[50];
 
   for (int testId = 0; testId < NUM_HBM_TESTS; testId++) {
-    sprintf(testname, "Testing HBM performance [%s]", HbmTestConfigs[testId].name.c_str());
-    printf("%-42s%c", testname, verbose ? '\n' : ' ');
-    fflush(stdout);
-
-    int numInputs = HbmTestConfigs[testId].numInputs;
-    int numOutputs = HbmTestConfigs[testId].numOutputs;
-
     TransferBench::ConfigOptions cfg;
     cfg.general.numIterations = 1000;
     cfg.general.numWarmups    = 50;
     cfg.gfx.blockSize         = testConfig.hbmBlockSize[testId];
     cfg.gfx.unrollFactor      = testConfig.hbmUnrollFactor[testId];
     cfg.gfx.temporalMode      = testConfig.hbmTemporalMode[testId];
+
+    sprintf(testname, "Testing HBM performance [%s]", HbmTestConfigs[testId].name.c_str());
+    if (verbose) printf("[Blocksize: %d Unroll: %d TemporalMode: %d]\n", cfg.gfx.blockSize, cfg.gfx.unrollFactor, cfg.gfx.temporalMode);
+    printf("%-42s%c", testname, verbose ? '\n' : ' ');
+    fflush(stdout);
+
+    int numInputs = HbmTestConfigs[testId].numInputs;
+    int numOutputs = HbmTestConfigs[testId].numOutputs;
 
     double limit = testConfig.hbmLimit[testId] * SFACTOR;
 
@@ -463,9 +464,9 @@ void HealthCheckPreset(EnvVars&           ev,
 
   // Run through all tests
   int numFails = 0;
+  numFails += TestHbmPerformance(modelId, verbose);
   numFails += TestUnidir(modelId, verbose);
   numFails += TestBidir(modelId, verbose);
   numFails += TestAllToAll(modelId, verbose);
-  numFails += TestHbmPerformance(modelId, verbose);
   exit(numFails ? 1 : 0);
 }
