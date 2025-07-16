@@ -3,6 +3,146 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.66.02
+### Added
+- Adding DMA-BUF support
+  - TransferBench now supports GPU memory registration via DMA-BUF handle
+    - Disabled by default in build time
+    - To enable, `DISABLE_DMABUF` must be explicitly turned off for both CMake and Make process
+  - DMA-BUF registration relies on both IB verbs registration and HSA dmabuf export functionality
+    - Support for both are checked in compile time as well as runtime
+- New preset: nicp2p
+  - A point to point performance sweep for all paris of NIC on all nodes
+  - The preset requires all participating nodes have identical topology
+  - All NICs on every node will bind to closest device of user specified memtype, and communicate with all
+    other NICs in the potentially multi-node world
+  - Execution of node pairs, as well as NIC pairs under the same node pair, are parallelized by default
+- Adding GPU affinity check for NIC devices
+
+### Fixed
+- Fixing some typo in result table and NIC verbose output
+
+## v1.66.01
+### Fixed
+- Adding support for TheRock
+- Fixing parsing issue when using NULL memory type
+- Fixing CUAD compilation flags when enabling NIC/MPI
+### Modified
+- TransferBenchCuda must now be explicitly built with via 'make TransferBenchCuda'
+
+## v1.66.00
+### Added
+- Adding multi-node support
+  - TransferBench now supports multiple nodes through the use of MPI or sockets
+    - In order to utilize MPI, TransferBench must be compiled with MPI support (setting MPI_PATH to where
+      an MPI implementation is located).  MPI support can explicitly disabled by setting DISABLE_MPI_COMM=1
+      - TransferBench can be executed with an MPI launcher, such as mpirun
+    - In order to utilize sockets, several environment variables need to be provided to processes
+      * TB_RANK:        Rank of this process (0-based)
+      * TB_NUM_RANKS:   Total number of processes
+      * TB_MASTER_ADDR: IP address of rank 0 (Other ranks will connect to rank 0)
+      * TB_MASTER_PORT: Port for communication (default: 29500)
+    - Additional debug messages can be enabled by setting TB_VERBOSE=1
+    - NOTE: It is recommended that one process be launched per node to avoid aliasing of devices
+- Adding multi-node topology detection
+  -  When running in multi-node mode, TransferBench will try to collect topology information about each
+     rank, then group ranks into homogenous configurations.
+  - This is done by running TransferBench with no arguments (e.g. mpirun -np 2 ./TransferBench)
+- Adding multi-node Transfer parsing and wildcard support
+  - Memory locations have now been extended to support a rank index
+    * R(memRank)?(memIndex)  (where ? is one of the supported memory type characters "CGBFUNMP")
+        (e.g. R2G3 is GPU memory location in GPU 3 on rank 2)
+    - Rank is optional and if not specified, will fallback to "local" rank
+  - Executor locations have been extended to support rank indices as well)
+    * R(exeRank)?(exeIndex){exeSlot}.{exeSubIndex}{exeSubSlot} (where ? is one of the supported executor-types characters "CGDIN")
+      - exeSlots are only relevant for the EXE_NIC_NEAREST executor, and allows for distinguishing when multiple NICs are closest to a GPU
+      - exeSlots are defined by upper case letters 'A' for first closest NIC, 'B' for 2nd closest NIC, etc.
+        -  For example:  N0B.4C would execute using the 2nd closest NIC to GPU 0 via communicating with the 3rd closest NIC to GPU 4
+  - Wildcard support:
+    - To help quickly define sets of transfers, Transfers can now be specified using wildcards
+    - All the fields above may be specified either:
+      * directly with a single value:  E.g: R34        -> Rank 34
+      * full wildcard:                 E.g: R*         -> Will be replaced by all available ranks
+      * Ranged wildcard:               E.g. R[1,5..7]  -> Will be replaced by Rank 1, Rank 5, Rank 6, Rank 7
+  - Wildcard nearest NIC wildcard
+    - To simplify nearest NIC execution, it is not necessary to specify exeIndex/exeSubIndex for the "N" executor
+    - If exeRank/exeIndex/exeSlot/exeSubIndex/exeSubSlot are all not specified, the Transfer will be expanded to
+      choose the correct values such that a remote write operation will occur based on SRC/DST mem locations
+      -  For example: (R2G4->N->R4G5) will expand to (R2G4->R2N4.5->R4G5)
+- Adding dry-run preset
+  - This new preset is similar to cmdline however it only shows the list of transfers that will be executed
+  - This new dryrun preset may be useful when using the new wildcard expressions to ensure that the Test
+    contains the correct set of Transfers
+- Adding nicrings preset
+  - This new preset runs parallel transfers forming rings that connect identical NICs across ranks
+- Adding NIC_FILTER to allow for filtering which NICs to detect.  NIC_FILTER accepts regular-expression syntax
+- Added new memory types based on latest HIP memory allocation flags
+    Supported memory locations are:
+    - C:    Pinned host memory              (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - P:    Pinned host memory              (on NUMA node, indexed by closest GPU [#GPUs -1])
+    - B:    Coherent pinned host memory     (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - D:    Non-coherent pinned host memory (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - K:    Uncached pinned host memory     (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - H:    Unpinned host memory            (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - G:    Global device memory            (on GPU device indexed from 0 to [# GPUs - 1])
+    - F:    Fine-grain device memory        (on GPU device indexed from 0 to [# GPUs - 1])
+    - U:    Uncached device memory          (on GPU device indexed from 0 to [# GPUs - 1])
+    - N:    Null memory                     (index ignored)
+  - As a result, the a2a preset has deprecated USE_FINE_GRAIN for MEM_TYPE to allow for selecting between various GPU memory types
+  - A warning message is issued if USE_FINE_GRAIN is used, however previous matching functionality remains for now
+  - The p2p preset has also deprecated USE_FINE_GRAIN for CPU_MEM_TYPE and GPU_MEM_TYPE
+### Modified
+- Refactored front-end client code to facilitate simpler and more consistent presets.
+- Refactored tabular data display to simplify code.  Output result tables now use ASCII box-drawing
+  characters for borders which helps group data visually.  Borders may be disabled by setting SHOW_BORDERS=0
+- The All-to-all preset is now multi-rank compatible.  When executed on multiple ranks, it runs
+  inter-rank all-to-all and then reports the min/max across all ranks.  The number of extrema
+  results shown can be adjusted by NUM_RESULTS
+
+### Fixed
+- Added guard for ROCM version when using __syncwarp();
+- Exiting with non-zero code on fatal errors
+
+## v1.65.00
+### Added
+- Added warp-level dispatch support via GFX_SE_TYPE environment variable
+  - GFX_SE_TYPE=0 (default): Threadblock-level dispatch, each subexecutor is a threadblock
+  - GFX_SE_TYPE=1: Warp-level dispatch, each subexecutor is a single warp
+
+## v1.64.00
+### Added
+- Added BLOCKSIZES to a2asweep preset to allow also sweeping over threadblock sizes
+- Added FILL_COMPRESS to allow more control over input data pattern
+  - FILL_COMPRESS takes in a comma-separated list of integer percentages (that must add up to 100)
+    that sets the percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0 data patterns
+    - Bins:
+      - 0 - random
+      - 1 - 1B0    upper 1 byte of each aligned 2 bytes is 0
+      - 2 - 2B0    upper 2 bytes of each aligned 4 bytes is 0
+      - 3 - 4B0    upper 4 bytes of each aligned 8 bytes is 0
+      - 4 - 32B0   upper 32 bytes of each aligned 64-byte line are 0
+  - FILL_PATTERN will be ignored if FILL_COMPRESS is specified
+- Additional details about data patterns generated will be printed if the debug env var DUMP_LINES is
+  set to a non-zero value, which also corresponds to how many 64 byte lines will be printed
+### Modified
+- Increased GFX_BLOCKSIZE limit from 512 to 1024 (still requires multiple of 64)
+
+### Fixed
+- Fixed bug when using BYTE_OFFSET
+
+## v1.63.00
+### Added
+- Added `gfx950`, `gfx1150`, and `gfx1151` to default GPU targets list in CMake builds
+
+### Modified
+- Removing self-GPU check for DMA engine copies
+- Switched to amdclang++ as primary compiler
+- healthcheck preset adds HBM testing and support for more MI3XX variants
+
+### Fixed
+- Fixed issue when using "P" memory type and specific DMA subengines
+- Fixed issue with subiteration timing reports
+
 ## v1.62.00
 ### Added
 - Adding GFX_TEMPORAL to allow for use for use of non-temporal loads/stores

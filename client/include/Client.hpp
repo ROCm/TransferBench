@@ -1,3 +1,4 @@
+/*
 Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -17,3 +18,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+*/
+
+#pragma once
+
+#include "TransferBench.hpp"
+#include "tbclient_version.hpp"
+
+// Helper function to print client version
+auto GetClientVersion() -> const std::string;
+
+
+/*
+ *  TODO: We need to look into this circular dependency (envVars->Client->envVars)
+ */
+#include "EnvVars.hpp"
+
+
+constexpr size_t DEFAULT_BYTES_PER_TRANSFER = (1 << 28);
+
+char const ExeTypeName[5][4] = {"CPU", "GPU", "DMA", "NIC", "NIC"};
+
+// Display version
+void DisplayVersion();
+
+// Display usage instructions
+void DisplayUsage(char const* cmdName);
+
+// Display detected hardware
+void DisplayTopology(bool outputToCsv);

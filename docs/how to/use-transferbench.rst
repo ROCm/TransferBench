@@ -66,7 +66,7 @@ There are two ways to specify a test:
   .. code-block:: bash
 
    1 4 (G0->G0->G1)                   Uses 4 CUs on GPU0 to copy from GPU0 to GPU1
-   1 4 (G2->C1->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
+   1 4 (C1->G2->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
    2 4 G0->G0->G1 G1->G1->G0          Copies from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs
 
 - **Advanced**
@@ -177,8 +177,15 @@ Here is the list of preset configurations that can be used instead of configurat
    * - ``cmdline``
      - Allows transfers to run from the command line instead of a configuration file
 
+   * - ``dryrun``
+     - Lists the set of transfers to be executed as provided from the command line
+     - This is useful when using wildcards to ensure correctness
+
    * - ``healthcheck``
      - Simple health check (supported on AMD Instinct MI300 series only)
+
+   * - ``nic_rings``
+     - Measure performance of NICs set up in a ring across ranks
 
    * - ``p2p``
      - Peer-to-peer benchmark test
