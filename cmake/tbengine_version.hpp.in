@@ -1,5 +1,7 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+MIT License
+
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -18,36 +20,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
 */
 
 #pragma once
 
-// TransferBench client version
-#define CLIENT_VERSION "00"
+/*
+    CMake auto-generated file: Do not edit it.
+*/
+#define TRANSFERBENCH_GIT_BRANCH     "@GIT_BRANCH@"
+#define TRANSFERBENCH_GIT_COMMIT     "@GIT_COMMIT_HASH_LONG@"
+#define TRANSFERBENCH_HEADER_VERSION "@TRANSFERBENCH_HEADER_VERSION@"
 
-#include "TransferBench.hpp"
-#include "EnvVars.hpp"
-
-size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<28);
-
-char const ExeTypeName[5][4] = {"CPU", "GPU", "DMA", "NIC", "NIC"};
-
-// Display detected hardware
-void DisplayTopology(bool outputToCsv);
-
-// Display usage instructions
-void DisplayUsage(char const* cmdName);
-
-// Print TransferBench test results
-void PrintResults(EnvVars const& ev, int const testNum,
-                  std::vector<Transfer> const& transfers,
-                  TransferBench::TestResults const& results);
-
-// Helper function that converts MemDevices to a string
-std::string MemDevicesToStr(std::vector<MemDevice> const& memDevices);
-
-// Helper function to print warning / exit on fatal error
-void CheckForError(ErrResult const& error);
-
-// Helper function to print list of errors
-void PrintErrors(std::vector<ErrResult> const& errors);
