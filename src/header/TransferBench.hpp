@@ -755,7 +755,7 @@ namespace {
 #if defined (__NVCC__)
         return {ERR_FATAL, "Fine-grained CPU memory not supported on NVIDIA platform"};
 #else
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser));
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocCoherent));
 #endif
       } else if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
 #if defined (__NVCC__)
@@ -2629,7 +2629,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     childThreads.clear();
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double deltaMsec = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0) / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
       rss.totalDurationMsec += deltaMsec;
@@ -2659,7 +2659,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       asyncTransfer.join();
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+
     if (iteration >= 0)
       exeInfo.totalDurationMsec += deltaMsec;
     return ERR_NONE;
@@ -2697,20 +2698,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (numaNode != -1)
         numa_run_on_node(numaNode);
     }
+
+    auto transferCount = exeInfo.resources.size();
+    std::vector<double> totalTimeMsec(transferCount, 0.0);
+
     int subIterations = 0;
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
+
     do {
-      auto cpuStart = std::chrono::high_resolution_clock::now();
-      size_t completedTransfers = 0;
-      auto transferCount = exeInfo.resources.size();
-      std::vector<uint8_t> receivedQPs(transferCount);
-      std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
+      std::vector<uint8_t> receivedQPs(transferCount, 0);
       // post the sends
       for (auto i = 0; i < transferCount; i++) {
         transferTimers[i] = std::chrono::high_resolution_clock::now();
         ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
       }
       // poll for completions
-      do {
+      size_t completedTransfers = 0;
+      while (completedTransfers < transferCount) {
         for (auto i = 0; i < transferCount; i++) {
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
@@ -2730,20 +2735,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
               auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
               double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
               if (iteration >= 0) {
-                rss.totalDurationMsec += deltaMsec;
-                if (cfg.general.recordPerIteration)
-                  rss.perIterMsec.push_back(deltaMsec);
+                totalTimeMsec[i] += deltaMsec;
               }
               completedTransfers++;
             }
           }
         }
-      } while(completedTransfers < transferCount);
-      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-      double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-      if (iteration >= 0)
-        exeInfo.totalDurationMsec += deltaMsec;
+      }
     } while(++subIterations < cfg.general.numSubIterations);
+
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+
+    if (iteration >= 0) {
+      exeInfo.totalDurationMsec += deltaMsec;
+      for (int i = 0; i < transferCount; i++) {
+        auto& rss = exeInfo.resources[i];
+        double transferTimeMsec = totalTimeMsec[i] / cfg.general.numSubIterations;
+        rss.totalDurationMsec += transferTimeMsec;
+        if (cfg.general.recordPerIteration)
+          rss.perIterMsec.push_back(transferTimeMsec);
+      }
+    }
     return ERR_NONE;
   }
 #endif
@@ -3082,14 +3095,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     ERR_CHECK(hipStreamSynchronize(stream));
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
       if (startEvent != NULL) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        deltaMsec = gpuDeltaMsec;
+        deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
       }
       rss.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration) {
@@ -3159,12 +3172,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_CHECK(hipStreamSynchronize(stream));
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+      / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
       if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        gpuDeltaMsec /= cfg.general.numSubIterations;
         exeInfo.totalDurationMsec += gpuDeltaMsec;
       } else {
         exeInfo.totalDurationMsec += cpuDeltaMsec;
@@ -3187,7 +3202,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
           }
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
-
+          deltaMsec /= cfg.general.numSubIterations;
           rss.totalDurationMsec += deltaMsec;
           if (cfg.general.recordPerIteration) {
             rss.perIterMsec.push_back(deltaMsec);
@@ -3254,14 +3269,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
       if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        deltaMsec = gpuDeltaMsec;
+        deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
       }
       resources.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration)
@@ -3296,7 +3311,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_CHECK(asyncTransfer.get());
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
     if (iteration >= 0)
       exeInfo.totalDurationMsec += deltaMsec;
     return ERR_NONE;
@@ -3498,7 +3513,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
        // Stop CPU timing for this iteration
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-      double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
+      double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
       if (cfg.data.alwaysValidate) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
@@ -3533,7 +3548,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     results.tfrResults.resize(transfers.size());
     results.numTimedIterations = numTimedIterations;
     results.totalBytesTransferred = 0;
-    results.avgTotalDurationMsec = (totalCpuTimeSec * 1000.0) / (numTimedIterations * cfg.general.numSubIterations);
+    results.avgTotalDurationMsec = (totalCpuTimeSec * 1000.0) / numTimedIterations;
     results.overheadMsec = results.avgTotalDurationMsec;
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
@@ -3542,7 +3557,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Copy over executor results
       ExeResult& exeResult = results.exeResults[exeDevice];
       exeResult.numBytes = exeInfo.totalBytes;
-      exeResult.avgDurationMsec = exeInfo.totalDurationMsec / (numTimedIterations * cfg.general.numSubIterations);
+      exeResult.avgDurationMsec = exeInfo.totalDurationMsec / numTimedIterations;
       exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
       exeResult.sumBandwidthGbPerSec = 0.0;
       exeResult.transferIdx.clear();
