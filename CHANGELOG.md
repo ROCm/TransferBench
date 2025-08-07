@@ -14,6 +14,7 @@ Documentation for TransferBench is available at
 
 ### Fixed
 - Fixed issue when using "P" memory type and specific DMA subengines
+- Fixed issue with subiteration timing reports
 
 ## v1.62.00
 ### Added
