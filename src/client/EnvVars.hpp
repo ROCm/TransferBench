@@ -131,9 +131,8 @@ public:
     int defaultGfxUnroll = 4;
     if      (archName == "gfx906") defaultGfxUnroll = 8;
     else if (archName == "gfx90a") defaultGfxUnroll = 8;
-    else if (archName == "gfx940") defaultGfxUnroll = 6;
-    else if (archName == "gfx941") defaultGfxUnroll = 6;
     else if (archName == "gfx942") defaultGfxUnroll = 4;
+    else if (archName == "gfx950") defaultGfxUnroll = 4;
 
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);

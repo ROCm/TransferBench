@@ -3,6 +3,19 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.63.00
+### Added
+- Added `gfx950`, `gfx1150`, and `gfx1151` to default GPU targets list in CMake builds
+
+### Modified
+- Removing self-GPU check for DMA engine copies
+- Switched to amdclang++ as primary compiler
+- healthcheck preset adds HBM testing and support for more MI3XX variants
+
+### Fixed
+- Fixed issue when using "P" memory type and specific DMA subengines
+- Fixed issue with subiteration timing reports
+
 ## v1.62.00
 ### Added
 - Adding GFX_TEMPORAL to allow for use for use of non-temporal loads/stores
