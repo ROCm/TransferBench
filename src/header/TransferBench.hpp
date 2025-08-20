@@ -66,7 +66,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.63";
+  constexpr char VERSION[] = "1.64";
 
   /**
    * Enumeration of supported Executor types
@@ -599,7 +599,7 @@ namespace {
 // Constants
 //========================================================================================
 
-  int   constexpr MAX_BLOCKSIZE  = 512;                // Max threadblock size
+  int   constexpr MAX_BLOCKSIZE  = 1024;               // Max threadblock size
   int   constexpr MAX_WAVEGROUPS = MAX_BLOCKSIZE / 64; // Max wavegroups/warps
   int   constexpr MAX_UNROLL     = 8;                  // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                  // Max srcs per Transfer
@@ -3055,7 +3055,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     GPU_KERNEL_UNROLL_DECL(320),
     GPU_KERNEL_UNROLL_DECL(384),
     GPU_KERNEL_UNROLL_DECL(448),
-    GPU_KERNEL_UNROLL_DECL(512)
+    GPU_KERNEL_UNROLL_DECL(512),
+    GPU_KERNEL_UNROLL_DECL(576),
+    GPU_KERNEL_UNROLL_DECL(640),
+    GPU_KERNEL_UNROLL_DECL(704),
+    GPU_KERNEL_UNROLL_DECL(768),
+    GPU_KERNEL_UNROLL_DECL(832),
+    GPU_KERNEL_UNROLL_DECL(896),
+    GPU_KERNEL_UNROLL_DECL(960),
+    GPU_KERNEL_UNROLL_DECL(1024),
   };
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL

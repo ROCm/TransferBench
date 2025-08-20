@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.64.00
+### Added
+- Added BLOCKSIZES to a2asweep preset to allow also sweeping over threadblock sizes
+
 ## v1.63.00
 ### Added
 - Added `gfx950`, `gfx1150`, and `gfx1151` to default GPU targets list in CMake builds
