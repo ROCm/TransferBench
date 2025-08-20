@@ -3450,6 +3450,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     vector<float> outputBuffer(maxN);
     vector<vector<float>> dstReference(maxNumSrcs + 1, vector<float>(maxN));
     {
+      size_t initOffset = cfg.data.byteOffset / sizeof(float);
       vector<vector<float>> srcReference(maxNumSrcs, vector<float>(maxN));
       memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
 
@@ -3466,7 +3467,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Initialize all src memory buffers
       for (auto resource : transferResources) {
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
-          ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx], srcReference[srcIdx].data(), resource->numBytes,
+          ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                hipMemcpyDefault), errResults);
         }
       }

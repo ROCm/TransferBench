@@ -6,6 +6,8 @@ Documentation for TransferBench is available at
 ## v1.64.00
 ### Added
 - Added BLOCKSIZES to a2asweep preset to allow also sweeping over threadblock sizes
+### Fixed
+- Fixed bug when using BYTE_OFFSET
 
 ## v1.63.00
 ### Added
