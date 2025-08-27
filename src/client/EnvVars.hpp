@@ -77,6 +77,7 @@ public:
   int blockBytes;                    // Each subexecutor, except the last, gets a multiple of this many bytes to copy
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
+  vector<int> fillCompress;          // Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0
   int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
   int validateSource;                // Validate source GPU memory immediately after preparation
 
@@ -137,6 +138,7 @@ public:
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
+    fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
     gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
     gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
@@ -314,6 +316,7 @@ public:
     printf(" CLOSEST_NIC       - Comma-separated list of per-GPU closest NIC (default=auto)\n");
 #endif
     printf(" CU_MASK           - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
+    printf(" FILL_COMPRESS     - Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0\n");
     printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
     printf(" GFX_BLOCK_ORDER   - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
     printf(" GFX_BLOCK_SIZE    - # of threads per threadblock (Must be multiple of 64)\n");
@@ -400,6 +403,8 @@ public:
 #endif
     Print("CU_MASK", getenv("CU_MASK") ? 1 : 0,
           "%s", (cuMask.size() ? GetCuMaskDesc().c_str() : "All"));
+    Print("FILL_COMPRESS", getenv("FILL_COMPRESS") ? 1 : 0,
+          "%s", (fillCompress.size() ? GetStr(fillCompress).c_str() : "Not specified"));
     Print("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
           "%s", (fillPattern.size() ? getenv("FILL_PATTERN") : TransferBench::GetStrAttribute(ATR_SRC_PREP_DESCRIPTION).c_str()));
     Print("GFX_BLOCK_ORDER", gfxBlockOrder,
@@ -495,6 +500,27 @@ public:
   static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
     if (getenv(varname.c_str())) {
+      std::vector<int> values;
+      char* arrayStr = getenv(varname.c_str());
+      char* token = strtok(arrayStr, ",");
+      while (token) {
+        int val;
+        if (sscanf(token, "%d", &val) == 1) {
+          values.push_back(val);
+        } else {
+          printf("[ERROR] Unrecognized token [%s]\n", token);
+          exit(1);
+        }
+        token = strtok(NULL, ",");
+      }
+      return values;
+    }
+    return defaultValue;
+  }
+
+  static std::vector<int> GetEnvVarRangeArray(std::string const& varname, std::vector<int> const& defaultValue)
+  {
+    if (getenv(varname.c_str())) {
       char* rangeStr = getenv(varname.c_str());
       std::set<int> values;
       char* token = strtok(rangeStr, ",");
@@ -522,6 +548,15 @@ public:
     if (getenv(varname.c_str()))
       return getenv(varname.c_str());
     return defaultValue;
+  }
+
+  std::string GetStr(std::vector<int> const& varnameList) const {
+    std::string result = "";
+    for (int i = 0; i < varnameList.size(); i++) {
+      if (i) result += ",";
+      result += std::to_string(varnameList[i]);
+    }
+    return result;
   }
 
   std::string GetCuMaskDesc() const
@@ -572,9 +607,10 @@ public:
     cfg.data.alwaysValidate        = alwaysValidate;
     cfg.data.blockBytes            = blockBytes;
     cfg.data.byteOffset            = byteOffset;
+    cfg.data.fillCompress          = fillCompress;
+    cfg.data.fillPattern           = fillPattern;
     cfg.data.validateDirect        = validateDirect;
     cfg.data.validateSource        = validateSource;
-    cfg.data.fillPattern           = fillPattern;
 
     cfg.dma.useHipEvents           = useHipEvents;
     cfg.dma.useHsaCopy             = useHsaDma;

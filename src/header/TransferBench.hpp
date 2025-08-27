@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -166,6 +166,7 @@ namespace TransferBench
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
+    vector<int>   fillCompress     = {};        ///< Customized data patterns (overrides fillPattern if non-empty)
     int           validateDirect   = 0;         ///< Validate GPU results directly instead of copying to host
     int           validateSource   = 0;         ///< Validate src GPU memory immediately after preparation
   };
@@ -681,8 +682,8 @@ namespace {
     int canAccess;
     ERR_CHECK(hipDeviceCanAccessPeer(&canAccess, deviceId, peerDeviceId));
     if (!canAccess)
-      return {ERR_FATAL,
-              "Unable to enable peer access from GPU devices %d to %d", peerDeviceId, deviceId};
+      return {ERR_FATAL, "Peer access is unavailable between GPU devices %d to %d."
+                         "For AMD hardware, check IOMMU configuration", peerDeviceId, deviceId};
 
     ERR_CHECK(hipSetDevice(deviceId));
     hipError_t error = hipDeviceEnablePeerAccess(peerDeviceId, 0);
@@ -973,6 +974,19 @@ namespace {
       errors.push_back({ERR_FATAL, "[data.blockBytes] must be positive multiple of %lu", sizeof(float)});
     if (cfg.data.byteOffset < 0 || cfg.data.byteOffset % sizeof(float))
       errors.push_back({ERR_FATAL, "[data.byteOffset] must be positive multiple of %lu", sizeof(float)});
+    if (cfg.data.fillCompress.size() > 0 && cfg.data.fillPattern.size() > 0)
+      errors.push_back({ERR_WARN, "[data.fillCompress] will override [data.fillPattern] when both are specified"});
+    if (cfg.data.fillCompress.size() > 0) {
+      int sum = 0;
+      for (int bin : cfg.data.fillCompress)
+        sum += bin;
+      if (sum != 100) {
+        errors.push_back({ERR_FATAL, "[data.fillCompress] values must add up to 100"});
+      }
+    }
+    if (cfg.data.fillCompress.size() > 5) {
+      errors.push_back({ERR_FATAL, "[data.fillCompress] may only have up to 5 values"});
+    }
 
     // Check GFX options
     if (cfg.gfx.blockOrder < 0 || cfg.gfx.blockOrder > 2)
@@ -2162,8 +2176,105 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     size_t N = cpuBuffer.size();
 
-    // Source buffer
-    if (bufferIdx >= 0) {
+    if (!cfg.data.fillCompress.empty()) {
+      // 0 -> Random
+      // 1 ->  1B0 - The upper  1 byte  of each aligned 2 bytes is 0
+      // 2 ->  2B0 - The upper  2 bytes of each aligned 4 bytes are 0
+      // 3 ->  4B0 - The upper  4 bytes of each aligned 8 bytes are 0
+      // 4 -> 32B0 - The upper 32 bytes of each 64-byte line are 0
+
+      // Fill buffer with random floats
+      std::default_random_engine gen;
+      printf("Seeding with %d\n", bufferIdx);
+      gen.seed(bufferIdx * 425);
+      std::uniform_real_distribution<float> dist(-100000.0f, +100000.0f);
+      for (size_t i = 0; i < N; i++) {
+        cpuBuffer[i] = dist(gen);
+      }
+
+      // Figure out distribution for lines based on the percentages given
+      size_t numLines = N / 16;
+      size_t leftover = numLines;
+      std::vector<size_t> lineCounts(5, 0);
+      std::set<std::pair<double, int>> remainder;
+
+      // Assign rounded down values first
+      std::vector<int> percentages = cfg.data.fillCompress;
+      while (percentages.size() < 5) percentages.push_back(0);
+      for (int i = 0; i < percentages.size(); i++){
+        lineCounts[i] = (size_t)(numLines * (percentages[i] / 100.0));
+        leftover -= lineCounts[i];
+        remainder.insert(std::make_pair(numLines * (percentages[i] / 100.0) - lineCounts[i], i));
+      }
+
+      // Assign leftovers based on largest remainder
+      while (leftover != 0) {
+        auto last = *remainder.rbegin();
+        lineCounts[last.second]++;
+        remainder.erase(last);
+        leftover--;
+      }
+
+      // Randomly decide which lines get assigned to which types
+      std::vector<int> lineTypes(numLines, 0);
+      int offset = lineCounts[0];
+      for (int i = 1; i < 5; i++) {
+        for (int j = 0; j < lineCounts[i]; j++)
+          lineTypes[offset++] = i;
+      }
+      std::shuffle(lineTypes.begin(), lineTypes.end(), gen);
+
+      // Apply zero-ing
+      int dumpLines = getenv("DUMP_LINES") ? atoi(getenv("DUMP_LINES")) : 0;
+
+      if (dumpLines) {
+        printf("Input pattern 64B line statistics for bufferIdx %d:\n", bufferIdx);
+        printf("Total lines: %lu\n", numLines);
+        printf("- 0: Random : %8lu (%8.3f%%)\n", lineCounts[0], 100.0 * lineCounts[0] / (1.0 * numLines));
+        printf("- 1: 1B0    : %8lu (%8.3f%%)\n", lineCounts[1], 100.0 * lineCounts[1] / (1.0 * numLines));
+        printf("- 2: 2B0    : %8lu (%8.3f%%)\n", lineCounts[2], 100.0 * lineCounts[2] / (1.0 * numLines));
+        printf("- 3: 4B0    : %8lu (%8.3f%%)\n", lineCounts[3], 100.0 * lineCounts[3] / (1.0 * numLines));
+        printf("- 4: 32B0   : %8lu (%8.3f%%)\n", lineCounts[4], 100.0 * lineCounts[4] / (1.0 * numLines));
+      }
+
+      for (int line = 0; line < numLines; line++) {
+        unsigned char* linePtr = (unsigned char*)&cpuBuffer[line * 16];
+
+        switch (lineTypes[line]) {
+        case 1: // 1B0
+          for (int i = 0; i < 32; i++)
+            linePtr[2*i+1] = 0;
+          break;
+        case 2: // 2B0
+          for (int i = 0; i < 16; i++) {
+            linePtr[4*i+2] = 0;
+            linePtr[4*i+3] = 0;
+          }
+          break;
+        case 3: // 4B0
+          for (int i = 0; i < 8; i++) {
+            linePtr[8*i+4] = 0;
+            linePtr[8*i+5] = 0;
+            linePtr[8*i+6] = 0;
+            linePtr[8*i+7] = 0;
+          }
+          break;
+        case 4: // 32B0
+          for (int i = 32; i < 64; i++)
+            linePtr[i] = 0;
+          break;
+        }
+
+        if (line < dumpLines) {
+          printf("Line %02d [%d]: ", line, lineTypes[line]);
+          for (int j = 63; j >= 0; j--){
+            printf("%02x ", linePtr[j]);
+            if (j % 16 == 0) printf(" ");
+          }
+          printf("\n");
+        }
+      }
+    } else {
       // Use fill pattern if specified
       size_t patternLen = cfg.data.fillPattern.size();
       if (patternLen > 0) {
@@ -2177,26 +2288,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (leftOver)
           memcpy(cpuBufferPtr, cfg.data.fillPattern.data(), leftOver * sizeof(float));
       } else {
+        // Fall back to pseudo-random
         for (size_t i = 0; i < N; ++i)
           cpuBuffer[i] = PrepSrcValue(bufferIdx, i);
-      }
-    } else { // Destination buffer
-      int numSrcs = -bufferIdx - 1;
-
-      if (numSrcs == 0) {
-        // Note: 0x75757575 = 13323083.0
-        memset(cpuBuffer.data(), MEMSET_CHAR, N * sizeof(float));
-      } else {
-        PrepareReference(cfg, cpuBuffer, 0);
-        if (numSrcs > 1) {
-          std::vector<float> temp(N);
-          for (int i = 1; i < numSrcs; i++) {
-            PrepareReference(cfg, temp, i);
-            for (int j = 0; j < N; j++) {
-              cpuBuffer[i] += temp[i];
-            }
-          }
-        }
       }
     }
   }

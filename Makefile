@@ -83,4 +83,3 @@ TransferBenchCuda: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
 
 clean:
 	rm -f ./TransferBench ./TransferBenchCuda
-

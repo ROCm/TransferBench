@@ -6,6 +6,18 @@ Documentation for TransferBench is available at
 ## v1.64.00
 ### Added
 - Added BLOCKSIZES to a2asweep preset to allow also sweeping over threadblock sizes
+- Added FILL_COMPRESS to allow more control over input data pattern
+  - FILL_COMPRESS takes in a comma-separated list of integer percentages (that must add up to 100)
+    that sets the percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0 data patterns
+    - Bins:
+      - 0 - random
+      - 1 - 1B0  upper 1 byte of each aligned 2 bytes is 0
+      - 2 - 2B0    upper 2 bytes of each aligned 4 bytes is 0
+      - 3 - 4B0    upper 4 bytes of each aligned 8 bytes is 0
+      - 4 - 32B0   upper 32 bytes of each aligned 64-byte line are 0
+  - FILL_PATTERN will be ignored if FILL_COMPRESS is specified
+- Additional details about data patterns generated will be printed if the debug env var DUMP_LINES is
+  set to a non-zero value, which also corresponds to how many 64 byte lines will be printed
 ### Fixed
 - Fixed bug when using BYTE_OFFSET
 
