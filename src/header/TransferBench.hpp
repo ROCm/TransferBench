@@ -2185,7 +2185,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Fill buffer with random floats
       std::default_random_engine gen;
-      printf("Seeding with %d\n", bufferIdx);
       gen.seed(bufferIdx * 425);
       std::uniform_real_distribution<float> dist(-100000.0f, +100000.0f);
       for (size_t i = 0; i < N; i++) {
