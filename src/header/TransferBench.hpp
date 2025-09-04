@@ -2184,7 +2184,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // 4 -> 32B0 - The upper 32 bytes of each 64-byte line are 0
 
       // Fill buffer with random floats
-      std::default_random_engine gen;
+      std::mt19937 gen;
       gen.seed(bufferIdx * 425);
       std::uniform_real_distribution<float> dist(-100000.0f, +100000.0f);
       for (size_t i = 0; i < N; i++) {
@@ -2565,7 +2565,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         std::random_device rd;
-        std::default_random_engine gen(rd());
+        std::mt19937 gen(rd());
         std::shuffle(indices.begin(), indices.end(), gen);
 
         // Build randomized threadblock list
