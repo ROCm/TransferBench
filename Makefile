@@ -17,7 +17,7 @@ DEBUG ?= 0
 
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
   # Compile TransferBenchCuda if nvidia-smi returns successfully
-  ifeq ("$(shell nvidia-smi > /dev/null 2>&1 && echo found)", "found")
+  ifeq ("$(shell nvidia-smi > /dev/null 2>&1 && test -e $(NVCC) && echo found)", "found")
     EXE=TransferBenchCuda
     CXX=$(NVCC)
   else
