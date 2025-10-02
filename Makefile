@@ -16,7 +16,7 @@ GPU_TARGETS ?= native
 DEBUG ?= 0
 
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
-  # Compile TransferBenchCuda if nvidia-smi returns successfully
+  # Compile TransferBenchCuda if nvidia-smi returns successfully and nvcc detected
   ifeq ("$(shell nvidia-smi > /dev/null 2>&1 && test -e $(NVCC) && echo found)", "found")
     EXE=TransferBenchCuda
     CXX=$(NVCC)
