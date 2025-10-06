@@ -16,8 +16,8 @@ GPU_TARGETS ?= native
 DEBUG ?= 0
 
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
-  # Compile TransferBenchCuda if nvcc detected
-  ifeq ("$(shell test -e $(NVCC) && echo found)", "found")
+  # Compile TransferBenchCuda if nvidia-smi returns successfully and nvcc detected
+  ifeq ("$(shell nvidia-smi > /dev/null 2>&1 && test -e $(NVCC) && echo found)", "found")
     EXE=TransferBenchCuda
     CXX=$(NVCC)
   else
@@ -47,6 +47,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
 
   LDFLAGS += -lpthread
 
+  NIC_ENABLED = 0
   # Compile RDMA executor if
   # 1) DISABLE_NIC_EXEC is not set to 1
   # 2) IBVerbs is found in the Dynamic Linker cache
