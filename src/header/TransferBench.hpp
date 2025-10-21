@@ -629,6 +629,18 @@ namespace {
 #endif
   }
 
+  // Calculate grid Y dimension based on SE_TYPE
+  int CalculateGridY(int seType, int blockSize, int numSubExecs) {
+    // Warp-level: each subexecutor is a warp, pack warps into threadblocks
+    if (seType == 1) {
+      int warpsPerBlock = blockSize / GetWarpSize();
+      return (numSubExecs + warpsPerBlock - 1) / warpsPerBlock;
+    }
+
+    // Default: Threadblock-level, each subexecutor is a threadblock
+    return numSubExecs;
+  }
+
 // Parsing-related functions
 //========================================================================================
 
@@ -3238,18 +3250,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int numSubExecs = rss.subExecParamCpu.size();
-    
-    // Calculate grid dimensions based on SE_TYPE
-    int gridY;
-    if (cfg.gfx.seType == 0) {
-      // Threadblock-level: each subexecutor is a threadblock
-      gridY = numSubExecs;
-    } else {
-      // Warp-level: each subexecutor is a warp, pack warps into threadblocks
-      int warpsPerBlock = cfg.gfx.blockSize / GetWarpSize();
-      gridY = (numSubExecs + warpsPerBlock - 1) / warpsPerBlock;
-    }
-    
+    int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
     dim3 const gridSize(xccDim, gridY, 1);
     dim3 const blockSize(cfg.gfx.blockSize, 1);
 
@@ -3325,18 +3326,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     } else {
       // Combine all the Transfers into a single kernel launch
       int numSubExecs = exeInfo.totalSubExecs;
-      
-      // Calculate grid dimensions based on SE_TYPE
-      int gridY;
-      if (cfg.gfx.seType == 0) {
-        // Threadblock-level: each subexecutor is a threadblock
-        gridY = numSubExecs;
-      } else {
-        // Warp-level: each subexecutor is a warp, pack warps into threadblocks
-        int warpsPerBlock = cfg.gfx.blockSize / GetWarpSize();
-        gridY = (numSubExecs + warpsPerBlock - 1) / warpsPerBlock;
-      }
-      
+      int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
       dim3 const gridSize(xccDim, gridY, 1);
       dim3 const blockSize(cfg.gfx.blockSize, 1);
       hipStream_t stream = exeInfo.streams[0];
