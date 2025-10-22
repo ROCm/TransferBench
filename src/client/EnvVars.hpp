@@ -89,6 +89,7 @@ public:
   int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
   vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
   vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int gfxSeType;                     // GFX subexecutor type (0=threadblock, 1=warp)
   int gfxTemporal;                   // Non-temporal load/store mode (0=none, 1=load, 2=store, 3=both)
   int gfxUnroll;                     // GFX-kernel unroll factor
   int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
@@ -141,6 +142,7 @@ public:
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
     gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
+    gfxSeType         = GetEnvVar("GFX_SE_TYPE"         , 0);
     gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
     gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
@@ -320,6 +322,7 @@ public:
     printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
     printf(" GFX_BLOCK_ORDER   - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
     printf(" GFX_BLOCK_SIZE    - # of threads per threadblock (Must be multiple of 64)\n");
+    printf(" GFX_SE_TYPE       - SubExecutor granularity type (0=threadblock, 1=warp)\n");
     printf(" GFX_TEMPORAL      - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
     printf(" GFX_UNROLL        - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
     printf(" GFX_SINGLE_TEAM   - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
@@ -411,6 +414,8 @@ public:
           "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential" : "Interleaved");
     Print("GFX_BLOCK_SIZE", gfxBlockSize,
           "Threadblock size of %d", gfxBlockSize);
+    Print("GFX_SE_TYPE", gfxSeType,
+          "SubExecutor granularity: %s", gfxSeType == 0 ? "Threadblock" : "Warp");
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
           "%s", (gfxSingleTeam ? "Combining CUs to work across entire data array" :
                                  "Each CUs operates on its own disjoint subarray"));
@@ -619,6 +624,7 @@ public:
     cfg.gfx.blockSize              = gfxBlockSize;
     cfg.gfx.cuMask                 = cuMask;
     cfg.gfx.prefXccTable           = prefXccTable;
+    cfg.gfx.seType                 = gfxSeType;
     cfg.gfx.unrollFactor           = gfxUnroll;
     cfg.gfx.temporalMode           = gfxTemporal;
     cfg.gfx.useHipEvents           = useHipEvents;

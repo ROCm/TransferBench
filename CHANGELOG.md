@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.65.00
+### Added
+- Added warp-level dispatch support via GFX_SE_TYPE environment variable
+  - GFX_SE_TYPE=0 (default): Threadblock-level dispatch, each subexecutor is a threadblock
+  - GFX_SE_TYPE=1: Warp-level dispatch, each subexecutor is a single warp
+
 ## v1.64.00
 ### Added
 - Added BLOCKSIZES to a2asweep preset to allow also sweeping over threadblock sizes
