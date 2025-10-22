@@ -3,12 +3,15 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
-## v1.64.00
+## v1.65.00
 ### Added
 - Added warp-level dispatch support via GFX_SE_TYPE environment variable
   - GFX_SE_TYPE=0 (default): Threadblock-level dispatch, each subexecutor is a threadblock
     - NUM_SUB_EXEC specifies number of threadblocks (e.g., NUM_SUB_EXEC=2 launches 2 threadblocks)
   - GFX_SE_TYPE=1: Warp-level dispatch, each subexecutor is a single warp (e.g., NUM_SUB_EXEC specifies total number of warps across all threadblocks)
+
+## v1.64.00
+### Added
 - Added BLOCKSIZES to a2asweep preset to allow also sweeping over threadblock sizes
 - Added FILL_COMPRESS to allow more control over input data pattern
   - FILL_COMPRESS takes in a comma-separated list of integer percentages (that must add up to 100)
