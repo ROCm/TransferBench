@@ -7,8 +7,7 @@ Documentation for TransferBench is available at
 ### Added
 - Added warp-level dispatch support via GFX_SE_TYPE environment variable
   - GFX_SE_TYPE=0 (default): Threadblock-level dispatch, each subexecutor is a threadblock
-    - NUM_SUB_EXEC specifies number of threadblocks (e.g., NUM_SUB_EXEC=2 launches 2 threadblocks)
-  - GFX_SE_TYPE=1: Warp-level dispatch, each subexecutor is a single warp (e.g., NUM_SUB_EXEC specifies total number of warps across all threadblocks)
+  - GFX_SE_TYPE=1: Warp-level dispatch, each subexecutor is a single warp
 
 ## v1.64.00
 ### Added

@@ -610,16 +610,16 @@ namespace {
   float constexpr MEMSET_VAL     = 13323083.0f;        // Value to memset (double)
 
   int GetWarpSize(std::vector<ErrResult>* errors = nullptr) {
-    hipDeviceProp_t prop;
-    hipError_t err = hipGetDeviceProperties(&prop, 0);
+    int warpSize = 0;
+    hipError_t err = hipDeviceGetAttribute(&warpSize, hipDeviceAttributeWarpSize, 0);
     if (err == hipSuccess) {
-      return prop.warpSize;
+      return warpSize;
     }
     
     // Query failed, report error and fall back to compile-time default
     if (errors) {
       errors->push_back({ERR_WARN,
-                        "Failed to query device warp size (hipGetDeviceProperties error: %d). "
+                        "Failed to query device warp size (hipDeviceGetAttribute error: %d). "
                         "Falling back to compile-time default", err});
     }
 #if defined(__NVCC__)
