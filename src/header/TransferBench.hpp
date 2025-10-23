@@ -460,6 +460,7 @@ namespace TransferBench
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
   #define hipDeviceAttributeMultiprocessorCount              cudaDevAttrMultiProcessorCount
+  #define hipDeviceAttributeWarpSize                         cudaDevAttrWarpSize
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
   #define hipMemcpyDefault                                   cudaMemcpyDefault
@@ -4104,6 +4105,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipDeviceAttributeClockRate
 #undef hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #undef hipDeviceAttributeMultiprocessorCount
+#undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
 #undef hipFuncCachePreferShared
 #undef hipMemcpyDefault
