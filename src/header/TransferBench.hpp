@@ -3318,14 +3318,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   // Execute XGMI kernel for ALL 1-to-1 transfers in one launch
   static ErrResult RunXgmiExecutor(
-      int           const  iteration,
       ConfigOptions const& cfg,
-      int           const  exeIndex,
       ExeInfo&             exeInfo)
   {
-      auto cpuStart = std::chrono::high_resolution_clock::now();
-      ERR_CHECK(hipSetDevice(exeIndex));
-      
       int numTransfers = exeInfo.resources.size();
       hipStream_t stream = exeInfo.streams[0];
       
@@ -3443,27 +3438,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_CHECK(hipFree(srcArrayGpu));
       ERR_CHECK(hipFree(dstArrayGpu));
       
-      // Record timing (similar to RunGpuExecutor)
-      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-      double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
-        / cfg.general.numSubIterations;
-      
-      if (iteration >= 0) {
-          if (cfg.gfx.useHipEvents) {
-              float gpuDeltaMsec;
-              ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
-              gpuDeltaMsec /= cfg.general.numSubIterations;
-              exeInfo.totalDurationMsec += gpuDeltaMsec;
-          } else {
-              exeInfo.totalDurationMsec += cpuDeltaMsec;
-          }
-          
-          // Distribute timing evenly across transfers (simplified)
-          for (auto& rss : exeInfo.resources) {
-              rss.totalDurationMsec += exeInfo.totalDurationMsec / numTransfers;
-          }
-      }
-      
       return ERR_NONE;
   }
 
@@ -3536,12 +3510,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     ERR_CHECK(hipSetDevice(exeIndex));
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
-
-    // XGMI kernel carveout for 1-to-1 transfers (single-stream only)
-    if (cfg.gfx.useXgmiKernel && !cfg.gfx.useMultiStream && AllTransfersAreOneToOne(exeInfo)) {
-        // Use XGMI kernel for ALL transfers in one launch
-        return RunXgmiExecutor(iteration, cfg, exeIndex, exeInfo);
-    }
+    bool usedXgmiKernel = false;
 
     if (cfg.gfx.useMultiStream) {
       // Launch each Transfer separately in its own stream
@@ -3560,32 +3529,39 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (auto& asyncTransfer : asyncTransfers)
         ERR_CHECK(asyncTransfer.get());
     } else {
-      // Combine all the Transfers into a single kernel launch
-      int numSubExecs = exeInfo.totalSubExecs;
-      int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
-      dim3 const gridSize(xccDim, gridY, 1);
-      dim3 const blockSize(cfg.gfx.blockSize, 1);
-      hipStream_t stream = exeInfo.streams[0];
+      // Single-stream path: check if we should use XGMI kernel
+      if (cfg.gfx.useXgmiKernel && AllTransfersAreOneToOne(exeInfo)) {
+        // Use XGMI kernel for 1-to-1 transfers
+        usedXgmiKernel = true;
+        ERR_CHECK(RunXgmiExecutor(cfg, exeInfo));
+      } else {
+        // Standard GpuReduceKernel path
+        int numSubExecs = exeInfo.totalSubExecs;
+        int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
+        dim3 const gridSize(xccDim, gridY, 1);
+        dim3 const blockSize(cfg.gfx.blockSize, 1);
+        hipStream_t stream = exeInfo.streams[0];
 
-      int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
-                        cfg.gfx.wordSize == 2 ? 1 :
-                                                2;
-      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
-      int warpSize = GetWarpSize();
+        int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
+                          cfg.gfx.wordSize == 2 ? 1 :
+                                                  2;
+        auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+        int warpSize = GetWarpSize();
 
 #if defined(__NVCC__)
-      if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
-      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-      if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
+        if (cfg.gfx.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
+        gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+        if (cfg.gfx.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
-      hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
-                            cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
-                            exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+        hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
+                              cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                              cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
+                              exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
-      ERR_CHECK(hipStreamSynchronize(stream));
+        ERR_CHECK(hipStreamSynchronize(stream));
+      }
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
@@ -3603,26 +3579,38 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
-        for (int i = 0; i < exeInfo.resources.size(); i++) {
-          TransferResources& rss = exeInfo.resources[i];
-          long long minStartCycle = std::numeric_limits<long long>::max();
-          long long maxStopCycle  = std::numeric_limits<long long>::min();
-          std::set<std::pair<int, int>> CUs;
-
-          for (auto subExecIdx : rss.subExecIdx) {
-            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+        if (usedXgmiKernel) {
+          // XGMI kernel doesn't populate subExecParam timing, distribute evenly
+          double perTransferMsec = exeInfo.totalDurationMsec / exeInfo.resources.size();
+          for (auto& rss : exeInfo.resources) {
+            rss.totalDurationMsec += perTransferMsec;
             if (cfg.general.recordPerIteration) {
-              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+              rss.perIterMsec.push_back(perTransferMsec);
             }
           }
-          double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
-          deltaMsec /= cfg.general.numSubIterations;
-          rss.totalDurationMsec += deltaMsec;
-          if (cfg.general.recordPerIteration) {
-            rss.perIterMsec.push_back(deltaMsec);
-            rss.perIterCUs.push_back(CUs);
+        } else {
+          // Standard kernel: use per-subexecutor timing from GPU
+          for (int i = 0; i < exeInfo.resources.size(); i++) {
+            TransferResources& rss = exeInfo.resources[i];
+            long long minStartCycle = std::numeric_limits<long long>::max();
+            long long maxStopCycle  = std::numeric_limits<long long>::min();
+            std::set<std::pair<int, int>> CUs;
+
+            for (auto subExecIdx : rss.subExecIdx) {
+              minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+                                          GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+              }
+            }
+            double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
+            deltaMsec /= cfg.general.numSubIterations;
+            rss.totalDurationMsec += deltaMsec;
+            if (cfg.general.recordPerIteration) {
+              rss.perIterMsec.push_back(deltaMsec);
+              rss.perIterCUs.push_back(CUs);
+            }
           }
         }
       }
