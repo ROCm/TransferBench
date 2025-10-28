@@ -95,8 +95,10 @@ public:
   int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
   int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
   int gfxSingleTeam;                 // Team all subExecutors across the data array
+  int gfxUseXgmiKernel;              // Use XGMI-style kernel (exact xgmi_test.cpp logic)
   int gfxWaveOrder;                  // GFX-kernel wavefront ordering
   int gfxWordSize;                   // GFX-kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)
+  int gfxXgmiBlockSize;              // XGMI kernel striding block size (only used when gfxUseXgmiKernel=1)
 
   // Client options
   int hideEnv;                       // Skip printing environment variable
@@ -146,8 +148,10 @@ public:
     gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
     gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
+    gfxUseXgmiKernel  = GetEnvVar("GFX_USE_XGMI_KERNEL" , 0);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
     gfxWordSize       = GetEnvVar("GFX_WORD_SIZE"       , 4);
+    gfxXgmiBlockSize  = GetEnvVar("GFX_XGMI_BLOCK_SIZE" , -1);  // -1 means use blockSize
     hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
     minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
     maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
@@ -419,6 +423,15 @@ public:
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
           "%s", (gfxSingleTeam ? "Combining CUs to work across entire data array" :
                                  "Each CUs operates on its own disjoint subarray"));
+    Print("GFX_USE_XGMI_KERNEL", gfxUseXgmiKernel,
+          "%s", (gfxUseXgmiKernel ? "Using XGMI-style kernel (xgmi_test.cpp logic)" :
+                                    "Using standard TransferBench kernel"));
+    if (gfxUseXgmiKernel) {
+      Print("GFX_XGMI_BLOCK_SIZE", gfxXgmiBlockSize,
+            "%s", (gfxXgmiBlockSize > 0 ? 
+                   ("XGMI kernel striding block size of " + std::to_string(gfxXgmiBlockSize)).c_str() :
+                   "Using GFX_BLOCK_SIZE for XGMI kernel"));
+    }
     Print("GFX_TEMPORAL", gfxTemporal,
           "%s", (gfxTemporal == 0 ? "Not using non-temporal loads/stores" :
                  gfxTemporal == 1 ? "Using non-temporal loads" :
@@ -630,8 +643,10 @@ public:
     cfg.gfx.useHipEvents           = useHipEvents;
     cfg.gfx.useMultiStream         = !useSingleStream;
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
+    cfg.gfx.useXgmiKernel          = gfxUseXgmiKernel;
     cfg.gfx.waveOrder              = gfxWaveOrder;
     cfg.gfx.wordSize               = gfxWordSize;
+    cfg.gfx.xgmiBlockSize          = gfxXgmiBlockSize;
 
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
