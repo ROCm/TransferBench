@@ -1060,6 +1060,17 @@ namespace {
     if (!(cfg.gfx.wordSize == 1 || cfg.gfx.wordSize == 2 || cfg.gfx.wordSize == 4))
       errors.push_back({ERR_FATAL, "[gfx.wordSize] must be either 1, 2 or 4"});
 
+    // Check XGMI kernel options
+    if (cfg.gfx.useXgmiKernel) {
+      if (cfg.gfx.unrollFactor < 1 || cfg.gfx.unrollFactor > 8)
+        errors.push_back({ERR_FATAL,
+                          "[gfx.unrollFactor] must be between 1 and 8 when using XGMI kernel"});
+      
+      if (cfg.gfx.xgmiBlockSize <= 0)
+        errors.push_back({ERR_FATAL,
+                          "[gfx.xgmiBlockSize] must be positive when using XGMI kernel"});
+    }
+
     int numGpus = GetNumExecutors(EXE_GPU_GFX);
     int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
     vector<vector<int>> const& table = cfg.gfx.prefXccTable;
@@ -1491,6 +1502,10 @@ namespace {
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
     int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
+
+    // For XGMI kernel
+    float**                    xgmiSrcArrayGpu;   ///< GPU array of source pointers (for XGMI kernel)
+    float**                    xgmiDstArrayGpu;   ///< GPU array of destination pointers (for XGMI kernel)
   };
 
   // Structure to track PCIe topology
@@ -2625,6 +2640,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                           exeInfo.totalSubExecs * sizeof(SubExecParam),
                           hipMemcpyHostToDevice));
       ERR_CHECK(hipDeviceSynchronize());
+
+      // Pre-allocate XGMI pointer arrays if needed
+      exeInfo.xgmiSrcArrayGpu = nullptr;
+      exeInfo.xgmiDstArrayGpu = nullptr;
+      if (cfg.gfx.useXgmiKernel) {
+        int numTransfers = exeInfo.resources.size();
+        ERR_CHECK(hipMalloc(&exeInfo.xgmiSrcArrayGpu, numTransfers * sizeof(float*)));
+        ERR_CHECK(hipMalloc(&exeInfo.xgmiDstArrayGpu, numTransfers * sizeof(float*)));
+      }
     }
 
     // Prepare for NIC-based executors
@@ -2698,6 +2722,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       MemType memType = MEM_MANAGED;
 #endif
       ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
+
+      // Free XGMI pointer arrays if allocated
+      if (exeInfo.xgmiSrcArrayGpu != nullptr) {
+        ERR_CHECK(hipFree(exeInfo.xgmiSrcArrayGpu));
+      }
+      if (exeInfo.xgmiDstArrayGpu != nullptr) {
+        ERR_CHECK(hipFree(exeInfo.xgmiDstArrayGpu));
+      }
     }
 
     return ERR_NONE;
@@ -3306,6 +3338,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 // XGMI Executor - Execution logic for XGMI kernel
 //========================================================================================
 
+  // RAII helper for temporary CPU pointer arrays
+  struct XgmiCpuArrays {
+    std::vector<float*> srcArrayCpu;
+    std::vector<float*> dstArrayCpu;
+    
+    XgmiCpuArrays(int numTransfers) : srcArrayCpu(numTransfers), dstArrayCpu(numTransfers) {}
+  };
+
   // Helper function to check if all transfers are 1-to-1
   static bool AllTransfersAreOneToOne(ExeInfo const& exeInfo) {
       for (auto const& rss : exeInfo.resources) {
@@ -3324,35 +3364,27 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int numTransfers = exeInfo.resources.size();
       hipStream_t stream = exeInfo.streams[0];
       
-      // Validate all transfers are 1-to-1
-      for (auto const& rss : exeInfo.resources) {
-          if (rss.srcMem.size() != 1 || rss.dstMem.size() != 1) {
-              return {ERR_FATAL, "XGMI kernel requires all transfers to have exactly 1 source and 1 destination"};
-          }
-      }
+      // Use pre-allocated GPU arrays (allocated in PrepareExecutor)
+      float** srcArrayGpu = exeInfo.xgmiSrcArrayGpu;
+      float** dstArrayGpu = exeInfo.xgmiDstArrayGpu;
       
-      // Allocate GPU arrays for src/dst pointers
-      float** srcArrayGpu;
-      float** dstArrayGpu;
-      ERR_CHECK(hipMalloc(&srcArrayGpu, numTransfers * sizeof(float*)));
-      ERR_CHECK(hipMalloc(&dstArrayGpu, numTransfers * sizeof(float*)));
-      
-      // Build CPU arrays of pointers
-      std::vector<float*> srcArrayCpu(numTransfers);
-      std::vector<float*> dstArrayCpu(numTransfers);
+      // Build CPU arrays of pointers using RAII helper
+      XgmiCpuArrays cpuArrays(numTransfers);
       size_t numBytes = 0;
       for (int i = 0; i < numTransfers; i++) {
-          srcArrayCpu[i] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
-          dstArrayCpu[i] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
+          cpuArrays.srcArrayCpu[i] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
+          cpuArrays.dstArrayCpu[i] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
           if (i == 0) numBytes = exeInfo.resources[i].numBytes;
           else if (numBytes != exeInfo.resources[i].numBytes) {
               return {ERR_FATAL, "XGMI kernel requires all transfers to have the same size"};
           }
       }
       
-      // Copy pointer arrays to GPU
-      ERR_CHECK(hipMemcpy(srcArrayGpu, srcArrayCpu.data(), numTransfers * sizeof(float*), hipMemcpyHostToDevice));
-      ERR_CHECK(hipMemcpy(dstArrayGpu, dstArrayCpu.data(), numTransfers * sizeof(float*), hipMemcpyHostToDevice));
+      // Copy pointer arrays to GPU asynchronously
+      ERR_CHECK(hipMemcpyAsync(srcArrayGpu, cpuArrays.srcArrayCpu.data(), numTransfers * sizeof(float*), 
+                               hipMemcpyHostToDevice, stream));
+      ERR_CHECK(hipMemcpyAsync(dstArrayGpu, cpuArrays.dstArrayCpu.data(), numTransfers * sizeof(float*), 
+                               hipMemcpyHostToDevice, stream));
       
       // XGMI-specific configuration
       int wg_size = cfg.gfx.blockSize;
@@ -3364,8 +3396,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int threads = numSubExecs * wg_size;
       int block_workers = threads / (block_size * numTransfers);
       if (block_workers == 0) {
-          (void)hipFree(srcArrayGpu);
-          (void)hipFree(dstArrayGpu);
           return {ERR_FATAL, "Insufficient threads for XGMI kernel with %d transfers", numTransfers};
       }
       
@@ -3380,8 +3410,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           case 2: dataTypeIdx = 1; elementSize = sizeof(uint64_t); break;
           case 4: dataTypeIdx = 2; elementSize = sizeof(__uint128_t); break;
           default:
-              (void)hipFree(srcArrayGpu);
-              (void)hipFree(dstArrayGpu);
               return {ERR_FATAL, "XGMI kernel requires wordSize 1, 2, or 4"};
       }
       
@@ -3389,16 +3417,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Use integer division (truncate) to avoid accessing beyond buffer
       int iters = static_cast<int>(numBytes / total_iter_size);
       if (iters == 0) {
-          (void)hipFree(srcArrayGpu);
-          (void)hipFree(dstArrayGpu);
           return {ERR_FATAL, "Transfer size too small for XGMI kernel configuration (need at least %zu bytes)", total_iter_size};
-      }
-      
-      // Select and launch kernel
-      if (unroll < 1 || unroll > 8) {
-          (void)hipFree(srcArrayGpu);
-          (void)hipFree(dstArrayGpu);
-          return {ERR_FATAL, "XGMI kernel requires unroll between 1 and 8"};
       }
       XgmiKernelPtr kernel = XgmiKernelTable[unroll - 1][dataTypeIdx];
       
@@ -3427,16 +3446,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           
           // Copy remainder for each transfer
           for (int i = 0; i < numTransfers; i++) {
-              float* src = srcArrayCpu[i] + remainderOffset;
-              float* dst = dstArrayCpu[i] + remainderOffset;
+              float* src = cpuArrays.srcArrayCpu[i] + remainderOffset;
+              float* dst = cpuArrays.dstArrayCpu[i] + remainderOffset;
               ERR_CHECK(hipMemcpyAsync(dst, src, remainderBytes, hipMemcpyDeviceToDevice, stream));
           }
           ERR_CHECK(hipStreamSynchronize(stream));
       }
-      
-      // Clean up GPU arrays
-      ERR_CHECK(hipFree(srcArrayGpu));
-      ERR_CHECK(hipFree(dstArrayGpu));
       
       return ERR_NONE;
   }
