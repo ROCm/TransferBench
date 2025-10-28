@@ -186,6 +186,7 @@ namespace TransferBench
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
+    int                 useXgmiKernel  = 0;     ///< Use XGMI-style kernel (xgmi_test.cpp logic) for 1-to-1 transfers
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
     int                 wordSize       = 4;     ///< GFX-kernel packed data size (4=dwordx4, 2=dwordx2, 1=dwordx1)
   };
@@ -3055,6 +3056,73 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     PACKED_FLOAT*       __restrict__ dstFloatPacked[MAX_DSTS];
     for (int i = 0; i < numSrcs; i++) srcFloatPacked[i] = (PACKED_FLOAT const*)p.src[i];
     for (int i = 0; i < numDsts; i++) dstFloatPacked[i] = (PACKED_FLOAT*)p.dst[i];
+
+    // Fast path for 1 SRC -> 1 DST (xgmi_test.cpp style optimized loop)
+    // This is the common case for GPU-to-GPU transfers
+    if (numSrcs == 1 && numDsts == 1 && seType == 0 && p.teamSize == 1) {
+      PACKED_FLOAT const* __restrict__ src = srcFloatPacked[0];
+      PACKED_FLOAT*       __restrict__ dst = dstFloatPacked[0];
+      size_t const numPackedFloat = p.N / (sizeof(PACKED_FLOAT)/sizeof(float));
+      
+      int subIterations = 0;
+      while (1) {
+        // Each thread processes UNROLL elements with stride = BLOCKSIZE
+        size_t idx = threadIdx.x;
+        size_t const stride = BLOCKSIZE;
+        
+        // Main loop: process UNROLL elements per iteration
+        while (idx + (UNROLL - 1) * stride < numPackedFloat) {
+          PACKED_FLOAT val[UNROLL];
+          
+          // Load phase with unrolling
+          #pragma unroll
+          for (int u = 0; u < UNROLL; u++) {
+            Load<TEMPORAL_MODE>(&src[idx + u * stride], val[u]);
+          }
+          
+          // Store phase with unrolling
+          #pragma unroll
+          for (int u = 0; u < UNROLL; u++) {
+            Store<TEMPORAL_MODE>(val[u], &dst[idx + u * stride]);
+          }
+          
+          idx += UNROLL * stride;
+        }
+        
+        // Cleanup loop: handle remaining elements
+        while (idx < numPackedFloat) {
+          PACKED_FLOAT val;
+          Load<TEMPORAL_MODE>(&src[idx], val);
+          Store<TEMPORAL_MODE>(val, &dst[idx]);
+          idx += stride;
+        }
+        
+        // Handle remaining floats if PACKED_FLOAT size doesn't divide evenly
+        if (sizeof(PACKED_FLOAT) > sizeof(float)) {
+          size_t floatIdx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + threadIdx.x;
+          while (floatIdx < p.N) {
+            float val;
+            Load<TEMPORAL_MODE>(&p.src[0][floatIdx], val);
+            Store<TEMPORAL_MODE>(val, &p.dst[0][floatIdx]);
+            floatIdx += stride;
+          }
+        }
+        
+        if (++subIterations == numSubIterations) break;
+      }
+      
+      // Wait for all threads to finish
+      __syncthreads();
+      
+      if (shouldRecordTiming) {
+        __threadfence_system();
+        p.stopCycle  = GetTimestamp();
+        p.startCycle = startCycle;
+        GetHwId(p.hwId);
+        GetXccId(p.xccId);
+      }
+      return;
+    }
 
     // Operate on wavefront granularity
     int32_t const nTeams   = p.teamSize;             // Number of threadblocks working together on this subarray
