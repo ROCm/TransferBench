@@ -186,7 +186,7 @@ namespace TransferBench
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
-    int                 useXgmiKernel  = 0;     ///< Use XGMI-style kernel (xgmi_test.cpp logic) for 1-to-1 transfers
+    int                 useXgmiKernel  = 0;     ///< Use XGMI-style kernel for 1-to-1 transfers
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
     int                 wordSize       = 4;     ///< GFX-kernel packed data size (4=dwordx4, 2=dwordx2, 1=dwordx1)
     int                 xgmiBlockSize  = -1;    ///< XGMI kernel block size (-1 = use blockSize)
@@ -3241,7 +3241,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 // XGMI Kernel - Optimized for 1-to-1 GPU transfers
 //========================================================================================
 
-  // XGMI kernel for multiple 1-to-1 transfers (matches xgmi_test.cpp architecture)
+  // XGMI kernel for multiple 1-to-1 transfers
   template<int Unroll, class T>
   __global__ void XgmiTransferKernel(
       float** __restrict__ src,       // Array of source pointers (one per transfer)
@@ -3316,7 +3316,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       return true;
   }
 
-  // Execute XGMI kernel for ALL 1-to-1 transfers in one launch (matches xgmi_test.cpp)
+  // Execute XGMI kernel for ALL 1-to-1 transfers in one launch
   static ErrResult RunXgmiExecutor(
       int           const  iteration,
       ConfigOptions const& cfg,
@@ -3336,7 +3336,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
       }
       
-      // Allocate GPU arrays for src/dst pointers (like xgmi_test's void** arrays)
+      // Allocate GPU arrays for src/dst pointers
       float** srcArrayGpu;
       float** dstArrayGpu;
       ERR_CHECK(hipMalloc(&srcArrayGpu, numTransfers * sizeof(float*)));
@@ -3361,11 +3361,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       
       // XGMI-specific configuration
       int wg_size = cfg.gfx.blockSize;
-      int block_size = (cfg.gfx.xgmiBlockSize > 0) ? cfg.gfx.xgmiBlockSize : wg_size;
+      int block_size = cfg.gfx.xgmiBlockSize;  // Defaults to blockSize if not explicitly set
       int unroll = cfg.gfx.unrollFactor;
       int numSubExecs = exeInfo.totalSubExecs;
       
-      // Calculate grid dimensions (matching xgmi_test logic)
+      // Calculate grid dimensions
       int threads = numSubExecs * wg_size;
       int block_workers = threads / (block_size * numTransfers);
       if (block_workers == 0) {
@@ -3537,6 +3537,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
+    // XGMI kernel carveout for 1-to-1 transfers (single-stream only)
+    if (cfg.gfx.useXgmiKernel && !cfg.gfx.useMultiStream && AllTransfersAreOneToOne(exeInfo)) {
+        // Use XGMI kernel for ALL transfers in one launch
+        return RunXgmiExecutor(iteration, cfg, exeIndex, exeInfo);
+    }
+
     if (cfg.gfx.useMultiStream) {
       // Launch each Transfer separately in its own stream
       vector<std::future<ErrResult>> asyncTransfers;
@@ -3554,12 +3560,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (auto& asyncTransfer : asyncTransfers)
         ERR_CHECK(asyncTransfer.get());
     } else {
-      // Single-stream path - XGMI kernel carveout for 1-to-1 transfers
-      if (cfg.gfx.useXgmiKernel && AllTransfersAreOneToOne(exeInfo)) {
-          // Use XGMI kernel for ALL transfers in one launch
-          return RunXgmiExecutor(iteration, cfg, exeIndex, exeInfo);
-      }
-      
       // Combine all the Transfers into a single kernel launch
       int numSubExecs = exeInfo.totalSubExecs;
       int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
