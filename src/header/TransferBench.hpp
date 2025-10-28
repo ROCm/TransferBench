@@ -3583,24 +3583,30 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
+      double currentIterMsec;  // Current iteration time for this executor
       if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
         gpuDeltaMsec /= cfg.general.numSubIterations;
+        currentIterMsec = gpuDeltaMsec;
         exeInfo.totalDurationMsec += gpuDeltaMsec;
       } else {
+        currentIterMsec = cpuDeltaMsec;
         exeInfo.totalDurationMsec += cpuDeltaMsec;
       }
 
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
         if (usedXgmiKernel) {
-          // XGMI kernel doesn't populate subExecParam timing, distribute evenly
-          double perTransferMsec = exeInfo.totalDurationMsec / exeInfo.resources.size();
+          // XGMI kernel handles all transfers in parallel in a single kernel launch
+          // To match xgmi_test.cpp: it reports (total_data * num_links) / time
+          // We want per-transfer BW such that SUM matches xgmi_test
+          // Per-transfer: data / time, Sum: (data * num_transfers) / time
+          // So each transfer should use the full time (they execute in parallel)
           for (auto& rss : exeInfo.resources) {
-            rss.totalDurationMsec += perTransferMsec;
+            rss.totalDurationMsec += currentIterMsec;
             if (cfg.general.recordPerIteration) {
-              rss.perIterMsec.push_back(perTransferMsec);
+              rss.perIterMsec.push_back(currentIterMsec);
             }
           }
         } else {
