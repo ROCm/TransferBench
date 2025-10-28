@@ -2646,8 +2646,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       exeInfo.xgmiDstArrayGpu = nullptr;
       if (cfg.gfx.useXgmiKernel) {
         int numTransfers = exeInfo.resources.size();
-        ERR_CHECK(hipMalloc(&exeInfo.xgmiSrcArrayGpu, numTransfers * sizeof(float*)));
-        ERR_CHECK(hipMalloc(&exeInfo.xgmiDstArrayGpu, numTransfers * sizeof(float*)));
+        // Use pinned host memory (like xgmi_test.cpp) so GPU can access directly without copying
+        ERR_CHECK(hipHostMalloc(&exeInfo.xgmiSrcArrayGpu, numTransfers * sizeof(float*), 0));
+        ERR_CHECK(hipHostMalloc(&exeInfo.xgmiDstArrayGpu, numTransfers * sizeof(float*), 0));
+        
+        // Populate the arrays once (accounting for byteOffset)
+        for (int i = 0; i < numTransfers; i++) {
+          exeInfo.xgmiSrcArrayGpu[i] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
+          exeInfo.xgmiDstArrayGpu[i] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
+        }
       }
     }
 
@@ -2723,12 +2730,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
 
-      // Free XGMI pointer arrays if allocated
+      // Free XGMI pointer arrays if allocated (using hipHostFree for pinned memory)
       if (exeInfo.xgmiSrcArrayGpu != nullptr) {
-        ERR_CHECK(hipFree(exeInfo.xgmiSrcArrayGpu));
+        ERR_CHECK(hipHostFree(exeInfo.xgmiSrcArrayGpu));
       }
       if (exeInfo.xgmiDstArrayGpu != nullptr) {
-        ERR_CHECK(hipFree(exeInfo.xgmiDstArrayGpu));
+        ERR_CHECK(hipHostFree(exeInfo.xgmiDstArrayGpu));
       }
     }
 
@@ -3364,27 +3371,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int numTransfers = exeInfo.resources.size();
       hipStream_t stream = exeInfo.streams[0];
       
-      // Use pre-allocated GPU arrays (allocated in PrepareExecutor)
-      float** srcArrayGpu = exeInfo.xgmiSrcArrayGpu;
-      float** dstArrayGpu = exeInfo.xgmiDstArrayGpu;
+      // Use pre-populated pinned host arrays (allocated and filled once in PrepareExecutor)
+      // GPU can access these directly without copying (like xgmi_test.cpp)
+      float** srcArrayHost = exeInfo.xgmiSrcArrayGpu;
+      float** dstArrayHost = exeInfo.xgmiDstArrayGpu;
       
-      // Build CPU arrays of pointers using RAII helper
-      XgmiCpuArrays cpuArrays(numTransfers);
-      size_t numBytes = 0;
-      for (int i = 0; i < numTransfers; i++) {
-          cpuArrays.srcArrayCpu[i] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
-          cpuArrays.dstArrayCpu[i] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
-          if (i == 0) numBytes = exeInfo.resources[i].numBytes;
-          else if (numBytes != exeInfo.resources[i].numBytes) {
+      // Verify all transfers have the same size
+      size_t numBytes = exeInfo.resources[0].numBytes;
+      for (int i = 1; i < numTransfers; i++) {
+          if (numBytes != exeInfo.resources[i].numBytes) {
               return {ERR_FATAL, "XGMI kernel requires all transfers to have the same size"};
           }
       }
-      
-      // Copy pointer arrays to GPU asynchronously
-      ERR_CHECK(hipMemcpyAsync(srcArrayGpu, cpuArrays.srcArrayCpu.data(), numTransfers * sizeof(float*), 
-                               hipMemcpyHostToDevice, stream));
-      ERR_CHECK(hipMemcpyAsync(dstArrayGpu, cpuArrays.dstArrayCpu.data(), numTransfers * sizeof(float*), 
-                               hipMemcpyHostToDevice, stream));
       
       // XGMI-specific configuration
       int wg_size = cfg.gfx.blockSize;
@@ -3424,16 +3422,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       dim3 grid_dim(numSubExecs, 1, 1);
       dim3 block_dim(wg_size, 1, 1);
       
+      size_t numElements = numBytes / elementSize;
+      
+      // Use hipExtLaunchKernelGGL (like xgmi_test.cpp) for better performance
+      // Events are passed directly to the launch for more efficient timing
+#if defined(__NVCC__)
       if (cfg.gfx.useHipEvents) {
           ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
       }
-      
-      size_t numElements = numBytes / elementSize;
-      kernel<<<grid_dim, block_dim, 0, stream>>>(srcArrayGpu, dstArrayGpu, numElements, block_size, numTransfers, iters);
-      
+      kernel<<<grid_dim, block_dim, 0, stream>>>(srcArrayHost, dstArrayHost, numElements, block_size, numTransfers, iters);
       if (cfg.gfx.useHipEvents) {
           ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
       }
+#else
+      hipExtLaunchKernelGGL(kernel, grid_dim, block_dim, 0, stream,
+                            cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
+                            srcArrayHost, dstArrayHost, numElements, block_size, numTransfers, iters);
+#endif
       
       ERR_CHECK(hipStreamSynchronize(stream));
       ERR_CHECK(hipGetLastError());
@@ -3444,10 +3450,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           size_t remainderBytes = numBytes - bytesTransferred;
           size_t remainderOffset = bytesTransferred / sizeof(float);
           
-          // Copy remainder for each transfer
+          // Copy remainder for each transfer (use pre-populated host arrays)
           for (int i = 0; i < numTransfers; i++) {
-              float* src = cpuArrays.srcArrayCpu[i] + remainderOffset;
-              float* dst = cpuArrays.dstArrayCpu[i] + remainderOffset;
+              float* src = srcArrayHost[i] + remainderOffset;
+              float* dst = dstArrayHost[i] + remainderOffset;
               ERR_CHECK(hipMemcpyAsync(dst, src, remainderBytes, hipMemcpyDeviceToDevice, stream));
           }
           ERR_CHECK(hipStreamSynchronize(stream));
