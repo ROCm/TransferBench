@@ -3261,8 +3261,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 // XGMI Kernel - Optimized for 1-to-1 GPU transfers
 //========================================================================================
 
-  // XGMI kernel for 1-to-1 GPU transfers
-  // Matches xgmi_test.cpp kernel implementation for optimal XGMI bandwidth
+  // XGMI kernel matching xgmi_test.cpp implementation
   template<int Unroll, class T>
   __global__ void XgmiTransferKernel(
       float** __restrict__ src,       // Global source pointer array
@@ -3381,7 +3380,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Execute XGMI kernel for a single GPU device
-  // Launches one kernel per GPU (matching xgmi_test.cpp pattern)
   static ErrResult RunXgmiExecutor(
       int           const  iteration,
       ConfigOptions const& cfg,
@@ -3451,11 +3449,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (cfg.gfx.useHipEvents)
           ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
-      // AMD path: use hipExtLaunchKernelGGL with events for zero-overhead timing
       hipExtLaunchKernelGGL(kernel, grid_dim, block_dim, 0, stream,
                             cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 
-                            0,  // No dynamic shared memory
+                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
                             srcArrayGpu, dstArrayGpu, exeIndex, numTransfers,
                             block_size, link_stride_items, iters, active_threads);
 #endif
@@ -3464,14 +3460,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_CHECK(hipGetLastError());
       
       // Handle remainder bytes that weren't covered by kernel iterations
-      size_t bytesTransferred = actual_transfer_size;
-      if (bytesTransferred < numBytes) {
-          size_t remainderBytes = numBytes - bytesTransferred;
-          size_t remainderOffset = bytesTransferred / sizeof(float);
+      if (actual_transfer_size < numBytes) {
+          size_t remainderBytes = numBytes - actual_transfer_size;
+          size_t remainderOffset = actual_transfer_size / sizeof(float);
+          int numGpus = GetNumExecutors(EXE_GPU_GFX);
+          int maxLinks = numGpus - 1;
           
           for (int i = 0; i < numTransfers; i++) {
-              int numGpus = GetNumExecutors(EXE_GPU_GFX);
-              int maxLinks = numGpus - 1;
               int globalIdx = exeIndex * maxLinks + i;
               float* src = srcArrayGpu[globalIdx] + remainderOffset;
               float* dst = dstArrayGpu[globalIdx] + remainderOffset;
@@ -3621,7 +3616,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         exeInfo.totalDurationMsec += cpuDeltaMsec;
       }
 
-      // Record timing for each transfer
+      // Determine timing for each of the individual transfers that were part of this launch 
       if (!cfg.gfx.useMultiStream) {
         if (usedXgmiKernel) {
           // XGMI kernel: all transfers execute in parallel, so each gets the full time
@@ -3888,20 +3883,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExeInfo&         exeInfo   = exeInfoPair.second;
       ERR_APPEND(PrepareExecutor(cfg, transfers, exeDevice, exeInfo), errResults);
 
-      // Assign global XGMI arrays and populate pointers
+      // Populate XGMI pointer arrays
       if (cfg.gfx.useXgmiKernel && exeDevice.exeType == EXE_GPU_GFX) {
         exeInfo.xgmiSrcArrayGpu = xgmiArrays.srcArray;
         exeInfo.xgmiDstArrayGpu = xgmiArrays.dstArray;
         
+        int numTransfers = exeInfo.resources.size();
+        int dev = exeDevice.exeIndex;
         int numGpus = GetNumExecutors(EXE_GPU_GFX);
         int maxLinks = numGpus - 1;
-        int dev = exeDevice.exeIndex;
-        int numTransfers = exeInfo.resources.size();
+        size_t offset = cfg.data.byteOffset / sizeof(float);
         
         for (int i = 0; i < numTransfers; i++) {
           int globalIdx = dev * maxLinks + i;
-          xgmiArrays.srcArray[globalIdx] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
-          xgmiArrays.dstArray[globalIdx] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
+          xgmiArrays.srcArray[globalIdx] = exeInfo.resources[i].srcMem[0] + offset;
+          xgmiArrays.dstArray[globalIdx] = exeInfo.resources[i].dstMem[0] + offset;
         }
       }
 
