@@ -1,4 +1,3 @@
-
 /*
 Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
@@ -187,8 +186,10 @@ namespace TransferBench
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
     int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
+    int                 useXgmiKernel  = 0;     ///< Use XGMI-style kernel for 1-to-1 transfers
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
     int                 wordSize       = 4;     ///< GFX-kernel packed data size (4=dwordx4, 2=dwordx2, 1=dwordx1)
+    int                 xgmiBlockSize  = -1;    ///< XGMI kernel block size (-1 = use blockSize)
   };
 
   /**
@@ -1059,6 +1060,17 @@ namespace {
     if (!(cfg.gfx.wordSize == 1 || cfg.gfx.wordSize == 2 || cfg.gfx.wordSize == 4))
       errors.push_back({ERR_FATAL, "[gfx.wordSize] must be either 1, 2 or 4"});
 
+    // Check XGMI kernel options
+    if (cfg.gfx.useXgmiKernel) {
+      if (cfg.gfx.unrollFactor < 1 || cfg.gfx.unrollFactor > 8)
+        errors.push_back({ERR_FATAL,
+                          "[gfx.unrollFactor] must be between 1 and 8 when using XGMI kernel"});
+      
+      if (cfg.gfx.xgmiBlockSize <= 0)
+        errors.push_back({ERR_FATAL,
+                          "[gfx.xgmiBlockSize] must be positive when using XGMI kernel"});
+    }
+
     int numGpus = GetNumExecutors(EXE_GPU_GFX);
     int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
     vector<vector<int>> const& table = cfg.gfx.prefXccTable;
@@ -1490,6 +1502,10 @@ namespace {
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
     int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
+
+    // For XGMI kernel
+    float**                    xgmiSrcArrayGpu;   ///< GPU array of source pointers (for XGMI kernel)
+    float**                    xgmiDstArrayGpu;   ///< GPU array of destination pointers (for XGMI kernel)
   };
 
   // Structure to track PCIe topology
@@ -2624,6 +2640,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                           exeInfo.totalSubExecs * sizeof(SubExecParam),
                           hipMemcpyHostToDevice));
       ERR_CHECK(hipDeviceSynchronize());
+
+      // XGMI pointer arrays will be assigned globally in RunTransfers
+      exeInfo.xgmiSrcArrayGpu = nullptr;
+      exeInfo.xgmiDstArrayGpu = nullptr;
     }
 
     // Prepare for NIC-based executors
@@ -2697,6 +2717,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       MemType memType = MEM_MANAGED;
 #endif
       ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
+
+      // XGMI pointer arrays are freed globally in RunTransfers
     }
 
     return ERR_NONE;
@@ -3236,6 +3258,195 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #undef GPU_KERNEL_TEMPORAL_DECL
   #undef GPU_KERNEL_SE_TYPE_DECL
 
+//========================================================================================
+// XGMI Kernel - Optimized for 1-to-1 GPU transfers
+//========================================================================================
+
+  // XGMI kernel for 1-to-1 GPU transfers
+  // Matches xgmi_test.cpp kernel implementation for optimal XGMI bandwidth
+  template<int Unroll, class T>
+  __global__ void XgmiTransferKernel(
+      float** __restrict__ src,       // Global source pointer array
+      float** __restrict__ dst,       // Global destination pointer array
+      int dev,                        // Device ID for this kernel launch
+      int linksPerDevice,             // Number of links per device
+      int blockSize,                  // Striding block size
+      int linkStrideItems,            // Pre-calculated stride
+      int iters,                      // Number of iterations
+      int activeThreads               // Total active threads
+  )
+  {
+      int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+      
+      if (global_thread >= activeThreads) {
+          return;
+      }
+      
+      int block_worker = global_thread / blockSize;
+      int block_thread = global_thread % blockSize;
+      size_t iter_items = blockSize * Unroll;
+      
+      // Determine which link this thread works on
+      int link = block_worker % linksPerDevice;
+      int block_worker_in_link = block_worker / linksPerDevice;
+      
+      size_t offs = block_worker_in_link * iter_items + block_thread;
+      
+      // Main transfer loop
+      for (int i = 0; i < iters; i++) {
+          const T* psrc = (const T*)(src[dev * linksPerDevice + link]) + offs;
+          T* pdst = (T*)(dst[dev * linksPerDevice + link]) + offs;
+          T v[Unroll];
+          
+          #pragma unroll Unroll
+          for (uint32_t j = 0; j < Unroll; j++) {
+              v[j] = __builtin_nontemporal_load(psrc);
+              psrc += blockSize;
+          }
+          
+          #pragma unroll Unroll
+          for (uint32_t j = 0; j < Unroll; j++) {
+              __builtin_nontemporal_store(v[j], pdst);
+              pdst += blockSize;
+          }
+          
+          offs += linkStrideItems;
+      }
+  }
+
+  // Function pointer type for XGMI kernel
+  typedef void (*XgmiKernelPtr)(float**, float**, int, int, int, int, int, int);
+
+  // Kernel table: [unroll][dataType]
+  // dataType: 0=uint32_t, 1=uint64_t, 2=__uint128_t
+  static XgmiKernelPtr XgmiKernelTable[8][3] = {
+      { XgmiTransferKernel<1, uint32_t>, XgmiTransferKernel<1, uint64_t>, XgmiTransferKernel<1, __uint128_t> },
+      { XgmiTransferKernel<2, uint32_t>, XgmiTransferKernel<2, uint64_t>, XgmiTransferKernel<2, __uint128_t> },
+      { XgmiTransferKernel<3, uint32_t>, XgmiTransferKernel<3, uint64_t>, XgmiTransferKernel<3, __uint128_t> },
+      { XgmiTransferKernel<4, uint32_t>, XgmiTransferKernel<4, uint64_t>, XgmiTransferKernel<4, __uint128_t> },
+      { XgmiTransferKernel<5, uint32_t>, XgmiTransferKernel<5, uint64_t>, XgmiTransferKernel<5, __uint128_t> },
+      { XgmiTransferKernel<6, uint32_t>, XgmiTransferKernel<6, uint64_t>, XgmiTransferKernel<6, __uint128_t> },
+      { XgmiTransferKernel<7, uint32_t>, XgmiTransferKernel<7, uint64_t>, XgmiTransferKernel<7, __uint128_t> },
+      { XgmiTransferKernel<8, uint32_t>, XgmiTransferKernel<8, uint64_t>, XgmiTransferKernel<8, __uint128_t> },
+  };
+
+//========================================================================================
+// XGMI Executor - Execution logic for XGMI kernel
+//========================================================================================
+
+  // Helper function to check if all transfers are 1-to-1
+  static bool AllTransfersAreOneToOne(ExeInfo const& exeInfo) {
+      for (auto const& rss : exeInfo.resources) {
+          if (rss.srcMem.size() != 1 || rss.dstMem.size() != 1) {
+              return false;
+          }
+      }
+      return true;
+  }
+
+  // Execute XGMI kernel for a single GPU device
+  // Launches one kernel per GPU (matching xgmi_test.cpp pattern)
+  static ErrResult RunXgmiExecutor(
+      int           const  iteration,
+      ConfigOptions const& cfg,
+      int           const  exeIndex,    // GPU device index
+      ExeInfo&             exeInfo)
+  {
+      int numTransfers = exeInfo.resources.size();
+      hipStream_t stream = exeInfo.streams[0];
+      
+      float** srcArrayGpu = exeInfo.xgmiSrcArrayGpu;
+      float** dstArrayGpu = exeInfo.xgmiDstArrayGpu;
+      
+      // Validate all transfers have same size
+      size_t numBytes = exeInfo.resources[0].numBytes;
+      for (int i = 1; i < numTransfers; i++) {
+          if (exeInfo.resources[i].numBytes != numBytes) {
+              return {ERR_FATAL, "XGMI kernel requires all transfers to have the same size"};
+          }
+      }
+      
+      // Configuration
+      int wg_size = cfg.gfx.blockSize;
+      int block_size = cfg.gfx.xgmiBlockSize;
+      int unroll = cfg.gfx.unrollFactor;
+      int cu = exeInfo.totalSubExecs / numTransfers;
+      
+      // Calculate grid dimensions
+      int threads = cu * wg_size;
+      int block_workers = threads / (block_size * numTransfers);
+      if (block_workers == 0) {
+          return {ERR_FATAL, "Insufficient threads (%d) for XGMI kernel with block_size=%d and %d links", 
+                  threads, block_size, numTransfers};
+      }
+      
+      int active_threads = block_workers * block_size * numTransfers;
+      int link_stride_items = active_threads * unroll / numTransfers;
+      
+      // Determine data type
+      int dataTypeIdx;
+      size_t elementSize;
+      switch (cfg.gfx.wordSize) {
+          case 1: dataTypeIdx = 0; elementSize = sizeof(uint32_t); break;
+          case 2: dataTypeIdx = 1; elementSize = sizeof(uint64_t); break;
+          case 4: dataTypeIdx = 2; elementSize = sizeof(__uint128_t); break;
+          default:
+              return {ERR_FATAL, "XGMI kernel requires wordSize 1, 2, or 4"};
+      }
+      
+      size_t total_iter_size = elementSize * link_stride_items;
+      int iters = static_cast<int>(numBytes / total_iter_size);
+      if (iters == 0) {
+          return {ERR_FATAL, "Transfer size too small for XGMI kernel configuration (need at least %zu bytes)", total_iter_size};
+      }
+      
+      size_t actual_transfer_size = total_iter_size * iters;
+      
+      XgmiKernelPtr kernel = XgmiKernelTable[unroll - 1][dataTypeIdx];
+      dim3 grid_dim(cu, 1, 1);
+      dim3 block_dim(wg_size, 1, 1);
+      
+      // Launch kernel for this device
+#if defined(__NVCC__)
+      if (cfg.gfx.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
+      kernel<<<grid_dim, block_dim, 0, stream>>>(srcArrayGpu, dstArrayGpu, exeIndex, numTransfers, 
+                                                   block_size, link_stride_items, iters, active_threads);
+      if (cfg.gfx.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
+#else
+      // AMD path: use hipExtLaunchKernelGGL with events for zero-overhead timing
+      hipExtLaunchKernelGGL(kernel, grid_dim, block_dim, 0, stream,
+                            cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 
+                            0,  // No dynamic shared memory
+                            srcArrayGpu, dstArrayGpu, exeIndex, numTransfers,
+                            block_size, link_stride_items, iters, active_threads);
+#endif
+      
+      ERR_CHECK(hipStreamSynchronize(stream));
+      ERR_CHECK(hipGetLastError());
+      
+      // Handle remainder bytes that weren't covered by kernel iterations
+      size_t bytesTransferred = actual_transfer_size;
+      if (bytesTransferred < numBytes) {
+          size_t remainderBytes = numBytes - bytesTransferred;
+          size_t remainderOffset = bytesTransferred / sizeof(float);
+          
+          for (int i = 0; i < numTransfers; i++) {
+              int numGpus = GetNumExecutors(EXE_GPU_GFX);
+              int maxLinks = numGpus - 1;
+              int globalIdx = exeIndex * maxLinks + i;
+              float* src = srcArrayGpu[globalIdx] + remainderOffset;
+              float* dst = dstArrayGpu[globalIdx] + remainderOffset;
+              ERR_CHECK(hipMemcpyAsync(dst, src, remainderBytes, hipMemcpyDeviceToDevice, stream));
+          }
+          ERR_CHECK(hipStreamSynchronize(stream));
+      }
+      
+      return ERR_NONE;
+  }
+
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
                                       hipStream_t   const  stream,
@@ -3305,6 +3516,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     ERR_CHECK(hipSetDevice(exeIndex));
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
+    bool usedXgmiKernel = false;
 
     if (cfg.gfx.useMultiStream) {
       // Launch each Transfer separately in its own stream
@@ -3323,69 +3535,89 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (auto& asyncTransfer : asyncTransfers)
         ERR_CHECK(asyncTransfer.get());
     } else {
-      // Combine all the Transfers into a single kernel launch
-      int numSubExecs = exeInfo.totalSubExecs;
-      int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
-      dim3 const gridSize(xccDim, gridY, 1);
-      dim3 const blockSize(cfg.gfx.blockSize, 1);
-      hipStream_t stream = exeInfo.streams[0];
+      // Single-stream path: check if we should use XGMI kernel
+      if (cfg.gfx.useXgmiKernel && AllTransfersAreOneToOne(exeInfo)) {
+        usedXgmiKernel = true;
+        ERR_CHECK(RunXgmiExecutor(iteration, cfg, exeIndex, exeInfo));
+      } else {
+        // Standard GpuReduceKernel path
+        int numSubExecs = exeInfo.totalSubExecs;
+        int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
+        dim3 const gridSize(xccDim, gridY, 1);
+        dim3 const blockSize(cfg.gfx.blockSize, 1);
+        hipStream_t stream = exeInfo.streams[0];
 
-      int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
-                        cfg.gfx.wordSize == 2 ? 1 :
-                                                2;
-      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
-      int warpSize = GetWarpSize();
+        int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
+                          cfg.gfx.wordSize == 2 ? 1 :
+                                                  2;
+        auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+        int warpSize = GetWarpSize();
 
 #if defined(__NVCC__)
-      if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
-      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-      if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
+        if (cfg.gfx.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
+        gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+        if (cfg.gfx.useHipEvents)
+          ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
-      hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
-                            cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
-                            exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+        hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
+                              cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                              cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
+                              exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
-      ERR_CHECK(hipStreamSynchronize(stream));
+        ERR_CHECK(hipStreamSynchronize(stream));
+      }
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
       / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
+      double currentIterMsec;  // Current iteration time for this executor
       if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
         gpuDeltaMsec /= cfg.general.numSubIterations;
+        currentIterMsec = gpuDeltaMsec;
         exeInfo.totalDurationMsec += gpuDeltaMsec;
       } else {
+        currentIterMsec = cpuDeltaMsec;
         exeInfo.totalDurationMsec += cpuDeltaMsec;
       }
 
-      // Determine timing for each of the individual transfers that were part of this launch
+      // Record timing for each transfer
       if (!cfg.gfx.useMultiStream) {
-        for (int i = 0; i < exeInfo.resources.size(); i++) {
-          TransferResources& rss = exeInfo.resources[i];
-          long long minStartCycle = std::numeric_limits<long long>::max();
-          long long maxStopCycle  = std::numeric_limits<long long>::min();
-          std::set<std::pair<int, int>> CUs;
-
-          for (auto subExecIdx : rss.subExecIdx) {
-            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+        if (usedXgmiKernel) {
+          // XGMI kernel: all transfers execute in parallel, so each gets the full time
+          for (auto& rss : exeInfo.resources) {
+            rss.totalDurationMsec += currentIterMsec;
             if (cfg.general.recordPerIteration) {
-              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+              rss.perIterMsec.push_back(currentIterMsec);
             }
           }
-          double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
-          deltaMsec /= cfg.general.numSubIterations;
-          rss.totalDurationMsec += deltaMsec;
-          if (cfg.general.recordPerIteration) {
-            rss.perIterMsec.push_back(deltaMsec);
-            rss.perIterCUs.push_back(CUs);
+        } else {
+          // Standard kernel: use per-subexecutor timing from GPU
+          for (int i = 0; i < exeInfo.resources.size(); i++) {
+            TransferResources& rss = exeInfo.resources[i];
+            long long minStartCycle = std::numeric_limits<long long>::max();
+            long long maxStopCycle  = std::numeric_limits<long long>::min();
+            std::set<std::pair<int, int>> CUs;
+
+            for (auto subExecIdx : rss.subExecIdx) {
+              minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+                                          GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+              }
+            }
+            double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
+            deltaMsec /= cfg.general.numSubIterations;
+            rss.totalDurationMsec += deltaMsec;
+            if (cfg.general.recordPerIteration) {
+              rss.perIterMsec.push_back(deltaMsec);
+              rss.perIterCUs.push_back(CUs);
+            }
           }
         }
       }
@@ -3602,6 +3834,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
     }
 
+    // Allocate global XGMI pointer arrays (shared across all GPU executors)
+    float** globalXgmiSrcArray = nullptr;
+    float** globalXgmiDstArray = nullptr;
+    if (cfg.gfx.useXgmiKernel) {
+      int numGpus = GetNumExecutors(EXE_GPU_GFX);
+      int maxLinks = numGpus - 1;
+      int totalPointers = numGpus * maxLinks;
+      
+      ERR_APPEND(hipHostMalloc(&globalXgmiSrcArray, totalPointers * sizeof(float*), 0), errResults);
+      ERR_APPEND(hipHostMalloc(&globalXgmiDstArray, totalPointers * sizeof(float*), 0), errResults);
+    }
+
     // Loop over each executor and prepare
     // - Allocates memory for each Transfer
     // - Set up work for subexecutors
@@ -3610,6 +3854,23 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
       ERR_APPEND(PrepareExecutor(cfg, transfers, exeDevice, exeInfo), errResults);
+
+      // Assign global XGMI arrays and populate pointers
+      if (cfg.gfx.useXgmiKernel && exeDevice.exeType == EXE_GPU_GFX) {
+        exeInfo.xgmiSrcArrayGpu = globalXgmiSrcArray;
+        exeInfo.xgmiDstArrayGpu = globalXgmiDstArray;
+        
+        int numGpus = GetNumExecutors(EXE_GPU_GFX);
+        int maxLinks = numGpus - 1;
+        int dev = exeDevice.exeIndex;
+        int numTransfers = exeInfo.resources.size();
+        
+        for (int i = 0; i < numTransfers; i++) {
+          int globalIdx = dev * maxLinks + i;
+          globalXgmiSrcArray[globalIdx] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
+          globalXgmiDstArray[globalIdx] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
+        }
+      }
 
       for (auto& resource : exeInfo.resources) {
         transferResources.push_back(&resource);
@@ -3774,6 +4035,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
       ERR_APPEND(TeardownExecutor(cfg, exeDevice, transfers, exeInfo), errResults);
+    }
+
+    // Free global XGMI pointer arrays
+    if (globalXgmiSrcArray != nullptr) {
+      ERR_APPEND(hipHostFree(globalXgmiSrcArray), errResults);
+    }
+    if (globalXgmiDstArray != nullptr) {
+      ERR_APPEND(hipHostFree(globalXgmiDstArray), errResults);
     }
 
     return true;
