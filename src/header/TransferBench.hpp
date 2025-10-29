@@ -2718,7 +2718,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
 
-      // XGMI pointer arrays are freed globally in RunTransfers
     }
 
     return ERR_NONE;
@@ -3334,6 +3333,43 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 // XGMI Executor - Execution logic for XGMI kernel
 //========================================================================================
 
+  // RAII wrapper for global XGMI pointer arrays
+  struct XgmiPointerArrays {
+      float** srcArray;
+      float** dstArray;
+      size_t numPointers;
+      
+      XgmiPointerArrays() : srcArray(nullptr), dstArray(nullptr), numPointers(0) {}
+      
+      ErrResult Allocate(size_t count) {
+          numPointers = count;
+          size_t bytes = count * sizeof(float*);
+          
+          // Use hipHostMalloc directly (pointer arrays are metadata, not data buffers)
+          ERR_CHECK(hipHostMalloc(&srcArray, bytes, 0));
+          ERR_CHECK(hipHostMalloc(&dstArray, bytes, 0));
+          return ERR_NONE;
+      }
+      
+      ~XgmiPointerArrays() {
+          // Best-effort cleanup in destructor (cannot throw exceptions)
+          if (srcArray) {
+              hipError_t err = hipHostFree(srcArray);
+              (void)err;  // Explicitly ignore error in destructor
+              srcArray = nullptr;
+          }
+          if (dstArray) {
+              hipError_t err = hipHostFree(dstArray);
+              (void)err;  // Explicitly ignore error in destructor
+              dstArray = nullptr;
+          }
+      }
+      
+      // Prevent copying
+      XgmiPointerArrays(const XgmiPointerArrays&) = delete;
+      XgmiPointerArrays& operator=(const XgmiPointerArrays&) = delete;
+  };
+
   // Helper function to check if all transfers are 1-to-1
   static bool AllTransfersAreOneToOne(ExeInfo const& exeInfo) {
       for (auto const& rss : exeInfo.resources) {
@@ -3834,16 +3870,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
     }
 
-    // Allocate global XGMI pointer arrays (shared across all GPU executors)
-    float** globalXgmiSrcArray = nullptr;
-    float** globalXgmiDstArray = nullptr;
+    XgmiPointerArrays xgmiArrays;
     if (cfg.gfx.useXgmiKernel) {
       int numGpus = GetNumExecutors(EXE_GPU_GFX);
       int maxLinks = numGpus - 1;
       int totalPointers = numGpus * maxLinks;
       
-      ERR_APPEND(hipHostMalloc(&globalXgmiSrcArray, totalPointers * sizeof(float*), 0), errResults);
-      ERR_APPEND(hipHostMalloc(&globalXgmiDstArray, totalPointers * sizeof(float*), 0), errResults);
+      ERR_APPEND(xgmiArrays.Allocate(totalPointers), errResults);
     }
 
     // Loop over each executor and prepare
@@ -3857,8 +3890,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Assign global XGMI arrays and populate pointers
       if (cfg.gfx.useXgmiKernel && exeDevice.exeType == EXE_GPU_GFX) {
-        exeInfo.xgmiSrcArrayGpu = globalXgmiSrcArray;
-        exeInfo.xgmiDstArrayGpu = globalXgmiDstArray;
+        exeInfo.xgmiSrcArrayGpu = xgmiArrays.srcArray;
+        exeInfo.xgmiDstArrayGpu = xgmiArrays.dstArray;
         
         int numGpus = GetNumExecutors(EXE_GPU_GFX);
         int maxLinks = numGpus - 1;
@@ -3867,8 +3900,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         
         for (int i = 0; i < numTransfers; i++) {
           int globalIdx = dev * maxLinks + i;
-          globalXgmiSrcArray[globalIdx] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
-          globalXgmiDstArray[globalIdx] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
+          xgmiArrays.srcArray[globalIdx] = exeInfo.resources[i].srcMem[0] + cfg.data.byteOffset / sizeof(float);
+          xgmiArrays.dstArray[globalIdx] = exeInfo.resources[i].dstMem[0] + cfg.data.byteOffset / sizeof(float);
         }
       }
 
@@ -4035,14 +4068,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
       ERR_APPEND(TeardownExecutor(cfg, exeDevice, transfers, exeInfo), errResults);
-    }
-
-    // Free global XGMI pointer arrays
-    if (globalXgmiSrcArray != nullptr) {
-      ERR_APPEND(hipHostFree(globalXgmiSrcArray), errResults);
-    }
-    if (globalXgmiDstArray != nullptr) {
-      ERR_APPEND(hipHostFree(globalXgmiDstArray), errResults);
     }
 
     return true;
