@@ -3014,10 +3014,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-  // Kernel for GFX execution
-  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
-  __global__ void __launch_bounds__(BLOCKSIZE)
-    GpuReduceKernel(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
+  // Kernel for GFX execution (Implementation with templated NUM_SRCS and NUM_DSTS)
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE,
+            int NUM_SRCS, int NUM_DSTS>
+  __device__ void GpuReduceKernelImpl(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
   {
     int64_t startCycle;
     // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
@@ -3048,9 +3048,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
 #endif
 
-    // Collect data information
-    int32_t const  numSrcs  = p.numSrcs;
-    int32_t const  numDsts  = p.numDsts;
+    // Collect data information (now compile-time constants via templates)
+    constexpr int32_t numSrcs = NUM_SRCS;
+    constexpr int32_t numDsts = NUM_DSTS;
     PACKED_FLOAT const* __restrict__ srcFloatPacked[MAX_SRCS];
     PACKED_FLOAT*       __restrict__ dstFloatPacked[MAX_DSTS];
     for (int i = 0; i < numSrcs; i++) srcFloatPacked[i] = (PACKED_FLOAT const*)p.src[i];
@@ -3186,6 +3186,74 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       GetHwId(p.hwId);
       GetXccId(p.xccId);
     }
+  }
+
+  // Dispatch wrapper: Selects specialized kernel based on runtime numSrcs/numDsts
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
+  __global__ void __launch_bounds__(BLOCKSIZE)
+    GpuReduceKernel(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
+  {
+    // Read numSrcs and numDsts from first subexec param (consistent across all subexecs in this kernel)
+    int const numSrcs = params[blockIdx.y].numSrcs;
+    int const numDsts = params[blockIdx.y].numDsts;
+    
+    // Dispatch to specialized implementation for common cases
+    
+    // Most common case: 1 src -> 1 dst (standard copy)
+    if (numSrcs == 1 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Write-only benchmark
+    if (numSrcs == 0 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 0, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Read-only benchmark
+    if (numSrcs == 1 && numDsts == 0) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 0>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Dual-source reduction
+    if (numSrcs == 2 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 2, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Broadcast to 2 destinations
+    if (numSrcs == 1 && numDsts == 2) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 2>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Triple-source reduction
+    if (numSrcs == 3 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 3, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Quad-source reduction
+    if (numSrcs == 4 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 4, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations);
+      return;
+    }
+    
+    // Fallback for uncommon cases
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+      printf("[WARN] Using unoptimized path for numSrcs=%d, numDsts=%d\n", numSrcs, numDsts);
+    }
+    GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 1>
+      (params, seType, warpSize, waveOrder, numSubIterations);
   }
 
 #define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)           \
