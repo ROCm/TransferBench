@@ -3014,7 +3014,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-  // Kernel for GFX execution (Implementation with templated NUM_SRCS and NUM_DSTS)
+  // Kernel for GFX execution
   template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE,
             int NUM_SRCS, int NUM_DSTS>
   __device__ void GpuReduceKernelImpl(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
@@ -3048,7 +3048,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
 #endif
 
-    // Collect data information (now compile-time constants via templates)
+    // Collect data information
     constexpr int32_t numSrcs = NUM_SRCS;
     constexpr int32_t numDsts = NUM_DSTS;
     PACKED_FLOAT const* __restrict__ srcFloatPacked[MAX_SRCS];
@@ -3197,8 +3197,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int const numSrcs = params[blockIdx.y].numSrcs;
     int const numDsts = params[blockIdx.y].numDsts;
     
-    // Dispatch to specialized implementation
-    
+    // Dispatch to specialized implementation based on numSrcs and numDsts
     if (numSrcs == 1 && numDsts == 1) {
       GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 1>
         (params, seType, warpSize, waveOrder, numSubIterations);
