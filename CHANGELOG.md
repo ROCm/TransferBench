@@ -8,6 +8,8 @@ Documentation for TransferBench is available at
 - Added warp-level dispatch support via GFX_SE_TYPE environment variable
   - GFX_SE_TYPE=0 (default): Threadblock-level dispatch, each subexecutor is a threadblock
   - GFX_SE_TYPE=1: Warp-level dispatch, each subexecutor is a single warp
+- Added compile-time template specialization for numSrcs/numDsts in GpuReduceKernel
+  - Instantiates optimized kernels for common cases: (0,1), (1,0), (1,1)
 
 ## v1.64.00
 ### Added
