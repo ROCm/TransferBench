@@ -3049,9 +3049,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
 #endif
 
-    // Use template values if non-zero, otherwise use runtime arguments
-    int32_t const numSrcs = (NUM_SRCS != 0) ? NUM_SRCS : numSrcsArg;
-    int32_t const numDsts = (NUM_DSTS != 0) ? NUM_DSTS : numDstsArg;
+    // Use template values if >= 0, otherwise use runtime arguments (NUM_SRCS/NUM_DSTS == -1)
+    int32_t const numSrcs = (NUM_SRCS >= 0) ? NUM_SRCS : numSrcsArg;
+    int32_t const numDsts = (NUM_DSTS >= 0) ? NUM_DSTS : numDstsArg;
     PACKED_FLOAT const* __restrict__ srcFloatPacked[MAX_SRCS];
     PACKED_FLOAT*       __restrict__ dstFloatPacked[MAX_DSTS];
     for (int i = 0; i < numSrcs; i++) srcFloatPacked[i] = (PACKED_FLOAT const*)p.src[i];
@@ -3202,24 +3202,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (numSrcs == 1 && numDsts == 1) {
       GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 1>
         (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
-      return;
     }
-    
-    if (numSrcs == 0 && numDsts == 1) {
+    else if (numSrcs == 0 && numDsts == 1) {
       GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 0, 1>
         (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
-      return;
     }
-    
-    if (numSrcs == 1 && numDsts == 0) {
+    else if (numSrcs == 1 && numDsts == 0) {
       GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 0>
         (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
-      return;
     }
-    
-    // Fallback: Use (0,0) template which uses runtime arguments for any combination
-    GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 0, 0>
-      (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
+    else {
+      // Fallback: Use (-1,-1) template which uses runtime arguments for any combination
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, -1, -1>
+        (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
+    }
   }
 
 #define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)           \
