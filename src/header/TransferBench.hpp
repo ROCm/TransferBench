@@ -3015,9 +3015,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Kernel for GFX execution
-  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
-  __global__ void __launch_bounds__(BLOCKSIZE)
-    GpuReduceKernel(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
+  // NUM_SRCS/NUM_DSTS: If 0, use runtime numSrcs/numDsts args; otherwise use template values
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE,
+            int NUM_SRCS, int NUM_DSTS>
+  __device__ void GpuReduceKernelImpl(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations, int numSrcsArg, int numDstsArg)
   {
     int64_t startCycle;
     // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
@@ -3048,9 +3049,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
 #endif
 
-    // Collect data information
-    int32_t const  numSrcs  = p.numSrcs;
-    int32_t const  numDsts  = p.numDsts;
+    // Use template values if >= 0, otherwise use runtime arguments (NUM_SRCS/NUM_DSTS == -1)
+    int32_t const numSrcs = (NUM_SRCS >= 0) ? NUM_SRCS : numSrcsArg;
+    int32_t const numDsts = (NUM_DSTS >= 0) ? NUM_DSTS : numDstsArg;
     PACKED_FLOAT const* __restrict__ srcFloatPacked[MAX_SRCS];
     PACKED_FLOAT*       __restrict__ dstFloatPacked[MAX_DSTS];
     for (int i = 0; i < numSrcs; i++) srcFloatPacked[i] = (PACKED_FLOAT const*)p.src[i];
@@ -3185,6 +3186,35 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       p.startCycle = startCycle;
       GetHwId(p.hwId);
       GetXccId(p.xccId);
+    }
+  }
+
+  // Dispatch wrapper: Selects specialized kernel based on runtime numSrcs/numDsts
+  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
+  __global__ void __launch_bounds__(BLOCKSIZE)
+    GpuReduceKernel(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
+  {
+    // Read numSrcs and numDsts from params
+    int const numSrcs = params[blockIdx.y].numSrcs;
+    int const numDsts = params[blockIdx.y].numDsts;
+    
+    // Dispatch to specialized implementation for common cases
+    if (numSrcs == 1 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
+    }
+    else if (numSrcs == 0 && numDsts == 1) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 0, 1>
+        (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
+    }
+    else if (numSrcs == 1 && numDsts == 0) {
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, 1, 0>
+        (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
+    }
+    else {
+      // Fallback: Use (-1,-1) template which uses runtime arguments for any combination
+      GpuReduceKernelImpl<PACKED_FLOAT, BLOCKSIZE, UNROLL, TEMPORAL_MODE, -1, -1>
+        (params, seType, warpSize, waveOrder, numSubIterations, numSrcs, numDsts);
     }
   }
 
