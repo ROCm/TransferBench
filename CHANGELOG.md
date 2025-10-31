@@ -13,7 +13,7 @@ Documentation for TransferBench is available at
     - Copy (1 src → 1 dst): Optimized single-source data copy
     - Read-only (1 src → 0 dst): Optimized memory read validation
     - Write-only (0 src → 1 dst): Optimized memory write/initialization
-  - Compiler eliminates dead code loops for these specialized cases, improving performance by ~6% to 7% on MI3xx machines 
+  - Compiler eliminates dead code loops for these specialized cases, improving performance by up to 7% for all-to-all workloads on MI3xx machines
 
 ## v1.64.00
 ### Added
