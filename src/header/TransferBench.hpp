@@ -3017,7 +3017,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   // Kernel for GFX execution
   template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
   __global__ void __launch_bounds__(BLOCKSIZE)
-    GpuReduceKernel(SubExecParam* params, int seType, int warpSize, int waveOrder, int numSubIterations)
+    GpuReduceKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
   {
     int64_t startCycle;
     // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
@@ -3210,7 +3210,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
    GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 8)}
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
-  typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int, int);
+  typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
   GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
   {
     GPU_KERNEL_UNROLL_DECL(64),
@@ -3255,17 +3255,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                       cfg.gfx.wordSize == 2 ? 1 :
                                               2;
     auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
-    int warpSize = GetWarpSize();
 
 #if defined(__NVCC__)
     if (startEvent != NULL)
       ERR_CHECK(hipEventRecord(startEvent, stream));
-    gpuKernel<<<gridSize, blockSize, 0, stream>>>(rss.subExecParamGpuPtr, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+    gpuKernel<<<gridSize, blockSize, 0, stream>>>(rss.subExecParamGpuPtr, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
     if (stopEvent != NULL)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream, startEvent, stopEvent,
-                          0, rss.subExecParamGpuPtr, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+                          0, rss.subExecParamGpuPtr, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
@@ -3333,19 +3332,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                         cfg.gfx.wordSize == 2 ? 1 :
                                                 2;
       auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
-      int warpSize = GetWarpSize();
 
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
-      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
       hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
                             cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                             cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
-                            exeInfo.subExecParamGpu, cfg.gfx.seType, warpSize, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+                            exeInfo.subExecParamGpu, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
       ERR_CHECK(hipStreamSynchronize(stream));
     }
