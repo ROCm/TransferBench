@@ -66,7 +66,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.64";
+  constexpr char VERSION[] = "1.65";
 
   /**
    * Enumeration of supported Executor types
@@ -616,7 +616,7 @@ namespace {
     if (err == hipSuccess) {
       return warpSize;
     }
-    
+
     // Query failed, report error and fall back to compile-time default
     if (errors) {
       errors->push_back({ERR_WARN,
@@ -1346,7 +1346,7 @@ namespace {
           errors.push_back({ERR_WARN,
                             "GPU %d requests %d total %s however only %d available. "
                             "Serialization will occur",
-                            exeDevice.exeIndex, totalSubExecs[exeDevice], 
+                            exeDevice.exeIndex, totalSubExecs[exeDevice],
                             cfg.gfx.seType == 0 ? "CUs" : "warps", numGpuSubExec});
         // Check that if executor subindices are used, all Transfers specify executor subindices
         if (useSubIndexCount[exeDevice] > 0 && useSubIndexCount[exeDevice] != transferCount[exeDevice]) {
@@ -3178,7 +3178,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // For threadblock-level, sync all threads
       __syncthreads();
     }
-    
+
     if (shouldRecordTiming) {
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
