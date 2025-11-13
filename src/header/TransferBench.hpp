@@ -66,7 +66,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.64";
+  constexpr char VERSION[] = "1.65";
 
   /**
    * Enumeration of supported Executor types
@@ -180,6 +180,7 @@ namespace TransferBench
     int                 blockSize      = 256;   ///< Size of each threadblock (must be multiple of 64)
     vector<uint32_t>    cuMask         = {};    ///< Bit-vector representing the CU mask
     vector<vector<int>> prefXccTable   = {};    ///< 2D table with preferred XCD to use for a specific [src][dst] GPU device
+    int                 seType         = 0;     ///< SubExecutor granularity type (0=threadblock, 1=warp)
     int                 temporalMode   = 0;     ///< Non-temporal load/store mode 0=none, 1=load, 2=store, 3=both
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
     int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
@@ -459,6 +460,7 @@ namespace TransferBench
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
   #define hipDeviceAttributeMultiprocessorCount              cudaDevAttrMultiProcessorCount
+  #define hipDeviceAttributeWarpSize                         cudaDevAttrWarpSize
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
   #define hipMemcpyDefault                                   cudaMemcpyDefault
@@ -607,6 +609,38 @@ namespace {
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
   int   constexpr MEMSET_CHAR    = 75;                 // Value to memset (char)
   float constexpr MEMSET_VAL     = 13323083.0f;        // Value to memset (double)
+
+  int GetWarpSize(std::vector<ErrResult>* errors = nullptr) {
+    int warpSize = 0;
+    hipError_t err = hipDeviceGetAttribute(&warpSize, hipDeviceAttributeWarpSize, 0);
+    if (err == hipSuccess) {
+      return warpSize;
+    }
+
+    // Query failed, report error and fall back to compile-time default
+    if (errors) {
+      errors->push_back({ERR_WARN,
+                        "Failed to query device warp size (hipDeviceGetAttribute error: %d). "
+                        "Falling back to compile-time default", err});
+    }
+#if defined(__NVCC__)
+    return 32;
+#else
+    return 64;
+#endif
+  }
+
+  // Calculate grid Y dimension based on SE_TYPE
+  int CalculateGridY(int seType, int blockSize, int numSubExecs) {
+    // Warp-level: each subexecutor is a warp, pack warps into threadblocks
+    if (seType == 1) {
+      int warpsPerBlock = blockSize / GetWarpSize();
+      return (numSubExecs + warpsPerBlock - 1) / warpsPerBlock;
+    }
+
+    // Default: Threadblock-level, each subexecutor is a threadblock
+    return numSubExecs;
+  }
 
 // Parsing-related functions
 //========================================================================================
@@ -1303,11 +1337,17 @@ namespace {
       {
         // Check total number of subexecutors requested
         int numGpuSubExec = GetNumSubExecutors(exeDevice);
+        // For warp-level dispatch, multiply by warps per threadblock
+        if (cfg.gfx.seType == 1) {
+          int warpsPerBlock = cfg.gfx.blockSize / GetWarpSize(&errors);
+          numGpuSubExec *= warpsPerBlock;
+        }
         if (totalSubExecs[exeDevice] > numGpuSubExec)
           errors.push_back({ERR_WARN,
-                            "GPU %d requests %d total CUs however only %d available. "
+                            "GPU %d requests %d total %s however only %d available. "
                             "Serialization will occur",
-                            exeDevice.exeIndex, totalSubExecs[exeDevice], numGpuSubExec});
+                            exeDevice.exeIndex, totalSubExecs[exeDevice],
+                            cfg.gfx.seType == 0 ? "CUs" : "warps", numGpuSubExec});
         // Check that if executor subindices are used, all Transfers specify executor subindices
         if (useSubIndexCount[exeDevice] > 0 && useSubIndexCount[exeDevice] != transferCount[exeDevice]) {
           errors.push_back({ERR_FATAL,
@@ -2977,12 +3017,29 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   // Kernel for GFX execution
   template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
   __global__ void __launch_bounds__(BLOCKSIZE)
-    GpuReduceKernel(SubExecParam* params, int waveOrder, int numSubIterations)
+    GpuReduceKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
   {
     int64_t startCycle;
-    if (threadIdx.x == 0) startCycle = GetTimestamp();
+    // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
+    bool shouldRecordTiming = (seType == 1) ? (threadIdx.x % warpSize == 0) : (threadIdx.x == 0);
+    if (shouldRecordTiming) startCycle = GetTimestamp();
 
-    SubExecParam& p = params[blockIdx.y];
+    // seType: 0=threadblock, 1=warp
+    int subExecIdx;
+    if (seType == 0) {
+      // Threadblock-level: each threadblock is a subexecutor
+      subExecIdx = blockIdx.y;
+    } else {
+      // Warp-level: each warp is a subexecutor
+      int warpIdx = threadIdx.x / warpSize;
+      int warpsPerBlock = BLOCKSIZE / warpSize;
+      subExecIdx = blockIdx.y * warpsPerBlock + warpIdx;
+    }
+
+    SubExecParam& p = params[subExecIdx];
+
+    // For warp-level dispatch, inactive warps should return early
+    if (seType == 1 && p.N == 0) return;
 
     // Filter by XCC
 #if !defined(__NVCC__)
@@ -3002,8 +3059,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Operate on wavefront granularity
     int32_t const nTeams   = p.teamSize;             // Number of threadblocks working together on this subarray
     int32_t const teamIdx  = p.teamIdx;              // Index of this threadblock within the team
-    int32_t const nWaves   = BLOCKSIZE   / warpSize; // Number of wavefronts within this threadblock
-    int32_t const waveIdx  = threadIdx.x / warpSize; // Index of this wavefront within the threadblock
+    int32_t nWaves, waveIdx;
+    if (seType == 0) {
+      // Threadblock-level: all wavefronts in block work together
+      nWaves  = BLOCKSIZE / warpSize;                // Number of wavefronts within this threadblock
+      waveIdx = threadIdx.x / warpSize;              // Index of this wavefront within the threadblock
+    } else {
+      // Warp-level: each warp works independently
+      nWaves  = 1;
+      waveIdx = 0;
+    }
     int32_t const tIdx     = threadIdx.x % warpSize; // Thread index within wavefront
 
     size_t  const numPackedFloat = p.N / (sizeof(PACKED_FLOAT)/sizeof(float));
@@ -3106,8 +3171,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Wait for all threads to finish
-    __syncthreads();
-    if (threadIdx.x == 0) {
+    if (seType == 1) {
+      // For warp-level, sync within warp only
+      __syncwarp();
+    } else {
+      // For threadblock-level, sync all threads
+      __syncthreads();
+    }
+
+    if (shouldRecordTiming) {
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
@@ -3116,10 +3188,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)    \
-  {GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_NONE>,  \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_LOAD>,  \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_STORE>, \
+#define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)           \
+  {GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_NONE>,      \
+   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_LOAD>,      \
+   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_STORE>,     \
    GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_BOTH>}
 
 #define GPU_KERNEL_DWORD_DECL(BLOCKSIZE, UNROLL)        \
@@ -3137,8 +3209,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
    GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 7),      \
    GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 8)}
 
-  // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size)
-  typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int);
+  // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
+  typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
   GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
   {
     GPU_KERNEL_UNROLL_DECL(64),
@@ -3161,6 +3233,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
+  #undef GPU_KERNEL_SE_TYPE_DECL
 
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
@@ -3174,7 +3247,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int numSubExecs = rss.subExecParamCpu.size();
-    dim3 const gridSize(xccDim, numSubExecs, 1);
+    int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
+    dim3 const gridSize(xccDim, gridY, 1);
     dim3 const blockSize(cfg.gfx.blockSize, 1);
 
     int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
@@ -3185,12 +3259,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #if defined(__NVCC__)
     if (startEvent != NULL)
       ERR_CHECK(hipEventRecord(startEvent, stream));
-    gpuKernel<<<gridSize, blockSize, 0, stream>>>(rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+    gpuKernel<<<gridSize, blockSize, 0, stream>>>(rss.subExecParamGpuPtr, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
     if (stopEvent != NULL)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream, startEvent, stopEvent,
-                          0, rss.subExecParamGpuPtr, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+                          0, rss.subExecParamGpuPtr, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
@@ -3249,7 +3323,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     } else {
       // Combine all the Transfers into a single kernel launch
       int numSubExecs = exeInfo.totalSubExecs;
-      dim3 const gridSize(xccDim, numSubExecs, 1);
+      int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
+      dim3 const gridSize(xccDim, gridY, 1);
       dim3 const blockSize(cfg.gfx.blockSize, 1);
       hipStream_t stream = exeInfo.streams[0];
 
@@ -3261,14 +3336,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
-      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
       if (cfg.gfx.useHipEvents)
         ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
 #else
       hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
                             cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                             cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
-                            exeInfo.subExecParamGpu, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+                            exeInfo.subExecParamGpu, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
       ERR_CHECK(hipStreamSynchronize(stream));
     }
@@ -4026,6 +4101,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipDeviceAttributeClockRate
 #undef hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #undef hipDeviceAttributeMultiprocessorCount
+#undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
 #undef hipFuncCachePreferShared
 #undef hipMemcpyDefault
