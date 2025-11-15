@@ -196,3 +196,9 @@ void DisplayTopology(bool outputToCsv)
   }
 #endif
 }
+
+void DisplayMultiNodeTopology(bool outputToCsv)
+{
+  // TODO: Update this for multi-node
+  DisplayTopology(outputToCsv);
+}

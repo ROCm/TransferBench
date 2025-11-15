@@ -49,6 +49,10 @@ THE SOFTWARE.
 #include <fstream>
 #endif
 
+#ifdef MPI_COMM_ENABLED
+#include <mpi.h>
+#endif
+
 #if defined(__NVCC__)
 #include <cuda_runtime.h>
 #else
@@ -93,9 +97,12 @@ namespace TransferBench
   {
     ExeType exeType;                            ///< Executor type
     int32_t exeIndex;                           ///< Executor index
+    int32_t exeRank = -1;                       ///< Executor rank (-1 indicate wildcard)
 
     bool operator<(ExeDevice const& other) const {
-      return (exeType < other.exeType) || (exeType == other.exeType && exeIndex < other.exeIndex);
+      return ((exeType  != other.exeType)  ? (exeType  < other.exeType) :
+              (exeIndex != other.exeIndex) ? (exeIndex < other.exeIndex) :
+                                             (exeRank  < other.exeRank));
     }
   };
 
@@ -126,9 +133,12 @@ namespace TransferBench
   {
     MemType memType;                            ///< Memory type
     int32_t memIndex;                           ///< Device index
+    int32_t memRank = -1;                       ///< Rank index (-1 indicates wildcard)
 
     bool operator<(MemDevice const& other) const {
-      return (memType < other.memType) || (memType == other.memType && memIndex < other.memIndex);
+      return ((memType  != other.memType)  ? (memType  < other.memType) :
+              (memIndex != other.memIndex) ? (memIndex < other.memIndex) :
+                                             (memRank  < other.memRank));
     }
   };
 
@@ -379,10 +389,11 @@ namespace TransferBench
   /**
    * Returns information about number of available available Executors
    *
-   * @param[in] exeType    Executor type to query
+   * @param[in] exeType         Executor type to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected Executors of exeType
    */
-  int GetNumExecutors(ExeType exeType);
+  int GetNumExecutors(ExeType exeType, int targetRank = -1);
 
   /**
    * Returns the number of possible Executor subindices
@@ -391,43 +402,69 @@ namespace TransferBench
    * @note For GFX, this refers to the number of XCDs
    * @note For DMA, this refers to the number of DMA engines
    *
-   * @param[in] exeDevice The specific Executor to query
+   * @param[in] exeDevice       The specific Executor to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected executor subindices
    */
-  int GetNumExecutorSubIndices(ExeDevice exeDevice);
+  int GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank = -1);
 
   /**
    * Returns number of subExecutors for a given ExeDevice
    *
-   * @param[in] exeDevice   The specific Executor to query
+   * @param[in] exeDevice       The specific Executor to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected subExecutors for the given ExePair
    */
-  int GetNumSubExecutors(ExeDevice exeDevice);
+  int GetNumSubExecutors(ExeDevice exeDevice, int targetRank = -1);
 
   /**
    * Returns the index of the NUMA node closest to the given GPU
    *
-   * @param[in] gpuIndex Index of the GPU to query
+   * @param[in] gpuIndex        Index of the GPU to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns NUMA node index closest to GPU gpuIndex, or -1 if unable to detect
    */
-  int GetClosestCpuNumaToGpu(int gpuIndex);
+  int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank = -1);
 
   /**
    * Returns the index of the NUMA node closest to the given NIC
    *
-   * @param[in] nicIndex Index of the NIC to query
+   * @param[in] nicIndex        Index of the NIC to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns NUMA node index closest to the NIC nicIndex, or -1 if unable to detect
    */
-  int GetClosestCpuNumaToNic(int nicIndex);
+  int GetClosestCpuNumaToNic(int nicIndex, int targetRank = -1);
 
   /**
-   * Returns the index of the NIC closest to the given GPU
+   * Returns the index of a NIC closest to the given GPU
    *
-   * @param[in] gpuIndex Index of the GPU to query
+   * @param[in] gpuIndex        Index of the GPU to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns IB Verbs capable NIC index closest to GPU gpuIndex, or -1 if unable to detect
    */
-  int GetClosestNicToGpu(int gpuIndex);
+  int GetClosestNicToGpu(int gpuIndex, int targetRank = -1);
+
+  /**
+   * Returns the indices of the NICs closest to the given GPU
+   *
+   * @param[out] nicIndices     Vector that will contain NIC indices closest to given GPU
+   * @param[in] gpuIndex        Index of the GPU to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns IB Verbs capable NIC indices closest to GPU gpuIndex, or empty if unable to detect
+   */
+  void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+
+  /**
+   * @returns 0-indexed rank for this process
+   */
+  int GetRank();
+
+  /**
+   * @returns The total numbers of ranks participating
+   */
+  int GetNumRanks();
 
   /**
    * Helper function to parse a line containing Transfers into a vector of Transfers
@@ -641,6 +678,203 @@ namespace {
     // Default: Threadblock-level, each subexecutor is a threadblock
     return numSubExecs;
   }
+
+// System singleton
+//========================================================================================
+/**
+   * System singleton class used for multi-node capability / topology dectection
+   *
+   * This supports three possible communication modes - Socket-based, MPI-based, disabled
+   *
+   * - Will first attempt to use sockets if TB_RANK env var is detected
+   * - Will then try MPI-based, if compiled with MPI support
+   * - Drop back to single node functionality
+
+   * - Configuration for socket-based communicator is read via environment variables
+   *   - TB_RANK:        Rank of this process (0-based)
+   *   - TB_NUM_RANKS:   Total number of processes
+   *   - TB_MASTER_ADDR: IP address of rank 0
+   *   - TB_MASTER_PORT: Port for communication (default: 29500)
+   */
+  class System
+  {
+  public:
+    static System& Get() {
+      static System instance;
+      return instance;
+    }
+
+    /**
+     * @returns 0-indexed rank for this process
+     */
+    int GetRank() const { return rank; }
+
+    /**
+     * @returns The total numbers of ranks participating
+     */
+    int GetNumRanks() const { return numRanks; }
+
+    // Communication functions
+    /**
+     * Barrier that all ranks must arrive at before proceeding
+     */
+    void Barrier();
+
+    /**
+     * Send data to a single destination rank
+     * Requires a matching call to RecvData on destination rank
+     * NOTE: For socket-based communicator, this must involve rank 0
+     *
+     * @param[in] dstRank       Rank to send to
+     * @param[in] numBytes      Number of bytes to send
+     * @param[in] sendData      Data to send
+     */
+    void SendData(int dstRank, size_t const numBytes, const void* sendData) const;
+
+    /**
+     * Recevive data from a single source rank
+     * Requires a matching call to SendData on source rank
+     * NOTE: For socket-based communicator, this must involve rank 0
+     *
+     * @param[in] srcRank       Rank to receive from
+     * @param[in] numBytes      Number of bytes to receive
+     * @param[in] recvData      Buffer to receive data into
+     */
+    void RecvData(int srcRank, size_t const numBytes, void* recvData) const;
+
+    // Topology functions
+    /**
+     * Returns information about number of available Executors
+     *
+     * @param[in] exeType       Executor type to query
+     * @param[in] targetRank    Rank to query.  (-1 for local rank)
+     * @returns Number of detected Executors of exeType
+     */
+    int GetNumExecutors(ExeType exeType, int targetRank = -1) const;
+
+    /**
+     * Returns the number of possible Executor subindices
+     *
+     * @note For CPU, this is 0
+     * @note For GFX, this refers to the number of XCDs
+     * @note For DMA, this refers to the number of DMA engines
+     *
+     * @param[in] exeDevice     The specific Executor to query
+     * @param[in] targetRank    Rank to query (-1 for local rank)
+     * @returns Number of detected executor subindices
+     */
+    int GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank = -1) const;
+
+    /**
+     * Returns number of subExecutors for a given ExeDevice
+     *
+     * @param[in] exeDevice     The specific Executor to query
+     * @param[in] targetRank    Rank to query (-1 for local rank)
+     * @returns Number of detected subExecutors for the given ExePair
+     */
+    int GetNumSubExecutors(ExeDevice exeDevice, int targetRank = -1) const;
+
+    /**
+     * Returns the index of the NUMA node closest to the given GPU
+     *
+     * @param[in] gpuIndex      Index of the GPU to query
+     * @param[in] targetRank    Rank to query (-1 for local rank)
+     * @returns NUMA node index closest to GPU gpuIndex, or -1 if unable to detect
+     */
+    int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank = -1) const;
+
+    /**
+     * Returns the index of the NUMA node closest to the given NIC
+     *
+     * @param[in] nicIndex      Index of the NIC to query
+     * @param[in] targetRank    Rank to query (-1 for local rank)
+     * @returns NUMA node index closest to the NIC nicIndex, or -1 if unable to detect
+     */
+    int GetClosestCpuNumaToNic(int nicIndex, int targetRank = -1) const;
+
+    /**
+     * Returns the indices of the NICs closest to the given GPU
+     *
+     * @param[out] nicIndices     Vector that will contain NIC indices closest to given GPU
+     * @param[in] gpuIndex        Index of the GPU to query
+     * @param[in] targetRank      Rank to query (-1 for local rank)
+     * @note This function is applicable when the IBV/RDMA executor is available
+     * @returns IB Verbs capable NIC indices closest to GPU gpuIndex, or empty if unable to detect
+     */
+    void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1) const;
+
+#if !defined(__NVCC__)
+    ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
+    ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
+#endif
+
+  private:
+    System();
+    ~System();
+    System(System const&)            = delete;
+    System(System&&)                 = delete;
+    System& operator=(System const&) = delete;
+    System& operator=(System&&)      = delete;
+
+    int rank;
+    int numRanks;
+    bool verbose = false;
+
+#if !defined(__NVCC__)
+    std::vector<hsa_agent_t> cpuAgents;
+    std::vector<hsa_agent_t> gpuAgents;
+#endif
+
+    enum CommType
+    {
+      COMM_NONE   = 0,                        ///< Single node only
+      COMM_MPI    = 1,                        ///< MPI-based communication
+      COMM_SOCKET = 2                         ///< Socket-based communication
+    };
+
+    int commMode;                             ///< Communication mode
+
+#ifdef MPI_COMM_ENABLED
+    bool mpiInit = false;                     ///< Whether or not MPI_Init was called
+    MPI_Comm comm;                            ///< MPI communicator
+#endif
+
+    // Socket related
+    std::string      masterAddr;              ///< Rank 0 master address
+    int              masterPort;              ///< Rank 0 master port
+    std::vector<int> sockets;                 ///< Master list of sockets
+    int              listenSocket;            ///< Master listener socket
+
+    // Topology related
+    struct RankTopology
+    {
+      std::map<ExeType,   int>   numExecutors;
+      std::map<ExeDevice, int>   numExecutorSubIndices;
+      std::map<ExeDevice, int>   numSubExecutors;
+      std::map<int,       int>   closestCpuNumaToGpu;
+      std::map<int,       int>   closestCpuNumaToNic;
+      std::map<int, vector<int>> closestNicsToGpu;
+    };
+
+    std::vector<RankTopology> rankInfo;       ///< Topology of each rank
+
+    void SetupSocketCommunicator();
+    void SetupMpiCommunicator();
+    void GetRankTopology(RankTopology& topo);
+    void CollectTopology();
+
+    template <typename KeyType, typename ValType>
+    void SendMap(int peerRank, std::map<KeyType, std::vector<ValType>> const& mapToSend) const;
+    template <typename KeyType, typename ValType>
+    void SendMap(int peerRank, std::map<KeyType, ValType> const& mapToSend) const;
+    template <typename KeyType, typename ValType>
+    void RecvMap(int peerRank, std::map<KeyType, std::vector<ValType>>& mapToRecv) const;
+    template <typename KeyType, typename ValType>
+    void RecvMap(int peerRank, std::map<KeyType, ValType>& mapToRecv) const;
+
+    void SendRankTopo(int peerRank, RankTopology const& topo) const;
+    void RecvRankTopo(int peerRank, RankTopology& topo) const;
+  };
 
 // Parsing-related functions
 //========================================================================================
@@ -866,79 +1100,6 @@ namespace {
 
 // HSA-related functions
 //========================================================================================
-
-#if !defined(__NVCC__)
-  // Get the hsa_agent_t associated with a ExeDevice
-  static ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent)
-  {
-    static bool isInitialized = false;
-    static std::vector<hsa_agent_t> cpuAgents;
-    static std::vector<hsa_agent_t> gpuAgents;
-
-    int const& exeIndex = exeDevice.exeIndex;
-    int const numCpus   = GetNumExecutors(EXE_CPU);
-    int const numGpus   = GetNumExecutors(EXE_GPU_GFX);
-
-    // Initialize results on first use
-    if (!isInitialized) {
-      hsa_amd_pointer_info_t info;
-      info.size = sizeof(info);
-
-      ErrResult err;
-      int32_t* tempBuffer;
-
-      // Index CPU agents
-      cpuAgents.clear();
-      for (int i = 0; i < numCpus; i++) {
-        ERR_CHECK(AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer));
-        ERR_CHECK(hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL));
-        cpuAgents.push_back(info.agentOwner);
-        ERR_CHECK(DeallocateMemory(MEM_CPU, tempBuffer, 1024));
-      }
-
-      // Index GPU agents
-      gpuAgents.clear();
-      for (int i = 0; i < numGpus; i++) {
-        ERR_CHECK(AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer));
-        ERR_CHECK(hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL));
-        gpuAgents.push_back(info.agentOwner);
-        ERR_CHECK(DeallocateMemory(MEM_GPU, tempBuffer, 1024));
-      }
-      isInitialized = true;
-    }
-
-    switch (exeDevice.exeType) {
-    case EXE_CPU:
-      if (exeIndex < 0 || exeIndex >= numCpus)
-        return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
-      agent = cpuAgents[exeDevice.exeIndex];
-      break;
-    case EXE_GPU_GFX: case EXE_GPU_DMA:
-      if (exeIndex < 0 || exeIndex >= numGpus)
-
-        return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
-      agent = gpuAgents[exeIndex];
-      break;
-    default:
-      return {ERR_FATAL,
-              "Attempting to get HSA agent of unknown or unsupported executor type (%d)",
-              exeDevice.exeType};
-    }
-    return ERR_NONE;
-  }
-
-  // Get the hsa_agent_t associated with a MemDevice
-  static ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent)
-  {
-    if (memDevice.memType == MEM_CPU_CLOSEST)
-      return GetHsaAgent({EXE_CPU, GetClosestCpuNumaToGpu(memDevice.memIndex)}, agent);
-    if (IsCpuMemType(memDevice.memType)) return GetHsaAgent({EXE_CPU, memDevice.memIndex}, agent);
-    if (IsGpuMemType(memDevice.memType)) return GetHsaAgent({EXE_GPU_GFX, memDevice.memIndex}, agent);
-    return {ERR_FATAL,
-            "Unable to get HSA agent for memDevice (%d,%d)",
-            memDevice.memType, memDevice.memIndex};
-  }
-#endif
 
 // Setup validation-related functions
 //========================================================================================
@@ -1230,12 +1391,12 @@ namespace {
           // Check that engine Id exists between agents
           hsa_agent_t srcAgent, dstAgent;
           ErrResult err;
-          err = GetHsaAgent(t.srcs[0], srcAgent);
+          err = System::Get().GetHsaAgent(t.srcs[0], srcAgent);
           if (err.errType != ERR_NONE) {
             errors.push_back(err);
             if (err.errType == ERR_FATAL) break;
           }
-          err = GetHsaAgent(t.dsts[0], dstAgent);
+          err = System::Get().GetHsaAgent(t.dsts[0], dstAgent);
           if (err.errType != ERR_NONE) {
             errors.push_back(err);
             if (err.errType == ERR_FATAL) break;
@@ -1781,7 +1942,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Build PCIe tree on first use
     if (!isInitialized) {
       // Add NICs to the tree
-      int numNics = GetNumExecutors(EXE_NIC);
+      int numNics = GetIbvDeviceList().size();
       auto const& ibvDeviceList = GetIbvDeviceList();
       for (IbvDevice const& ibvDevice : ibvDeviceList) {
         if (!ibvDevice.hasActivePort || ibvDevice.busId == "") continue;
@@ -1789,7 +1950,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
 
       // Add GPUs to the tree
-      int numGpus = GetNumExecutors(EXE_GPU_GFX);
+      int numGpus = 0;
+      if (hipGetDeviceCount(&numGpus) != hipSuccess) numGpus = 0;
       for (int i = 0; i < numGpus; ++i) {
         char hipPciBusId[64];
         if (hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i) == hipSuccess) {
@@ -3211,6 +3373,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
+#if 1
+  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
+  {
+    GPU_KERNEL_UNROLL_DECL(64),
+    GPU_KERNEL_UNROLL_DECL(128),
+    GPU_KERNEL_UNROLL_DECL(192),
+    GPU_KERNEL_UNROLL_DECL(256),
+  };
+#else
   GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
   {
     GPU_KERNEL_UNROLL_DECL(64),
@@ -3230,6 +3401,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     GPU_KERNEL_UNROLL_DECL(960),
     GPU_KERNEL_UNROLL_DECL(1024),
   };
+#endif
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
@@ -3864,224 +4036,754 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
-  int GetNumExecutors(ExeType exeType)
+  // System related
+  //========================================================================================
+  System::System() :
+    rank(0), numRanks(1), commMode(COMM_NONE)
   {
-    switch (exeType) {
-    case EXE_CPU:
-      return numa_num_configured_nodes();
-    case EXE_GPU_GFX: case EXE_GPU_DMA:
-    {
-      int numDetectedGpus = 0;
-      hipError_t status = hipGetDeviceCount(&numDetectedGpus);
-      if (status != hipSuccess) numDetectedGpus = 0;
-      return numDetectedGpus;
+    verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
+
+    // Priority 1: Socket communicator
+    SetupSocketCommunicator();
+
+    // Priority 2: MPI communicator
+    if (commMode == COMM_NONE) {
+      SetupMpiCommunicator();
     }
-#ifdef NIC_EXEC_ENABLED
-    case EXE_NIC: case EXE_NIC_NEAREST:
-    {
-      return GetIbvDeviceList().size();
+
+    if (verbose && commMode == COMM_NONE) {
+      printf("[INFO] Running in single node mode\n");
     }
-#endif
-    default:
-      return 0;
-    }
+
+    // Collect topology and distribute across all ranks
+    CollectTopology();
+
+    Barrier();
   }
 
-  int GetNumSubExecutors(ExeDevice exeDevice)
+  System::~System()
   {
-    int const& exeIndex = exeDevice.exeIndex;
-
-    switch(exeDevice.exeType) {
-    case EXE_CPU:
-    {
-      int numCores = 0;
-      for (int i = 0; i < numa_num_configured_cpus(); i++)
-        if (numa_node_of_cpu(i) == exeIndex) numCores++;
-      return numCores;
-    }
-    case EXE_GPU_GFX:
-    {
-      int numGpus = GetNumExecutors(EXE_GPU_GFX);
-      if (exeIndex < 0 || numGpus <= exeIndex) return 0;
-      int numDeviceCUs = 0;
-      hipError_t status = hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, exeIndex);
-      if (status != hipSuccess) numDeviceCUs = 0;
-      return numDeviceCUs;
-    }
-    case EXE_GPU_DMA:
-    {
-      return 1;
-    }
-    default:
-      return 0;
-    }
-  }
-
-  int GetNumExecutorSubIndices(ExeDevice exeDevice)
-  {
-    // Executor subindices are not supported on NVIDIA hardware
-#if defined(__NVCC__)
-    return 0;
-#else
-    int const& exeIndex = exeDevice.exeIndex;
-
-    switch(exeDevice.exeType) {
-    case EXE_CPU: return 0;
-    case EXE_GPU_GFX:
-    {
-      hsa_agent_t agent;
-      ErrResult err = GetHsaAgent(exeDevice, agent);
-      if (err.errType != ERR_NONE) return 0;
-      int numXccs = 1;
-      if (hsa_agent_get_info(agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_XCC, &numXccs) != HSA_STATUS_SUCCESS)
-        return 1;
-      return numXccs;
-    }
-    case EXE_GPU_DMA:
-    {
-      std::set<int> engineIds;
-      ErrResult err;
-
-      // Get HSA agent for this GPU
-      hsa_agent_t agent;
-      err = GetHsaAgent(exeDevice, agent);
-      if (err.errType != ERR_NONE) return 0;
-
-      int numTotalEngines = 0, numEnginesA = 0, numEnginesB = 0;
-      if (hsa_agent_get_info(agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_ENG, &numEnginesA)
-          == HSA_STATUS_SUCCESS)
-        numTotalEngines += numEnginesA;
-      if (hsa_agent_get_info(agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_XGMI_ENG, &numEnginesB)
-          == HSA_STATUS_SUCCESS)
-        numTotalEngines += numEnginesB;
-
-      return numTotalEngines;
-    }
-    default:
-      return 0;
-    }
-#endif
-  }
-
-  int GetClosestCpuNumaToGpu(int gpuIndex)
-  {
-    // Closest NUMA is not supported on NVIDIA hardware at this time
-#if defined(__NVCC__)
-    return -1;
-#else
-    hsa_agent_t gpuAgent;
-    ErrResult err = GetHsaAgent({EXE_GPU_GFX, gpuIndex}, gpuAgent);
-    if (err.errType != ERR_NONE) return -1;
-
-    hsa_agent_t closestCpuAgent;
-    if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NEAREST_CPU, &closestCpuAgent)
-        == HSA_STATUS_SUCCESS) {
-      int numCpus = GetNumExecutors(EXE_CPU);
-      for (int i = 0; i < numCpus; i++) {
-        hsa_agent_t cpuAgent;
-        err = GetHsaAgent({EXE_CPU, i}, cpuAgent);
-        if (err.errType != ERR_NONE) return -1;
-        if (cpuAgent.handle == closestCpuAgent.handle) return i;
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      if (mpiInit == true)  {
+        MPI_Finalize();
       }
     }
-    return -1;
+#endif
+    if (commMode == COMM_SOCKET) {
+      // Close all sockets
+      for (auto& sock : sockets) {
+        if (sock != -1) {
+          close(sock);
+          sock = -1;
+        }
+      }
+
+      if (listenSocket != -1) {
+        close(listenSocket);
+        listenSocket = -1;
+      }
+    }
+  }
+
+  void System::SetupSocketCommunicator()
+  {
+    char* rankStr       = getenv("TB_RANK");
+    char* numRanksStr   = getenv("TB_NUM_RANKS");
+    char* masterAddrStr = getenv("TB_MASTER_ADDR");
+    char* masterPortStr = getenv("TB_MASTER_PORT");
+
+    // Socket communicator requires rank / numRanks / masterAddr
+    if (!rankStr || !numRanksStr || !masterAddrStr) {
+      if (verbose) {
+        printf("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
+      }
+      return;
+    }
+
+    rank       = atoi(rankStr);
+    numRanks   = atoi(numRanksStr);
+    masterAddr = masterAddrStr;
+    masterPort = masterPortStr ? atoi(masterPortStr) : 29500;
+
+    if (rank < 0 || rank >= numRanks) {
+      printf("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
+      exit(1);
+    }
+
+    sockets.resize(numRanks, -1);
+
+    // Rank 0 acts as server for others to connect to
+    int opt = 1;
+    if (rank == 0) {
+      // Create listening socket
+      listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (listenSocket == -1) {
+        printf("[ERROR] Unable to create listener socket\n");
+        exit(1);
+      }
+
+      // Allow address reuse
+      setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+      // Bind to port
+      sockaddr_in serverAddr;
+      memset(&serverAddr, 0, sizeof(serverAddr));
+      serverAddr.sin_family      = AF_INET;
+      serverAddr.sin_addr.s_addr = INADDR_ANY;
+      serverAddr.sin_port        = htons(masterPort);
+
+      if (bind(listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
+        printf("[ERROR] Failed to bind listen socket\n");
+        exit(1);
+      }
+
+      if (listen(listenSocket, numRanks) == -1) {
+        printf("[ERROR] Failed to listen on socket\n");
+        exit(1);
+      }
+      // Accept connections from other ranks
+      if (verbose) {
+        printf("[INFO] Rank 0 waiting for connections from other ranks\n");
+      }
+      for (int i = 1; i < numRanks; i++) {
+        sockaddr_in clientAddr;
+        socklen_t clientAddrLen = sizeof(clientAddr);
+
+        auto clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
+        if (clientSocket == -1) {
+          printf("[ERROR] Failed to accept connection from rank %d\n", i);
+          exit(1);
+        }
+
+        // Receive rank ID from client
+        int clientRank;
+        recv(clientSocket, (char*)&clientRank, sizeof(clientRank), 0);
+
+        if (clientRank < 0 || clientRank >= numRanks) {
+          close(clientSocket);
+          printf("[ERROR] Invalid rank received: %d\n", clientRank);
+          exit(1);
+        }
+        if (verbose) {
+          printf("[INFO] Rank 0 accepted connection from rank %d\n", clientRank);
+        }
+        sockets[clientRank] = clientSocket;
+      }
+    } else {
+      // All other ranks connect to rank 0
+      int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (sock == -1) {
+        printf("[ERROR] Failed to create socket\n");
+        exit(1);
+      }
+
+      sockaddr_in serverAddr;
+      memset(&serverAddr, 0, sizeof(serverAddr));
+      serverAddr.sin_family = AF_INET;
+      serverAddr.sin_port = htons(masterPort);
+      if (inet_pton(AF_INET, masterAddr.c_str(), &serverAddr.sin_addr) <= 0) {
+        printf("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
+        exit(1);
+      }
+
+      // Retry connection with backoff
+      if (verbose)
+        printf("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
+      int maxRetries = 50;
+      for (int retry = 0; retry < maxRetries; retry++) {
+        if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
+          break;
+        }
+        if (retry == maxRetries - 1) {
+          printf("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
+        }
+        sleep(1);
+      }
+
+      // Send local rank to the server
+      send(sock, (char*)&rank, sizeof(rank), 0);
+      sockets[0] = sock;
+    }
+
+    commMode = COMM_SOCKET;
+  };
+
+  void System::SetupMpiCommunicator()
+  {
+#ifdef MPI_COMM_ENABLED
+    int flag;
+    MPI_Initialized(&flag);
+    if (!flag) {
+      MPI_Init(NULL, NULL);
+      mpiInit = true;
+    }
+
+    comm = MPI_COMM_WORLD;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &numRanks);
+    if (numRanks > 1) {
+      if (verbose) {
+        printf("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
+      }
+      commMode = COMM_MPI;
+    }
 #endif
   }
 
-  int GetClosestCpuNumaToNic(int nicIndex)
+  void System::Barrier()
   {
-#ifdef NIC_EXEC_ENABLED
-    int numNics = GetNumExecutors(EXE_NIC);
-    if (nicIndex < 0 || nicIndex >= numNics) return -1;
-    return GetIbvDeviceList()[nicIndex].numaNode;
-#else
-    return -1;
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Barrier(comm);
+      return;
+    }
 #endif
+    if (commMode == COMM_SOCKET) {
+      char dummy = 0;
+
+      // Simple barrier using rank 0 to coordinate
+      if (rank == 0) {
+        // Wait for notification from all ranks
+        for (int peerRank = 1; peerRank < numRanks; peerRank++)
+          RecvData(peerRank, 1, &dummy);
+
+        // Release all ranks
+        for (int peerRank = 1; peerRank < numRanks; peerRank++)
+          SendData(peerRank, 1, &dummy);
+      } else {
+        // Send notification to root
+        SendData(0, 1, &dummy);
+
+        // Wait for release from root
+        RecvData(0, 1, &dummy);
+      }
+    }
   }
 
-
-  int GetClosestNicToGpu(int gpuIndex)
+  void System::SendData(int dstRank, size_t const numBytes, const void* sendData) const
   {
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Send(sendData, numBytes, MPI_BYTE, dstRank, 1234, comm);
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      if (rank != 0 && dstRank != 0) {
+        printf("[ERROR] Socket communicator is limited to sending from/to rank 0\n");
+        exit(1);
+      }
+      auto sock = sockets[dstRank];
+
+      // Send data
+      size_t totalSent = 0;
+      while (totalSent < numBytes) {
+        auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, 0);
+        if (sent == -1) {
+          printf("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
+          exit(1);
+        }
+        totalSent += sent;
+      }
+    }
+  }
+
+  void System::RecvData(int srcRank, size_t const numBytes, void* recvData) const
+  {
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Status status;
+      MPI_Recv(recvData, numBytes, MPI_BYTE, srcRank, 1234, comm, &status);
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      if (rank != 0 && srcRank != 0) {
+        printf("[ERROR] Socket communicator is limited to receiving from/at rank 0\n");
+        exit(1);
+      }
+
+      auto sock = sockets[srcRank];
+      size_t totalRecv = 0;
+      while (totalRecv < numBytes) {
+        auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);
+        if (recvd == -1 || recvd == 0) {
+          printf("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
+          exit(1);
+        }
+        totalRecv += recvd;
+      }
+    }
+  }
+
+  void System::GetRankTopology(RankTopology& topo)
+  {
+    // Clear topology structure first
+    topo.numExecutors.clear();
+    topo.numExecutorSubIndices.clear();
+    topo.numSubExecutors.clear();
+    topo.closestCpuNumaToGpu.clear();
+    topo.closestCpuNumaToNic.clear();
+    topo.closestNicsToGpu.clear();
+
+    // CPU Executor
+    int numCpus = numa_num_configured_nodes();
+    topo.numExecutors[EXE_CPU] = numCpus;
+
+    for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+      topo.numExecutorSubIndices[{EXE_CPU, exeIndex}] = 0;
+    }
+    for (int cpuCore = 0; cpuCore < numa_num_configured_cpus(); cpuCore++) {
+      topo.numSubExecutors[{EXE_CPU, numa_node_of_cpu(cpuCore)}]++;
+    }
+    if (verbose) {
+      for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+        printf("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores\n", rank, exeIndex, numCpus, topo.numSubExecutors[{EXE_CPU, exeIndex}]);
+      }
+    }
+
+    // GPU Executor
+    int numGpus = 0;
+    hipError_t status = hipGetDeviceCount(&numGpus);
+    if (status != hipSuccess) numGpus = 0;
+    topo.numExecutors[EXE_GPU_GFX] = numGpus;
+    topo.numExecutors[EXE_GPU_DMA] = numGpus;
+
+    for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+      int numDeviceCUs  = 0;
+      int numXccs       = 0;
+      int numDmaEngines = 0;
+      int closestNuma   = -1;
+
+      if (hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, exeIndex) != hipSuccess) {
+        numDeviceCUs = 0;
+      }
+
+#if !defined(__NVCC__)
+      hsa_agent_t gpuAgent = gpuAgents[exeIndex];
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_XCC, &numXccs) != HSA_STATUS_SUCCESS)
+        numXccs = 1;
+
+      int numEnginesA, numEnginesB;
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_ENG, &numEnginesA)
+          == HSA_STATUS_SUCCESS)
+        numDmaEngines += numEnginesA;
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_XGMI_ENG, &numEnginesB)
+          == HSA_STATUS_SUCCESS)
+        numDmaEngines += numEnginesB;
+
+      hsa_agent_t closestCpuAgent;
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NEAREST_CPU, &closestCpuAgent)
+          == HSA_STATUS_SUCCESS) {
+        for (int cpuIndex = 0; cpuIndex < numCpus; cpuIndex++) {
+          hsa_agent_t cpuAgent = cpuAgents[cpuIndex];
+          if (cpuAgent.handle == closestCpuAgent.handle) {
+            closestNuma = cpuIndex;
+            break;
+          }
+        }
+      }
+#endif
+      topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}] = numXccs;
+      topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
+      topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
+      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
+      topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
+    }
+
+    // NIC Executor
+    int numNics = 0;
 #ifdef NIC_EXEC_ENABLED
-    static bool isInitialized = false;
-    static std::vector<int> closestNicId;
-
-    int numGpus = GetNumExecutors(EXE_GPU_GFX);
-    if (gpuIndex < 0 || gpuIndex >= numGpus) return -1;
-
-    // Build closest NICs per GPU on first use
-    if (!isInitialized) {
-      closestNicId.resize(numGpus, -1);
-
-      // Build up list of NIC bus addresses
-      std::vector<std::string> ibvAddressList;
-      auto const& ibvDeviceList = GetIbvDeviceList();
-      for (auto const& ibvDevice : ibvDeviceList)
-        ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
-
-      // Track how many times a device has been assigned as "closest"
-      // This allows distributed work across devices using multiple ports (sharing the same busID)
-      // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
-      // Counter example:
-      //
-      //  G0 prefers (N0,N1), picks N0
-      //  G1 prefers (N1,N2), picks N1
-      //  G2 prefers N0,      picks N0
-      //
-      //  instead of G0->N1, G1->N2, G2->N0
-
-      std::vector<int> assignedCount(ibvDeviceList.size(), 0);
-
-      // Loop over each GPU to find the closest NIC(s) based on PCIe address
-      for (int i = 0; i < numGpus; i++) {
-        // Collect PCIe address for the GPU
-        char hipPciBusId[64];
-        hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i);
-        if (err != hipSuccess) {
-#ifdef VERBS_DEBUG
-          printf("Failed to get PCI Bus ID for HIP device %d: %s\n", i, hipGetErrorString(err));
+    numNics = GetIbvDeviceList().size();
+    for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+      topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+      if (verbose) {
+        printf("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
+      }
+    }
 #endif
-          closestNicId[i] = -1;
-          continue;
-        }
+    topo.numExecutors[EXE_NIC] = topo.numExecutors[EXE_NIC_NEAREST] = numNics;
+    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+      topo.numSubExecutors[{EXE_NIC, nicIndex}] = 0;
+      topo.numExecutorSubIndices[{EXE_NIC, nicIndex}] = 0;
+    }
+    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+      topo.numSubExecutors[{EXE_NIC_NEAREST, gpuIndex}] = 0;
+      topo.numExecutorSubIndices[{EXE_NIC_NEAREST, gpuIndex}] = 0;
+    }
 
-        // Find closest NICs
-        std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
+    // Figure out closest NICs to GPUs
+#ifdef NIC_EXEC_ENABLED
 
-        // Pick the least-used NIC to assign as closest
-        int closestIdx = -1;
-        for (auto idx : closestNicIdxs) {
-          if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
-            closestIdx = idx;
-        }
+    // Build up list of NIC bus addresses
+    std::vector<std::string> ibvAddressList;
+    auto const& ibvDeviceList = GetIbvDeviceList();
+    for (auto const& ibvDevice : ibvDeviceList)
+      ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
 
-        // The following will only use distance between bus IDs
-        // to determine the closest NIC to GPU if the PCIe tree approach fails
-        if (closestIdx < 0) {
+    // Track how many times a device has been assigned as "closest"
+    // This allows distributed work across devices using multiple ports (sharing the same busID)
+    // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
+    // Counter example:
+    //
+    //  G0 prefers (N0,N1), picks N0
+    //  G1 prefers (N1,N2), picks N1
+    //  G2 prefers N0,      picks N0
+    //
+    //  instead of G0->N1, G1->N2, G2->N0
+
+    std::vector<int> assignedCount(ibvDeviceList.size(), 0);
+
+    // Loop over each GPU to find the closest NIC(s) based on PCIe address
+    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+      // Collect PCIe address for the GPU
+      char hipPciBusId[64];
+      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIndex);
+      if (err != hipSuccess) {
 #ifdef VERBS_DEBUG
-          printf("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+        printf("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
 #endif
+        continue;
+      }
 
-          int minDistance = std::numeric_limits<int>::max();
-          for (int j = 0; j < ibvDeviceList.size(); j++) {
-            if (ibvDeviceList[j].busId != "") {
-              int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[j].busId);
-              if (distance < minDistance && distance >= 0) {
-                minDistance = distance;
-                closestIdx = j;
-              }
+      // Find closest NICs
+      std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
+
+      // Pick the least-used NIC to assign as closest
+      int closestIdx = -1;
+      for (auto idx : closestNicIdxs) {
+        if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
+          closestIdx = idx;
+      }
+
+      // The following will only use distance between bus IDs
+      // to determine the closest NIC to GPU if the PCIe tree approach fails
+      if (closestIdx < 0) {
+#ifdef VERBS_DEBUG
+        printf("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+#endif
+        int minDistance = std::numeric_limits<int>::max();
+        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+          if (ibvDeviceList[nicIndex].busId != "") {
+            int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
+            if (distance < minDistance && distance >= 0) {
+              minDistance = distance;
+              closestIdx = nicIndex;
             }
           }
         }
-        closestNicId[i] = closestIdx;
-        if (closestIdx != -1) assignedCount[closestIdx]++;
       }
-      isInitialized = true;
+      if (closestIdx != 1) {
+        topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
+        assignedCount[closestIdx]++;
+      }
     }
-    return closestNicId[gpuIndex];
-#else
-    return -1;
 #endif
+
+    if (verbose) {
+      for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
+               topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
+               topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
+               topo.closestCpuNumaToGpu[exeIndex]);
+        if (topo.closestNicsToGpu[exeIndex].size() == 0) {
+          printf(" none");
+        } else {
+          for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
+            printf(" %d", nicIndex);
+          }
+          printf("\n");
+        }
+      }
+    }
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::SendMap(int peerRank, std::map<KeyType, std::vector<ValType>> const& mapToSend) const
+  {
+    size_t mapSize = mapToSend.size();
+    SendData(peerRank, sizeof(mapSize), &mapSize);
+    for (auto const& p : mapToSend) {
+      SendData(peerRank, sizeof(p.first), &p.first);
+      size_t vectorSize = p.second.size();
+      SendData(peerRank, sizeof(vectorSize), &vectorSize);
+      for (auto const& v : p.second) {
+        SendData(peerRank, sizeof(v), &v);
+      }
+    }
+    fflush(stdout);
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::SendMap(int peerRank, std::map<KeyType, ValType> const& mapToSend) const
+  {
+    size_t mapSize = mapToSend.size();
+    SendData(peerRank, sizeof(mapSize), &mapSize);
+    for (auto const p : mapToSend) {
+      SendData(peerRank, sizeof(p), &p);
+    }
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::RecvMap(int peerRank, std::map<KeyType, std::vector<ValType>>& mapToRecv) const
+  {
+    mapToRecv.clear();
+    size_t mapSize;
+    RecvData(peerRank, sizeof(mapSize), &mapSize);
+    for (size_t i = 0; i < mapSize; i++) {
+      KeyType key;
+      size_t vectorSize;
+      std::vector<ValType> values;
+      RecvData(peerRank, sizeof(key), &key);
+      RecvData(peerRank, sizeof(vectorSize), &vectorSize);
+      if (vectorSize) {
+        values.resize(vectorSize);
+        for (size_t j = 0; j < vectorSize; j++) {
+          RecvData(peerRank, sizeof(ValType), &values[j]);
+        }
+      }
+      mapToRecv[key] = values;
+    }
+  }
+
+
+  template <typename KeyType, typename ValType>
+  void System::RecvMap(int peerRank, std::map<KeyType, ValType>& mapToRecv) const
+  {
+    mapToRecv.clear();
+    size_t mapSize;
+    RecvData(peerRank, sizeof(mapSize), &mapSize);
+    for (size_t i = 0; i < mapSize; i++) {
+      std::pair<KeyType, ValType> p;
+      RecvData(peerRank, sizeof(p), &p);
+      mapToRecv[p.first] = p.second;
+    }
+  }
+
+  void System::SendRankTopo(int peerRank, RankTopology const& topo) const
+  {
+    SendMap(peerRank, topo.numExecutors);
+    SendMap(peerRank, topo.numExecutorSubIndices);
+    SendMap(peerRank, topo.numSubExecutors);
+    SendMap(peerRank, topo.closestCpuNumaToGpu);
+    SendMap(peerRank, topo.closestCpuNumaToNic);
+    SendMap(peerRank, topo.closestNicsToGpu);
+  };
+
+  void System::RecvRankTopo(int peerRank, RankTopology& topo) const
+  {
+    RecvMap(peerRank, topo.numExecutors);
+    RecvMap(peerRank, topo.numExecutorSubIndices);
+    RecvMap(peerRank, topo.numSubExecutors);
+    RecvMap(peerRank, topo.closestCpuNumaToGpu);
+    RecvMap(peerRank, topo.closestCpuNumaToNic);
+    RecvMap(peerRank, topo.closestNicsToGpu);
+  }
+
+#if !defined(__NVCC__)
+  // Get the hsa_agent_t associated with a ExeDevice
+  ErrResult System::GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const
+  {
+    int numCpus = static_cast<int>(cpuAgents.size());
+    int numGpus = static_cast<int>(gpuAgents.size());
+    int exeIndex = exeDevice.exeIndex;
+
+    switch (exeDevice.exeType) {
+    case EXE_CPU:
+      if (exeIndex < 0 || exeIndex >= numCpus)
+        return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
+      agent = cpuAgents[exeDevice.exeIndex];
+      break;
+    case EXE_GPU_GFX: case EXE_GPU_DMA:
+      if (exeIndex < 0 || exeIndex >= numGpus)
+        return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
+      agent = gpuAgents[exeIndex];
+      break;
+    default:
+      return {ERR_FATAL,
+              "Attempting to get HSA agent of unknown or unsupported executor type (%d)",
+              exeDevice.exeType};
+    }
+    return ERR_NONE;
+  }
+
+  // Get the hsa_agent_t associated with a MemDevice
+  ErrResult System::GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const
+  {
+    if (memDevice.memType == MEM_CPU_CLOSEST)
+      return GetHsaAgent({EXE_CPU, GetClosestCpuNumaToGpu(memDevice.memIndex)}, agent);
+    if (IsCpuMemType(memDevice.memType)) return GetHsaAgent({EXE_CPU, memDevice.memIndex}, agent);
+    if (IsGpuMemType(memDevice.memType)) return GetHsaAgent({EXE_GPU_GFX, memDevice.memIndex}, agent);
+    return {ERR_FATAL,
+            "Unable to get HSA agent for memDevice (%d,%d)",
+            memDevice.memType, memDevice.memIndex};
+  }
+#endif
+
+  void System::CollectTopology()
+  {
+    // Cache the HSA agents for each device
+#if !defined(__NVCC__)
+    {
+      hsa_amd_pointer_info_t info;
+      info.size = sizeof(info);
+
+      ErrResult err;
+      int32_t* tempBuffer;
+
+      // Index CPU agents
+      cpuAgents.clear();
+      int numCpus = numa_num_configured_nodes();
+      for (int i = 0; i < numCpus; i++) {
+        AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer);
+        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
+        cpuAgents.push_back(info.agentOwner);
+        DeallocateMemory(MEM_CPU, tempBuffer, 1024);
+      }
+
+      // Index GPU agents
+      int numGpus = 0;
+      hipError_t status = hipGetDeviceCount(&numGpus);
+      if (status != hipSuccess) numGpus = 0;
+      gpuAgents.clear();
+      for (int i = 0; i < numGpus; i++) {
+        AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
+        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
+        gpuAgents.push_back(info.agentOwner);
+        DeallocateMemory(MEM_GPU, tempBuffer, 1024);
+      }
+    }
+#endif
+
+    // Collect the topology of the local node
+    RankTopology localTopo;
+    GetRankTopology(localTopo);
+
+    // Distribute amongst all ranks
+    rankInfo.resize(numRanks);
+
+    if (rank == 0) {
+      // Receive topology info from each rank
+      rankInfo[0] = localTopo;
+      for (int peerRank = 1; peerRank < numRanks; peerRank++) {
+        if (verbose) {
+          printf("[INFO] Rank 0 receives topology from Rank %d\n", peerRank);
+        }
+        RecvRankTopo(peerRank, rankInfo[peerRank]);
+      }
+
+      // Send out full set of info to each rank
+      for (int peerRank = 1; peerRank < numRanks; peerRank++) {
+        for (int i = 0; i < numRanks; i++) {
+          if (verbose) {
+            printf("[INFO] Rank 0 sends topology %d to Rank %d\n", i, peerRank);
+          }
+          SendRankTopo(peerRank, rankInfo[i]);
+        }
+      }
+    } else {
+      // Send local topology info back to root
+      if (verbose) {
+        printf("[INF0] Rank %d sends topology from Rank 0\n", rank);
+      }
+      SendRankTopo(0, localTopo);
+
+      for (int i = 0; i < numRanks; i++) {
+        RecvRankTopo(0, rankInfo[i]);
+        if (verbose) {
+          printf("[INF0] Rank %d receives topology %d from Rank 0\n", rank, i);
+        }
+      }
+    }
+  }
+
+  int System::GetNumExecutors(ExeType exeType, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].numExecutors.at(exeType);
+  }
+
+  int System::GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].numExecutorSubIndices.at(exeDevice);
+  }
+
+  int System::GetNumSubExecutors(ExeDevice exeDevice, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].numSubExecutors.at(exeDevice);
+  }
+
+  int System::GetClosestCpuNumaToGpu(int gpuIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (gpuIndex < 0 || gpuIndex >= GetNumExecutors(EXE_GPU_GFX, targetRank)) return 0;
+    return rankInfo[targetRank].closestCpuNumaToGpu.at(gpuIndex);
+  }
+
+  int System::GetClosestCpuNumaToNic(int nicIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (nicIndex < 0 || nicIndex >= GetNumExecutors(EXE_NIC, targetRank)) return 0;
+    return rankInfo[targetRank].closestCpuNumaToNic.at(nicIndex);
+  }
+
+  void System::GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank) const
+  {
+    nicIndices.clear();
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (gpuIndex < 0 || gpuIndex >= GetNumExecutors(EXE_GPU_GFX, targetRank)) return;
+    nicIndices = rankInfo[targetRank].closestNicsToGpu.at(gpuIndex);
+  }
+
+  int GetNumExecutors(ExeType exeType, int targetRank)
+  {
+    return System::Get().GetNumExecutors(exeType, targetRank);
+  }
+
+  int GetNumSubExecutors(ExeDevice exeDevice, int targetRank)
+  {
+    return System::Get().GetNumSubExecutors(exeDevice, targetRank);
+  }
+
+  int GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank)
+  {
+    return System::Get().GetNumExecutorSubIndices(exeDevice, targetRank);
+  }
+
+  int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank)
+  {
+    return System::Get().GetClosestCpuNumaToGpu(gpuIndex, targetRank);
+  }
+
+  int GetClosestCpuNumaToNic(int nicIndex, int targetRank)
+  {
+    return System::Get().GetClosestCpuNumaToNic(nicIndex, targetRank);
+  }
+
+  int GetClosestNicToGpu(int gpuIndex, int targetRank)
+  {
+    std::vector<int> nicIndices;
+    System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+    if (nicIndices.size() == 0) return -1;
+    return nicIndices[0];
+  }
+
+  void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank)
+  {
+    System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+  }
+
+  int GetRank()
+  {
+    return System::Get().GetRank();
+  }
+
+  int GetNumRanks()
+  {
+    return System::Get().GetNumRanks();
   }
 
 // Undefine CUDA compatibility macros

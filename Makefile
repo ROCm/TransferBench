@@ -5,6 +5,7 @@
 # Configuration options
 ROCM_PATH ?= /opt/rocm
 CUDA_PATH ?= /usr/local/cuda
+MPI_PATH  ?= /usr/local/openmpi/
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -39,7 +40,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   NVFLAGS  = -x cu -lnuma -arch=native
 
   ifeq ($(DEBUG), 0)
-    COMMON_FLAGS += -O3
+    COMMON_FLAGS += -O3 -g
   else
     COMMON_FLAGS += -O0 -g -ggdb3
   endif
@@ -70,7 +71,30 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       $(info Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable)
     endif
   endif
+
+  MPI_ENABLED = 0
+  # Compile with MPI communicator support if
+  # 1) DISABLE_MPI_COMM is not set to 1
+  # 2) mpi.h is found in the MPI_PATH
+  DISABLE_MPI_COMM ?= 0
+  ifneq ($(DISABLE_MPI_COMM), 1)
+    ifeq ($(wildcard $(MPI_PATH)/include/mpi.h),)
+      $(info Unable to find mpi.h at $(MPI_PATH)/include.  Please specify appropriate MPI_PATH)
+    else
+      MPI_ENABLED = 1
+      CXXFLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
+      LDFLAGS += -L/$(MPI_PATH)/lib -lmpi
+    endif
+
+    ifeq ($(MPI_ENABLED), 0)
+      $(info Building without MPI communicator support)
+      $(info To use TransferBench with MPI support, install MPI libraries and specify appropriate MPI_PATH)
+    else
+      $(info Building with MPI communicator support.  Can set DISABLE_MPI_COMM=1 to disable)
+   endif
+  endif
 endif
+
 
 .PHONY : all clean
 

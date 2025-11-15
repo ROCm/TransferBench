@@ -32,12 +32,19 @@ int main(int argc, char **argv) {
 
   // Display usage instructions and detected topology
   if (argc <= 1) {
-    if (!ev.outputToCsv) {
-      DisplayUsage(argv[0]);
-      DisplayPresets();
+    int rank     = TransferBench::GetRank();
+    int numRanks = TransferBench::GetNumRanks();
+    if (numRanks == 1) {
+      if (!ev.outputToCsv) {
+        DisplayUsage(argv[0]);
+        DisplayPresets();
+      }
+      DisplayTopology(ev.outputToCsv);
+      exit(0);
+    } else {
+      DisplayMultiNodeTopology(ev.outputToCsv);
+      exit(0);
     }
-    DisplayTopology(ev.outputToCsv);
-    exit(0);
   }
 
   // Determine number of bytes to run per Transfer

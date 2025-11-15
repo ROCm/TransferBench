@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.66.00
+- Adding multi-node support
+
+
 ## v1.65.00
 ### Added
 - Added warp-level dispatch support via GFX_SE_TYPE environment variable
