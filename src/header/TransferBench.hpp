@@ -55,6 +55,7 @@ THE SOFTWARE.
 
 #if defined(__NVCC__)
 #include <cuda_runtime.h>
+#include <nvml.h>
 #else
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
@@ -97,7 +98,7 @@ namespace TransferBench
   {
     ExeType exeType;                            ///< Executor type
     int32_t exeIndex;                           ///< Executor index
-    int32_t exeRank = -1;                       ///< Executor rank (-1 indicate wildcard)
+    int32_t exeRank = 0;                        ///< Executor rank
 
     bool operator<(ExeDevice const& other) const {
       return ((exeType  != other.exeType)  ? (exeType  < other.exeType) :
@@ -133,7 +134,7 @@ namespace TransferBench
   {
     MemType memType;                            ///< Memory type
     int32_t memIndex;                           ///< Device index
-    int32_t memRank = -1;                       ///< Rank index (-1 indicates wildcard)
+    int32_t memRank = 0;                        ///< Rank index
 
     bool operator<(MemDevice const& other) const {
       return ((memType  != other.memType)  ? (memType  < other.memType) :
@@ -276,6 +277,16 @@ namespace TransferBench
   };
 
   /**
+   * Enumeration of possible communication mode types
+   */
+  enum CommType
+  {
+    COMM_NONE   = 0,                             ///< Single node only
+    COMM_MPI    = 1,                             ///< MPI-based communication
+    COMM_SOCKET = 2                              ///< Socket-based communication
+  };
+
+  /**
    * ErrResult consists of error type and error message
    */
   struct ErrResult
@@ -403,19 +414,17 @@ namespace TransferBench
    * @note For DMA, this refers to the number of DMA engines
    *
    * @param[in] exeDevice       The specific Executor to query
-   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected executor subindices
    */
-  int GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank = -1);
+  int GetNumExecutorSubIndices(ExeDevice exeDevice);
 
   /**
    * Returns number of subExecutors for a given ExeDevice
    *
    * @param[in] exeDevice       The specific Executor to query
-   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected subExecutors for the given ExePair
    */
-  int GetNumSubExecutors(ExeDevice exeDevice, int targetRank = -1);
+  int GetNumSubExecutors(ExeDevice exeDevice);
 
   /**
    * Returns the index of the NUMA node closest to the given GPU
@@ -465,6 +474,11 @@ namespace TransferBench
    * @returns The total numbers of ranks participating
    */
   int GetNumRanks();
+
+  /**
+   * @returns Gets the current communication mode
+   */
+  int GetCommType();
 
   /**
    * Helper function to parse a line containing Transfers into a vector of Transfers
@@ -714,6 +728,11 @@ namespace {
      */
     int GetNumRanks() const { return numRanks; }
 
+    /**
+     * @returns The communication mode
+     */
+    int GetCommMode() const { return commMode; }
+
     // Communication functions
     /**
      * Barrier that all ranks must arrive at before proceeding
@@ -760,19 +779,17 @@ namespace {
      * @note For DMA, this refers to the number of DMA engines
      *
      * @param[in] exeDevice     The specific Executor to query
-     * @param[in] targetRank    Rank to query (-1 for local rank)
      * @returns Number of detected executor subindices
      */
-    int GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank = -1) const;
+    int GetNumExecutorSubIndices(ExeDevice exeDevice) const;
 
     /**
      * Returns number of subExecutors for a given ExeDevice
      *
      * @param[in] exeDevice     The specific Executor to query
-     * @param[in] targetRank    Rank to query (-1 for local rank)
      * @returns Number of detected subExecutors for the given ExePair
      */
-    int GetNumSubExecutors(ExeDevice exeDevice, int targetRank = -1) const;
+    int GetNumSubExecutors(ExeDevice exeDevice) const;
 
     /**
      * Returns the index of the NUMA node closest to the given GPU
@@ -825,13 +842,6 @@ namespace {
     std::vector<hsa_agent_t> gpuAgents;
 #endif
 
-    enum CommType
-    {
-      COMM_NONE   = 0,                        ///< Single node only
-      COMM_MPI    = 1,                        ///< MPI-based communication
-      COMM_SOCKET = 2                         ///< Socket-based communication
-    };
-
     int commMode;                             ///< Communication mode
 
 #ifdef MPI_COMM_ENABLED
@@ -845,15 +855,24 @@ namespace {
     std::vector<int> sockets;                 ///< Master list of sockets
     int              listenSocket;            ///< Master listener socket
 
+
+    // Fabric support
+    struct FabricId
+    {
+      uint32_t cliqueId;                      ///< Fabric clique ID
+    };
+
     // Topology related
     struct RankTopology
     {
+      char hostname[HOST_NAME_MAX+1];
       std::map<ExeType,            int>         numExecutors;
       std::map<pair<ExeType, int>, int>         numExecutorSubIndices;
       std::map<pair<ExeType, int>, int>         numSubExecutors;
       std::map<int,                int>         closestCpuNumaToGpu;
       std::map<int,                int>         closestCpuNumaToNic;
       std::map<int,                vector<int>> closestNicsToGpu;
+      std::map<int,                FabricId>    gpuFabricId;
     };
 
     std::vector<RankTopology> rankInfo;       ///< Topology of each rank
@@ -1172,9 +1191,6 @@ namespace {
     return ERR_NONE;
   }
 
-// HSA-related functions
-//========================================================================================
-
 // Setup validation-related functions
 //========================================================================================
 
@@ -1184,6 +1200,12 @@ namespace {
   {
     // By default, nothing needs to change
     actualExeDevice = origExeDevice;
+
+    // Check that rank has been specified
+    if (origExeDevice.exeRank < 0 || origExeDevice.exeRank >= GetNumRanks()) {
+      return {ERR_FATAL,
+              "Rank index must be between 0 and %d (instead of %d)", GetNumRanks() - 1, origExeDevice.exeRank};
+    }
 
     // When using NIC_NEAREST, remap to the closest NIC to the GPU
     if (origExeDevice.exeType == EXE_NIC_NEAREST) {
@@ -1195,7 +1217,7 @@ namespace {
 
         actualExeDevice.exeIndex = cfg.nic.closestNics[origExeDevice.exeIndex];
       } else {
-        actualExeDevice.exeIndex = GetClosestNicToGpu(origExeDevice.exeIndex);
+        actualExeDevice.exeIndex = GetClosestNicToGpu(origExeDevice.exeIndex, origExeDevice.exeRank);
       }
     }
     return ERR_NONE;
@@ -1207,22 +1229,27 @@ namespace {
     if (memDevice.memType == MEM_NULL)
       return ERR_NONE;
 
+    if (memDevice.memRank < 0 || memDevice.memRank >= GetNumRanks()) {
+      return {ERR_FATAL,
+              "Rank index must be between 0 and %d (instead of %d)", GetNumRanks() - 1, memDevice.memRank};
+    }
+
     if (IsCpuMemType(memDevice.memType) && memDevice.memType != MEM_CPU_CLOSEST) {
-      int numCpus = GetNumExecutors(EXE_CPU);
+      int numCpus = GetNumExecutors(EXE_CPU, memDevice.memRank);
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numCpus)
         return {ERR_FATAL,
-                "CPU index must be between 0 and %d (instead of %d)", numCpus - 1, memDevice.memIndex};
+                "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
       return ERR_NONE;
     }
 
     if (IsGpuMemType(memDevice.memType) || memDevice.memType == MEM_CPU_CLOSEST) {
-    int numGpus = GetNumExecutors(EXE_GPU_GFX);
+      int numGpus = GetNumExecutors(EXE_GPU_GFX, memDevice.memRank);
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numGpus)
         return {ERR_FATAL,
-                "GPU index must be between 0 and %d (instead of %d)", numGpus - 1, memDevice.memIndex};
+                "GPU index must be between 0 and %d (instead of %d) on rank %d", numGpus - 1, memDevice.memIndex, memDevice.memRank};
       if (memDevice.memType == MEM_CPU_CLOSEST) {
-        if (GetClosestCpuNumaToGpu(memDevice.memIndex) == -1) {
-          return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d", memDevice.memIndex};
+        if (GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) == -1) {
+          return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
       }
       return ERR_NONE;
@@ -1363,10 +1390,6 @@ namespace {
                                   std::vector<Transfer> const& transfers,
                                   std::vector<ErrResult>&      errors)
   {
-    int numCpus = GetNumExecutors(EXE_CPU);
-    int numGpus = GetNumExecutors(EXE_GPU_GFX);
-    int numNics = GetNumExecutors(EXE_NIC);
-
     std::set<ExeDevice>      executors;
     std::map<ExeDevice, int> transferCount;
     std::map<ExeDevice, int> useSubIndexCount;
@@ -1379,6 +1402,9 @@ namespace {
       if (t.numBytes == 0)
         errors.push_back({ERR_FATAL, "Transfer %d: Cannot perform 0-byte transfers", i});
 
+      // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
+      // mean that some subexecutors might not have any work assigned to them if the amount to
+      // transfer is small
       if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU) {
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
@@ -1387,8 +1413,8 @@ namespace {
 
         if (maxSubExecToUse < t.numSubExecs)
           errors.push_back({ERR_WARN,
-                            "Transfer %d data size is too small - will only use %d of %d subexecutors",
-                            i, maxSubExecToUse, t.numSubExecs});
+                            "Transfer %d data size is too small - will only use %d of %d subexecutors due to blockBytes of %d",
+                            i, maxSubExecToUse, t.numSubExecs, cfg.data.blockBytes});
       }
 
       // Check sources and destinations
@@ -1406,21 +1432,29 @@ namespace {
           errors.push_back({ERR_FATAL, "Transfer %d: DST %d: %s", i, j, err.errMsg.c_str()});
       }
 
-      // Check executor
+      // Check executor rank
+      if (t.exeDevice.exeRank < 0 || t.exeDevice.exeRank >= GetNumRanks()) {
+        errors.push_back({ERR_FATAL,
+            "Rank index for executor must be between 0 and %d (instead of %d)", GetNumRanks() - 1, t.exeDevice.exeRank});
+        continue;
+      }
+
       executors.insert(t.exeDevice);
       transferCount[t.exeDevice]++;
+      int numExecutors = GetNumExecutors(t.exeDevice.exeType, t.exeDevice.exeRank);
+
       switch (t.exeDevice.exeType) {
       case EXE_CPU:
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numCpus)
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors)
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: CPU index must be between 0 and %d (instead of %d)",
-                            i, numCpus - 1, t.exeDevice.exeIndex});
+                            "Transfer %d: CPU index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
         break;
       case EXE_GPU_GFX:
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numGpus) {
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: GFX index must be between 0 and %d (instead of %d)",
-                            i, numGpus - 1, t.exeDevice.exeIndex});
+                            "Transfer %d: GFX index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
         } else {
           if (t.exeSubIndex != -1) {
 #if defined(__NVCC__)
@@ -1431,7 +1465,7 @@ namespace {
             int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
             if (t.exeSubIndex >= numSubIndices)
               errors.push_back({ERR_FATAL,
-                                "Transfer %d: GFX subIndex (XCC) must be between 0 and %d", i, numSubIndices - 1});
+                  "Transfer %d: GFX subIndex (XCC) must be between 0 and %d for rank %d", i, numSubIndices - 1, t.exeDevice.exeRank});
 #endif
           }
         }
@@ -1442,10 +1476,10 @@ namespace {
                             "Transfer %d: DMA executor must have exactly 1 source and 1 destination", i});
         }
 
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numGpus) {
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: DMA index must be between 0 and %d (instead of %d)",
-                            i, numGpus - 1, t.exeDevice.exeIndex});
+                            "Transfer %d: DMA index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
           // Cannot proceed with any further checks
           continue;
         }
@@ -1503,12 +1537,12 @@ namespace {
           if (IsGpuMemType(t.srcs[0].memType)) {
             if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
               errors.push_back({ERR_WARN,
-                  "Transfer %d: DMA executor will automatically switch to using the source memory device (%d) not (%d)",
+                  "Transfer %d: DMA executor may automatically switch to using the source memory device (%d) not (%d)",
                   i, t.srcs[0].memIndex, t.exeDevice.exeIndex});
             }
           } else if (t.dsts[0].memIndex != t.exeDevice.exeIndex) {
             errors.push_back({ERR_WARN,
-                "Transfer %d: DMA executor will automatically switch to using the destination memory device (%d) not (%d)",
+                "Transfer %d: DMA executor may automatically switch to using the destination memory device (%d) not (%d)",
                 i, t.dsts[0].memIndex, t.exeDevice.exeIndex});
           }
         }
@@ -1518,9 +1552,9 @@ namespace {
       {
         int srcIndex = t.exeDevice.exeIndex;
         int dstIndex = t.exeSubIndex;
-        if (srcIndex < 0 || srcIndex >= numNics)
+        if (srcIndex < 0 || srcIndex >= numExecutors)
           errors.push_back({ERR_FATAL, "Transfer %d: src NIC executor indexes an out-of-range NIC (%d)", i, srcIndex});
-        if (dstIndex < 0 || dstIndex >= numNics)
+        if (dstIndex < 0 || dstIndex >= numExecutors)
           errors.push_back({ERR_FATAL, "Transfer %d: dst NIC executor indexes an out-of-range NIC (%d)", i, dstIndex});
       }
 #else
@@ -4473,6 +4507,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.closestCpuNumaToNic.clear();
     topo.closestNicsToGpu.clear();
 
+    memset(topo.hostname, 0, sizeof(topo.hostname));
+    gethostname(topo.hostname, HOST_NAME_MAX);
+
     // CPU Executor
     int numCpus = numa_num_configured_nodes();
     topo.numExecutors[EXE_CPU] = numCpus;
@@ -4709,6 +4746,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   void System::SendRankTopo(int peerRank, RankTopology const& topo) const
   {
+    SendData(peerRank, sizeof(topo.hostname), topo.hostname);
     SendMap(peerRank, topo.numExecutors);
     SendMap(peerRank, topo.numExecutorSubIndices);
     SendMap(peerRank, topo.numSubExecutors);
@@ -4719,6 +4757,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   void System::RecvRankTopo(int peerRank, RankTopology& topo) const
   {
+    RecvData(peerRank, sizeof(topo.hostname), topo.hostname);
     RecvMap(peerRank, topo.numExecutors);
     RecvMap(peerRank, topo.numExecutorSubIndices);
     RecvMap(peerRank, topo.numSubExecutors);
@@ -4850,14 +4889,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return rankInfo[targetRank].numExecutors.at(exeType);
   }
 
-  int System::GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank) const
+  int System::GetNumExecutorSubIndices(ExeDevice exeDevice) const
   {
+    int targetRank = exeDevice.exeRank;
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
     return rankInfo[targetRank].numExecutorSubIndices.at({exeDevice.exeType, exeDevice.exeIndex});
   }
 
-  int System::GetNumSubExecutors(ExeDevice exeDevice, int targetRank) const
+  int System::GetNumSubExecutors(ExeDevice exeDevice) const
   {
+    int targetRank = exeDevice.exeRank;
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
     return rankInfo[targetRank].numSubExecutors.at({exeDevice.exeType, exeDevice.exeIndex});
   }
@@ -4889,14 +4930,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return System::Get().GetNumExecutors(exeType, targetRank);
   }
 
-  int GetNumSubExecutors(ExeDevice exeDevice, int targetRank)
+  int GetNumSubExecutors(ExeDevice exeDevice)
   {
-    return System::Get().GetNumSubExecutors(exeDevice, targetRank);
+    return System::Get().GetNumSubExecutors(exeDevice);
   }
 
-  int GetNumExecutorSubIndices(ExeDevice exeDevice, int targetRank)
+  int GetNumExecutorSubIndices(ExeDevice exeDevice)
   {
-    return System::Get().GetNumExecutorSubIndices(exeDevice, targetRank);
+    return System::Get().GetNumExecutorSubIndices(exeDevice);
   }
 
   int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank)
@@ -4930,6 +4971,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   int GetNumRanks()
   {
     return System::Get().GetNumRanks();
+  }
+
+  int GetCommMode()
+  {
+    return System::Get().GetCommMode();
   }
 
 // Undefine CUDA compatibility macros
