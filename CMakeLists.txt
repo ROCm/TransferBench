@@ -105,6 +105,11 @@ if(NOT (("${CMAKE_CXX_COMPILER}" MATCHES ".*hipcc") OR ("${CMAKE_CXX_COMPILER}" 
   message(FATAL_ERROR "On ROCm platform 'hipcc' or HIP-aware Clang must be used as C++ compiler.")
 endif()
 
+check_cxx_compiler_flag("-parallel-jobs=12" HAVE_PARALLEL_JOBS)
+if (HAVE_PARALLEL_JOBS)
+  message(STATUS "Parallel jobs enabled")
+endif()
+
 ## Check for Threads
 find_package(Threads REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -163,6 +168,10 @@ if(IBVERBS_FOUND)
   target_link_libraries(TransferBench PRIVATE ${IBVERBS_LIBRARY})
   target_compile_definitions(TransferBench PRIVATE NIC_EXEC_ENABLED)
 endif()
+if (HAVE_PARALLEL_JOBS)
+  target_compile_options(TransferBench PRIVATE -parallel-jobs=12)
+endif()
+
 
 target_link_libraries(TransferBench PRIVATE -fgpu-rdc)             # Required when linking relocatable device code
 target_link_libraries(TransferBench PRIVATE Threads::Threads)
@@ -171,6 +180,15 @@ target_link_libraries(TransferBench PRIVATE hip::device)
 target_link_libraries(TransferBench PRIVATE dl)
 target_link_libraries(TransferBench PRIVATE ${NUMA_LIBRARY})
 target_link_libraries(TransferBench PRIVATE ${HSA_LIBRARY})
+## Reserve 16GB for each linker job. Limit max number of linker jobs to 16
+if (HAVE_PARALLEL_JOBS)
+  math(EXPR num_linker_jobs "(${memory_in_gb} + 15) / 16")
+  if (${num_linker_jobs} GREATER_EQUAL "16")
+    set(num_linker_jobs "16")
+  endif()
+  message(STATUS "Use ${num_linker_jobs} jobs for linking")
+  target_link_options(TransferBench PRIVATE -parallel-jobs=${num_linker_jobs})       # Use multiple threads to link
+endif()
 
 rocm_install(TARGETS TransferBench COMPONENT devel)
 rocm_setup_version(VERSION ${VERSION_STRING})
