@@ -71,7 +71,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.65";
+  constexpr char VERSION[] = "1.66";
 
   /**
    * Enumeration of supported Executor types
@@ -478,7 +478,39 @@ namespace TransferBench
   /**
    * @returns Gets the current communication mode
    */
-  int GetCommType();
+  int GetCommMode();
+
+  /**
+   * @param[in] targetRank  Rank to query (-1 for local rank)
+   * @returns Gets the hostname for the target rank
+   **/
+  std::string GetHostname(int targetRank = -1);
+
+  /**
+   * @param[in] targetRank  Rank to query (-1 for local rank)
+   * @returns Gets the rack identifier for the target rank
+   **/
+  std::string GetRackId(int targetRank = -1);
+
+  /**
+   * @param[in] targetRank  Rank to query (-1 for local rank)
+   * @returns Gets the virtual pod identifier for the target rank
+   **/
+  int GetVpodId(int targetRank = -1);
+
+  /**
+   * @param[in] exeDevice       The specific Executor to query
+   * @returns Name of the executor
+   */
+  std::string GetExecutorName(ExeDevice exeDevice);
+
+  /**
+   *
+   * @param[in] nicIndex        The NIC index to query
+   * @param[in] targetRank Rank to query (-1 for local rank)
+   * @returns Returns 1 if and only if NIC exists and has an active port
+   */
+  int NicIsActive(int nicIndex, int targetRank = -1);
 
   /**
    * Helper function to parse a line containing Transfers into a vector of Transfers
@@ -820,6 +852,12 @@ namespace {
      */
     void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1) const;
 
+    std::string GetHostname(int targetRank) const;
+    std::string GetRackId(int targetRank) const;
+    int GetVpodId(int targetRank) const;
+    std::string GetExecutorName(ExeDevice exeDevice) const;
+    int NicIsActive(int nicIndex, int targetRank) const;
+
 #if !defined(__NVCC__)
     ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
     ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
@@ -855,24 +893,21 @@ namespace {
     std::vector<int> sockets;                 ///< Master list of sockets
     int              listenSocket;            ///< Master listener socket
 
-
-    // Fabric support
-    struct FabricId
-    {
-      uint32_t cliqueId;                      ///< Fabric clique ID
-    };
-
     // Topology related
     struct RankTopology
     {
-      char hostname[HOST_NAME_MAX+1];
+      char hostname[33];
+      char rackId[256];
+      int  vpodId;
+
       std::map<ExeType,            int>         numExecutors;
       std::map<pair<ExeType, int>, int>         numExecutorSubIndices;
       std::map<pair<ExeType, int>, int>         numSubExecutors;
       std::map<int,                int>         closestCpuNumaToGpu;
       std::map<int,                int>         closestCpuNumaToNic;
+      std::map<int,                int>         nicIsActive;
       std::map<int,                vector<int>> closestNicsToGpu;
-      std::map<int,                FabricId>    gpuFabricId;
+      std::map<pair<ExeType, int>, std::string> executorName;
     };
 
     std::vector<RankTopology> rankInfo;       ///< Topology of each rank
@@ -881,15 +916,21 @@ namespace {
     void SetupMpiCommunicator();
     void GetRankTopology(RankTopology& topo);
     void CollectTopology();
+    std::string GetCpuName() const;
 
     template <typename KeyType, typename ValType>
     void SendMap(int peerRank, std::map<KeyType, std::vector<ValType>> const& mapToSend) const;
     template <typename KeyType, typename ValType>
     void SendMap(int peerRank, std::map<KeyType, ValType> const& mapToSend) const;
+    template <typename KeyType>
+    void SendMap(int peerRank, std::map<KeyType, std::string> const& mapToSend) const;
+
     template <typename KeyType, typename ValType>
     void RecvMap(int peerRank, std::map<KeyType, std::vector<ValType>>& mapToRecv) const;
     template <typename KeyType, typename ValType>
     void RecvMap(int peerRank, std::map<KeyType, ValType>& mapToRecv) const;
+    template <typename KeyType>
+    void RecvMap(int peerRank, std::map<KeyType, std::string>& mapToRecv) const;
 
     void SendRankTopo(int peerRank, RankTopology const& topo) const;
     void RecvRankTopo(int peerRank, RankTopology& topo) const;
@@ -3949,7 +3990,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
       if (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations) break;
 
-
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
@@ -4223,6 +4263,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
 
+    if (getenv("TB_PAUSE")) {
+      printf("Pausing for debug attachment\n");
+      volatile bool pause = true;
+      while (pause);
+    }
+
     // Priority 1: Socket communicator
     SetupSocketCommunicator();
 
@@ -4237,8 +4283,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Collect topology and distribute across all ranks
     CollectTopology();
-
-    Barrier();
   }
 
   System::~System()
@@ -4497,6 +4541,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+  std::string System::GetCpuName() const
+  {
+    std::ifstream cpuInfo("/proc/cpuinfo");
+    std::string line;
+
+    if (cpuInfo.is_open()) {
+      while (std::getline(cpuInfo, line)) {
+        if (line.find("model name") != std::string::npos) {
+          size_t colonIdx = line.find(":");
+          if (colonIdx != std::string::npos) {
+            return line.substr(colonIdx + 2);
+          }
+        }
+      }
+    }
+    return "Unknown CPU";
+  }
+
   void System::GetRankTopology(RankTopology& topo)
   {
     // Clear topology structure first
@@ -4508,21 +4570,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.closestNicsToGpu.clear();
 
     memset(topo.hostname, 0, sizeof(topo.hostname));
-    gethostname(topo.hostname, HOST_NAME_MAX);
+    gethostname(topo.hostname, 32);
+
+    // NOTE: Placeholder values
+    strcpy(topo.rackId, "ABC");
+    topo.vpodId = -1;
 
     // CPU Executor
     int numCpus = numa_num_configured_nodes();
     topo.numExecutors[EXE_CPU] = numCpus;
 
+    std::string cpuName = GetCpuName();
+
     for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
       topo.numExecutorSubIndices[{EXE_CPU, exeIndex}] = 0;
+      topo.executorName[{EXE_CPU, exeIndex}] = cpuName;
     }
+
     for (int cpuCore = 0; cpuCore < numa_num_configured_cpus(); cpuCore++) {
       topo.numSubExecutors[{EXE_CPU, numa_node_of_cpu(cpuCore)}]++;
     }
+
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
-        printf("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores\n", rank, exeIndex, numCpus, topo.numSubExecutors[{EXE_CPU, exeIndex}]);
+        printf("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores (%s)\n", rank, exeIndex, numCpus,
+               topo.numSubExecutors[{EXE_CPU, exeIndex}],
+               topo.executorName[{EXE_CPU, exeIndex}].c_str());
       }
     }
 
@@ -4542,6 +4615,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, exeIndex) != hipSuccess) {
         numDeviceCUs = 0;
       }
+
+      std::string gpuName = "Unknown GPU";
+      hipDeviceProp_t props;
+      if (hipGetDeviceProperties(&props, exeIndex) == hipSuccess) {
+        gpuName = props.name;
+      }
+      topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
 
 #if !defined(__NVCC__)
       hsa_agent_t gpuAgent = gpuAgents[exeIndex];
@@ -4573,6 +4654,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
       topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
+      topo.closestNicsToGpu[exeIndex] = {};
     }
 
     // NIC Executor
@@ -4581,15 +4663,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     numNics = GetIbvDeviceList().size();
     for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
       topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+      topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
+      topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
       if (verbose) {
         printf("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
       }
     }
 #endif
     topo.numExecutors[EXE_NIC] = topo.numExecutors[EXE_NIC_NEAREST] = numNics;
+
     for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
       topo.numSubExecutors[{EXE_NIC, nicIndex}] = 0;
       topo.numExecutorSubIndices[{EXE_NIC, nicIndex}] = 0;
+      std::string gpuName = "Unknown GPU";
+
     }
     for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
       topo.numSubExecutors[{EXE_NIC_NEAREST, gpuIndex}] = 0;
@@ -4657,7 +4744,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
-      if (closestIdx != 1) {
+      if (closestIdx != -1) {
         topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
         assignedCount[closestIdx]++;
       }
@@ -4708,6 +4795,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+  template <typename KeyType>
+  void System::SendMap(int peerRank, std::map<KeyType, std::string> const& mapToSend) const
+  {
+    size_t mapSize = mapToSend.size();
+    SendData(peerRank, sizeof(mapSize), &mapSize);
+    for (auto const p : mapToSend) {
+      size_t strlen = p.second.size();
+      SendData(peerRank, sizeof(p.first), &p.first);
+      SendData(peerRank, sizeof(strlen), &strlen);
+      if (strlen) SendData(peerRank, strlen, p.second.data());
+    }
+  }
+
   template <typename KeyType, typename ValType>
   void System::RecvMap(int peerRank, std::map<KeyType, std::vector<ValType>>& mapToRecv) const
   {
@@ -4730,6 +4830,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+  template <typename KeyType>
+  void System::RecvMap(int peerRank, std::map<KeyType, std::string>& mapToRecv) const
+  {
+    mapToRecv.clear();
+    size_t mapSize;
+    RecvData(peerRank, sizeof(mapSize), &mapSize);
+    for (size_t i = 0; i < mapSize; i++) {
+      KeyType key;
+      size_t strlen;
+      std::string value;
+      RecvData(peerRank, sizeof(key), &key);
+      RecvData(peerRank, sizeof(size_t), &strlen);
+      if (strlen) {
+        value.resize(strlen);
+        RecvData(peerRank, strlen, value.data());
+      }
+      mapToRecv[key] = value;
+    }
+  }
 
   template <typename KeyType, typename ValType>
   void System::RecvMap(int peerRank, std::map<KeyType, ValType>& mapToRecv) const
@@ -4747,23 +4866,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::SendRankTopo(int peerRank, RankTopology const& topo) const
   {
     SendData(peerRank, sizeof(topo.hostname), topo.hostname);
+    SendData(peerRank, sizeof(topo.rackId), &topo.rackId);
+    SendData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     SendMap(peerRank, topo.numExecutors);
     SendMap(peerRank, topo.numExecutorSubIndices);
     SendMap(peerRank, topo.numSubExecutors);
     SendMap(peerRank, topo.closestCpuNumaToGpu);
     SendMap(peerRank, topo.closestCpuNumaToNic);
+    SendMap(peerRank, topo.nicIsActive);
     SendMap(peerRank, topo.closestNicsToGpu);
+    SendMap(peerRank, topo.executorName);
   };
 
   void System::RecvRankTopo(int peerRank, RankTopology& topo) const
   {
     RecvData(peerRank, sizeof(topo.hostname), topo.hostname);
+    RecvData(peerRank, sizeof(topo.rackId), &topo.rackId);
+    RecvData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     RecvMap(peerRank, topo.numExecutors);
     RecvMap(peerRank, topo.numExecutorSubIndices);
     RecvMap(peerRank, topo.numSubExecutors);
     RecvMap(peerRank, topo.closestCpuNumaToGpu);
     RecvMap(peerRank, topo.closestCpuNumaToNic);
+    RecvMap(peerRank, topo.nicIsActive);
     RecvMap(peerRank, topo.closestNicsToGpu);
+    RecvMap(peerRank, topo.executorName);
   }
 
 #if !defined(__NVCC__)
@@ -4886,6 +5013,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   int System::GetNumExecutors(ExeType exeType, int targetRank) const
   {
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].numExecutors.count(exeType) == 0) return 0;
     return rankInfo[targetRank].numExecutors.at(exeType);
   }
 
@@ -4893,6 +5021,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     int targetRank = exeDevice.exeRank;
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].numExecutorSubIndices.count({exeDevice.exeType, exeDevice.exeIndex}) == 0)
+      return 0;
     return rankInfo[targetRank].numExecutorSubIndices.at({exeDevice.exeType, exeDevice.exeIndex});
   }
 
@@ -4900,6 +5030,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     int targetRank = exeDevice.exeRank;
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].numSubExecutors.count({exeDevice.exeType, exeDevice.exeIndex}) == 0)
+      return 0;
     return rankInfo[targetRank].numSubExecutors.at({exeDevice.exeType, exeDevice.exeIndex});
   }
 
@@ -4923,6 +5055,41 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
     if (gpuIndex < 0 || gpuIndex >= GetNumExecutors(EXE_GPU_GFX, targetRank)) return;
     nicIndices = rankInfo[targetRank].closestNicsToGpu.at(gpuIndex);
+  }
+
+  std::string System::GetHostname(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].hostname;
+  }
+
+  std::string System::GetRackId(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].rackId;
+  }
+
+  int System::GetVpodId(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].vpodId;
+  }
+
+  std::string System::GetExecutorName(ExeDevice exeDevice) const
+  {
+    int targetRank = exeDevice.exeRank;
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+
+    if (rankInfo[targetRank].executorName.count({exeDevice.exeType, exeDevice.exeIndex}) == 0)
+      return "Unknown device";
+    return rankInfo[targetRank].executorName.at({exeDevice.exeType, exeDevice.exeIndex});
+  }
+
+  int System::NicIsActive(int nicIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].nicIsActive.count(nicIndex) == 0) return 0;
+    return rankInfo[targetRank].nicIsActive.at(nicIndex);
   }
 
   int GetNumExecutors(ExeType exeType, int targetRank)
@@ -4976,6 +5143,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   int GetCommMode()
   {
     return System::Get().GetCommMode();
+  }
+
+  std::string GetHostname(int targetRank)
+  {
+    return System::Get().GetHostname(targetRank);
+  }
+
+  std::string GetRackId(int targetRank)
+  {
+    return System::Get().GetRackId(targetRank);
+  }
+
+  int GetVpodId(int targetRank)
+  {
+    return System::Get().GetVpodId(targetRank);
+  }
+
+  std::string GetExecutorName(ExeDevice exeDevice)
+  {
+    return System::Get().GetExecutorName(exeDevice);
+  }
+
+  int NicIsActive(int nicIndex, int targetRank)
+  {
+    return System::Get().NicIsActive(nicIndex, targetRank);
   }
 
 // Undefine CUDA compatibility macros

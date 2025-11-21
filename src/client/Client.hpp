@@ -35,6 +35,9 @@ char const ExeTypeName[5][4] = {"CPU", "GPU", "DMA", "NIC", "NIC"};
 // Display detected hardware
 void DisplayTopology(bool outputToCsv);
 
+// Display version information
+void DisplayVersion();
+
 // Display usage instructions
 void DisplayUsage(char const* cmdName);
 

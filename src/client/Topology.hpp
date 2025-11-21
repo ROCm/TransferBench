@@ -63,8 +63,8 @@ static void PrintNicToGPUTopo(bool outputToCsv)
            ibvDeviceList[i].busId.c_str(),
            ibvDeviceList[i].numaNode,
            closestGpusStr.c_str(),
-           ibvDeviceList[i].isRoce && ibvDeviceList[i].hasActivePort?  std::to_string(ibvDeviceList[i].gidIndex).c_str() : "N/A",
-           ibvDeviceList[i].isRoce && ibvDeviceList[i].hasActivePort?  ibvDeviceList[i].gidDescriptor.c_str() : "N/A"
+           ibvDeviceList[i].isRoce && ibvDeviceList[i].hasActivePort ? std::to_string(ibvDeviceList[i].gidIndex).c_str() : "N/A",
+           ibvDeviceList[i].isRoce && ibvDeviceList[i].hasActivePort ? ibvDeviceList[i].gidDescriptor.c_str() : "N/A"
           );
   }
   printf("\n");
@@ -197,8 +197,221 @@ void DisplayTopology(bool outputToCsv)
 #endif
 }
 
+bool HasDuplicateHostname()
+{
+  std::set<std::string> seenHosts;
+  for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
+    std::string hostname = TransferBench::GetHostname(rank);
+    if (seenHosts.count(hostname)) return true;
+    seenHosts.insert(hostname);
+  }
+  return false;
+}
+
+typedef std::tuple<
+  std::string,                   // RackId
+  int,                           // VPod
+  std::vector<std::string>,      // CPU Names
+  std::vector<int>,              // CPU #Subexecutors
+  std::vector<std::string>,      // GPU Names
+  std::vector<int>,              // GPU #Subexecutors
+  std::vector<int>,              // GPU Closest NUMA
+  std::vector<std::string>,      // NIC Names
+  std::vector<int>,              // NIC Closest NUMA
+  std::vector<int>,              // NIC Closest GPU
+  std::vector<int>               // NIC is active
+  > GroupKey;
+
 void DisplayMultiNodeTopology(bool outputToCsv)
 {
-  // TODO: Update this for multi-node
-  DisplayTopology(outputToCsv);
+  std::map<GroupKey, std::vector<int>> groups;
+
+  // Build GroupKey for each rank
+  for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
+
+    std::string rackId = TransferBench::GetRackId(rank);
+    int         vpodId = TransferBench::GetVpodId(rank);
+
+    // CPU information
+    int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
+    std::vector<std::string> cpuNames;
+    std::vector<int> cpuNumSubExecs;
+    for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+      ExeDevice exeDevice = {EXE_CPU, exeIndex, rank};
+      cpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
+      cpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
+    }
+
+    // GPU information
+    int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, rank);
+    std::vector<std::string> gpuNames;
+    std::vector<int> gpuNumSubExecs;
+    std::vector<int> gpuClosestCpu;
+    for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+      ExeDevice exeDevice = {EXE_GPU_GFX, exeIndex, rank};
+      gpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
+      gpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
+      gpuClosestCpu.push_back(TransferBench::GetClosestCpuNumaToGpu(exeIndex, rank));
+    }
+
+    // NIC information
+    int numNics = TransferBench::GetNumExecutors(EXE_NIC, rank);
+
+    std::vector<int> nicClosestGpu(numNics, -1);
+    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+      std::vector<int> nicIndices;
+      TransferBench::GetClosestNicsToGpu(nicIndices, gpuIndex, rank);
+      for (auto nicIndex : nicIndices) {
+        nicClosestGpu[nicIndex] = gpuIndex;
+      }
+    }
+
+    std::vector<std::string> nicNames;
+    std::vector<int> nicClosestCpu;
+    std::vector<int> nicIsActive;
+    for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+      ExeDevice exeDevice = {EXE_NIC, exeIndex, rank};
+      nicNames.push_back(TransferBench::GetExecutorName(exeDevice));
+      nicClosestCpu.push_back(TransferBench::GetClosestCpuNumaToNic(exeIndex, rank));
+      nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
+    }
+
+    GroupKey key(rackId, vpodId,
+                 cpuNames, cpuNumSubExecs,
+                 gpuNames, gpuNumSubExecs, gpuClosestCpu,
+                 nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
+
+    groups[key].push_back(rank);
+  }
+
+  printf("%d rank(s) in %lu homogeneous group(s)\n", TransferBench::GetNumRanks(), groups.size());
+  printf("-------------------------------------------------------------------------------------------------------------\n");
+
+  // Print off each group
+  int groupNum = 1;
+  for (auto const& group : groups) {
+    GroupKey const& key           = group.first;
+    std::vector<int> const& hosts = group.second;
+
+    std::string              rackId        = std::get<0>(key);
+    int                      vpodId        = std::get<1>(key);
+    std::vector<std::string> cpuNames      = std::get<2>(key);
+    std::vector<int>         cpuSubExecs   = std::get<3>(key);
+    std::vector<std::string> gpuNames      = std::get<4>(key);
+    std::vector<int>         gpuSubExecs   = std::get<5>(key);
+    std::vector<int>         gpuClosestCpu = std::get<6>(key);
+    std::vector<std::string> nicNames      = std::get<7>(key);
+    std::vector<int>         nicClosestCpu = std::get<8>(key);
+    std::vector<int>         nicClosestGpu = std::get<9>(key);
+    std::vector<int>         nicIsActive   = std::get<10>(key);
+
+    int numRanks = hosts.size();
+    int numCpus  = cpuNames.size();
+    int numGpus  = gpuNames.size();
+    int numNics  = nicNames.size();
+    int numExecutors = numCpus + numGpus +  numNics;
+    int numActiveNics = 0;
+    for (auto x : nicIsActive) numActiveNics += x;
+
+    if (groupNum > 1) printf("\n");
+    printf("Group %03d: %d rank(s) %d CPU(s) %d GPU(s) %d NIC(s) (%d active NICs)\n",
+           groupNum++, numRanks, numCpus, numGpus, numNics, numActiveNics);
+  //printf("| 1234 | 12345678901234567890123456789012 | 123 | 123 | 1234567890 | 12345678901234567890123456789012 | 123 |\n");
+    printf("+------+----------------------------------+-----+-----+------------+----------------------------------+-----+\n");
+    printf("| Rank | Hostname                         | RID | VID | Executor   | Executor Name                    | #SE |\n");
+    printf("+------+----------------------------------+-----+-----+------------+----------------------------------+-----+\n");
+
+    int  rankIdx = 0;
+    char rankStr[5];
+    char hostnameStr[33] = {};
+    char ridStr[4];
+    char vidStr[4];
+    char exeStr[11];
+    char exeNameStr[33];
+    char seStr[4];
+
+    #define FORMAT_STR "| %-4s | %-32s | %-3s | %-3s | %-10s | %-32s | %-3s |\n"
+    sprintf(ridStr, "%3s", rackId.c_str());
+    sprintf(vidStr, "%3d", vpodId);
+
+    // Loop over each CPU executor
+    for (int cpuIndex = 0; cpuIndex < numCpus; cpuIndex++) {
+      if (rankIdx < numRanks) {
+        sprintf(rankStr, "%04d", hosts[rankIdx]);
+        sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
+      } else {
+        rankStr[0] = hostnameStr[0] = 0;
+      }
+      sprintf(exeStr, "CPU %02d", cpuIndex);
+      sprintf(exeNameStr, "%-32s", cpuNames[cpuIndex].c_str());
+      sprintf(seStr, "%3d", cpuSubExecs[cpuIndex]);
+      printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
+      ridStr[0] = vidStr[0] = 0;
+      rankIdx++;
+
+      // Loop over each GPU closest to this CPU executor
+      for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+        if (gpuClosestCpu[gpuIndex] != cpuIndex) continue;
+        if (rankIdx < numRanks) {
+          sprintf(rankStr, "%04d", hosts[rankIdx]);
+          sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
+        } else {
+          rankStr[0] = hostnameStr[0] = 0;
+        }
+        sprintf(exeStr, "- GPU %02d", gpuIndex);
+        sprintf(exeNameStr, "- %-30s", gpuNames[cpuIndex].c_str());
+        sprintf(seStr, "%3d", gpuSubExecs[cpuIndex]);
+        printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
+        rankIdx++;
+
+        //  Loop over each NIC closest to this GPU
+        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+          if (nicClosestGpu[nicIndex] != gpuIndex) continue;
+          if (rankIdx < numRanks) {
+            sprintf(rankStr, "%04d", hosts[rankIdx]);
+            sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
+          } else {
+            rankStr[0] = hostnameStr[0] = 0;
+          }
+          sprintf(exeStr, "  - NIC %02d", nicIndex);
+          sprintf(exeNameStr, "  - %-28s", nicNames[nicIndex].c_str());
+          sprintf(seStr, "%3s", nicIsActive[nicIndex] ? "ON" : "OFF");
+          printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
+          rankIdx++;
+        }
+      }
+
+      // Loop over remaining NICs not associated with GPU but associated with this CPU
+      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+        if (nicClosestGpu[nicIndex] != -1 || nicClosestCpu[nicIndex] != cpuIndex) continue;
+        if (rankIdx < numRanks) {
+          sprintf(rankStr, "%04d", hosts[rankIdx]);
+          sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
+        } else {
+          rankStr[0] = hostnameStr[0] = 0;
+        }
+        sprintf(exeStr, "- NIC %02d", nicIndex);
+        sprintf(exeNameStr, "- %-30s", nicNames[nicIndex].c_str());
+        sprintf(seStr, "%3s", nicIsActive[nicIndex] ? "ON" : "OFF");
+        printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
+        rankIdx++;
+      }
+    }
+
+    // Loop over remamining hosts in group
+    while (rankIdx < numRanks) {
+      sprintf(rankStr, "%04d", hosts[rankIdx]);
+      sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
+      exeStr[0] = 0;
+      exeNameStr[0] = 0;
+      seStr[0] = 0;
+      printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
+      rankIdx++;
+    }
+    printf("+------+----------------------------------+-----+-----+------------+----------------------------------+-----+\n");
+  }
+
+  if (HasDuplicateHostname()) {
+    printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
+  }
 }

@@ -36,15 +36,19 @@ int main(int argc, char **argv) {
     int numRanks = TransferBench::GetNumRanks();
     if (numRanks == 1) {
       if (!ev.outputToCsv) {
+        DisplayVersion();
         DisplayUsage(argv[0]);
         DisplayPresets();
       }
       DisplayTopology(ev.outputToCsv);
-      exit(0);
     } else {
-      DisplayMultiNodeTopology(ev.outputToCsv);
-      exit(0);
+      if (TransferBench::GetCommMode() != TransferBench::COMM_MPI || TransferBench::GetRank() == 0)
+      {
+        DisplayVersion();
+        DisplayMultiNodeTopology(ev.outputToCsv);
+      }
     }
+    exit(0);
   }
 
   // Determine number of bytes to run per Transfer
@@ -187,15 +191,25 @@ int main(int argc, char **argv) {
   }
 }
 
-void DisplayUsage(char const* cmdName)
+void DisplayVersion()
 {
   std::string nicSupport = "";
 #if NIC_EXEC_ENABLED
   nicSupport = " (with NIC support)";
 #endif
-  printf("TransferBench v%s.%s%s\n", TransferBench::VERSION, CLIENT_VERSION, nicSupport.c_str());
-  printf("========================================\n");
+  std::string multiNodeMode = "";
+  switch (TransferBench::GetCommMode()) {
+  case TransferBench::COMM_NONE:   multiNodeMode = " (Single-node mode)";       break;
+  case TransferBench::COMM_SOCKET: multiNodeMode = " (Multi-node via sockets)"; break;
+  case TransferBench::COMM_MPI:    multiNodeMode = " (Multi-node via MPI)";     break;
+  }
 
+  printf("TransferBench v%s.%s%s%s\n", TransferBench::VERSION, CLIENT_VERSION, nicSupport.c_str(), multiNodeMode.c_str());
+  printf("=============================================================================================================\n");
+}
+
+void DisplayUsage(char const* cmdName)
+{
   if (numa_available() == -1) {
     printf("[ERROR] NUMA library not supported. Check to see if libnuma has been installed on this system\n");
     exit(1);
