@@ -793,6 +793,16 @@ namespace {
      */
     void RecvData(int srcRank, size_t const numBytes, void* recvData) const;
 
+    /**
+     * Broadcast data from root to all ranks
+     * All ranks must participate in this call
+     *
+     * @param[in] root          Rank that sends data
+     * @param[in] numBytes      Number of bytes to transfer
+     * @param[in/out] data      Buffer to send from root / to receive into on other ranks
+     */
+    void Broadcast(int root, size_t const numBytes, void* data) const;
+
     // Topology functions
     /**
      * Returns information about number of available Executors
@@ -862,6 +872,9 @@ namespace {
     ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
     ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
 #endif
+
+    void BroadcastExeResult(int root, ExeResult& exeResult) const;
+    void BroadcastTfrResult(int root, TransferResult& tfrResult) const;
 
   private:
     System();
@@ -934,11 +947,13 @@ namespace {
 
     void SendRankTopo(int peerRank, RankTopology const& topo) const;
     void RecvRankTopo(int peerRank, RankTopology& topo) const;
+
+    template <typename T>
+    void BroadcastVector(int root, vector<T>& data) const;
   };
 
 // Parsing-related functions
 //========================================================================================
-
   static ErrResult CharToMemType(char const c, MemType& memType)
   {
     char const* val = strchr(MemTypeStr, toupper(c));
@@ -1134,7 +1149,7 @@ namespace {
   }
 
   // Allocate memory
-  static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr)
+  static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr, bool isShareable = false)
   {
     if (numBytes == 0) {
       return {ERR_FATAL, "Unable to allocate 0 bytes"};
@@ -1305,6 +1320,11 @@ namespace {
     // Check general options
     if (cfg.general.numWarmups < 0)
       errors.push_back({ERR_FATAL, "[general.numWarmups] must be a non-negative number"});
+
+    // Running for a fixed time in multi-node mode is disabled because different ranks may end up
+    // performing different number of iterations
+    if (cfg.general.numIterations < 0 && GetCommMode() != COMM_NONE)
+      errors.push_back({ERR_FATAL, "[general.numIterations] can not be negative when using  multi-node mode"});
 
     // Check data options
     if (cfg.data.blockBytes == 0 || cfg.data.blockBytes % 4)
@@ -2662,6 +2682,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < rss->dstMem.size(); dstIdx++) {
+        // Validation is only done on the rank the destination memory is on
+        if (t.dsts[dstIdx].memRank != GetRank()) continue;
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
           output = (rss->dstMem[dstIdx]) + initOffset;
         } else {
@@ -2674,8 +2696,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           // Difference found - find first error
           for (size_t i = 0; i < N; i++) {
             if (output[i] != expected[i]) {
-              return {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d: Expected %10.5f Actual: %10.5f",
-                transferIdx, i, dstIdx, expected[i], output[i]};
+              return {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
+                transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
             }
           }
           return {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
@@ -2699,11 +2721,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Figure out the sub-array each subExecutor works on for this Transfer
     // - Partition N as evenly as possible, but try to keep subarray sizes as multiples of data.blockBytes
     //   except the very last one, for alignment reasons
-    size_t const N              = transfer.numBytes / sizeof(float);
+    size_t const N              = transfer.numBytes   / sizeof(float);
     int    const initOffset     = cfg.data.byteOffset / sizeof(float);
     int    const targetMultiple = cfg.data.blockBytes / sizeof(float);
 
-    // In some cases, there may not be enough data for all subExectors
+    // In some cases, there may not be enough data for all subExecutors
     int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                          (size_t)transfer.numSubExecs);
 
@@ -2772,6 +2794,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                    ExeInfo&                exeInfo)
   {
     exeInfo.totalDurationMsec = 0.0;
+    int const localRank = GetRank();
 
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
@@ -2784,27 +2807,43 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         MemDevice const& srcMemDevice = t.srcs[iSrc];
 
         // Ensure executing GPU can access source memory
-        if (IsGpuExeType(exeDevice.exeType) && IsGpuMemType(srcMemDevice.memType) &&
+        // This only applies to memory being accessed by a local GPU executor
+        if (IsGpuExeType(exeDevice.exeType)    &&
+            IsGpuMemType(srcMemDevice.memType) &&
+            srcMemDevice.memRank == localRank  &&
+            exeDevice.exeRank    == localRank  &&
             srcMemDevice.memIndex != exeDevice.exeIndex) {
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, srcMemDevice.memIndex));
         }
-        ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
+
+        // Allocate source memory (on the correct rank)
+        if (srcMemDevice.memRank == localRank) {
+          ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
+        }
       }
 
       // Allocate destination memory
       rss.dstMem.resize(t.dsts.size());
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         MemDevice const& dstMemDevice = t.dsts[iDst];
-
+        if (dstMemDevice.memRank != localRank) continue;
         // Ensure executing GPU can access destination memory
-        if (IsGpuExeType(exeDevice.exeType) && IsGpuMemType(dstMemDevice.memType) &&
+        if (IsGpuExeType(exeDevice.exeType)    &&
+            IsGpuMemType(dstMemDevice.memType) &&
+            dstMemDevice.memRank == localRank  &&
+            exeDevice.exeRank    == localRank  &&
             dstMemDevice.memIndex != exeDevice.exeIndex) {
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, dstMemDevice.memIndex));
         }
-        ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
+
+        // Allocate destination memory (on the correct rank)
+        if (dstMemDevice.memRank == localRank) {
+          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
+        }
       }
 
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
+      // Prepare HSA DMA copy specific resources
+      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
@@ -2824,17 +2863,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
 
       // Prepare subexecutor parameters
-      ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
+      if (exeDevice.exeRank == localRank) {
+        ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
+      }
     }
 
     // Prepare additional requirements for GPU-based executors
-    if (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA ||
-                                   (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
-        ? exeInfo.resources.size() : 1;
+                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
+                                  ? exeInfo.resources.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
 
       // Create streams
@@ -2862,7 +2903,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Prepare for GPU GFX executor
-    if (exeDevice.exeType == EXE_GPU_GFX) {
+    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
       // Allocate one contiguous chunk of GPU memory for threadblock parameters
       // This allows support for executing one transfer per stream, or all transfers in a single stream
 #if !defined(__NVCC__)
@@ -2959,23 +3000,29 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                     vector<Transfer> const& transfers,
                                     ExeInfo&                exeInfo)
   {
+    int const localRank = GetRank();
+
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
 
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
+        if (t.srcs[iSrc].memRank == localRank) {
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
+        }
       }
 
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
+        if (t.dsts[iDst].memRank == localRank) {
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
+        }
       }
 
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
+      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
         ERR_CHECK(hsa_signal_destroy(rss.signal));
       }
 #endif
@@ -2989,7 +3036,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Teardown additional requirements for GPU-based executors
-    if (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
@@ -3000,7 +3047,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    if (exeDevice.exeType == EXE_GPU_GFX) {
+    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
       MemType memType = MEM_GPU;
 #else
@@ -3923,6 +3970,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Loop over each executor and prepare
     // - Allocates memory for each Transfer
     // - Set up work for subexecutors
+    int const localRank = GetRank();
+    vector<ExeDevice> localExecutors;
     vector<TransferResources*> transferResources;
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
@@ -3931,6 +3980,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       for (auto& resource : exeInfo.resources) {
         transferResources.push_back(&resource);
+      }
+      // Track executors that are on this rank
+      if (exeDevice.exeRank == localRank) {
+        localExecutors.push_back(exeDevice);
       }
     }
 
@@ -3953,33 +4006,40 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
         dstReference[numSrcs].clear();
 
-      // Initialize all src memory buffers
+      // Initialize all src memory buffers (if on local rank)
       for (auto resource : transferResources) {
+        Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
-          ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
-                               hipMemcpyDefault), errResults);
+          if (t.srcs[srcIdx].memRank == localRank) {
+            ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
+                                 hipMemcpyDefault), errResults);
+          }
         }
       }
     }
 
     // Pause before starting when running in iteractive mode
     if (cfg.general.useInteractive) {
-      printf("Memory prepared:\n");
+      if (localRank == 0) {
+        printf("Memory prepared:\n");
 
-      for (int i = 0; i < transfers.size(); i++) {
-        ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
-        printf("Transfer %03d:\n", i);
-        for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
-          printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
-        for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
-          printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+        for (int i = 0; i < transfers.size(); i++) {
+          ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
+          printf("Transfer %03d:\n", i);
+          for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
+            printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
+          for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
+            printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+        }
+        printf("Hit <Enter> to continue: ");
+        fflush(stdout);
+        if (scanf("%*c") != 0) {
+          printf("[ERROR] Unexpected input\n");
+          exit(1);
+        }
+        printf("\n");
       }
-      printf("Hit <Enter> to continue: ");
-      if (scanf("%*c") != 0) {
-        printf("[ERROR] Unexpected input\n");
-        exit(1);
-      }
-      printf("\n");
+      System::Get().Barrier();
     }
 
     // Perform iterations
@@ -3988,19 +4048,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int iteration = -cfg.general.numWarmups; ; iteration++) {
       // Stop if number of iterations/seconds has reached limit
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
+      // NOTE: Time-based limit is not permitted for multi-node, because some ranks
+      //       might end up attempting different number of iterations which would lead to
+      //       hang at barrier
       if (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations) break;
+
+      // Wait for all ranks before starting any timing
+      System::Get().Barrier();
 
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
       // Execute all Transfers in parallel
       std::vector<std::future<ErrResult>> asyncExecutors;
-      for (auto& exeInfoPair : executorMap) {
+      for (auto const& exeDevice : localExecutors) {
         asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
                                                iteration,
                                                std::cref(cfg),
-                                               std::cref(exeInfoPair.first),
-                                               std::ref(exeInfoPair.second)));
+                                               std::cref(exeDevice),
+                                               std::ref(executorMap[exeDevice])));
       }
 
       // Wait for all threads to finish
@@ -4008,7 +4074,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         ERR_APPEND(asyncExecutor.get(), errResults);
       }
 
-       // Stop CPU timing for this iteration
+      // Wait for all ranks to finish
+      System::Get().Barrier();
+
+      // Stop CPU timing for this iteration
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
@@ -4025,12 +4094,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Pause for interactive mode
     if (cfg.general.useInteractive) {
-      printf("Transfers complete. Hit <Enter> to continue: ");
-      if (scanf("%*c") != 0)  {
-        printf("[ERROR] Unexpected input\n");
-        exit(1);
+      if (localRank == 0) {
+        printf("Transfers complete. Hit <Enter> to continue: ");
+        if (scanf("%*c") != 0)  {
+          printf("[ERROR] Unexpected input\n");
+          exit(1);
+        }
+        printf("\n");
+        fflush(stdout);
       }
-      printf("\n");
+      System::Get().Barrier();
     }
 
     // Validate results
@@ -4051,38 +4124,50 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
 
-      // Copy over executor results
-      ExeResult& exeResult = results.exeResults[exeDevice];
-      exeResult.numBytes = exeInfo.totalBytes;
-      exeResult.avgDurationMsec = exeInfo.totalDurationMsec / numTimedIterations;
-      exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
-      exeResult.sumBandwidthGbPerSec = 0.0;
-      exeResult.transferIdx.clear();
       results.totalBytesTransferred += exeInfo.totalBytes;
+
+      // Copy over executor results
+      ExeResult exeResult;
+      if (exeDevice.exeRank == localRank) {
+        // Local executor collects results
+        exeResult.numBytes             = exeInfo.totalBytes;
+        exeResult.avgDurationMsec      = exeInfo.totalDurationMsec / numTimedIterations;
+        exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
+        exeResult.sumBandwidthGbPerSec = 0.0;
+        exeResult.transferIdx.clear();
+
+        // Copy over transfer results
+        for (auto const& rss : exeInfo.resources) {
+          int const transferIdx = rss.transferIdx;
+          exeResult.transferIdx.push_back(transferIdx);
+
+          TransferResult& tfrResult      = results.tfrResults[transferIdx];
+          tfrResult.exeDevice            = exeDevice;
+#ifdef NIC_EXEC_ENABLED
+          tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
+#else
+          tfrResult.exeDstDevice         = exeDevice;
+#endif
+          tfrResult.numBytes             = rss.numBytes;
+          tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
+          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
+          if (cfg.general.recordPerIteration) {
+            tfrResult.perIterMsec = rss.perIterMsec;
+            tfrResult.perIterCUs  = rss.perIterCUs;
+          }
+          exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
+        }
+      }
+
+      // Send executor and transfer result to all ranks
+      System::Get().BroadcastExeResult(exeDevice.exeRank, exeResult);
+      for (int const transferIdx : exeResult.transferIdx) {
+        System::Get().BroadcastTfrResult(exeDevice.exeRank, results.tfrResults[transferIdx]);
+      }
+
+      results.exeResults[exeDevice] = exeResult;
       results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
                                                              exeResult.avgDurationMsec));
-
-      // Copy over transfer results
-      for (auto const& rss : exeInfo.resources) {
-        int const transferIdx = rss.transferIdx;
-        exeResult.transferIdx.push_back(transferIdx);
-
-        TransferResult& tfrResult      = results.tfrResults[transferIdx];
-        tfrResult.exeDevice            = exeDevice;
-#ifdef NIC_EXEC_ENABLED
-        tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-#else
-        tfrResult.exeDstDevice         = exeDevice;
-#endif
-        tfrResult.numBytes             = rss.numBytes;
-        tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
-        tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
-        if (cfg.general.recordPerIteration) {
-          tfrResult.perIterMsec = rss.perIterMsec;
-          tfrResult.perIterCUs  = rss.perIterCUs;
-        }
-        exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
-      }
     }
     results.avgTotalBandwidthGbPerSec = (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec;
 
@@ -4451,6 +4536,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         printf("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
       }
       commMode = COMM_MPI;
+    } else if (mpiInit) {
+      // Drop out of MPI use for single node
+      MPI_Finalize();
     }
 #endif
   }
@@ -4537,6 +4625,35 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           exit(1);
         }
         totalRecv += recvd;
+      }
+    }
+  }
+
+  void System::Broadcast(int root, size_t const numBytes, void* data) const
+  {
+    if (numBytes == 0) return;
+
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Bcast(data, numBytes, MPI_CHAR, root, comm);
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      // Relay through rank 0 first
+      if (root != 0) {
+        if (rank == root) {
+          SendData(0, numBytes, data);
+        } else if (rank == 0) {
+          RecvData(root, numBytes, data);
+        }
+      }
+      if (rank == 0) {
+        for (int peer = 1; peer < numRanks; peer++) {
+          SendData(peer, numBytes, data);
+        }
+      } else {
+        RecvData(0, numBytes, data);
       }
     }
   }
@@ -4892,6 +5009,74 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     RecvMap(peerRank, topo.closestNicsToGpu);
     RecvMap(peerRank, topo.executorName);
   }
+
+  template <typename T>
+  void System::BroadcastVector(int root, vector<T>& data) const
+  {
+    size_t len = data.size();
+    Broadcast(root, sizeof(len), &len);
+    data.resize(len);
+    if (len) {
+      Broadcast(root, sizeof(T) * len, data.data());
+    }
+  }
+
+  void System::BroadcastExeResult(int root, ExeResult& exeResult) const
+  {
+    #define BROADCAST(X)  Broadcast(root, sizeof(X), &X)
+    BROADCAST(exeResult.numBytes);
+    BROADCAST(exeResult.avgDurationMsec);
+    BROADCAST(exeResult.avgBandwidthGbPerSec);
+    BROADCAST(exeResult.sumBandwidthGbPerSec);
+    BroadcastVector(root, exeResult.transferIdx);
+    #undef BROADCAST
+  }
+
+  void System::BroadcastTfrResult(int root, TransferResult& tfrResult) const
+  {
+    #define BROADCAST(X)  Broadcast(root, sizeof(X), &X)
+    BROADCAST(tfrResult.numBytes);
+    BROADCAST(tfrResult.avgDurationMsec);
+    BROADCAST(tfrResult.avgBandwidthGbPerSec);
+    BroadcastVector(root, tfrResult.perIterMsec);
+    BROADCAST(tfrResult.exeDevice);
+    BROADCAST(tfrResult.exeDstDevice);
+
+    // Per-Iteration CU results need to be handled in a custom manner
+    size_t perIterCuSize = tfrResult.perIterCUs.size();
+    BROADCAST(perIterCuSize);
+
+    if (perIterCuSize > 0) {
+      tfrResult.perIterCUs.resize(perIterCuSize);
+      for (size_t i = 0; i < perIterCuSize; i++) {
+        size_t setSize;
+
+        //vector<set<pair<int,int>>> perIterCUs;      ///< GFX-Executor only. XCC:CU used per iteration
+
+        if (GetRank() == root) {
+          setSize = tfrResult.perIterCUs[i].size();
+          BROADCAST(setSize);
+          if (setSize > 0) {
+            for (pair<int,int> const& x : tfrResult.perIterCUs[i]) {
+              pair<int, int> p = x;
+              BROADCAST(p);
+            }
+          }
+        } else {
+          BROADCAST(setSize);
+          tfrResult.perIterCUs[i].clear();
+          if (setSize > 0) {
+            pair<int, int> p;
+            BROADCAST(p);
+            tfrResult.perIterCUs[i].insert(p);
+          }
+        }
+      }
+    } else {
+      tfrResult.perIterCUs.clear();
+    }
+    #undef BROADCAST
+  };
 
 #if !defined(__NVCC__)
   // Get the hsa_agent_t associated with a ExeDevice

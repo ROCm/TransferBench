@@ -25,7 +25,11 @@ THE SOFTWARE.
 #include "Topology.hpp"
 #include <fstream>
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
+  // When running in MPI mode, only the first rank produces output
+  bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
+                               || TransferBench::GetRank() == 0);
 
   // Collect environment variables
   EnvVars ev;
@@ -42,8 +46,7 @@ int main(int argc, char **argv) {
       }
       DisplayTopology(ev.outputToCsv);
     } else {
-      if (TransferBench::GetCommMode() != TransferBench::COMM_MPI || TransferBench::GetRank() == 0)
-      {
+      if (rankDoesOutput) {
         DisplayVersion();
         DisplayMultiNodeTopology(ev.outputToCsv);
       }
@@ -91,9 +94,11 @@ int main(int argc, char **argv) {
   }
 
   // Print environment variables and CSV header
-  ev.DisplayEnvVars();
-  if (ev.outputToCsv)
-    printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
+  if (rankDoesOutput) {
+    ev.DisplayEnvVars();
+    if (ev.outputToCsv)
+      printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
+  }
 
   TransferBench::ConfigOptions cfgOptions = ev.ToConfigOptions();
   TransferBench::TestResults results;
@@ -117,7 +122,7 @@ int main(int argc, char **argv) {
       std::map<ExeDevice, int> varTransferCount;
       for (auto const& t : transfers) {
         if (t.numSubExecs == 0) {
-          if (t.exeDevice.exeType != EXE_GPU_GFX) {
+          if (t.exeDevice.exeType != EXE_GPU_GFX && rankDoesOutput) {
             printf("[ERROR] Variable number of subexecutors is only supported on GFX executors\n");
             exit(1);
           }
@@ -126,7 +131,7 @@ int main(int argc, char **argv) {
           maxVarCount = max(maxVarCount, varTransferCount[t.exeDevice]);
         }
       }
-      if (numVariableTransfers > 0 && numVariableTransfers != transfers.size()) {
+      if (numVariableTransfers > 0 && numVariableTransfers != transfers.size() && rankDoesOutput) {
         printf("[ERROR] All or none of the Transfers in the Test must use variable number of Subexecutors\n");
         exit(1);
       }
@@ -154,7 +159,9 @@ int main(int argc, char **argv) {
           if (TransferBench::RunTransfers(cfgOptions, transfers, results)) {
             PrintResults(ev, ++testNum, transfers, results);
           }
-          PrintErrors(results.errResults);
+          if (rankDoesOutput) {
+            PrintErrors(results.errResults);
+          }
         } else {
           // Variable subexecutors - Determine how many subexecutors to sweep up to
           int maxNumVarSubExec = ev.maxNumVarSubExec;
@@ -231,9 +238,14 @@ void DisplayUsage(char const* cmdName)
 
 std::string MemDevicesToStr(std::vector<MemDevice> const& memDevices) {
   if (memDevices.empty()) return "N";
+  bool isMultiNode = GetNumRanks() > 1;
   std::stringstream ss;
-  for (auto const& m : memDevices)
+  for (auto const& m : memDevices) {
+    if (isMultiNode) {
+      ss << "R" << m.memRank;
+    }
     ss << TransferBench::MemTypeStr[m.memType] << m.memIndex;
+  }
   return ss.str();
 }
 
@@ -241,11 +253,18 @@ void PrintResults(EnvVars const& ev, int const testNum,
                   std::vector<Transfer> const& transfers,
                   TransferBench::TestResults const& results)
 {
+  // When running in MPI mode, only the first rank produces output
+  bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
+                               || TransferBench::GetRank() == 0);
+  if (!rankDoesOutput) return;
+
+  bool isMultiNode = TransferBench::GetNumRanks() > 1;
   char sep = ev.outputToCsv ? ',' : '|';
   size_t numTimedIterations = results.numTimedIterations;
 
   if (!ev.outputToCsv) printf("Test %d:\n", testNum);
 
+  std::string rankGap = (isMultiNode ? "      " : "");
   // Loop over each executor
   for (auto exeInfoPair : results.exeResults) {
     ExeDevice const& exeDevice = exeInfoPair.first;
@@ -253,9 +272,19 @@ void PrintResults(EnvVars const& ev, int const testNum,
     ExeType const    exeType   = exeDevice.exeType;
     int32_t const    exeIndex  = exeDevice.exeIndex;
 
-    printf(" Executor: %3s %02d %c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)\n",
-           ExeTypeName[exeType], exeIndex, sep, exeResult.avgBandwidthGbPerSec, sep,
-           exeResult.avgDurationMsec, sep, exeResult.numBytes, sep, exeResult.sumBandwidthGbPerSec);
+    char exeRankStr[32] = "";
+    char exeRankStr2[32] = "";
+    char exeHostStr[256] = "";
+    if (isMultiNode) {
+      sprintf(exeRankStr, "R%04d ", exeDevice.exeRank);
+      sprintf(exeRankStr2, "R%d", exeDevice.exeRank);
+      sprintf(exeHostStr, " %c %s", sep, GetHostname(exeDevice.exeRank).c_str());
+    }
+
+    printf(" Executor: %s%3s %02d %c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)%s\n",
+           exeRankStr, ExeTypeName[exeType], exeIndex, sep, exeResult.avgBandwidthGbPerSec, sep,
+           exeResult.avgDurationMsec, sep, exeResult.numBytes, sep, exeResult.sumBandwidthGbPerSec,
+           exeHostStr);
 
     // Loop over each executor
     for (int idx : exeResult.transferIdx) {
@@ -265,13 +294,14 @@ void PrintResults(EnvVars const& ev, int const testNum,
       char exeSubIndexStr[32] = "";
       if (t.exeSubIndex != -1)
         sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
-      printf("     Transfer %02d  %c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %c%03d%s:%03d -> %s\n",
-             idx,                    sep,
+
+      printf("     Transfer %02d  %s%c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%c%03d%s:%03d -> %s\n",
+             idx, rankGap.c_str(),   sep,
              r.avgBandwidthGbPerSec, sep,
              r.avgDurationMsec,      sep,
              r.numBytes,             sep,
              MemDevicesToStr(t.srcs).c_str(),
-             TransferBench::ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+             exeRankStr2, TransferBench::ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
              exeSubIndexStr, t.numSubExecs,
              MemDevicesToStr(t.dsts).c_str());
 
@@ -305,7 +335,8 @@ void PrintResults(EnvVars const& ev, int const testNum,
         for (auto& time : times) {
           double iterDurationMsec = time.first;
           double iterBandwidthGbs = (t.numBytes / 1.0E9) / iterDurationMsec * 1000.0f;
-          printf("      Iter %03d    %c %8.3f GB/s %c %8.3f ms %c", time.second, sep, iterBandwidthGbs, sep, iterDurationMsec, sep);
+          printf("      Iter %03d    %s%c %8.3f GB/s %c %8.3f ms %c", time.second, rankGap.c_str(),
+                 sep, iterBandwidthGbs, sep, iterDurationMsec, sep);
 
           std::set<int> usedXccs;
           if (time.second - 1 < r.perIterCUs.size()) {
@@ -321,11 +352,12 @@ void PrintResults(EnvVars const& ev, int const testNum,
             printf(" %02d", x);
           printf("\n");
         }
-        printf("      StandardDev %c %8.3f GB/s %c %8.3f ms %c\n", sep, stdDevBw, sep, stdDevTime, sep);
+        printf("      StandardDev %s%c %8.3f GB/s %c %8.3f ms %c\n", rankGap.c_str(), sep, stdDevBw, sep, stdDevTime, sep);
       }
     }
   }
-  printf(" Aggregate (CPU)  %c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n",
+  printf(" Aggregate (CPU)  %s%c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n",
+         rankGap.c_str(),
          sep, results.avgTotalBandwidthGbPerSec,
          sep, results.avgTotalDurationMsec,
          sep, results.totalBytesTransferred,
@@ -349,9 +381,13 @@ void CheckForError(ErrResult const& error)
 
 void PrintErrors(std::vector<ErrResult> const& errors)
 {
+  // When running in MPI mode, only the first rank produces output
+  bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
+                               || TransferBench::GetRank() == 0);
   bool isFatal = false;
   for (auto const& err : errors) {
-    printf("[%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
+    if (rankDoesOutput)
+      printf("[%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
     isFatal |= (err.errType == ERR_FATAL);
   }
   if (isFatal) exit(1);
