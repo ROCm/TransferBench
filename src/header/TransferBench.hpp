@@ -141,6 +141,11 @@ namespace TransferBench
               (memIndex != other.memIndex) ? (memIndex < other.memIndex) :
                                              (memRank  < other.memRank));
     }
+    bool operator==(MemDevice const& other) const {
+      return (memType  == other.memType &&
+              memIndex == other.memIndex &&
+              memRank  == other.memRank);
+    }
   };
 
   /**
@@ -765,6 +770,8 @@ namespace {
      */
     int GetCommMode() const { return commMode; }
 
+    bool& IsVerbose() { return verbose; }
+
     // Communication functions
     /**
      * Barrier that all ranks must arrive at before proceeding
@@ -794,6 +801,14 @@ namespace {
     void RecvData(int srcRank, size_t const numBytes, void* recvData) const;
 
     /**
+     * Modifies provided input to true if any rank provides a true input
+     *
+     * @param[in] flag          Flag to compare across ranks
+     * @returns   True if and only if any rank provided a flag with value of true
+     */
+    bool Any(bool const flag) const;
+
+    /**
      * Broadcast data from root to all ranks
      * All ranks must participate in this call
      *
@@ -802,6 +817,12 @@ namespace {
      * @param[in/out] data      Buffer to send from root / to receive into on other ranks
      */
     void Broadcast(int root, size_t const numBytes, void* data) const;
+
+    /**
+     * Collect errors across ranks
+     * @param[in,out] errResults List of errors per rank
+     */
+    void AllGatherErrors(vector<ErrResult>& errResults) const;
 
     // Topology functions
     /**
@@ -873,8 +894,12 @@ namespace {
     ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
 #endif
 
+    template <typename T>
+    void BroadcastVector(int root, vector<T>& data) const;
+    void BroadcastString(int root, std::string& string) const;
     void BroadcastExeResult(int root, ExeResult& exeResult) const;
     void BroadcastTfrResult(int root, TransferResult& tfrResult) const;
+
 
   private:
     System();
@@ -947,9 +972,6 @@ namespace {
 
     void SendRankTopo(int peerRank, RankTopology const& topo) const;
     void RecvRankTopo(int peerRank, RankTopology& topo) const;
-
-    template <typename T>
-    void BroadcastVector(int root, vector<T>& data) const;
   };
 
 // Parsing-related functions
@@ -1313,6 +1335,116 @@ namespace {
     return {ERR_FATAL, "Unsupported memory type (%d)", memDevice.memType};
   }
 
+  static void CheckMultiNodeConfigConsistency(ConfigOptions const& cfg,
+                                              std::vector<ErrResult>& errors)
+  {
+    if (GetCommMode() == COMM_NONE) return;
+
+    // To check consistency, compare against rank 0
+    int root = 0;
+
+    #define ADD_ERROR(STR) errors.push_back({ERR_FATAL, STR " must be consistent across all ranks"})
+
+    // Compare general options
+    {
+      GeneralOptions general = cfg.general;
+      System::Get().Broadcast(root, sizeof(general), &general);
+      if (general.numIterations      != cfg.general.numIterations)      ADD_ERROR("cfg.general.numIterations");
+      if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
+      if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
+      if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
+      if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
+    }
+
+    // Compare data options
+    {
+      DataOptions data = cfg.data;
+      System::Get().Broadcast(root, sizeof(data), &data);
+
+      // data.alwaysValidate is permitted to be different across ranks
+
+      if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
+      if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
+
+      size_t fillPatternSize = cfg.data.fillPattern.size();
+      System::Get().Broadcast(root, sizeof(fillPatternSize), &fillPatternSize);
+      if (fillPatternSize != cfg.data.fillPattern.size()) {
+        ADD_ERROR("cfg.data.fillPattern");
+      } else if (fillPatternSize > 0) {
+        auto fillPatternTemp = cfg.data.fillPattern;
+        System::Get().BroadcastVector(0, fillPatternTemp);
+        for (size_t i = 0; i < fillPatternSize; i++) {
+          if (fillPatternTemp[i] != cfg.data.fillPattern[i]) {
+            ADD_ERROR("cfg.data.fillPattern");
+            break;
+          }
+        }
+      }
+
+      size_t fillCompressSize = cfg.data.fillCompress.size();
+      System::Get().Broadcast(root, sizeof(fillCompressSize), &fillCompressSize);
+      if (fillCompressSize != cfg.data.fillCompress.size()) {
+        ADD_ERROR("cfg.data.fillCompress");
+      } else if (fillCompressSize > 0) {
+        auto fillCompressTemp = cfg.data.fillCompress;
+        System::Get().BroadcastVector(0, fillCompressTemp);
+        for (size_t i = 0; i < fillCompressSize; i++) {
+          if (fillCompressTemp[i] != cfg.data.fillCompress[i]) {
+            ADD_ERROR("cfg.data.fillCompress");
+            break;
+          }
+        }
+      }
+
+      // data.validateDirect is permitted to be different across ranks
+      // data.validateSource is permitted to be different across ranks
+    }
+
+    // Compare GFX Executor options
+    {
+      GfxOptions gfx = cfg.gfx;
+      System::Get().Broadcast(root, sizeof(gfx), &gfx);
+      if (gfx.blockOrder     != cfg.gfx.blockOrder)     ADD_ERROR("cfg.gfx.blockOrder");
+      if (gfx.blockSize      != cfg.gfx.blockSize)      ADD_ERROR("cfg.gfx.blockSize");
+      // gfx.cuMask       is permitted to be different across ranks
+      // gfx.perfXccTable is permitted to be different across ranks
+      if (gfx.seType         != cfg.gfx.seType)         ADD_ERROR("cfg.gfx.seType");
+      if (gfx.temporalMode   != cfg.gfx.temporalMode)   ADD_ERROR("cfg.gfx.temporalMode");
+      if (gfx.unrollFactor   != cfg.gfx.unrollFactor)   ADD_ERROR("cfg.gfx.unrollFactor)");
+      if (gfx.useHipEvents   != cfg.gfx.useHipEvents)   ADD_ERROR("cfg.gfx.useHipEvents");
+      if (gfx.useMultiStream != cfg.gfx.useMultiStream) ADD_ERROR("cfg.gfx.useMultiStream");
+      if (gfx.useSingleTeam  != cfg.gfx.useSingleTeam)  ADD_ERROR("cfg.gfx.useSingleTeam");
+      if (gfx.waveOrder      != cfg.gfx.waveOrder)      ADD_ERROR("cfg.gfx.waveOrder");
+      if (gfx.wordSize       != cfg.gfx.wordSize)       ADD_ERROR("cfg.gfx.wordSize");
+    }
+
+    // Compare DMA Executor options
+    {
+      DmaOptions dma = cfg.dma;
+      System::Get().Broadcast(root, sizeof(dma), &dma);
+      if (dma.useHipEvents != cfg.dma.useHipEvents) ADD_ERROR("cfg.dma.useHipEvents");
+      if (dma.useHsaCopy   != cfg.dma.useHsaCopy)   ADD_ERROR("cfg.dma.useHsaCopy");
+    }
+
+    // Compare NIC options
+    {
+      NicOptions nic = cfg.nic;
+      System::Get().Broadcast(root, sizeof(nic), &nic);
+      // nic.closestNics is permitted to be different across ranks
+      // nic.ibGidIndex  is permitted to be different across ranks
+      // nic.ibPort      is permitted to be different across ranks
+      if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
+      if (nic.maxRecvWorkReq  != cfg.nic.maxRecvWorkReq)  ADD_ERROR("cfg.nic.maxRecvWorkReq");
+      if (nic.maxSendWorkReq  != cfg.nic.maxSendWorkReq)  ADD_ERROR("cfg.nic.maxSendWorkReq");
+      // nic.queueSize   is permitted to be different across ranks
+      if (nic.roceVersion     != cfg.nic.roceVersion)     ADD_ERROR("cfg.nic.roceVersion");
+      if (nic.useRelaxedOrder != cfg.nic.useRelaxedOrder) ADD_ERROR("cfg.nic.useRelaxedOrder");
+      if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
+    }
+
+    #undef ADD_ERROR
+  }
+
   // Validate configuration options - return trues if and only if an fatal error is detected
   static bool ConfigOptionsHaveErrors(ConfigOptions const&    cfg,
                                       std::vector<ErrResult>& errors)
@@ -1321,10 +1453,8 @@ namespace {
     if (cfg.general.numWarmups < 0)
       errors.push_back({ERR_FATAL, "[general.numWarmups] must be a non-negative number"});
 
-    // Running for a fixed time in multi-node mode is disabled because different ranks may end up
-    // performing different number of iterations
-    if (cfg.general.numIterations < 0 && GetCommMode() != COMM_NONE)
-      errors.push_back({ERR_FATAL, "[general.numIterations] can not be negative when using  multi-node mode"});
+    // Check that config options are consistent (where necessary) across all ranks
+    CheckMultiNodeConfigConsistency(cfg, errors);
 
     // Check data options
     if (cfg.data.blockBytes == 0 || cfg.data.blockBytes % 4)
@@ -1446,6 +1576,54 @@ namespace {
     return false;
   }
 
+  static void CheckMultiNodeTransferConsistency(std::vector<Transfer> const& transfers,
+                                                std::vector<ErrResult>& errors)
+  {
+    if (GetCommMode() == COMM_NONE) return;
+
+    // To check consistency, compare against rank 0
+    int root = 0;
+
+    #define ADD_ERROR(STR)         \
+    do {                          \
+      isInconsistent = true;                                            \
+      if (System::Get().IsVerbose())                                     \
+        errors.push_back({ERR_FATAL, STR " must be the same for Transfer %d on all ranks", i}); \
+    } while(0)
+
+    size_t numTransfers = transfers.size();
+    System::Get().Broadcast(root, sizeof(numTransfers), &numTransfers);
+    if (numTransfers != transfers.size()) {
+      errors.push_back({ERR_FATAL, "The number of Transfers to run must be consistent across ranks"});
+    }
+
+    bool isInconsistent = false;
+    for (size_t i = 0; i < numTransfers; i++) {
+      Transfer t = transfers[i];
+
+      System::Get().Broadcast(root, sizeof(t.numBytes), &t.numBytes);
+      System::Get().BroadcastVector(root, t.srcs);
+      System::Get().BroadcastVector(root, t.dsts);
+      System::Get().Broadcast(root, sizeof(t.exeDevice),   &t.exeDevice);
+      System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
+      System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
+
+      if (t.numBytes    != transfers[i].numBytes)    ADD_ERROR("numBytes");
+      if (t.srcs        != transfers[i].srcs)        ADD_ERROR("Source memory locations");
+      if (t.dsts        != transfers[i].dsts)        ADD_ERROR("Destination memory locations");
+      if (t.exeDevice < transfers[i].exeDevice ||
+          transfers[i].exeDevice < t.exeDevice)      ADD_ERROR("Executor device");
+      if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
+      if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
+    }
+
+    if (isInconsistent && !System::Get().IsVerbose()) {
+      errors.push_back({ERR_FATAL, "Transfers to execute must be identical across all ranks"});
+    }
+
+    #undef ADD_ERROR
+  }
+
   // Validate Transfers to execute - returns true if and only if fatal error detected
   static bool TransfersHaveErrors(ConfigOptions         const& cfg,
                                   std::vector<Transfer> const& transfers,
@@ -1455,6 +1633,9 @@ namespace {
     std::map<ExeDevice, int> transferCount;
     std::map<ExeDevice, int> useSubIndexCount;
     std::map<ExeDevice, int> totalSubExecs;
+
+    // Check that the set of requested transfers is consistent across all ranks
+    CheckMultiNodeTransferConsistency(transfers, errors);
 
     // Per-Transfer checks
     for (size_t i = 0; i < transfers.size(); i++) {
@@ -3938,11 +4119,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     auto& errResults = results.errResults;
     errResults.clear();
 
-    // Check for valid configuration
-    if (ConfigOptionsHaveErrors(cfg, errResults)) return false;
+    // Check for valid configuration and quit if any rank has fatal error
+    if (System::Get().Any(ConfigOptionsHaveErrors(cfg, errResults))) {
+      System::Get().AllGatherErrors(errResults);
+      return false;
+    }
 
-    // Check for valid transfers
-    if (TransfersHaveErrors(cfg, transfers, errResults)) return false;
+    // Check for valid transfers and quit if any rank has fatal error
+    if (System::Get().Any(TransfersHaveErrors(cfg, transfers, errResults))) {
+      System::Get().AllGatherErrors(errResults);
+      return false;
+    }
 
     // Collect up transfers by executor
     int minNumSrcs = MAX_SRCS + 1;
@@ -4048,10 +4235,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int iteration = -cfg.general.numWarmups; ; iteration++) {
       // Stop if number of iterations/seconds has reached limit
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
-      // NOTE: Time-based limit is not permitted for multi-node, because some ranks
-      //       might end up attempting different number of iterations which would lead to
-      //       hang at barrier
-      if (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations) break;
+
+      // NOTE: Time-based limit is based on first rank to avoid any skew issues
+      bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
+      System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
+      if (shouldStop) break;
 
       // Wait for all ranks before starting any timing
       System::Get().Barrier();
@@ -4178,6 +4366,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_APPEND(TeardownExecutor(cfg, exeDevice, transfers, exeInfo), errResults);
     }
 
+    System::Get().AllGatherErrors(errResults);
     return true;
   }
 
@@ -4452,9 +4641,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         exit(1);
       }
       // Accept connections from other ranks
-      if (verbose) {
-        printf("[INFO] Rank 0 waiting for connections from other ranks\n");
-      }
+      printf("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
+             numRanks, masterAddr.c_str(), masterPort);
+
       for (int i = 1; i < numRanks; i++) {
         sockaddr_in clientAddr;
         socklen_t clientAddrLen = sizeof(clientAddr);
@@ -4658,6 +4847,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+  bool System::Any(bool const flag) const
+  {
+    bool result = false;
+    for (int i = 0; i < numRanks; i++) {
+      bool flagToSend = flag;
+      Broadcast(i, sizeof(flagToSend), &flagToSend);
+      result |= flagToSend;
+      if (result) break;
+    }
+    return result;
+  }
+
   std::string System::GetCpuName() const
   {
     std::ifstream cpuInfo("/proc/cpuinfo");
@@ -4688,6 +4889,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     memset(topo.hostname, 0, sizeof(topo.hostname));
     gethostname(topo.hostname, 32);
+    char* firstDotPtr = std::strchr(topo.hostname, '.');
+    if (firstDotPtr) *firstDotPtr = 0;
 
     // NOTE: Placeholder values
     strcpy(topo.rackId, "ABC");
@@ -5013,11 +5216,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   template <typename T>
   void System::BroadcastVector(int root, vector<T>& data) const
   {
+    // This assumes T is trivially copyable
+    static_assert(std::is_trivially_copyable<T>::value);
+
     size_t len = data.size();
     Broadcast(root, sizeof(len), &len);
     data.resize(len);
     if (len) {
       Broadcast(root, sizeof(T) * len, data.data());
+    }
+  }
+
+  void System::BroadcastString(int root, std::string& string) const
+  {
+    size_t len = string.size();
+    Broadcast(root, sizeof(len), &len);
+    string.resize(len);
+    if (len) {
+      Broadcast(root, len, string.data());
     }
   }
 
@@ -5077,6 +5293,26 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     #undef BROADCAST
   };
+
+  void System::AllGatherErrors(vector<ErrResult>& errResults) const
+  {
+    if (commMode == COMM_NONE) return;
+
+    vector<ErrResult> tempResults = std::move(errResults);
+
+    for (int i = 0; i < numRanks; i++) {
+      size_t errListSize = tempResults.size();
+      Broadcast(i, sizeof(errListSize), &errListSize);
+      for (size_t j = 0; j < errListSize; j++) {
+        ErrResult errResult;
+        if (rank == i) errResult = tempResults[j];
+        Broadcast(i, sizeof(errResult.errType), &errResult.errType);
+        BroadcastString(i, errResult.errMsg);
+        errResult.errMsg += " (Rank " + std::to_string(i) + ")";
+        errResults.push_back(errResult);
+      }
+    }
+  }
 
 #if !defined(__NVCC__)
   // Get the hsa_agent_t associated with a ExeDevice
