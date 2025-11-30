@@ -99,11 +99,13 @@ namespace TransferBench
     ExeType exeType;                            ///< Executor type
     int32_t exeIndex;                           ///< Executor index
     int32_t exeRank = 0;                        ///< Executor rank
+    int32_t exeSlot = 0;                        ///< Executor slot
 
     bool operator<(ExeDevice const& other) const {
-      return ((exeType  != other.exeType)  ? (exeType  < other.exeType) :
+      return ((exeRank  != other.exeRank)  ? (exeRank  < other.exeRank)  :
+              (exeType  != other.exeType)  ? (exeType  < other.exeType)  :
               (exeIndex != other.exeIndex) ? (exeIndex < other.exeIndex) :
-                                             (exeRank  < other.exeRank));
+                                             (exeSlot  < other.exeSlot));
     }
   };
 
@@ -158,6 +160,7 @@ namespace TransferBench
     vector<MemDevice> dsts        = {};         ///< List of destination memory devices
     ExeDevice         exeDevice   = {};         ///< Executor to use
     int32_t           exeSubIndex = -1;         ///< Executor subindex
+    int32_t           exeDstSlot  = 0;          ///< Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
   };
 
@@ -220,7 +223,7 @@ namespace TransferBench
    */
   struct NicOptions
   {
-    vector<int> closestNics     = {};           ///< Overrides the auto-detected closest NIC per GPU
+    size_t      chunkBytes      = 1<<30;        ///< How much bytes to transfer at a time
     int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
     uint8_t     ibPort          = 1;            ///< NIC port number to be used
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
@@ -1081,11 +1084,6 @@ namespace {
     ERR_CHECK(CharToExeType(*ptr, exeDevice.exeType));
     ptr++; // Skip executor type char
 
-    // NIC executor should not have rank specified
-    if (IsNicExeType(exeDevice.exeType) && rankSpecified) {
-      return {ERR_FATAL, "NIC executor cannot have rank specified in executor token %s", token.c_str()};
-    }
-
     // Check for wildcard
     if (*ptr == '*') {
       if (IsNicExeType(exeDevice.exeType)) {
@@ -1110,6 +1108,12 @@ namespace {
         return {ERR_FATAL, "Unable to parse subindex in executor token %s", token.c_str()};
       }
     }
+
+    // NIC executors require subIndex to denote destination NIC index
+    if (exeSubIndex == -1 && IsNicExeType(exeDevice.exeType)) {
+      return {ERR_FATAL, "NIC executor requires a subindex to indicate destination NIC index"};
+    }
+
     return ERR_NONE;
   }
 
@@ -1271,32 +1275,31 @@ namespace {
 
 // Setup validation-related functions
 //========================================================================================
-
-  static ErrResult GetActualExecutor(ConfigOptions const& cfg,
-                                     ExeDevice     const& origExeDevice,
-                                     ExeDevice&           actualExeDevice)
+  // This function resolves executors that may be indexed by "nearest"
+  static ErrResult GetActualExecutor(ExeDevice     const& origExeDevice,
+                                     ExeDevice&           actualExeDevice,
+                                     int                  rankOverride = -1)
   {
     // By default, nothing needs to change
     actualExeDevice = origExeDevice;
 
-    // Check that rank has been specified
-    if (origExeDevice.exeRank < 0 || origExeDevice.exeRank >= GetNumRanks()) {
-      return {ERR_FATAL,
-              "Rank index must be between 0 and %d (instead of %d)", GetNumRanks() - 1, origExeDevice.exeRank};
-    }
+    // Check that executor rank is valid
+    int exeRank = (rankOverride == -1 ? origExeDevice.exeRank : rankOverride);
+    if (exeRank < 0 || exeRank >= GetNumRanks())
+      return {ERR_FATAL, "Rank index must be between 0 and %d (instead of %d)", GetNumRanks() - 1, exeRank};
 
     // When using NIC_NEAREST, remap to the closest NIC to the GPU
     if (origExeDevice.exeType == EXE_NIC_NEAREST) {
       actualExeDevice.exeType  = EXE_NIC;
-
-      if (cfg.nic.closestNics.size() > 0) {
-        if (origExeDevice.exeIndex < 0 || origExeDevice.exeIndex >= cfg.nic.closestNics.size())
-          return {ERR_FATAL, "NIC index is out of range (%d)", origExeDevice.exeIndex};
-
-        actualExeDevice.exeIndex = cfg.nic.closestNics[origExeDevice.exeIndex];
-      } else {
-        actualExeDevice.exeIndex = GetClosestNicToGpu(origExeDevice.exeIndex, origExeDevice.exeRank);
+      actualExeDevice.exeRank  = exeRank;
+      std::vector<int> nicIndices;
+      GetClosestNicsToGpu(nicIndices, origExeDevice.exeIndex, exeRank);
+      if (origExeDevice.exeSlot < 0 || origExeDevice.exeSlot >= nicIndices.size()) {
+        return {ERR_FATAL, "Rank %d GPU %d closest NIC slot %d is invalid (%lu slots detected)",
+          exeRank, origExeDevice.exeIndex, origExeDevice.exeSlot, nicIndices.size()};
       }
+      actualExeDevice.exeIndex = nicIndices[actualExeDevice.exeSlot];
+      actualExeDevice.exeSlot = 0;
     }
     return ERR_NONE;
   }
@@ -1430,7 +1433,6 @@ namespace {
     {
       NicOptions nic = cfg.nic;
       System::Get().Broadcast(root, sizeof(nic), &nic);
-      // nic.closestNics is permitted to be different across ranks
       // nic.ibGidIndex  is permitted to be different across ranks
       // nic.ibPort      is permitted to be different across ranks
       if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
@@ -1538,16 +1540,9 @@ namespace {
 
     // Check NIC options
 #ifdef NIC_EXEC_ENABLED
-    int numNics = GetNumExecutors(EXE_NIC);
-    for (auto const& nic : cfg.nic.closestNics)
-      if (nic < 0 || nic >= numNics)
-        errors.push_back({ERR_FATAL, "NIC index (%d) in user-specified closest NIC list must be between 0 and %d",
-            nic, numNics - 1});
-
-    size_t closetNicsSize = cfg.nic.closestNics.size();
-    if (closetNicsSize > 0 && closetNicsSize < numGpus)
-      errors.push_back({ERR_FATAL, "User-specified closest NIC list must match GPU count of %d",
-          numGpus});
+    if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
+      errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    }
 #endif
 
     // NVIDIA specific
@@ -1606,6 +1601,7 @@ namespace {
       System::Get().BroadcastVector(root, t.dsts);
       System::Get().Broadcast(root, sizeof(t.exeDevice),   &t.exeDevice);
       System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
+      System::Get().Broadcast(root, sizeof(t.exeDstSlot),  &t.exeDstSlot);
       System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
 
       if (t.numBytes    != transfers[i].numBytes)    ADD_ERROR("numBytes");
@@ -1614,6 +1610,7 @@ namespace {
       if (t.exeDevice < transfers[i].exeDevice ||
           transfers[i].exeDevice < t.exeDevice)      ADD_ERROR("Executor device");
       if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
+      if (t.exeDstSlot  != transfers[i].exeDstSlot)  ADD_ERROR("Executor dst slot");
       if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
     }
 
@@ -1789,34 +1786,56 @@ namespace {
           }
         }
         break;
-      case EXE_NIC:
+      case EXE_NIC: case EXE_NIC_NEAREST:
 #ifdef NIC_EXEC_ENABLED
       {
-        int srcIndex = t.exeDevice.exeIndex;
-        int dstIndex = t.exeSubIndex;
-        if (srcIndex < 0 || srcIndex >= numExecutors)
-          errors.push_back({ERR_FATAL, "Transfer %d: src NIC executor indexes an out-of-range NIC (%d)", i, srcIndex});
-        if (dstIndex < 0 || dstIndex >= numExecutors)
-          errors.push_back({ERR_FATAL, "Transfer %d: dst NIC executor indexes an out-of-range NIC (%d)", i, dstIndex});
-      }
-#else
-        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available", i});
-#endif
-        break;
-      case EXE_NIC_NEAREST:
-#ifdef NIC_EXEC_ENABLED
-      {
+        // NIC Executors can only execute a copy operation
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+          errors.push_back({ERR_FATAL, "Transfer %d: NIC executor requires single SRC and single DST", i});
+          break;
+        }
+
+        // NIC executor cannot do remote read + remote write - either src or dst must be local
+        int srcExeRank = t.exeDevice.exeRank;
+        int srcMemRank = t.srcs[0].memRank;
+        int dstMemRank = t.dsts[0].memRank;
+        int dstExeRank = (srcExeRank == srcMemRank ? dstMemRank : srcMemRank);
+        if (srcMemRank != srcExeRank && dstMemRank != srcExeRank) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: NIC executor rank (%d) must be same as SRC memory rank (%d) or DST memory rank (%d)", i, srcExeRank, srcMemRank, dstMemRank});
+          break;
+        }
+
+        // The SRC NIC executor is the one that initiates either a (remote read/local write) or (local read/remote write) copy operation
         ExeDevice srcExeDevice;
-        ErrResult errSrc = GetActualExecutor(cfg, t.exeDevice, srcExeDevice);
+        ErrResult errSrc = GetActualExecutor(t.exeDevice, srcExeDevice);
         if (errSrc.errType != ERR_NONE) errors.push_back(errSrc);
+
+        // Check that the SRC NIC exists and is active
+        if (srcExeDevice.exeIndex < 0 || srcExeDevice.exeIndex >= GetNumExecutors(EXE_NIC, srcExeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d SRC NIC executor indexes an out-of-range NIC (%d).  Detected %d NICs",
+              i, srcExeRank, srcExeDevice.exeIndex, GetNumExecutors(EXE_NIC, srcExeRank)});
+        } else if (!NicIsActive(srcExeDevice.exeIndex, srcExeDevice.exeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d SRC NIC executor %d is not active", i, srcExeDevice.exeRank, srcExeDevice.exeIndex});
+        }
+
+        // The DST NIC executor facilitates the copy but issues no commands
+        ExeDevice dstOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, dstExeRank, t.exeDstSlot};
         ExeDevice dstExeDevice;
-        ErrResult errDst = GetActualExecutor(cfg, {t.exeDevice.exeType, t.exeSubIndex}, dstExeDevice);
-        if (errDst.errType != ERR_NONE) errors.push_back(errDst);
+        ErrResult errDst = GetActualExecutor(dstOrgDevice, dstExeDevice);
+
+        // Check that the DST NIC exists and is active
+        if (dstExeDevice.exeIndex < 0 || dstExeDevice.exeIndex >= GetNumExecutors(EXE_NIC, dstExeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d DST NIC executor indexes an out-of-range NIC (%d).  Detected %d NICs",
+              i, dstExeRank, dstExeDevice.exeIndex, GetNumExecutors(EXE_NIC, dstExeRank)});
+        } else if (!NicIsActive(dstExeDevice.exeIndex, dstExeDevice.exeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d DST NIC executor %d is not active", i, dstExeDevice.exeRank, dstExeDevice.exeIndex});
+        }
       }
 #else
-        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available", i});
+      errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
 #endif
-        break;
+      break;
       }
 
       // Check subexecutors
@@ -1973,8 +1992,8 @@ namespace {
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
-    vector<ibv_sge>            sgePerQueuePair;   ///< Scatter-gather elements per queue pair
-    vector<ibv_send_wr>        sendWorkRequests;  ///< Send work requests per queue pair
+    vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
+    vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
 #endif
 
     // Counters
@@ -2472,12 +2491,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  // Structure used to exchange connection information
+  struct ConnInfo
+  {
+    uint16_t lid;     // Local  routing id
+    ibv_gid  gid;     // Global routing id (RoCE)
+    int      gidIdx;  // Global routing id index (RoCE)
+    uint32_t qpn;     // Queue pair number
+    uint32_t rkey;    // Remote memory access key
+    uint64_t vaddr;   // Remote virtual address of the memory region
+  };
+
   // Transition QueuePair to Ready to Receive State
   static ErrResult TransitionQpToRtr(ibv_qp*         qp,
-                                     uint16_t const& dlid,
-                                     uint32_t const& dqpn,
-                                     ibv_gid  const& gid,
-                                     uint8_t  const& gidIndex,
+                                     ConnInfo const& connInfo,
                                      uint8_t  const& port,
                                      bool     const& isRoCE,
                                      ibv_mtu  const& mtu)
@@ -2491,19 +2518,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     attr.min_rnr_timer      = 12;
     if (isRoCE) {
       attr.ah_attr.is_global                     = 1;
-      attr.ah_attr.grh.dgid.global.subnet_prefix = gid.global.subnet_prefix;
-      attr.ah_attr.grh.dgid.global.interface_id  = gid.global.interface_id;
+      attr.ah_attr.grh.dgid.global.subnet_prefix = connInfo.gid.global.subnet_prefix;
+      attr.ah_attr.grh.dgid.global.interface_id  = connInfo.gid.global.interface_id;
       attr.ah_attr.grh.flow_label                = 0;
-      attr.ah_attr.grh.sgid_index                = gidIndex;
+      attr.ah_attr.grh.sgid_index                = connInfo.gidIdx;
       attr.ah_attr.grh.hop_limit                 = 255;
     } else {
       attr.ah_attr.is_global = 0;
-      attr.ah_attr.dlid      = dlid;
+      attr.ah_attr.dlid      = connInfo.lid;
     }
     attr.ah_attr.sl            = 0;
     attr.ah_attr.src_path_bits = 0;
     attr.ah_attr.port_num      = port;
-    attr.dest_qp_num           = dqpn;
+    attr.dest_qp_num           = connInfo.qpn;
 
     // Modify the QP
     int ret = ibv_modify_qp(qp, &attr,
@@ -2545,38 +2572,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
-                                               ExeDevice     const& srcExeDevice,
+                                               ExeDevice     const& nicExeDevice,
                                                Transfer      const& t,
                                                TransferResources&   rss)
 
   {
-    // Switch to the closest NUMA node to this NIC
-    int numaNode = GetIbvDeviceList()[srcExeDevice.exeIndex].numaNode;
-    if (numaNode != -1)
-      numa_run_on_node(numaNode);
+    // The NIC executor is the one that initiates either a (remote read/local write) or (local read/remote write) copy operation
+    // The NON executor is the NIC executor that facilitates the copy but issues no commands
+    // TransferResources will be mostly prepared only on the ranks that are involved in this transfer, although all ranks pass
+    // through this code
+    int const srcMemRank = t.srcs[0].memRank;
+    int const dstMemRank = t.dsts[0].memRank;
+    int const nicExeRank = nicExeDevice.exeRank;
+    int const nonExeRank = (nicExeRank == srcMemRank ? dstMemRank : srcMemRank);
 
-    int const port = cfg.nic.ibPort;
+    // Figure out non Executor (Accounts for possible remap due to use of EXE_NIC_NEAREST)
+    ExeDevice nonOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, nonExeRank, t.exeDstSlot};
+    ExeDevice nonExeDevice;
+    ERR_CHECK(GetActualExecutor(nonOrgDevice, nonExeDevice));
 
-    // Figure out destination NIC (Accounts for possible remap due to use of EXE_NIC_NEAREST)
-    ExeDevice dstExeDevice;
-    ERR_CHECK(GetActualExecutor(cfg, {t.exeDevice.exeType, t.exeSubIndex}, dstExeDevice));
-
-    rss.srcNicIndex = srcExeDevice.exeIndex;
-    rss.dstNicIndex = dstExeDevice.exeIndex;
+    // All ranks track which NIC was used and number of queue pairs used
+    rss.srcNicIndex = (nicExeRank == srcMemRank ? nicExeDevice.exeIndex : nonExeDevice.exeIndex);
+    rss.dstNicIndex = (nicExeRank == dstMemRank ? nicExeDevice.exeIndex : nonExeDevice.exeIndex);
     rss.qpCount     = t.numSubExecs;
 
-    // Check for valid NICs and active ports
-    int numNics = GetNumExecutors(EXE_NIC);
-    if (rss.srcNicIndex < 0 || rss.srcNicIndex >= numNics)
-      return {ERR_FATAL, "SRC NIC index is out of range (%d)", rss.srcNicIndex};
-    if (rss.dstNicIndex < 0 || rss.dstNicIndex >= numNics)
-      return {ERR_FATAL, "DST NIC index is out of range (%d)", rss.dstNicIndex};
-    if (!GetIbvDeviceList()[rss.srcNicIndex].hasActivePort)
-      return {ERR_FATAL, "SRC NIC %d is not active\n", rss.srcNicIndex};
-    if (!GetIbvDeviceList()[rss.dstNicIndex].hasActivePort)
-      return {ERR_FATAL, "DST NIC %d is not active\n", rss.dstNicIndex};
-
-    // Queue pair flags
+    // Establish memory access flags
     unsigned int rdmaAccessFlags = (IBV_ACCESS_LOCAL_WRITE    |
                                     IBV_ACCESS_REMOTE_READ    |
                                     IBV_ACCESS_REMOTE_WRITE   |
@@ -2585,101 +2605,164 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     unsigned int rdmaMemRegFlags = rdmaAccessFlags;
     if (cfg.nic.useRelaxedOrder) rdmaMemRegFlags |= IBV_ACCESS_RELAXED_ORDERING;
 
-    // Open NIC contexts
-    IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
-    IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
+    int const port = cfg.nic.ibPort;
 
-    // Open protection domains
-    IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
-    IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
-
-    // Register memory region
-    IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
-    IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
-
-    // Create completion queues
-    IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
-    IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
-
-    // Get port attributes
-    IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
-    IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
-
-
-    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer)
-      return {ERR_FATAL, "SRC NIC (%d) and DST NIC (%d) do not have the same link layer", rss.srcNicIndex, rss.dstNicIndex};
-
-    // Prepare GID index
+    // Prepare NIC on SRC mem rank
     int srcGidIndex = cfg.nic.ibGidIndex;
+    bool srcIsRoCE = false;
+    if (GetRank() == srcMemRank) {
+      // Open SRC NIC context
+      IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
+      // Open SRC protection domain
+      IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
+      // Register SRC memory region
+      IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+      // Create SRC completion queues
+      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Get SRC port attributes
+      IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
+      // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+      srcIsRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+      if (srcIsRoCE) {
+        // Try to auto-detect the GID index
+        std::pair<int, std::string> srcGidInfo (srcGidIndex, "");
+        ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, port, srcGidInfo));
+        srcGidIndex = srcGidInfo.first;
+        IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
+      }
+
+      // Prepare queue pairs and send elements
+      rss.srcQueuePairs.resize(rss.qpCount);
+      for (int i = 0; i < rss.qpCount; i++) {
+       // Create SRC queue pair
+        ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
+        // Initialize SRC queue pairs
+        ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
+      }
+    }
+
+    // Prepare NIC on DST mem rank
     int dstGidIndex = cfg.nic.ibGidIndex;
-
-    // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
-    bool isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
-    if (isRoCE) {
-      // Try to auto-detect the GID index
-      std::pair<int, std::string> srcGidInfo (srcGidIndex, "");
-      std::pair<int, std::string> dstGidInfo (dstGidIndex, "");
-      ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, cfg.nic.ibPort, srcGidInfo));
-      ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, cfg.nic.ibPort, dstGidInfo));
-      srcGidIndex = srcGidInfo.first;
-      dstGidIndex = dstGidInfo.first;
-      IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
-      IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
+    bool dstIsRoCE = false;
+    if (GetRank() == dstMemRank) {
+      // Open DST NIC contexts
+      IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
+      // Open DST protection domain
+      IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
+      // Register DST memory region
+      IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+      // Create DST completion queues
+      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Get DST port attributes
+      IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
+      // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+      dstIsRoCE = (rss.dstPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+      if (dstIsRoCE) {
+        // Try to auto-detect the GID index
+        std::pair<int, std::string> dstGidInfo (dstGidIndex, "");
+        ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, port, dstGidInfo));
+        dstGidIndex = dstGidInfo.first;
+        IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
+      }
+      // Prepare queue pairs
+      rss.dstQueuePairs.resize(rss.qpCount);
+      for (int i = 0; i < rss.qpCount; i++) {
+        // Create DST queue pair
+        ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
+        // Initialize SRC/DST queue pairs
+        ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
+      }
     }
 
-    // Prepare queue pairs and send elements
-    rss.srcQueuePairs.resize(rss.qpCount);
-    rss.dstQueuePairs.resize(rss.qpCount);
-    rss.sgePerQueuePair.resize(rss.qpCount);
-    rss.sendWorkRequests.resize(rss.qpCount);
-
-    for (int i = 0; i < rss.qpCount; ++i) {
-
-      // Create scatter-gather element for the portion of memory assigned to this queue pair
-      ibv_sge sg = {};
-      sg.addr   = (uint64_t)rss.subExecParamCpu[i].src[0];
-      sg.length = rss.subExecParamCpu[i].N * sizeof(float);
-      sg.lkey   = rss.srcMemRegion->lkey;
-      rss.sgePerQueuePair[i] = sg;
-
-      // Create send work request
-      ibv_send_wr wr = {};
-      wr.wr_id                = i;
-      wr.sg_list              = &rss.sgePerQueuePair[i];
-      wr.num_sge              = 1;
-      wr.opcode               = IBV_WR_RDMA_WRITE;
-      wr.send_flags           = IBV_SEND_SIGNALED;
-      wr.wr.rdma.remote_addr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
-      wr.wr.rdma.rkey         = rss.dstMemRegion->rkey;
-      rss.sendWorkRequests[i] = wr;
-
-      // Create SRC/DST queue pairs
-      ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
-      ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
-
-      // Initialize SRC/DST queue pairs
-      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
-      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
-
-      // Transition the SRC queue pair to ready to receive
-      ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
-                                  rss.dstQueuePairs[i]->qp_num, rss.dstGid,
-                                  dstGidIndex, port, isRoCE,
-                                  rss.srcPortAttr.active_mtu));
-
-      // Transition the SRC queue pair to ready to send
-      ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
-
-      // Transition the DST queue pair to ready to receive
-      ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], rss.srcPortAttr.lid,
-                                  rss.srcQueuePairs[i]->qp_num, rss.srcGid,
-                                  srcGidIndex, port, isRoCE,
-                                  rss.dstPortAttr.active_mtu));
-
-      // Transition the DST queue pair to ready to send
-      ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+    // Executor rank prepares send elements and work requests
+    if (GetRank() == nicExeRank) {
+      rss.sgePerQueuePair.resize(rss.qpCount);
+      rss.sendWorkRequests.resize(rss.qpCount);
     }
 
+    // Broadcast SRC/DST port link_layer so that all ranks know it so that they can be compared
+    System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
+    System::Get().Broadcast(dstMemRank, sizeof(rss.dstPortAttr.link_layer), &rss.dstPortAttr.link_layer);
+    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer)
+      return {ERR_FATAL, "SRC NIC (%d) [Rank %d] and DST NIC (%d) [Rank %d] do not have the same link layer",
+        rss.srcNicIndex, srcMemRank, rss.dstNicIndex, dstMemRank};
+
+    for (int i = 0; i < rss.qpCount; i++) {
+      // Prepare and exchange SRC connection information
+      ConnInfo srcConnInfo;
+      if (GetRank() == srcMemRank) {
+        srcConnInfo.lid    = rss.srcPortAttr.lid;
+        srcConnInfo.gid    = rss.srcGid;
+        srcConnInfo.gidIdx = srcGidIndex;
+        srcConnInfo.qpn    = rss.srcQueuePairs[i]->qp_num;
+        srcConnInfo.rkey   = rss.srcMemRegion->rkey;
+        srcConnInfo.vaddr  = (uint64_t)rss.subExecParamCpu[i].src[0];
+      }
+      System::Get().Broadcast(srcMemRank, sizeof(srcConnInfo), &srcConnInfo);
+
+      // Prepare and exchange DST connection information
+      ConnInfo dstConnInfo;
+      if (GetRank() == dstMemRank) {
+        dstConnInfo.lid    = rss.dstPortAttr.lid;
+        dstConnInfo.gid    = rss.dstGid;
+        dstConnInfo.gidIdx = dstGidIndex;
+        dstConnInfo.qpn    = rss.dstQueuePairs[i]->qp_num;
+        dstConnInfo.rkey   = rss.dstMemRegion->rkey;
+        dstConnInfo.vaddr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
+      }
+      System::Get().Broadcast(dstMemRank, sizeof(dstConnInfo), &dstConnInfo);
+
+      // Move queue pairs to ready-to-receive (RTR), using exchanged connection info
+      // Then move them to read-to-send (RTS)
+      if (GetRank() == srcMemRank) {
+        ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu));
+        ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+      }
+      if (GetRank() == dstMemRank) {
+        ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu));
+        ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+      }
+
+      // Prepare scatter-gather element / work request for this queue pair in advance
+      if (GetRank() == nicExeRank) {
+        // Process the data to transfer in chunks (of cfg.nic.chunkBytes)
+        size_t       remaining = rss.subExecParamCpu[i].N * sizeof(float);
+        size_t const numChunks = (remaining + cfg.nic.chunkBytes - 1) / cfg.nic.chunkBytes;
+        uint8_t*     local     = (nicExeRank == srcMemRank ? (uint8_t*)rss.subExecParamCpu[i].src[0]
+                                                           : (uint8_t*)rss.subExecParamCpu[i].dst[0]);
+        auto const   opcode    = (nicExeRank == srcMemRank ? IBV_WR_RDMA_WRITE             : IBV_WR_RDMA_READ);
+        uint64_t     remote    = (nicExeRank == srcMemRank ? dstConnInfo.vaddr             : srcConnInfo.vaddr);
+        auto const   lkey      = (nicExeRank == srcMemRank ? rss.srcMemRegion->lkey        : rss.dstMemRegion->lkey);
+        auto const   rkey      = (nicExeRank == srcMemRank ? dstConnInfo.rkey              : srcConnInfo.rkey);
+        rss.sgePerQueuePair[i].resize(numChunks, {});
+        rss.sendWorkRequests[i].resize(numChunks, {});
+
+        for (size_t chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+          bool   isLastChunk    = (chunkIdx == numChunks - 1);
+          size_t currChunkBytes = isLastChunk ? remaining : cfg.nic.chunkBytes;
+
+          // Prepare scatter gather element
+          ibv_sge& sg = rss.sgePerQueuePair[i][chunkIdx];
+          sg.length = currChunkBytes;
+          sg.addr   = (uintptr_t)local;
+          sg.lkey   = lkey;
+
+          // Prepare work request
+          ibv_send_wr& wr = rss.sendWorkRequests[i][chunkIdx];
+          wr.wr_id               = i;
+          wr.sg_list             = &rss.sgePerQueuePair[i][chunkIdx];
+          wr.num_sge             = 1;
+          wr.send_flags          = isLastChunk ? IBV_SEND_SIGNALED : 0;  // Only last chunk is signalled
+          wr.opcode              = opcode;
+          wr.wr.rdma.remote_addr = remote;
+          wr.wr.rdma.rkey        = rkey;
+
+          // Increment locations
+          local  += currChunkBytes;
+          remote += currChunkBytes;
+        }
+      }
+    }
     return ERR_NONE;
   }
 
@@ -3001,6 +3084,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (srcMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
         }
+
+        // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
+        System::Get().Broadcast(srcMemDevice.memRank, sizeof(rss.srcMem[iSrc]), &rss.srcMem[iSrc]);
       }
 
       // Allocate destination memory
@@ -3021,6 +3107,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (dstMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
         }
+        // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
+        System::Get().Broadcast(dstMemDevice.memRank, sizeof(rss.dstMem[iDst]), &rss.dstMem[iDst]);
       }
 
       // Prepare HSA DMA copy specific resources
@@ -3345,15 +3433,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
-
-
-    // Loop over each of the queue pairs and post the send
+    // Loop over each of the queue pairs and post work request
     ibv_send_wr* badWorkReq;
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-      int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
-      if (error)
-        return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
-          rss.transferIdx, qpIndex, error};
+      size_t numChunks = rss.sendWorkRequests[qpIndex].size();
+      for (size_t chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex][chunkIdx], &badWorkReq);
+        if (error)
+          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d chunk %lu of %lu (Error code %d)\n",
+            rss.transferIdx, qpIndex, chunkIdx, numChunks, error};
+      }
     }
     return ERR_NONE;
   }
@@ -4139,7 +4228,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int i = 0; i < transfers.size(); i++) {
       Transfer const& t = transfers[i];
       ExeDevice exeDevice;
-      ERR_APPEND(GetActualExecutor(cfg, t.exeDevice, exeDevice), errResults);
+      ERR_APPEND(GetActualExecutor(t.exeDevice, exeDevice), errResults);
 
       TransferResources resource = {};
       resource.transferIdx = i;
@@ -4519,14 +4608,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         Transfer rankTransfer = transfer;
         for (MemDevice& src : rankTransfer.srcs)
           if (src.memRank == -1) src.memRank = rankIndex;
-        if (rankTransfer.exeDevice.exeRank == -1)
-          rankTransfer.exeDevice.exeRank = rankIndex;
+        if (rankTransfer.exeDevice.exeRank == -1) {
+          // If NIC executor doesn't specify a rank, then use the source memory rank by default
+          if (IsNicExeType(rankTransfer.exeDevice.exeType)) {
+            if (rankTransfer.srcs.size() != 1) {
+              return {ERR_FATAL, "Parsing error: NIC execution requires single SRC and single DST"};
+            } else {
+              rankTransfer.exeDevice.exeRank = rankTransfer.srcs[0].memRank;
+            }
+          } else {
+            rankTransfer.exeDevice.exeRank = rankIndex;
+          }
+        }
         for (MemDevice& dst : rankTransfer.dsts)
           if (dst.memRank == -1) dst.memRank = rankIndex;
 
         RecursiveWildcardDeviceExpansion(rankTransfer, transfers);
       }
     }
+
     return ERR_NONE;
   }
 
@@ -4642,7 +4742,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       // Accept connections from other ranks
       printf("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
-             numRanks, masterAddr.c_str(), masterPort);
+             numRanks-1, masterAddr.c_str(), masterPort);
 
       for (int i = 1; i < numRanks; i++) {
         sockaddr_in clientAddr;

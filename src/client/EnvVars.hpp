@@ -107,11 +107,11 @@ public:
 
   // NIC options
   int ibGidIndex;                    // GID Index for RoCE NICs
-  int roceVersion;                   // RoCE version number
-  int ipAddressFamily;               // IP Address Famliy
   uint8_t ibPort;                    // NIC port number to be used
+  int ipAddressFamily;               // IP Address Famliy
+  int nicChunkBytes;                 // Number of bytes to send per chunk for RDMA operations
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
-  std::string closestNicStr;         // Holds the user-specified list of closest NICs
+  int roceVersion;                   // RoCE version number
 
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
@@ -168,8 +168,8 @@ public:
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
     roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
     ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
+    nicChunkBytes     = GetEnvVar("NIC_CHUNK_BYTES"     , 1073741824);
     nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
-    closestNicStr     = GetEnvVar("CLOSEST_NIC"         , "");
 
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
 
@@ -314,9 +314,6 @@ public:
     printf(" ALWAYS_VALIDATE   - Validate after each iteration instead of once after all iterations\n");
     printf(" BLOCK_BYTES       - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET       - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
-#if NIC_EXEC_ENABLED
-    printf(" CLOSEST_NIC       - Comma-separated list of per-GPU closest NIC (default=auto)\n");
-#endif
     printf(" CU_MASK           - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
     printf(" FILL_COMPRESS     - Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0\n");
     printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
@@ -337,6 +334,7 @@ public:
     printf(" MIN_VAR_SUBEXEC   - Minumum # of subexecutors to use for variable subExec Transfers\n");
     printf(" MAX_VAR_SUBEXEC   - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
 #if NIC_EXEC_ENABLED
+    printf(" NIC_CHUNK_BYTES   - Number of bytes to send at a time using NIC (default = 1GB)\n");
     printf(" NIC_RELAX_ORDER   - Set to non-zero to use relaxed ordering");
 #endif
     printf(" NUM_ITERATIONS    - # of timed iterations per test. If negative, run for this many seconds instead\n");
@@ -386,8 +384,7 @@ public:
     nicSupport = " (with NIC support)";
 #endif
     if (!outputToCsv) {
-      printf("TransferBench v%s.%s%s\n", TransferBench::VERSION, CLIENT_VERSION, nicSupport.c_str());
-      printf("===============================================================\n");
+      DisplayVersion();
       if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }
     else if (!hideEnv)
@@ -400,10 +397,6 @@ public:
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,
           "Using byte offset of %d", byteOffset);
-#if NIC_EXEC_ENABLED
-    Print("CLOSEST_NIC", (closestNicStr == "" ? "auto" : "user-input"),
-          "Per-GPU closest NIC is set as %s", (closestNicStr == "" ? "auto" : closestNicStr.c_str()));
-#endif
     Print("CU_MASK", getenv("CU_MASK") ? 1 : 0,
           "%s", (cuMask.size() ? GetCuMaskDesc().c_str() : "All"));
     Print("FILL_COMPRESS", getenv("FILL_COMPRESS") ? 1 : 0,
@@ -452,6 +445,8 @@ public:
           "Using up to %s subexecutors for variable subExec transfers",
           maxNumVarSubExec ? std::to_string(maxNumVarSubExec).c_str() : "all available");
 #if NIC_EXEC_ENABLED
+    Print("NIC_CHUNK_BYTES", nicChunkBytes,
+          "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
     Print("NIC_RELAX_ORDER", nicRelaxedOrder,
           "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
 #endif
@@ -633,27 +628,13 @@ public:
     cfg.gfx.waveOrder              = gfxWaveOrder;
     cfg.gfx.wordSize               = gfxWordSize;
 
+    cfg.nic.chunkBytes             = nicChunkBytes;
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
     cfg.nic.ipAddressFamily        = ipAddressFamily;
     cfg.nic.useRelaxedOrder        = nicRelaxedOrder;
     cfg.nic.roceVersion            = roceVersion;
 
-    std::vector<int> closestNics;
-    if(closestNicStr != "") {
-      std::stringstream ss(closestNicStr);
-      std::string item;
-      while (std::getline(ss, item, ',')) {
-        try {
-          int nic = std::stoi(item);
-          closestNics.push_back(nic);
-        } catch (const std::invalid_argument& e) {
-          printf("[ERROR] Invalid NIC index (%s) by user in %s\n", item.c_str(), closestNicStr.c_str());
-          exit(1);
-        }
-      }
-      cfg.nic.closestNics = closestNics;
-    }
     return cfg;
   }
 };

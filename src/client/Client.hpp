@@ -26,7 +26,11 @@ THE SOFTWARE.
 #define CLIENT_VERSION "00"
 
 #include "TransferBench.hpp"
-#include "EnvVars.hpp"
+
+using namespace TransferBench;
+
+// Forward declaration
+struct EnvVars;
 
 size_t const DEFAULT_BYTES_PER_TRANSFER = (1<<28);
 
