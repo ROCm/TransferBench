@@ -29,13 +29,15 @@ Here are the steps to build TransferBench:
     git clone https://github.com/ROCm/TransferBench.git
     cd TransferBench
 
-2. Build TransferBench using Makefile.
+2. Build TransferBench using Makefile or CMake.
+
+   To build using Makefile, use:
 
    .. code-block:: bash
 
     make
 
-3. Build TransferBench using CMake.
+   To build using CMake, use:
 
    .. code-block:: bash
 
