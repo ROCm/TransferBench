@@ -10,6 +10,9 @@ MPI_PATH  ?= /usr/local/openmpi/
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
 
+# Option to compile with single GFX kernel to drop compilation time
+SINGLE_KERNEL ?= 0
+
 # This can be a space separated string of multiple GPU targets
 # Default is the native GPU target
 GPU_TARGETS ?= native
@@ -38,6 +41,10 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
   HIPFLAGS = -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
   NVFLAGS  = -x cu -lnuma -arch=native
+
+  ifeq ($(SINGLE_KERNEL), 1)
+    CXXFLAGS += -DSINGLE_KERNEL
+  endif
 
   ifeq ($(DEBUG), 0)
     COMMON_FLAGS += -O3 -g
