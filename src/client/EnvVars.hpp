@@ -492,8 +492,17 @@ public:
   // Helper function that gets parses environment variable or sets to default value
   static int GetEnvVar(std::string const& varname, int defaultValue)
   {
-    if (getenv(varname.c_str()))
-      return atoi(getenv(varname.c_str()));
+    char const* varStr = getenv(varname.c_str());
+    if (varStr) {
+      int val = atoi(varStr);
+      char units = varStr[strlen(varStr)-1];
+      switch (units) {
+      case 'G': case 'g': val *= 1024;
+      case 'M': case 'm': val *= 1024;
+      case 'K': case 'k': val *= 1024;
+      }
+      return val;
+    }
     return defaultValue;
   }
 

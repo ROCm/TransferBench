@@ -228,7 +228,7 @@ namespace TransferBench
     uint8_t     ibPort          = 1;            ///< NIC port number to be used
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
     int         maxRecvWorkReq  = 16;           ///< Maximum number of recv work requests per queue pair
-    int         maxSendWorkReq  = 16;           ///< Maximum number of send work requests per queue pair
+    int         maxSendWorkReq  = 1024;         ///< Maximum number of send work requests per queue pair
     int         queueSize       = 100;          ///< Completion queue size
     int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
     int         useRelaxedOrder = 1;            ///< Use relaxed ordering
@@ -1342,6 +1342,9 @@ namespace {
                                               std::vector<ErrResult>& errors)
   {
     if (GetCommMode() == COMM_NONE) return;
+    if (System::Get().IsVerbose()) {
+      printf("[INFO] Rank %d checking config consistency\n", GetRank());
+    }
 
     // To check consistency, compare against rank 0
     int root = 0;
@@ -1433,6 +1436,7 @@ namespace {
     {
       NicOptions nic = cfg.nic;
       System::Get().Broadcast(root, sizeof(nic), &nic);
+      if (nic.chunkBytes      != cfg.nic.chunkBytes)      ADD_ERROR("cfg.nic.chunkBytes");
       // nic.ibGidIndex  is permitted to be different across ranks
       // nic.ibPort      is permitted to be different across ranks
       if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
@@ -1576,13 +1580,17 @@ namespace {
   {
     if (GetCommMode() == COMM_NONE) return;
 
+    if (System::Get().IsVerbose()) {
+      printf("[INFO] Rank %d checking transfers consistency\n", GetRank());
+    }
+
     // To check consistency, compare against rank 0
     int root = 0;
 
     #define ADD_ERROR(STR)         \
     do {                          \
       isInconsistent = true;                                            \
-      if (System::Get().IsVerbose())                                     \
+      if (System::Get().IsVerbose())                                    \
         errors.push_back({ERR_FATAL, STR " must be the same for Transfer %d on all ranks", i}); \
     } while(0)
 
@@ -1992,6 +2000,7 @@ namespace {
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
+    bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
 #endif
@@ -2492,7 +2501,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Structure used to exchange connection information
-  struct ConnInfo
+  struct __attribute__((packed)) ConnInfo
   {
     uint16_t lid;     // Local  routing id
     ibv_gid  gid;     // Global routing id (RoCE)
@@ -2585,6 +2594,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int const dstMemRank = t.dsts[0].memRank;
     int const nicExeRank = nicExeDevice.exeRank;
     int const nonExeRank = (nicExeRank == srcMemRank ? dstMemRank : srcMemRank);
+    rss.srcIsExeNic = (srcMemRank == nicExeRank);
 
     // Figure out non Executor (Accounts for possible remap due to use of EXE_NIC_NEAREST)
     ExeDevice nonOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, nonExeRank, t.exeDstSlot};
@@ -2611,6 +2621,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int srcGidIndex = cfg.nic.ibGidIndex;
     bool srcIsRoCE = false;
     if (GetRank() == srcMemRank) {
+      // Switch to closest CPU NUMA domain
+      int numaNode = GetIbvDeviceList()[rss.srcNicIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
       // Open SRC NIC context
       IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
       // Open SRC protection domain
@@ -2645,6 +2659,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int dstGidIndex = cfg.nic.ibGidIndex;
     bool dstIsRoCE = false;
     if (GetRank() == dstMemRank) {
+      // Switch to closest CPU NUMA domain
+      int numaNode = GetIbvDeviceList()[rss.dstNicIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
       // Open DST NIC contexts
       IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
       // Open DST protection domain
@@ -2683,13 +2701,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Broadcast SRC/DST port link_layer so that all ranks know it so that they can be compared
     System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
     System::Get().Broadcast(dstMemRank, sizeof(rss.dstPortAttr.link_layer), &rss.dstPortAttr.link_layer);
-    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer)
-      return {ERR_FATAL, "SRC NIC (%d) [Rank %d] and DST NIC (%d) [Rank %d] do not have the same link layer",
-        rss.srcNicIndex, srcMemRank, rss.dstNicIndex, dstMemRank};
+    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer) {
+      printf("[ERROR] Link layer do not match (%d vs %d)\n", rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer);
+      return {ERR_FATAL, "SRC NIC (%d) [Rank %d] and DST NIC (%d) [Rank %d] do not have the same link layer [%d vs %d]",
+        rss.srcNicIndex, srcMemRank, rss.dstNicIndex, dstMemRank, rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer};
+    }
 
+    ConnInfo dstConnInfo = {};
+    ConnInfo srcConnInfo = {};
     for (int i = 0; i < rss.qpCount; i++) {
       // Prepare and exchange SRC connection information
-      ConnInfo srcConnInfo;
       if (GetRank() == srcMemRank) {
         srcConnInfo.lid    = rss.srcPortAttr.lid;
         srcConnInfo.gid    = rss.srcGid;
@@ -2701,7 +2722,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       System::Get().Broadcast(srcMemRank, sizeof(srcConnInfo), &srcConnInfo);
 
       // Prepare and exchange DST connection information
-      ConnInfo dstConnInfo;
       if (GetRank() == dstMemRank) {
         dstConnInfo.lid    = rss.dstPortAttr.lid;
         dstConnInfo.gid    = rss.dstGid;
@@ -2734,6 +2754,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         uint64_t     remote    = (nicExeRank == srcMemRank ? dstConnInfo.vaddr             : srcConnInfo.vaddr);
         auto const   lkey      = (nicExeRank == srcMemRank ? rss.srcMemRegion->lkey        : rss.dstMemRegion->lkey);
         auto const   rkey      = (nicExeRank == srcMemRank ? dstConnInfo.rkey              : srcConnInfo.rkey);
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Transfer %d SubExec %d executed by rank %d NIC %d is %s with %lu chunks\n",
+                 rss.transferIdx, i, nicExeRank, nicExeDevice.exeIndex,
+                 (opcode == IBV_WR_RDMA_WRITE ? "remote write" : "remote read"),
+                 numChunks);
+        }
         rss.sgePerQueuePair[i].resize(numChunks, {});
         rss.sendWorkRequests[i].resize(numChunks, {});
 
@@ -2757,40 +2783,53 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           wr.wr.rdma.remote_addr = remote;
           wr.wr.rdma.rkey        = rkey;
 
+          if (System::Get().IsVerbose()) {
+            printf("[INFO] Transfer %d SubExec %d chunk %lu local %p remote %p of size %lu\n",
+                   rss.transferIdx, i, chunkIdx, (void*)local, (void*)remote, currChunkBytes);
+          }
+
           // Increment locations
-          local  += currChunkBytes;
-          remote += currChunkBytes;
+          remaining -= currChunkBytes;
+          local     += currChunkBytes;
+          remote    += currChunkBytes;
         }
       }
     }
     return ERR_NONE;
   }
 
-  static ErrResult TeardownNicTransferResources(TransferResources& rss)
+  static ErrResult TeardownNicTransferResources(TransferResources& rss, Transfer const& t)
   {
+    bool isSrcRank = (GetRank() == t.srcs[0].memRank);
+    bool isDstRank = (GetRank() == t.dsts[0].memRank);
+
     // Deregister memory regions
-    IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
-    IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
+    if (isSrcRank) IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
+    if (isDstRank) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
     // Destroy queue pairs
-    for (auto srcQueuePair : rss.srcQueuePairs)
-      IBV_CALL(ibv_destroy_qp, srcQueuePair);
-    rss.srcQueuePairs.clear();
-    for (auto dstQueuePair : rss.dstQueuePairs)
-      IBV_CALL(ibv_destroy_qp, dstQueuePair);
-    rss.dstQueuePairs.clear();
+    if (isSrcRank) {
+      for (auto srcQueuePair : rss.srcQueuePairs)
+        IBV_CALL(ibv_destroy_qp, srcQueuePair);
+      rss.srcQueuePairs.clear();
+    }
+    if (isDstRank) {
+      for (auto dstQueuePair : rss.dstQueuePairs)
+        IBV_CALL(ibv_destroy_qp, dstQueuePair);
+      rss.dstQueuePairs.clear();
+    }
 
     // Destroy completion queues
-    IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
-    IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
+    if (isSrcRank) IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
+    if (isDstRank) IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
 
     // Deallocate protection domains
-    IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
-    IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
+    if (isSrcRank) IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
+    if (isDstRank) IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
 
     // Destroy context
-    IBV_CALL(ibv_close_device, rss.srcContext);
-    IBV_CALL(ibv_close_device, rss.dstContext);
+    if (isSrcRank) IBV_CALL(ibv_close_device, rss.srcContext);
+    if (isDstRank) IBV_CALL(ibv_close_device, rss.dstContext);
 
     return ERR_NONE;
   }
@@ -3059,11 +3098,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     exeInfo.totalDurationMsec = 0.0;
     int const localRank = GetRank();
+    if (System::Get().IsVerbose()) {
+      printf("[INFO] Rank %d preparing executor (%c%d on Rank %d)\n",
+             localRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank);
+    }
 
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
       rss.numBytes = t.numBytes;
+
+      if (System::Get().IsVerbose()) {
+        printf("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST)\n",
+               localRank, rss.transferIdx, t.srcs.size(), t.dsts.size());
+      }
 
       // Allocate source memory
       rss.srcMem.resize(t.srcs.size());
@@ -3093,7 +3141,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rss.dstMem.resize(t.dsts.size());
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         MemDevice const& dstMemDevice = t.dsts[iDst];
-        if (dstMemDevice.memRank != localRank) continue;
+
         // Ensure executing GPU can access destination memory
         if (IsGpuExeType(exeDevice.exeType)    &&
             IsGpuMemType(dstMemDevice.memType) &&
@@ -3131,10 +3179,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       }
 
-      // Prepare subexecutor parameters
-      if (exeDevice.exeRank == localRank) {
-        ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
-      }
+      // Prepare subexecutor parameters (on all ranks)
+      ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
     }
 
     // Prepare additional requirements for GPU-based executors
@@ -3299,7 +3345,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Destroy NIC related resources
 #ifdef NIC_EXEC_ENABLED
       if (IsNicExeType(exeDevice.exeType)) {
-        ERR_CHECK(TeardownNicTransferResources(rss));
+        ERR_CHECK(TeardownNicTransferResources(rss, t));
       }
 #endif
     }
@@ -3438,10 +3484,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
       size_t numChunks = rss.sendWorkRequests[qpIndex].size();
       for (size_t chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
-        int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex][chunkIdx], &badWorkReq);
+        int error = ibv_post_send(rss.srcIsExeNic ? rss.srcQueuePairs[qpIndex] : rss.dstQueuePairs[qpIndex],
+                                  &rss.sendWorkRequests[qpIndex][chunkIdx], &badWorkReq);
         if (error)
-          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d chunk %lu of %lu (Error code %d)\n",
-            rss.transferIdx, qpIndex, chunkIdx, numChunks, error};
+          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d chunk %lu of %lu (Error code %d = %s)\n",
+            rss.transferIdx, qpIndex, chunkIdx, numChunks, error, strerror(error)};
       }
     }
     return ERR_NONE;
@@ -3483,11 +3530,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
             ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, 1, &wc);
             if (nc > 0) {
               receivedQPs[i]++;
               if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
+                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc.status};
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
@@ -3839,15 +3886,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
-#if 1
-  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
-  {
-    GPU_KERNEL_UNROLL_DECL(64),
-    GPU_KERNEL_UNROLL_DECL(128),
-    GPU_KERNEL_UNROLL_DECL(192),
-    GPU_KERNEL_UNROLL_DECL(256),
-  };
-#else
+#ifndef SINGLE_KERNEL
   GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
   {
     GPU_KERNEL_UNROLL_DECL(64),
@@ -3868,6 +3907,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     GPU_KERNEL_UNROLL_DECL(1024),
   };
 #endif
+
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
@@ -3892,7 +3932,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                       cfg.gfx.wordSize == 2 ? 1 :
                                               2;
+#ifdef SINGLE_KERNEL
+    auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
+#else
     auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+#endif
 
 #if defined(__NVCC__)
     if (startEvent != NULL)
@@ -3969,7 +4013,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                         cfg.gfx.wordSize == 2 ? 1 :
                                                 2;
+#ifdef SINGLE_KERNEL
+      auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
+#else
       auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+#endif
 
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
@@ -4605,9 +4653,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Perform wildcard expansion
       int numRanks = GetNumRanks();
       for (int rankIndex = 0; rankIndex < numRanks; rankIndex++) {
+        bool rankModified = false;
         Transfer rankTransfer = transfer;
         for (MemDevice& src : rankTransfer.srcs)
-          if (src.memRank == -1) src.memRank = rankIndex;
+          if (src.memRank == -1) {
+            src.memRank = rankIndex;
+            rankModified = true;
+          }
         if (rankTransfer.exeDevice.exeRank == -1) {
           // If NIC executor doesn't specify a rank, then use the source memory rank by default
           if (IsNicExeType(rankTransfer.exeDevice.exeType)) {
@@ -4618,12 +4670,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
           } else {
             rankTransfer.exeDevice.exeRank = rankIndex;
+            rankModified = true;
           }
         }
         for (MemDevice& dst : rankTransfer.dsts)
-          if (dst.memRank == -1) dst.memRank = rankIndex;
+          if (dst.memRank == -1) {
+            dst.memRank = rankIndex;
+            rankModified = true;
+          }
 
         RecursiveWildcardDeviceExpansion(rankTransfer, transfers);
+
+        // If no ranks were modified, exit after first rank
+        if (!rankModified) break;
       }
     }
 
@@ -4911,6 +4970,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);
         if (recvd == -1 || recvd == 0) {
           printf("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
+          perror("recv");
           exit(1);
         }
         totalRecv += recvd;
@@ -4924,7 +4984,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 #ifdef MPI_COMM_ENABLED
     if (commMode == COMM_MPI) {
-      MPI_Bcast(data, numBytes, MPI_CHAR, root, comm);
+      int err = MPI_Bcast(data, numBytes, MPI_CHAR, root, comm);
+      if (err != MPI_SUCCESS) {
+        printf("[ERROR] MPI_Bcast failed with error code %d\n", err);
+      }
       return;
     }
 #endif
