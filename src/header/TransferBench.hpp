@@ -2603,7 +2603,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // All ranks track which NIC was used and number of queue pairs used
     rss.srcNicIndex = (nicExeRank == srcMemRank ? nicExeDevice.exeIndex : nonExeDevice.exeIndex);
-    rss.dstNicIndex = (nicExeRank == dstMemRank ? nicExeDevice.exeIndex : nonExeDevice.exeIndex);
+    rss.dstNicIndex = (nicExeRank == srcMemRank ? nonExeDevice.exeIndex : nicExeDevice.exeIndex);
     rss.qpCount     = t.numSubExecs;
 
     // Establish memory access flags

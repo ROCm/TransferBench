@@ -295,7 +295,7 @@ void PrintResults(EnvVars const& ev, int const testNum,
       if (t.exeSubIndex != -1)
         sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
 
-      printf("     Transfer %02d  %s%c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%c%03d%s:%03d -> %s\n",
+      printf("     Transfer %02d  %s%c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%c%d%s:%d -> %s\n",
              idx, rankGap.c_str(),   sep,
              r.avgBandwidthGbPerSec, sep,
              r.avgDurationMsec,      sep,
