@@ -3173,7 +3173,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Wait for all threads to finish
     if (seType == 1) {
       // For warp-level, sync within warp only
+ #if HIP_VERSION_MARJOR >= 7
       __syncwarp();
+ #else
+      __builtin_amdgcn_wave_barrier();
+ #endif
     } else {
       // For threadblock-level, sync all threads
       __syncthreads();
