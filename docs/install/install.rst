@@ -20,20 +20,29 @@ Prerequisite
 Building TransferBench
 ------------------------
 
-To build TransferBench using Makefile, use:
+Here are the steps to build TransferBench:
 
-.. code-block:: bash
+1. Download the latest version of TransferBench from the git repository.
 
-  make
+   .. code-block:: bash
 
-To build TransferBench using CMake, use:
+    git clone https://github.com/ROCm/TransferBench.git
+    cd TransferBench
 
-.. code-block:: bash
+2. Build TransferBench using Makefile.
 
-  mkdir build
-  cd build
-  CXX=/opt/rocm/bin/hipcc cmake ..
-  make
+   .. code-block:: bash
+
+    make
+
+3. Build TransferBench using CMake.
+
+   .. code-block:: bash
+
+    mkdir build
+    cd build
+    CXX=/opt/rocm/bin/hipcc cmake ..
+    make
 
 .. note::
 

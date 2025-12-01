@@ -66,7 +66,7 @@ There are two ways to specify a test:
   .. code-block:: bash
 
    1 4 (G0->G0->G1)                   Uses 4 CUs on GPU0 to copy from GPU0 to GPU1
-   1 4 (G2->C1->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
+   1 4 (C1->G2->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0
    2 4 G0->G0->G1 G1->G1->G0          Copies from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs
 
 - **Advanced**
