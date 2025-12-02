@@ -3173,7 +3173,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Wait for all threads to finish
     if (seType == 1) {
       // For warp-level, sync within warp only
- #if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MARJOR < 7)
+ #if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
       __builtin_amdgcn_wave_barrier();
  #else
 
