@@ -43,6 +43,14 @@ void SweepPreset(EnvVars&           ev,
                  size_t      const  numBytesPerTransfer,
                  std::string const  presetName)
 {
+  if (TransferBench::GetNumRanks() > 1) {
+    if (RankDoesOutput()) {
+      DisplayVersion();
+      printf("[ERROR] Sweep preset currently not supported for multi-node\n");
+    }
+    exit(0);
+  }
+
   bool const isRandom = (presetName == "rsweep");
 
   int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);

@@ -58,3 +58,6 @@ void CheckForError(ErrResult const& error);
 
 // Helper function to print list of errors
 void PrintErrors(std::vector<ErrResult> const& errors);
+
+// Helper function to determine if current rank does output
+bool RankDoesOutput();

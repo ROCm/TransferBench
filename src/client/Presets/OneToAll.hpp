@@ -24,6 +24,14 @@ void OneToAllPreset(EnvVars&           ev,
                     size_t      const  numBytesPerTransfer,
                     std::string const  presetName)
 {
+  if (TransferBench::GetNumRanks() > 1) {
+    if (RankDoesOutput()) {
+      DisplayVersion();
+      printf("[ERROR] One-to-All preset currently not supported for multi-node\n");
+    }
+    exit(0);
+  }
+
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   if (numDetectedGpus < 2) {
     printf("[ERROR] One-to-all benchmark requires machine with at least 2 GPUs\n");

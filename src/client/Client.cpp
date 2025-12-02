@@ -27,10 +27,6 @@ THE SOFTWARE.
 
 int main(int argc, char **argv)
 {
-  // When running in MPI mode, only the first rank produces output
-  bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
-                               || TransferBench::GetRank() == 0);
-
   // Collect environment variables
   EnvVars ev;
 
@@ -46,7 +42,7 @@ int main(int argc, char **argv)
       }
       DisplayTopology(ev.outputToCsv);
     } else {
-      if (rankDoesOutput) {
+      if (RankDoesOutput()) {
         DisplayVersion();
         DisplayMultiNodeTopology(ev.outputToCsv);
       }
@@ -94,7 +90,7 @@ int main(int argc, char **argv)
   }
 
   // Print environment variables and CSV header
-  if (rankDoesOutput) {
+  if (RankDoesOutput()) {
     ev.DisplayEnvVars();
     if (ev.outputToCsv)
       printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
@@ -122,7 +118,7 @@ int main(int argc, char **argv)
       std::map<ExeDevice, int> varTransferCount;
       for (auto const& t : transfers) {
         if (t.numSubExecs == 0) {
-          if (t.exeDevice.exeType != EXE_GPU_GFX && rankDoesOutput) {
+          if (t.exeDevice.exeType != EXE_GPU_GFX && RankDoesOutput()) {
             printf("[ERROR] Variable number of subexecutors is only supported on GFX executors\n");
             exit(1);
           }
@@ -131,7 +127,7 @@ int main(int argc, char **argv)
           maxVarCount = max(maxVarCount, varTransferCount[t.exeDevice]);
         }
       }
-      if (numVariableTransfers > 0 && numVariableTransfers != transfers.size() && rankDoesOutput) {
+      if (numVariableTransfers > 0 && numVariableTransfers != transfers.size() && RankDoesOutput()) {
         printf("[ERROR] All or none of the Transfers in the Test must use variable number of Subexecutors\n");
         exit(1);
       }
@@ -159,7 +155,7 @@ int main(int argc, char **argv)
           if (TransferBench::RunTransfers(cfgOptions, transfers, results)) {
             PrintResults(ev, ++testNum, transfers, results);
           }
-          if (rankDoesOutput) {
+          if (RankDoesOutput()) {
             PrintErrors(results.errResults);
           }
         } else {
@@ -200,10 +196,20 @@ int main(int argc, char **argv)
 
 void DisplayVersion()
 {
-  std::string nicSupport = "";
+  bool nicSupport = false;
+  bool mpiSupport = false;
 #if NIC_EXEC_ENABLED
-  nicSupport = " (with NIC support)";
+  nicSupport = true;
 #endif
+#if MPI_COMM_ENABLED
+  mpiSupport = true;
+#endif
+
+  std::string support = "";
+  if (mpiSupport && nicSupport) support = " (with MPI+NIC support)";
+  else if (mpiSupport)          support = " (with MPI support)";
+  else if (nicSupport)          support = " (with NIC support)";
+
   std::string multiNodeMode = "";
   switch (TransferBench::GetCommMode()) {
   case TransferBench::COMM_NONE:   multiNodeMode = " (Single-node mode)";       break;
@@ -211,7 +217,7 @@ void DisplayVersion()
   case TransferBench::COMM_MPI:    multiNodeMode = " (Multi-node via MPI)";     break;
   }
 
-  printf("TransferBench v%s.%s%s%s\n", TransferBench::VERSION, CLIENT_VERSION, nicSupport.c_str(), multiNodeMode.c_str());
+  printf("TransferBench v%s.%s%s%s\n", TransferBench::VERSION, CLIENT_VERSION, support.c_str(), multiNodeMode.c_str());
   printf("=============================================================================================================\n");
 }
 
@@ -256,7 +262,7 @@ void PrintResults(EnvVars const& ev, int const testNum,
   // When running in MPI mode, only the first rank produces output
   bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
                                || TransferBench::GetRank() == 0);
-  if (!rankDoesOutput) return;
+  if (!RankDoesOutput()) return;
 
   bool isMultiNode = TransferBench::GetNumRanks() > 1;
   char sep = ev.outputToCsv ? ',' : '|';
@@ -382,13 +388,15 @@ void CheckForError(ErrResult const& error)
 void PrintErrors(std::vector<ErrResult> const& errors)
 {
   // When running in MPI mode, only the first rank produces output
-  bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
-                               || TransferBench::GetRank() == 0);
   bool isFatal = false;
   for (auto const& err : errors) {
-    if (rankDoesOutput)
+    if (RankDoesOutput())
       printf("[%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
     isFatal |= (err.errType == ERR_FATAL);
   }
   if (isFatal) exit(1);
+}
+
+bool RankDoesOutput() {
+  return (TransferBench::GetCommMode() != TransferBench::COMM_MPI || TransferBench::GetRank() == 0);
 }
