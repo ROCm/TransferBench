@@ -819,7 +819,7 @@ namespace {
 #if defined (__NVCC__)
         return {ERR_FATAL, "Fine-grained GPU memory not supported on NVIDIA platform"};
 #else
-        int flag = hipDeviceMallocUncached;
+        int flag = hipDeviceMallocFinegrained;
         ERR_CHECK(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
 #endif
       } else if (memType == MEM_MANAGED) {
