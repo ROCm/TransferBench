@@ -3773,6 +3773,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_APPEND(TeardownExecutor(cfg, exeDevice, transfers, exeInfo), errResults);
     }
 
+    // Check for fatal error
+    for (auto const& err : errResults) {
+      if (err.errType == ERR_FATAL) return false;
+    }
     return true;
   }
 

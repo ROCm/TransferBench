@@ -83,7 +83,7 @@ void AllToAllRdmaPreset(EnvVars&           ev,
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
       printf("%s\n", err.errMsg.c_str());
-    exit(0);
+    exit(1);
   } else {
     PrintResults(ev, 1, transfers, results);
   }
