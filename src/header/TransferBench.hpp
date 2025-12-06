@@ -160,7 +160,7 @@ namespace TransferBench
     vector<MemDevice> dsts        = {};         ///< List of destination memory devices
     ExeDevice         exeDevice   = {};         ///< Executor to use
     int32_t           exeSubIndex = -1;         ///< Executor subindex
-    int32_t           exeDstSlot  = 0;          ///< Executor subslot
+    int32_t           exeSubSlot  = 0;          ///< Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
   };
 
@@ -406,13 +406,22 @@ namespace TransferBench
   std::string GetStrAttribute(StrAttribute attribute);
 
   /**
-   * Returns information about number of available available Executors
+   * Returns information about number of available Executors given an executor type
    *
    * @param[in] exeType         Executor type to query
    * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected Executors of exeType
    */
   int GetNumExecutors(ExeType exeType, int targetRank = -1);
+
+  /**
+   * Returns information about number of available Executors given a memory type
+   *
+   * @param[in] memType         Memory type to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @returns Number of detected Executors for memType
+   */
+  int GetNumExecutors(MemType memType, int targetRank = -1);
 
   /**
    * Returns the number of possible Executor subindices
@@ -463,11 +472,22 @@ namespace TransferBench
   int GetClosestNicToGpu(int gpuIndex, int targetRank = -1);
 
   /**
+   * Returns the indices of the NICs closest to the given CPU
+   *
+   * @param[out] nicIndices     Vector that will contain NIC indices closest to given CPU
+   * @param[in]  cpuIndex       Index of the CPU to query
+   * @param[in]  targetRank     Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns IB Verbs capable NIC indices closest to CPU cpuIndex, or empty if unable to detect
+   */
+  void GetClosestNicsToCpu(std::vector<int>& nicIndices, int cpuIndex, int targetRank = -1);
+
+  /**
    * Returns the indices of the NICs closest to the given GPU
    *
    * @param[out] nicIndices     Vector that will contain NIC indices closest to given GPU
-   * @param[in] gpuIndex        Index of the GPU to query
-   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @param[in]  gpuIndex       Index of the GPU to query
+   * @param[in]  targetRank     Rank to query (-1 for local rank)
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns IB Verbs capable NIC indices closest to GPU gpuIndex, or empty if unable to detect
    */
@@ -999,120 +1019,221 @@ namespace {
     return {ERR_FATAL, "Unexpected executor type (%c)", c};
   }
 
-  static ErrResult ParseMemType(std::string const& token,
-                                std::vector<MemDevice>& memDevices)
+  struct WildcardMemDevice
   {
-    bool found        = false;
+    MemType memType;
+    vector<int> memRanks;
+    vector<int> memIndices;
+  };
+
+  struct WildcardExeDevice
+  {
+    ExeType exeType;
+    std::vector<int> exeRanks;
+    std::vector<int> exeIndices;
+    std::vector<int> exeSlots;
+    std::vector<int> exeSubIndices;
+    std::vector<int> exeSubSlots;
+  };
+
+  struct WildcardTransfer
+  {
+    std::vector<WildcardMemDevice> mem[2]; // 0 = SRCs, 1 = DSTs
+    WildcardExeDevice exe;
+  };
+
+  static char const* ParseRange(char const* start, int fullCount, std::vector<int>& range)
+  {
+    range.clear();
+
+    char const* ptr = start;
+    if (!ptr) return 0;
+
+    // Full wildcard
+    if (*ptr == '*') {
+      if (fullCount >= 0) {
+        for (int i = 0; i < fullCount; i++)
+        range.push_back(i);
+      } else {
+        range.push_back(fullCount);
+      }
+      return ++ptr;
+    }
+
+    // Ranged wildcard
+    if (*ptr == '[') {
+      std::string rangeStr(++ptr);
+      size_t endPos = rangeStr.find(']');
+      if (endPos == std::string::npos) return 0;
+      rangeStr.erase(endPos);
+      ptr += endPos+1;
+
+      std::set<int> values;
+      char* token = strtok(rangeStr.data(), ",");
+      while (token) {
+        int start, end;
+        if (sscanf(token, "%d..%d", &start, &end) == 2) {
+          if (start < 0 || end < 0 || end <= start) return 0;
+          for (int i = start; i <= end; i++)
+            values.insert(i);
+        } else if (sscanf(token, "%d", &start) == 1) {
+          values.insert(start);
+        } else {
+          return 0;
+        }
+        token = strtok(NULL, ",");
+      }
+      if (values.empty()) return 0;
+      for (auto v : values) range.push_back(v);
+      return ptr;
+    }
+
+    // Single number
+    char* endPtr;
+    int val = strtol(ptr, &endPtr, 10);
+    if (endPtr == ptr) return 0;
+    else range.push_back(val);
+    return endPtr;
+  }
+
+  static char const* ParseAlphaRange(char const* start, std::vector<int>& range)
+  {
+    range.clear();
+
+    char const* ptr = start;
+    if (!ptr) return 0;
+
+    // Full wildcard
+    if (*ptr == '*') {
+      range.push_back(-1);
+      return ++ptr;
+    }
+
+    // Ranged wildcard
+    if (*ptr == '[') {
+      std::string rangeStr(++ptr);
+      size_t endPos = rangeStr.find(']');
+      if (endPos == std::string::npos) return 0;
+      rangeStr.erase(endPos);
+      ptr += endPos+1;
+
+      std::set<int> values;
+      char* token = strtok(rangeStr.data(), ",");
+      while (token) {
+        char start, end;
+        if (sscanf(token, "%c..%c", &start, &end) == 2 && isalpha(toupper(start)) && isalpha(toupper(end))) {
+          int realStart = toupper(start) - 'A';
+          int realEnd   = toupper(end)   - 'A';
+          if (realStart < 0 || realEnd < 0) return 0;
+          for (int i = realStart; i <= realEnd; i++)
+            values.insert(i);
+        } else if (sscanf(token, "%c", &start) == 1 && isalpha(toupper(start))) {
+          int realStart = toupper(start) - 'A';
+          values.insert(realStart);
+        } else {
+          return 0;
+        }
+        token = strtok(NULL, ",");
+      }
+      for (auto v : values) range.push_back(v);
+      return ptr;
+    }
+
+    // Single character
+    if (isalpha(toupper(*ptr))) {
+      range.push_back(toupper(*ptr)-'A');
+      ++ptr;
+    }
+    return ptr;
+  }
+
+  static ErrResult ParseMemType(std::string const& token,
+                                std::vector<WildcardMemDevice>& memDevices)
+  {
     memDevices.clear();
 
     char const* ptr = token.c_str();
-    char* endPtr = nullptr;
     while (*ptr) {
-      // Check for rank prefix
-      int memRank = -1;
+      WildcardMemDevice w;
+
+      // Parse memory rank if it exists
       if (*ptr == 'R' || *ptr == 'r') {
         ptr++; // Skip 'R'
-        if (*ptr == '*') {
-          ptr++;
-        } else {
-          char* endPtr;
-          memRank = strtol(ptr, &endPtr, 10);
-          if (endPtr == ptr) {
-            return {ERR_FATAL, "Unable to parse rank index in memory token %s", token.c_str()};
-          }
-          ptr = endPtr;
-        }
+        ptr = ParseRange(ptr, GetNumRanks(), w.memRanks);
+        if (!ptr) return {ERR_FATAL, "Unable to parse rank index in memory token %s", token.c_str()};
+      } else {
+        // Otherwise will be replaced by "local" wildcard
+        w.memRanks.clear();
       }
 
-      // Parse memory type and device
-      char memTypeChar = *ptr;
-      MemType memType;
-      ERR_CHECK(CharToMemType(memTypeChar, memType));
+      // Parse memory type
+      ERR_CHECK(CharToMemType(*ptr, w.memType));
       ptr++; // Skip memory type
 
-      int memIndex = -1;
-      if (*ptr == '*') {
-        if (memType == MEM_NULL) {
-          return {ERR_FATAL, "Unable to use device wildcard with NULL memory type in token %s\n", token.c_str()};
-        }
-        ptr++;
-      } else {
-        memIndex = strtol(ptr, &endPtr, 10);
-        if (endPtr == ptr) {
-          return {ERR_FATAL, "Unable to parse device index in memory token %s", token.c_str()};
-        }
-        ptr = endPtr;
+      // Parse memory index
+      if (w.memType != MEM_NULL) {
+        ptr = ParseRange(ptr, -1, w.memIndices);
+        if (!ptr) return {ERR_FATAL, "Unable to parse device index in memory token %s", token.c_str()};
+        memDevices.push_back(w);
       }
-
-      if (memType != MEM_NULL) {
-        memDevices.push_back({memType, memIndex, memRank});
-      }
-      found = true;
     }
-    if (found) return ERR_NONE;
-    return {ERR_FATAL,
-            "Unable to parse memory type token %s.  Expected one of %s followed by an index",
-            token.c_str(), MemTypeStr};
+    return ERR_NONE;
   }
 
   static ErrResult ParseExeType(std::string const& token,
-                                ExeDevice& exeDevice,
-                                int& exeSubIndex)
+                                WildcardExeDevice& exeDevice)
   {
     char const* ptr = token.c_str();
-    char* endPtr= nullptr;
 
     // Check for rank prefix
-    bool rankSpecified = false;
-    int rankIndex = -1;
     if (*ptr == 'R' || *ptr == 'r') {
-      rankSpecified = true;
       ptr++; // Skip 'R'
-      if (*ptr == '*') {
-        ptr++;
-      } else {
-        rankIndex = strtol(ptr, &endPtr, 10);
-        if (endPtr == ptr) {
-          return {ERR_FATAL, "Unable to parse rank value in executor token %s", token.c_str()};
-        }
-        ptr = endPtr;
-      }
+      ptr = ParseRange(ptr, GetNumRanks(), exeDevice.exeRanks);
+      if (!ptr) return {ERR_FATAL, "Unable to parse rank index in executor token %s", token.c_str()};
+    } else {
+      exeDevice.exeRanks.clear();
     }
-    exeDevice.exeRank = rankIndex;
 
     // Parse executor type
     ERR_CHECK(CharToExeType(*ptr, exeDevice.exeType));
     ptr++; // Skip executor type char
 
-    // Check for wildcard
-    if (*ptr == '*') {
-      if (IsNicExeType(exeDevice.exeType)) {
-        return {ERR_FATAL, "NIC executor does not support device wildcards in executor token %s", token.c_str()};
-      }
-      exeDevice.exeIndex = -1;
-      ptr++;
-    } else {
-      exeDevice.exeIndex = strtol(ptr, &endPtr, 10);
-      if (endPtr == ptr) {
+    // Parse executor index
+    // This is optional for EXE_NIC_NEAREST as long as nothing further is specified
+    char const* endPtr = ParseRange(ptr, -1, exeDevice.exeIndices);
+    if (!endPtr) {
+      if (exeDevice.exeType == EXE_NIC_NEAREST && *endPtr == 0) {
+        if (exeDevice.exeRanks.size() != 0) {
+          return {ERR_FATAL, "Wildcard NIC executor may not be specified with rank in executor token %s", token.c_str()};
+        }
+        exeDevice.exeIndices.clear();
+        return ERR_NONE;
+      } else {
         return {ERR_FATAL, "Unable to parse device index in executor token %s", token.c_str()};
       }
+    } else {
       ptr = endPtr;
     }
 
+    // Parse (optional) executor slot
+    ptr = ParseAlphaRange(ptr, exeDevice.exeSlots);
+    if (!ptr) return {ERR_FATAL, "Unable to parse executor slot in executor token %s", token.c_str()};
+
     // Check for subindex after device
-    exeSubIndex = -1;
     if (*ptr == '.') {
-      ptr++;
-      exeSubIndex = strtol(ptr, &endPtr, 10);
-      if (endPtr == ptr) {
-        return {ERR_FATAL, "Unable to parse subindex in executor token %s", token.c_str()};
-      }
+      ptr++; // Skip '.'
+      ptr = ParseRange(ptr, -2, exeDevice.exeSubIndices);
+      if (!ptr) return {ERR_FATAL, "Unable to parse subindex in executor token %s", token.c_str()};
     }
 
-    // NIC executors require subIndex to denote destination NIC index
-    if (exeSubIndex == -1 && IsNicExeType(exeDevice.exeType)) {
-      return {ERR_FATAL, "NIC executor requires a subindex to indicate destination NIC index"};
+    // Ensure that EXE_NIC has non-empty subindex
+    if (exeDevice.exeType == EXE_NIC && exeDevice.exeSubIndices.size() == 0) {
+      return {ERR_FATAL, "NIC executor requires specification of a subindex in executor token %s", token.c_str()};
     }
+
+    // Parse (optional) executor subslot
+    ptr = ParseAlphaRange(ptr, exeDevice.exeSubSlots);
+    if (!ptr) return {ERR_FATAL, "Unable to parse subslot in executor token %s", token.c_str()};
 
     return ERR_NONE;
   }
@@ -1609,7 +1730,7 @@ namespace {
       System::Get().BroadcastVector(root, t.dsts);
       System::Get().Broadcast(root, sizeof(t.exeDevice),   &t.exeDevice);
       System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
-      System::Get().Broadcast(root, sizeof(t.exeDstSlot),  &t.exeDstSlot);
+      System::Get().Broadcast(root, sizeof(t.exeSubSlot),  &t.exeSubSlot);
       System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
 
       if (t.numBytes    != transfers[i].numBytes)    ADD_ERROR("numBytes");
@@ -1618,7 +1739,7 @@ namespace {
       if (t.exeDevice < transfers[i].exeDevice ||
           transfers[i].exeDevice < t.exeDevice)      ADD_ERROR("Executor device");
       if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
-      if (t.exeDstSlot  != transfers[i].exeDstSlot)  ADD_ERROR("Executor dst slot");
+      if (t.exeSubSlot  != transfers[i].exeSubSlot)  ADD_ERROR("Executor dst slot");
       if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
     }
 
@@ -1828,7 +1949,7 @@ namespace {
         }
 
         // The DST NIC executor facilitates the copy but issues no commands
-        ExeDevice dstOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, dstExeRank, t.exeDstSlot};
+        ExeDevice dstOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, dstExeRank, t.exeSubSlot};
         ExeDevice dstExeDevice;
         ErrResult errDst = GetActualExecutor(dstOrgDevice, dstExeDevice);
 
@@ -2597,7 +2718,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     rss.srcIsExeNic = (srcMemRank == nicExeRank);
 
     // Figure out non Executor (Accounts for possible remap due to use of EXE_NIC_NEAREST)
-    ExeDevice nonOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, nonExeRank, t.exeDstSlot};
+    ExeDevice nonOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, nonExeRank, t.exeSubSlot};
     ExeDevice nonExeDevice;
     ERR_CHECK(GetActualExecutor(nonOrgDevice, nonExeDevice));
 
@@ -4504,6 +4625,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     System::Get().AllGatherErrors(errResults);
+
+    for (auto const& err : errResults) {
+      if (err.errType == ERR_FATAL) return false;
+    }
     return true;
   }
 
@@ -4526,62 +4651,329 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-  void RecursiveWildcardDeviceExpansion(Transfer& transfer, std::vector<Transfer>& transfers)
+  bool RecursiveWildcardTransferExpansion(WildcardTransfer& wc,
+                                          int const& baseRankIndex,
+                                          size_t const& numBytes,
+                                          int const& numSubExecs,
+                                          std::vector<Transfer>& transfers)
   {
-    for (MemDevice& src : transfer.srcs) {
-      if (src.memIndex == -1) {
-        if (src.memRank == -1) {
-          printf("[ERROR] Src Mem device wildcard expansion requires rank wildcards to be resolved first\n");
+    // Basic implementation idea:
+    // - This recursive function procedes through each Transfer characteristic that has multiple possible values,
+    //   selects one, then proceeds.
+    // - At the "end", each characteristic will only have one option, which will then be used to specify the
+    //   Transfer to be added to transfers
+    bool result = false;
+    int numRanks = GetNumRanks();
+
+    // Resolve memory wildcards first
+    for (int isDst = 0; isDst <= 1; isDst++) {
+      for (int iMem = 0; iMem < wc.mem[isDst].size(); iMem++) {
+
+        // Resolve mem rank wildcards first
+        if (wc.mem[isDst][iMem].memRanks.size() == 0) {
+          // Replace empty rank with baseRankIndex
+          wc.mem[isDst][iMem].memRanks = {baseRankIndex};
+          RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          wc.mem[isDst][iMem].memRanks.clear();
+          return true;
+        } else if (wc.mem[isDst][iMem].memRanks.size() > 1) {
+          // Loop over each possible rank and recurse
+          std::vector<int> memRanks;
+          memRanks.swap(wc.mem[isDst][iMem].memRanks);
+          for (auto x : memRanks) {
+            wc.mem[isDst][iMem].memRanks = {x};
+            result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          }
+          wc.mem[isDst][iMem].memRanks.swap(memRanks);
+          return result;
+        }
+        // At this point, there should be only 1 (valid) rank assigned to this SRC
+        if (wc.mem[isDst][iMem].memRanks.size() != 1 || wc.mem[isDst][iMem].memRanks[0] < 0) {
+          printf("[ERROR] Unexpected number of ranks / invalid number of ranks for %s %d\n", isDst ? "DST" : "SRC", iMem);
           exit(1);
         }
-        int numExecutors = (IsCpuMemType(src.memType) ?
-                            GetNumExecutors(EXE_CPU, src.memRank) :
-                            GetNumExecutors(EXE_GPU_GFX, src.memRank));
 
-        for (int memIndex = 0; memIndex < numExecutors; memIndex++) {
-          src.memIndex = memIndex;
-          RecursiveWildcardDeviceExpansion(transfer, transfers);
+        // Resolve mem index wildcards
+        // Mem devices should have at least one index
+        if (wc.mem[isDst][iMem].memIndices.size() == 0) {
+          printf("[ERROR] MemIndex for %s %d cannot be empty\n", isDst ? "DST" : "SRC", iMem);
+          exit(1);
         }
-        src.memIndex = -1;
-        return;
+
+        // Loop over user provided list of device indices
+        if (wc.mem[isDst][iMem].memIndices.size() > 1) {
+          std::vector<int> memIndices;
+          memIndices.swap(wc.mem[isDst][iMem].memIndices);
+          for (auto x : memIndices) {
+            wc.mem[isDst][iMem].memIndices = {x};
+            result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          }
+          wc.mem[isDst][iMem].memIndices.swap(memIndices);
+          return result;
+        } else if (wc.mem[isDst][iMem].memIndices.size() == 1 && wc.mem[isDst][iMem].memIndices[0] == -1) {
+          // Wildcard - loop over all possible device indices for this memory type
+          int numExecutors = GetNumExecutors(wc.mem[isDst][iMem].memType, wc.mem[isDst][iMem].memRanks[0]);
+          for (int x = 0; x < numExecutors; x++) {
+            wc.mem[isDst][iMem].memIndices[0] = x;
+            result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          }
+          wc.mem[isDst][iMem].memIndices[0] = -1;
+          return result;
+        }
       }
     }
 
-    if (transfer.exeDevice.exeIndex == -1) {
-      if (transfer.exeDevice.exeRank == -1) {
-        printf("[ERROR] Executor device wildcard expansion requires rank wildcards to be resolved first\n");
+    // Check for NIC wildcard (device index) first
+    if (wc.exe.exeType == EXE_NIC_NEAREST &&
+        wc.exe.exeRanks.size() == 0 &&
+        wc.exe.exeIndices.size() == 0 &&
+        wc.exe.exeSlots.size() == 0 &&
+        wc.exe.exeSubIndices.size() == 0 &&
+        wc.exe.exeSubSlots.size() == 0) {
+
+      // Find (first) closest NIC to the SRC memory location
+      std::vector<int> srcNicIndices;
+      if (IsCpuMemType(wc.mem[0][0].memType)) {
+        GetClosestNicsToCpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      }
+      // Find (first) closest NIC to the DST memory location
+      std::vector<int> dstNicIndices;
+      if (IsCpuMemType(wc.mem[1][0].memType)) {
+        GetClosestNicsToCpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      }
+
+      // If valid, fill in all wildcards
+      if (srcNicIndices.size() > 0 && dstNicIndices.size() > 0) {
+        wc.exe.exeRanks      = {wc.mem[0][0].memRanks[0]};
+        wc.exe.exeIndices    = {srcNicIndices[0]};
+        wc.exe.exeSlots      = {0};
+        wc.exe.exeSubIndices = {dstNicIndices[0]};
+        wc.exe.exeSubSlots   = {0};
+
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+
+        wc.exe.exeRanks.clear();
+        wc.exe.exeIndices.clear();
+        wc.exe.exeSlots.clear();
+        wc.exe.exeSubIndices.clear();
+        wc.exe.exeSubSlots.clear();
+        return result;
+      } else {
+        return false;
+      }
+    }
+
+    // Resolve EXE rank
+    if (wc.exe.exeRanks.size() == 0)  {
+      // No rank provided - Assign the current base rank index
+      wc.exe.exeRanks = {baseRankIndex};
+      RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      wc.exe.exeRanks.clear();
+      return true;
+    } else if (wc.exe.exeRanks.size() > 1) {
+      // Loop over user provided ranks
+      std::vector<int> exeRanks;
+      exeRanks.swap(wc.exe.exeRanks);
+      for (auto x : exeRanks) {
+        wc.exe.exeRanks = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeRanks.swap(exeRanks);
+      return result;
+    } else if (wc.exe.exeRanks[0] == -1) {
+      printf("[ERROR] Exe rank should not be -1\n");
+      exit(1);
+    }
+
+    // Resolve EXE indices
+    if (wc.exe.exeIndices.size() == 0) {
+      printf("[ERROR] Exe index should never be empty\n");
+      exit(1);
+    } else if (wc.exe.exeIndices.size() > 1) {
+      // Loop over user provided indices
+      std::vector<int> exeIndices;
+      exeIndices.swap(wc.exe.exeIndices);
+      for (auto x : exeIndices) {
+        wc.exe.exeIndices = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeIndices.swap(exeIndices);
+      return result;
+    } else if (wc.exe.exeIndices[0] == -1) {
+      // Wildcard - loop over all possible executor indices
+      int numExecutors = GetNumExecutors(wc.exe.exeType, wc.exe.exeRanks[0]);
+      for (int x = 0; x < numExecutors; x++) {
+        wc.exe.exeIndices[0] = x;
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeIndices[0] = -1;
+      return result;
+    }
+
+    // Resolve EXE slots (only apples to EXE_NIC_NEAREST)
+    if (wc.exe.exeSlots.size() == 0) {
+      // Slot won't be used, so just assign 0
+      wc.exe.exeSlots = {0};
+      result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      wc.exe.exeSlots.clear();
+      return result;
+    } else if (wc.exe.exeSlots.size() > 1) {
+      // Loop over user provided slots
+      std::vector<int> exeSlots;
+      exeSlots.swap(wc.exe.exeSlots);
+      for (auto x : exeSlots) {
+        wc.exe.exeSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSlots.swap(exeSlots);
+      return result;
+    } else if (wc.exe.exeSlots[0] == -1) {
+      // Wildcard - Loop over all possible slots, based on SRC memory type
+      std::vector<int> srcNicIndices;
+      if (IsCpuMemType(wc.mem[0][0].memType)) {
+        GetClosestNicsToCpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      }
+      for (auto x : srcNicIndices) {
+        wc.exe.exeSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSlots = {-1};
+      return result;
+    }
+
+    // Resolve EXE subindex
+    if (wc.exe.exeSubIndices.size() == 0) {
+      if (IsCpuExeType(wc.exe.exeType) || IsGpuExeType(wc.exe.exeType)) {
+        wc.exe.exeSubIndices = {-1};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        wc.exe.exeSubIndices.clear();
+        return result;
+      } else if (wc.exe.exeType == EXE_NIC) {
+        printf("[ERROR] NIC executor requires a subindex be specified\n");
         exit(1);
+      } else if (wc.exe.exeType == EXE_NIC_NEAREST) {
+        // Assign NIC closest to DST mem
+        std::vector<int> dstNicIndices;
+        if (IsCpuMemType(wc.mem[1][0].memType)) {
+          GetClosestNicsToCpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+        } else {
+          GetClosestNicsToGpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+        }
+        if (dstNicIndices.size() > 0) {
+          wc.exe.exeSubIndices = {dstNicIndices[0]};
+          result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          wc.exe.exeSubIndices.clear();
+        }
+        return result;
       }
-      int numExecutors = GetNumExecutors(transfer.exeDevice.exeType, transfer.exeDevice.exeRank);
-      for (int exeIndex = 0; exeIndex < numExecutors; exeIndex++) {
-        transfer.exeDevice.exeIndex = exeIndex;
-        RecursiveWildcardDeviceExpansion(transfer, transfers);
+    } else if (wc.exe.exeSubIndices.size() > 1) {
+      // Loop over all user provided subindices
+      std::vector<int> exeSubIndices;
+      exeSubIndices.swap(wc.exe.exeSubIndices);
+      for (auto x : exeSubIndices) {
+        wc.exe.exeSubIndices = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
       }
-      transfer.exeDevice.exeIndex = -1;
-      return;
+      wc.exe.exeSubIndices.swap(exeSubIndices);
+      return result;
+    } else if (wc.exe.exeSubIndices[0] == -2) {
+      switch (wc.exe.exeType) {
+      case EXE_CPU:
+        wc.exe.exeSubIndices[0] = -1;
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        wc.exe.exeSubIndices[0] = -2;
+        return result;
+      case EXE_GPU_GFX: case EXE_GPU_DMA:
+      {
+        // Iterate over all available subindices
+        ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
+        int numSubIndices = GetNumExecutorSubIndices(exeDevice);
+        for (int x = 0; x < numSubIndices; x++) {
+          wc.exe.exeSubIndices = {x};
+          result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        }
+        wc.exe.exeSubIndices = {-1};
+        return result;
+      }
+      case EXE_NIC: case EXE_NIC_NEAREST:
+      {
+        // Iterates over total number of DST NICs
+        int numIndices = 0;
+        if (wc.exe.exeType == EXE_NIC) {
+          numIndices = GetNumExecutors(EXE_NIC, wc.mem[1][0].memRanks[0]);
+        } else {
+          numIndices = GetNumExecutors(EXE_GPU_GFX, wc.mem[1][0].memRanks[0]);
+        }
+        for (int x = 0; x < numIndices; x++) {
+          wc.exe.exeSubIndices = {x};
+          result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        }
+        wc.exe.exeSubIndices = {-1};
+        return result;
+      }
+      }
+      return result;
     }
 
-    for (MemDevice& dst : transfer.dsts) {
-      if (dst.memIndex == -1) {
-        if (dst.memRank == -1) {
-          printf("[ERROR] Dst Mem device wildcard expansion requires rank wildcards to be resolved first\n");
-          exit(1);
-        }
-        int numExecutors = (IsCpuMemType(dst.memType) ?
-                            GetNumExecutors(EXE_CPU, dst.memRank) :
-                            GetNumExecutors(EXE_GPU_GFX, dst.memRank));
-
-        for (int memIndex = 0; memIndex < numExecutors; memIndex++) {
-          dst.memIndex = memIndex;
-          RecursiveWildcardDeviceExpansion(transfer, transfers);
-        }
-        dst.memIndex = -1;
-        return;
+    // Resolve EXE subslots (only apples to EXE_NIC_NEAREST)
+    if (wc.exe.exeSubSlots.size() == 0) {
+      // Subslot won't be used, so just assign 0
+      wc.exe.exeSubSlots = {0};
+      result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      wc.exe.exeSubSlots.clear();
+      return result;
+    } else if (wc.exe.exeSubSlots.size() > 1) {
+      // Loop over user provided slots
+      std::vector<int> exeSubSlots;
+      exeSubSlots.swap(wc.exe.exeSubSlots);
+      for (auto x : exeSubSlots) {
+        wc.exe.exeSubSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
       }
+      wc.exe.exeSubSlots.swap(exeSubSlots);
+      return result;
+    } else if (wc.exe.exeSubSlots[0] == -1) {
+      // Wildcard - Loop over all possible slots, based on DST memory type
+      std::vector<int> dstNicIndices;
+      if (IsCpuMemType(wc.mem[1][0].memType)) {
+        GetClosestNicsToCpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      }
+      for (auto x : dstNicIndices) {
+        wc.exe.exeSubSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSubSlots = {-1};
+      return result;
     }
 
-    // This is only reached after all wildcards have been populated
-    transfers.push_back(transfer);
+    // Only reach here when each candidate has been narrowed down to 1 option
+    // Create Transfer and add to list
+    Transfer t;
+    t.numBytes    = numBytes;
+    t.numSubExecs = numSubExecs;
+
+    for (int iSrc = 0; iSrc < wc.mem[0].size(); iSrc++)
+      t.srcs.push_back({wc.mem[0][iSrc].memType, wc.mem[0][iSrc].memIndices[0], wc.mem[0][iSrc].memRanks[0]});
+    for (int iDst = 0; iDst < wc.mem[1].size(); iDst++)
+      t.dsts.push_back({wc.mem[1][iDst].memType, wc.mem[1][iDst].memIndices[0], wc.mem[1][iDst].memRanks[0]});
+    t.exeDevice.exeType  = wc.exe.exeType;
+    t.exeDevice.exeIndex = wc.exe.exeIndices[0];
+    t.exeDevice.exeRank  = wc.exe.exeRanks[0];
+    t.exeDevice.exeSlot  = wc.exe.exeSlots[0];
+    t.exeSubIndex        = wc.exe.exeSubIndices[0];
+    t.exeSubSlot         = wc.exe.exeSubSlots[0];
+
+    transfers.push_back(t);
+
+    return false;
   }
 
   ErrResult ParseTransfers(std::string            line,
@@ -4606,6 +4998,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     numTransfers = abs(numTransfers);
 
     int numSubExecs;
+    size_t numBytes;
     std::string srcStr, exeStr, dstStr, numBytesToken;
 
     if (!advancedMode) {
@@ -4617,72 +5010,43 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     for (int i = 0; i < numTransfers; i++) {
-      Transfer transfer;
-
+      size_t numBytes;
       if (!advancedMode) {
         iss >> srcStr >> exeStr >> dstStr;
-        transfer.numSubExecs = numSubExecs;
         if (iss.fail()) {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet", i+1};
         }
-        transfer.numBytes = 0;
+        numBytes = 0;
       } else {
-        iss >> srcStr >> exeStr >> dstStr >> transfer.numSubExecs >> numBytesToken;
+        iss >> srcStr >> exeStr >> dstStr >> numSubExecs >> numBytesToken;
         if (iss.fail()) {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST $CU #Bytes) tuple", i+1};
         }
-        if (sscanf(numBytesToken.c_str(), "%lu", &transfer.numBytes) != 1) {
+        if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1) {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple", i+1};
         }
 
         char units = numBytesToken.back();
         switch (toupper(units)) {
-        case 'G': transfer.numBytes *= 1024;
-        case 'M': transfer.numBytes *= 1024;
-        case 'K': transfer.numBytes *= 1024;
+        case 'G': numBytes *= 1024;
+        case 'M': numBytes *= 1024;
+        case 'K': numBytes *= 1024;
         }
       }
 
-      ERR_CHECK(ParseMemType(srcStr, transfer.srcs));
-      ERR_CHECK(ParseMemType(dstStr, transfer.dsts));
-      ERR_CHECK(ParseExeType(exeStr, transfer.exeDevice, transfer.exeSubIndex));
+      WildcardTransfer wct;
+      ERR_CHECK(ParseMemType(srcStr, wct.mem[0]));
+      ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
+      ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
       // Perform wildcard expansion
       int numRanks = GetNumRanks();
-      for (int rankIndex = 0; rankIndex < numRanks; rankIndex++) {
-        bool rankModified = false;
-        Transfer rankTransfer = transfer;
-        for (MemDevice& src : rankTransfer.srcs)
-          if (src.memRank == -1) {
-            src.memRank = rankIndex;
-            rankModified = true;
-          }
-        if (rankTransfer.exeDevice.exeRank == -1) {
-          // If NIC executor doesn't specify a rank, then use the source memory rank by default
-          if (IsNicExeType(rankTransfer.exeDevice.exeType)) {
-            if (rankTransfer.srcs.size() != 1) {
-              return {ERR_FATAL, "Parsing error: NIC execution requires single SRC and single DST"};
-            } else {
-              rankTransfer.exeDevice.exeRank = rankTransfer.srcs[0].memRank;
-            }
-          } else {
-            rankTransfer.exeDevice.exeRank = rankIndex;
-            rankModified = true;
-          }
-        }
-        for (MemDevice& dst : rankTransfer.dsts)
-          if (dst.memRank == -1) {
-            dst.memRank = rankIndex;
-            rankModified = true;
-          }
-
-        RecursiveWildcardDeviceExpansion(rankTransfer, transfers);
-
-        // If no ranks were modified, exit after first rank
-        if (!rankModified) break;
+      for (int localRankIndex = 0; localRankIndex < numRanks; localRankIndex++) {
+        bool localRankModified = RecursiveWildcardTransferExpansion(wct, localRankIndex, numBytes, numSubExecs, transfers);
+        if (!localRankModified) break;
       }
     }
 
@@ -5681,6 +6045,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return System::Get().GetNumExecutors(exeType, targetRank);
   }
 
+  int GetNumExecutors(MemType memType, int targetRank)
+  {
+    if (IsCpuMemType(memType)) return GetNumExecutors(EXE_CPU,     targetRank);
+    if (IsGpuMemType(memType)) return GetNumExecutors(EXE_GPU_GFX, targetRank);
+    return 0;
+  }
+
   int GetNumSubExecutors(ExeDevice exeDevice)
   {
     return System::Get().GetNumSubExecutors(exeDevice);
@@ -5712,6 +6083,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank)
   {
     System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+  }
+
+  void GetClosestNicsToCpu(std::vector<int>& nicIndices, int cpuIndex, int targetRank)
+  {
+    int numNics = GetNumExecutors(EXE_NIC, targetRank);
+    nicIndices.clear();
+    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+      if (GetClosestCpuNumaToNic(nicIndex, targetRank) == cpuIndex) {
+        nicIndices.push_back(nicIndex);
+      }
+    }
   }
 
   int GetRank()

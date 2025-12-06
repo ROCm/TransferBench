@@ -70,10 +70,11 @@ int main(int argc, char **argv)
   if (RunPreset(ev, numBytesPerTransfer, argc, argv)) exit(0);
 
   // Read input from command line or configuration file
+  bool isDryRun = !strcmp(argv[1], "dryrun");
   std::vector<std::string> lines;
   {
     std::string line;
-    if (!strcmp(argv[1], "cmdline")) {
+    if (!strcmp(argv[1], "cmdline") || isDryRun) {
       for (int i = 3; i < argc; i++)
         line += std::string(argv[i]) + " ";
       lines.push_back(line);
@@ -89,16 +90,43 @@ int main(int argc, char **argv)
     }
   }
 
+  TransferBench::ConfigOptions cfgOptions = ev.ToConfigOptions();
+  TransferBench::TestResults results;
+  std::vector<ErrResult> errors;
+
+  // Dry run prints off transfers (and errors)
+  if (isDryRun) {
+    if (RankDoesOutput()) {
+      DisplayVersion();
+      printf("Transfers to be executed (dry-run):\n");
+      printf("================================================================================\n");
+      std::vector<Transfer> transfers;
+      CheckForError(TransferBench::ParseTransfers(lines[0], transfers));
+      if (transfers.empty()) {
+        printf("<none>\n");
+      } else {
+        bool isMultiNode = GetNumRanks() > 1;
+        for (size_t i = 0; i < transfers.size(); i++) {
+          Transfer const& t = transfers[i];
+          printf("Transfer %5lu: (%s->", i, MemDevicesToStr(t.srcs).c_str());
+          if (isMultiNode) printf("R%d", t.exeDevice.exeRank);
+          printf("%c%d", TransferBench::ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
+          if (t.exeDevice.exeSlot) printf("%c", 'A' + t.exeDevice.exeSlot);
+          if (t.exeSubIndex != -1) printf(".%d", t.exeSubIndex);
+          if (t.exeSubSlot != 0) printf("%c", 'A' + t.exeSubSlot);
+          printf("->%s)\n", MemDevicesToStr(t.dsts).c_str());
+        }
+      }
+    }
+    return 0;
+  }
+
   // Print environment variables and CSV header
   if (RankDoesOutput()) {
     ev.DisplayEnvVars();
     if (ev.outputToCsv)
       printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
   }
-
-  TransferBench::ConfigOptions cfgOptions = ev.ToConfigOptions();
-  TransferBench::TestResults results;
-  std::vector<ErrResult> errors;
 
   // Process each line as a Test
   int testNum = 0;
