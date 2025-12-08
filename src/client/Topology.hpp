@@ -140,59 +140,61 @@ void DisplayTopology(bool outputToCsv)
   return;
 #else
   // Print headers
-  if (!outputToCsv) {
-    printf("        |");
-    for (int j = 0; j < numGpus; j++) {
-      hipDeviceProp_t prop;
-      HIP_CALL(hipGetDeviceProperties(&prop, j));
-      std::string fullName = prop.gcnArchName;
-      std::string archName = fullName.substr(0, fullName.find(':'));
-      printf(" %6s |", archName.c_str());
-    }
-    printf("\n");
-  }
-
-  printf("        %c", sep);
-  for (int j = 0; j < numGpus; j++)
-    printf(" GPU %02d %c", j, sep);
-  printf(" PCIe Bus ID  %c #CUs %c NUMA %c #DMA %c #XCC %c NIC\n", sep, sep, sep, sep, sep);
-
-  if (!outputToCsv) {
-    for (int j = 0; j <= numGpus; j++)
-      printf("--------+");
-    printf("--------------+------+------+------+------+------\n");
-  }
-
-  // Loop over each GPU device
-  for (int i = 0; i < numGpus; i++) {
-    printf(" GPU %02d %c", i, sep);
-
-    // Print off link information
-    for (int j = 0; j < numGpus; j++) {
-      if (i == j) {
-        printf("    N/A %c", sep);
-      } else {
-        uint32_t linkType, hopCount;
-        HIP_CALL(hipExtGetLinkTypeAndHopCount(i, j, &linkType, &hopCount));
-        printf(" %s-%d %c",
-               linkType == HSA_AMD_LINK_INFO_TYPE_HYPERTRANSPORT ? "  HT" :
-               linkType == HSA_AMD_LINK_INFO_TYPE_QPI            ? " QPI" :
-               linkType == HSA_AMD_LINK_INFO_TYPE_PCIE           ? "PCIE" :
-               linkType == HSA_AMD_LINK_INFO_TYPE_INFINBAND      ? "INFB" :
-               linkType == HSA_AMD_LINK_INFO_TYPE_XGMI           ? "XGMI" : "????",
-               hopCount, sep);
+  if (numGpus > 0) {
+    if (!outputToCsv) {
+      printf("        |");
+      for (int j = 0; j < numGpus; j++) {
+        hipDeviceProp_t prop;
+        HIP_CALL(hipGetDeviceProperties(&prop, j));
+        std::string fullName = prop.gcnArchName;
+        std::string archName = fullName.substr(0, fullName.find(':'));
+        printf(" %6s |", archName.c_str());
       }
+      printf("\n");
     }
 
-    char pciBusId[20];
-    HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
-    printf(" %-11s %c %-4d %c %-4d %c %-4d %c %-4d %c %-4d\n",
-           pciBusId, sep,
-           TransferBench::GetNumSubExecutors({EXE_GPU_GFX, i}), sep,
-           TransferBench::GetClosestCpuNumaToGpu(i), sep,
-           TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, i}), sep,
-           TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}), sep,
-           TransferBench::GetClosestNicToGpu(i));
+    printf("        %c", sep);
+    for (int j = 0; j < numGpus; j++)
+      printf(" GPU %02d %c", j, sep);
+    printf(" PCIe Bus ID  %c #CUs %c NUMA %c #DMA %c #XCC %c NIC\n", sep, sep, sep, sep, sep);
+
+    if (!outputToCsv) {
+      for (int j = 0; j <= numGpus; j++)
+        printf("--------+");
+      printf("--------------+------+------+------+------+------\n");
+    }
+
+    // Loop over each GPU device
+    for (int i = 0; i < numGpus; i++) {
+      printf(" GPU %02d %c", i, sep);
+
+      // Print off link information
+      for (int j = 0; j < numGpus; j++) {
+        if (i == j) {
+          printf("    N/A %c", sep);
+        } else {
+          uint32_t linkType, hopCount;
+          HIP_CALL(hipExtGetLinkTypeAndHopCount(i, j, &linkType, &hopCount));
+          printf(" %s-%d %c",
+                 linkType == HSA_AMD_LINK_INFO_TYPE_HYPERTRANSPORT ? "  HT" :
+                 linkType == HSA_AMD_LINK_INFO_TYPE_QPI            ? " QPI" :
+                 linkType == HSA_AMD_LINK_INFO_TYPE_PCIE           ? "PCIE" :
+                 linkType == HSA_AMD_LINK_INFO_TYPE_INFINBAND      ? "INFB" :
+                 linkType == HSA_AMD_LINK_INFO_TYPE_XGMI           ? "XGMI" : "????",
+                 hopCount, sep);
+        }
+      }
+
+      char pciBusId[20];
+      HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
+      printf(" %-11s %c %-4d %c %-4d %c %-4d %c %-4d %c %-4d\n",
+             pciBusId, sep,
+             TransferBench::GetNumSubExecutors({EXE_GPU_GFX, i}), sep,
+             TransferBench::GetClosestCpuNumaToGpu(i), sep,
+             TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, i}), sep,
+             TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}), sep,
+             TransferBench::GetClosestNicToGpu(i));
+    }
   }
 #endif
 }

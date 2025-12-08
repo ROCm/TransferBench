@@ -124,9 +124,13 @@ public:
     int numDeviceCUs    = TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0});
 
     hipDeviceProp_t prop;
-    HIP_CALL(hipGetDeviceProperties(&prop, 0));
-    std::string fullName = prop.gcnArchName;
-    std::string archName = fullName.substr(0, fullName.find(':'));
+    std::string fullName = "";
+    std::string archName = "";
+    if (numDetectedGpus > 0) {
+      HIP_CALL(hipGetDeviceProperties(&prop, 0));
+      fullName = prop.gcnArchName;
+      archName = fullName.substr(0, fullName.find(':'));
+    }
 
     // Different hardware pick different GPU kernels
     // This performance difference is generally only noticable when executing fewer CUs
