@@ -23,6 +23,7 @@ THE SOFTWARE.
 #pragma once
 
 #include "TransferBench.hpp"
+#include "Utilities.hpp"
 
 static int RemappedCpuIndex(int origIdx)
 {
@@ -235,7 +236,7 @@ GroupRankMap& GetGroupRankMap()
     // Build GroupKey for each rank
     for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
 
-      std::string rackId = TransferBench::GetRackId(rank);
+      std::string ppodId = TransferBench::GetPpodId(rank);
       int         vpodId = TransferBench::GetVpodId(rank);
 
       // CPU information
@@ -282,7 +283,7 @@ GroupRankMap& GetGroupRankMap()
         nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
       }
 
-      GroupKey key(rackId, vpodId,
+      GroupKey key(ppodId, vpodId,
                    cpuNames, cpuNumSubExecs,
                    gpuNames, gpuNumSubExecs, gpuClosestCpu,
                    nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
@@ -294,20 +295,21 @@ GroupRankMap& GetGroupRankMap()
   return groups;
 }
 
-void DisplayMultiRankTopology(bool outputToCsv)
+void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
 {
   GroupRankMap& groups = GetGroupRankMap();
 
   printf("%d rank(s) in %lu homogeneous group(s)\n", TransferBench::GetNumRanks(), groups.size());
-  printf("-------------------------------------------------------------------------------------------------------------\n");
+  printf("\n");
 
   // Print off each group
   int groupNum = 1;
+
   for (auto const& group : groups) {
     GroupKey const& key           = group.first;
     std::vector<int> const& hosts = group.second;
 
-    std::string              rackId        = std::get<0>(key);
+    std::string              ppodId        = std::get<0>(key);
     int                      vpodId        = std::get<1>(key);
     std::vector<std::string> cpuNames      = std::get<2>(key);
     std::vector<int>         cpuSubExecs   = std::get<3>(key);
@@ -323,105 +325,84 @@ void DisplayMultiRankTopology(bool outputToCsv)
     int numCpus  = cpuNames.size();
     int numGpus  = gpuNames.size();
     int numNics  = nicNames.size();
+    int numExecutors = numCpus + numGpus + numNics;
     int numActiveNics = 0;
     for (auto x : nicIsActive) numActiveNics += x;
 
     if (groupNum > 1) printf("\n");
     printf("Group %03d: %d rank(s) %d CPU(s) %d GPU(s) %d NIC(s) (%d active NICs)\n",
            groupNum++, numRanks, numCpus, numGpus, numNics, numActiveNics);
-  //printf("| 1234 | 12345678901234567890123456789012 | 123 | 123 | 1234567890 | 12345678901234567890123456789012 | 123 |\n");
-    printf("+------+----------------------------------+-----+-----+------------+----------------------------------+-----+\n");
-    printf("| Rank | Hostname                         | RID | VID | Executor   | Executor Name                    | #SE |\n");
-    printf("+------+----------------------------------+-----+-----+------------+----------------------------------+-----+\n");
 
-    int  rankIdx = 0;
-    char rankStr[5];
-    char hostnameStr[33] = {};
-    char ridStr[4];
-    char vidStr[4];
-    char exeStr[11];
-    char exeNameStr[33];
-    char seStr[4];
+    // Determine size of table
+    int numCols = 7;
+    int numRows = 1 + std::max(numRanks, numExecutors);
+    TransferBench::Utils::TableHelper table(numRows, numCols);
 
-    #define FORMAT_STR "| %-4s | %-32s | %-3s | %-3s | %-10s | %-32s | %-3s |\n"
-    sprintf(ridStr, "%3s", rackId.c_str());
-    sprintf(vidStr, "%3d", vpodId);
+    // Table borders / alignment
+    for (int col = 0; col <= numCols; col++) {
+      table.DrawColBorder(col);
+      table.SetColAlignment(col, TransferBench::Utils::TableHelper::ALIGN_LEFT);
+    }
+    table.DrawRowBorder(0);
+    table.DrawRowBorder(1);
+    table.DrawRowBorder(numRows);
 
-    // Loop over each CPU executor
+    // Table header
+    table.Set(0, 0, " Rank ");
+    table.Set(0, 1, " Hostname ");
+    table.Set(0, 2, " POD ");
+    table.Set(0, 3, " VID ");
+    table.Set(0, 4, " Executor ");
+    table.Set(0, 5, " Executor Name ");
+    table.Set(0, 6, " #SE ");
+
+    // Fill in ranks / hosts
+    for (int i = 0; i < numRanks; i++) {
+      int rank = hosts[i];
+      table.Set(1 + i, 0, " %04d ", rank);
+      table.Set(1 + i, 1, " %s ", TransferBench::GetHostname(rank).c_str());
+    }
+
+    // Fill in PPOD and VPOD
+    table.Set(1, 2, " %s ", ppodId.c_str());
+    table.Set(1, 3, " %d ", vpodId);
+
+    // Fill in Executor information
+    int rowIdx = 1;
     for (int cpuIndex = 0; cpuIndex < numCpus; cpuIndex++) {
-      if (rankIdx < numRanks) {
-        sprintf(rankStr, "%04d", hosts[rankIdx]);
-        sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
-      } else {
-        rankStr[0] = hostnameStr[0] = 0;
-      }
-      sprintf(exeStr, "CPU %02d", cpuIndex);
-      sprintf(exeNameStr, "%-32s", cpuNames[cpuIndex].c_str());
-      sprintf(seStr, "%3d", cpuSubExecs[cpuIndex]);
-      printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
-      ridStr[0] = vidStr[0] = 0;
-      rankIdx++;
+      table.Set(rowIdx, 4, " CPU %02d ", cpuIndex);
+      table.Set(rowIdx, 5, " %s ",       cpuNames[cpuIndex].c_str());
+      table.Set(rowIdx, 6, " %d ",       cpuSubExecs[cpuIndex]);
+      rowIdx++;
 
       // Loop over each GPU closest to this CPU executor
       for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
         if (gpuClosestCpu[gpuIndex] != cpuIndex) continue;
-        if (rankIdx < numRanks) {
-          sprintf(rankStr, "%04d", hosts[rankIdx]);
-          sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
-        } else {
-          rankStr[0] = hostnameStr[0] = 0;
-        }
-        sprintf(exeStr, "- GPU %02d", gpuIndex);
-        sprintf(exeNameStr, "- %-30s", gpuNames[cpuIndex].c_str());
-        sprintf(seStr, "%3d", gpuSubExecs[cpuIndex]);
-        printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
-        rankIdx++;
+        table.Set(rowIdx, 4, " - GPU %02d ", gpuIndex);
+        table.Set(rowIdx, 5, " - %s ",         gpuNames[gpuIndex].c_str());
+        table.Set(rowIdx, 6, " %d ",         gpuSubExecs[gpuIndex]);
+        rowIdx++;
 
         //  Loop over each NIC closest to this GPU
         for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
           if (nicClosestGpu[nicIndex] != gpuIndex) continue;
-          if (rankIdx < numRanks) {
-            sprintf(rankStr, "%04d", hosts[rankIdx]);
-            sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
-          } else {
-            rankStr[0] = hostnameStr[0] = 0;
-          }
-          sprintf(exeStr, "  - NIC %02d", nicIndex);
-          sprintf(exeNameStr, "  - %-28s", nicNames[nicIndex].c_str());
-          sprintf(seStr, "%3s", nicIsActive[nicIndex] ? "ON" : "OFF");
-          printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
-          rankIdx++;
+          table.Set(rowIdx, 4, "   - NIC %02d ", nicIndex);
+          table.Set(rowIdx, 5, "   - %s", nicNames[nicIndex].c_str());
+          table.Set(rowIdx, 6, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
+          rowIdx++;
         }
       }
 
       // Loop over remaining NICs not associated with GPU but associated with this CPU
       for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
         if (nicClosestGpu[nicIndex] != -1 || nicClosestCpu[nicIndex] != cpuIndex) continue;
-        if (rankIdx < numRanks) {
-          sprintf(rankStr, "%04d", hosts[rankIdx]);
-          sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
-        } else {
-          rankStr[0] = hostnameStr[0] = 0;
-        }
-        sprintf(exeStr, "- NIC %02d", nicIndex);
-        sprintf(exeNameStr, "- %-30s", nicNames[nicIndex].c_str());
-        sprintf(seStr, "%3s", nicIsActive[nicIndex] ? "ON" : "OFF");
-        printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
-        rankIdx++;
+        table.Set(rowIdx, 4, " - NIC %02d ", nicIndex);
+        table.Set(rowIdx, 5, " - %s ", nicNames[nicIndex].c_str());
+        table.Set(rowIdx, 6, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
+        rowIdx++;
       }
     }
-
-    // Loop over remamining hosts in group
-    while (rankIdx < numRanks) {
-      sprintf(rankStr, "%04d", hosts[rankIdx]);
-      sprintf(hostnameStr, "%-32s", TransferBench::GetHostname(hosts[rankIdx]).c_str());
-      exeStr[0] = 0;
-      exeNameStr[0] = 0;
-      seStr[0] = 0;
-      printf(FORMAT_STR, rankStr, hostnameStr, ridStr, vidStr, exeStr, exeNameStr, seStr);
-      rankIdx++;
-    }
-    printf("+------+----------------------------------+-----+-----+------------+----------------------------------+-----+\n");
+    table.PrintTable(outputToCsv, showBorders);
   }
 
   if (HasDuplicateHostname()) {
@@ -429,10 +410,10 @@ void DisplayMultiRankTopology(bool outputToCsv)
   }
 }
 
-void DisplayTopology(bool outputToCsv)
+void DisplayTopology(bool outputToCsv, bool showBorders)
 {
   if (GetNumRanks() > 1)
-    DisplayMultiRankTopology(outputToCsv);
+    DisplayMultiRankTopology(outputToCsv, showBorders);
   else
     DisplaySingleRankTopology(outputToCsv);
 }

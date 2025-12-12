@@ -45,7 +45,7 @@ int main(int argc, char **argv)
         DisplayUsage(argv[0]);
         DisplayPresets();
       }
-      DisplayTopology(ev.outputToCsv);
+      DisplayTopology(ev.outputToCsv, ev.showBorders);
     }
     exit(0);
   }

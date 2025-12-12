@@ -518,9 +518,9 @@ namespace TransferBench
 
   /**
    * @param[in] targetRank  Rank to query (-1 for local rank)
-   * @returns Gets the rack identifier for the target rank
+   * @returns Gets the physical pod identifier for the target rank
    **/
-  std::string GetRackId(int targetRank = -1);
+  std::string GetPpodId(int targetRank = -1);
 
   /**
    * @param[in] targetRank  Rank to query (-1 for local rank)
@@ -909,7 +909,7 @@ namespace {
     void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1) const;
 
     std::string GetHostname(int targetRank) const;
-    std::string GetRackId(int targetRank) const;
+    std::string GetPpodId(int targetRank) const;
     int GetVpodId(int targetRank) const;
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
@@ -960,7 +960,7 @@ namespace {
     struct RankTopology
     {
       char hostname[33];
-      char rackId[256];
+      char ppodId[256];
       int  vpodId;
 
       std::map<ExeType,            int>         numExecutors;
@@ -5438,7 +5438,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (firstDotPtr) *firstDotPtr = 0;
 
     // NOTE: Placeholder values
-    strcpy(topo.rackId, "ABC");
+    strcpy(topo.ppodId, "N/A");
     topo.vpodId = -1;
 
     // CPU Executor
@@ -5731,7 +5731,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::SendRankTopo(int peerRank, RankTopology const& topo) const
   {
     SendData(peerRank, sizeof(topo.hostname), topo.hostname);
-    SendData(peerRank, sizeof(topo.rackId), &topo.rackId);
+    SendData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
     SendData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     SendMap(peerRank, topo.numExecutors);
     SendMap(peerRank, topo.numExecutorSubIndices);
@@ -5746,7 +5746,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::RecvRankTopo(int peerRank, RankTopology& topo) const
   {
     RecvData(peerRank, sizeof(topo.hostname), topo.hostname);
-    RecvData(peerRank, sizeof(topo.rackId), &topo.rackId);
+    RecvData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
     RecvData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     RecvMap(peerRank, topo.numExecutors);
     RecvMap(peerRank, topo.numExecutorSubIndices);
@@ -6029,10 +6029,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return rankInfo[targetRank].hostname;
   }
 
-  std::string System::GetRackId(int targetRank) const
+  std::string System::GetPpodId(int targetRank) const
   {
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
-    return rankInfo[targetRank].rackId;
+    return rankInfo[targetRank].ppodId;
   }
 
   int System::GetVpodId(int targetRank) const
@@ -6134,9 +6134,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return System::Get().GetHostname(targetRank);
   }
 
-  std::string GetRackId(int targetRank)
+  std::string GetPpodId(int targetRank)
   {
-    return System::Get().GetRackId(targetRank);
+    return System::Get().GetPpodId(targetRank);
   }
 
   int GetVpodId(int targetRank)
