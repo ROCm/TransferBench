@@ -106,11 +106,6 @@ if(NOT (("${CMAKE_CXX_COMPILER}" MATCHES ".*hipcc") OR ("${CMAKE_CXX_COMPILER}" 
   message(FATAL_ERROR "On ROCm platform 'hipcc' or HIP-aware Clang must be used as C++ compiler.")
 endif()
 
-check_cxx_compiler_flag("-parallel-jobs=12" HAVE_PARALLEL_JOBS)
-if (HAVE_PARALLEL_JOBS)
-  message(STATUS "Parallel jobs enabled")
-endif()
-
 ## Check for Threads
 find_package(Threads REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
