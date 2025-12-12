@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2021-2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -121,13 +121,11 @@ public:
   // Constructor that collects values
   EnvVars()
   {
-    int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
-    int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
-    int numDeviceCUs    = TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0});
-
+    // Try to detect the GPU
     hipDeviceProp_t prop;
     std::string fullName = "";
     std::string archName = "";
+    int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     if (numDetectedGpus > 0) {
       HIP_CALL(hipGetDeviceProperties(&prop, 0));
       fullName = prop.gcnArchName;

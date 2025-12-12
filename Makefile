@@ -1,11 +1,11 @@
 #
-# Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 #
 
 # Configuration options
 ROCM_PATH ?= /opt/rocm
 CUDA_PATH ?= /usr/local/cuda
-MPI_PATH  ?= /usr/local/openmpi/
+MPI_PATH  ?= /usr/local/openmpi
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -91,6 +91,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       MPI_ENABLED = 1
       CXXFLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
       LDFLAGS += -L/$(MPI_PATH)/lib -lmpi
+      ifeq ($(DEBUG), 1)
+        LDFLAGS += -lmpi_cxx
+      endif
     endif
 
     ifeq ($(MPI_ENABLED), 0)

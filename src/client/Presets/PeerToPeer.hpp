@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -71,8 +71,8 @@ int PeerToPeerPreset(EnvVars&           ev,
 
   // Perform unidirectional / bidirectional
   for (int isBidirectional = 0; isBidirectional <= 1; isBidirectional++) {
-    if (p2pMode == 1 && isBidirectional == 1 ||
-        p2pMode == 2 && isBidirectional == 0) continue;
+    if ((p2pMode == 1 && isBidirectional == 1) ||
+        (p2pMode == 2 && isBidirectional == 0)) continue;
 
     printf("%sdirectional copy peak bandwidth GB/s [%s read / %s write] (GPU-Executor: %s)\n", isBidirectional ? "Bi" : "Uni",
            useRemoteRead ? "Remote" : "Local",

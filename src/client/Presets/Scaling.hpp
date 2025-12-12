@@ -74,12 +74,14 @@ int ScalingPreset(EnvVars&           ev,
 
   std::vector<std::pair<double, int>> bestResult(numDevices);
 
+  MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
+
   std::vector<Transfer> transfers(1);
   Transfer& t   = transfers[0];
   t.exeDevice   = {EXE_GPU_GFX, localIdx};
   t.exeSubIndex = -1;
   t.numBytes    = numBytesPerTransfer;
-  t.srcs        = {{MEM_GPU, localIdx}};
+  t.srcs        = {{memType, localIdx}};
 
   for (int numSubExec = sweepMin; numSubExec <= sweepMax; numSubExec++) {
     t.numSubExecs = numSubExec;

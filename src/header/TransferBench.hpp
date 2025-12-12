@@ -2408,9 +2408,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 //========================================================================================
 
   // Prints off PCIe tree
-  static void PrintPCIeTree(PCIeNode    const& node,
-                            std::string const& prefix = "",
-                            bool               isLast = true)
+  static inline void PrintPCIeTree(PCIeNode    const& node,
+                                   std::string const& prefix = "",
+                                   bool               isLast = true)
   {
     if (!node.address.empty()) {
       printf("%s%s%s", prefix.c_str(), (isLast ? "└── " : "├── "), node.address.c_str());
@@ -2459,7 +2459,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Build PCIe tree on first use
     if (!isInitialized) {
       // Add NICs to the tree
-      int numNics = GetIbvDeviceList().size();
       auto const& ibvDeviceList = GetIbvDeviceList();
       for (IbvDevice const& ibvDevice : ibvDeviceList) {
         if (!ibvDevice.hasActivePort || ibvDevice.busId == "") continue;
@@ -3381,7 +3380,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
         // Threadblocks are ordered sequentially one transfer at a time
         for (auto& rss : exeInfo.resources) {
-          Transfer const& t = transfers[rss.transferIdx];
           rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
           for (auto p : rss.subExecParamCpu) {
             rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
@@ -4492,7 +4490,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         printf("Memory prepared:\n");
 
         for (int i = 0; i < transfers.size(); i++) {
-          ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
           printf("Transfer %03d:\n", i);
           for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
             printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
@@ -4686,7 +4683,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // - At the "end", each characteristic will only have one option, which will then be used to specify the
     //   Transfer to be added to transfers
     bool result = false;
-    int numRanks = GetNumRanks();
 
     // Resolve memory wildcards first
     for (int isDst = 0; isDst <= 1; isDst++) {
@@ -5021,7 +5017,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     numTransfers = abs(numTransfers);
 
     int numSubExecs;
-    size_t numBytes;
     std::string srcStr, exeStr, dstStr, numBytesToken;
 
     if (!advancedMode) {

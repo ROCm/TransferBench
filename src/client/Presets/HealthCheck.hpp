@@ -451,7 +451,7 @@ int HealthCheckPreset(EnvVars&           ev,
   // Check for supported platforms
 #if defined(__NVCC__)
   printf("[WARN] healthcheck preset not supported on NVIDIA hardware\n");
-  return;
+  return 0;
 #endif
 
   printf("Disclaimer:\n");

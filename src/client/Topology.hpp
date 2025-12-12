@@ -323,7 +323,6 @@ void DisplayMultiRankTopology(bool outputToCsv)
     int numCpus  = cpuNames.size();
     int numGpus  = gpuNames.size();
     int numNics  = nicNames.size();
-    int numExecutors = numCpus + numGpus +  numNics;
     int numActiveNics = 0;
     for (auto x : nicIsActive) numActiveNics += x;
 

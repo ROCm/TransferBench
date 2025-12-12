@@ -290,7 +290,7 @@ namespace TransferBench::Utils
   void Print(const char* format, ...)
   {
     if (RankDoesOutput()) {
-      va_list args, args_temp;
+      va_list args;
       va_start(args, format);
       vprintf(format, args);
       va_end(args);
@@ -340,7 +340,6 @@ namespace TransferBench::Utils
     int numCols = 5, numRows = 1;
     size_t numTimedIterations = results.numTimedIterations;
     for (auto const& exeInfoPair : results.exeResults) {
-      ExeDevice const& exeDevice = exeInfoPair.first;
       ExeResult const& exeResult = exeInfoPair.second;
       numRows += 1 + exeResult.transferIdx.size();
       if (ev.showIterations) {
@@ -348,7 +347,6 @@ namespace TransferBench::Utils
 
         // Check that per-iteration information exists
         for (int idx : exeResult.transferIdx) {
-          Transfer const& t = transfers[idx];
           TransferResult const& r = results.tfrResults[idx];
           if (r.perIterMsec.size() != numTimedIterations) {
             Print("[ERROR] Per iteration timing data unavailable: Expected %lu data points, but have %lu\n",
