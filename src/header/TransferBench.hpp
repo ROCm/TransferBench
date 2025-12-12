@@ -25,6 +25,9 @@ THE SOFTWARE.
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstring>
+#include <fcntl.h>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <map>
 #include <netinet/in.h>
@@ -34,6 +37,10 @@ THE SOFTWARE.
 #include <set>
 #include <sstream>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <thread>
@@ -42,15 +49,6 @@ THE SOFTWARE.
 
 #ifdef NIC_EXEC_ENABLED
 #include <infiniband/verbs.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <filesystem>
-#include <fstream>
 #endif
 
 #ifdef MPI_COMM_ENABLED
