@@ -46,6 +46,13 @@ Documentation for TransferBench is available at
   - This new preset is similar to cmdline however it only shows the list of transfers that will be executed
   - This new dryrun preset may be useful when using the new wildcard expressions to ensure that the Test
     contains the correct set of Transfers
+### Modified
+- Refactored front-end client code to facilitate simpler and more consistent presets.
+- Refactored tabular data display to simplify code.  Output result tables now use ASCII box-drawing
+  characters for borders which helps group data visually.  Borders may be disabled by setting SHOW_BORDERS=0
+- The All-to-all preset is now multi-rank compatible.  When executed on multiple ranks, it runs
+  inter-rank all-to-all and then reports the min/max across all ranks.  The number of extrema
+  results shown can be adjusted by NUM_RESULTS
 ### Fixed
 - Added guard for ROCM version when using __syncwarp();
 - Exiting with non-zero code on fatal errors

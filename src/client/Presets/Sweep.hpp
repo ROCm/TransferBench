@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,9 +28,9 @@ void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& tran
     for (auto const& transfer : transfers)
     {
       fprintf(fp, " (%s->%c%d->%s %d %lu)",
-              MemDevicesToStr(transfer.srcs).c_str(),
+              Utils::MemDevicesToStr(transfer.srcs).c_str(),
               ExeTypeStr[transfer.exeDevice.exeType], transfer.exeDevice.exeIndex,
-              MemDevicesToStr(transfer.dsts).c_str(),
+              Utils::MemDevicesToStr(transfer.dsts).c_str(),
               transfer.numSubExecs,
               transfer.numBytes);
     }
@@ -39,16 +39,13 @@ void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& tran
   }
 }
 
-void SweepPreset(EnvVars&           ev,
-                 size_t      const  numBytesPerTransfer,
-                 std::string const  presetName)
+int SweepPreset(EnvVars&           ev,
+                size_t      const  numBytesPerTransfer,
+                std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR] Sweep preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR] Sweep preset currently not supported for multi-node\n");
+    return 1;
   }
 
   bool const isRandom = (presetName == "rsweep");
@@ -106,33 +103,33 @@ void SweepPreset(EnvVars&           ev,
   for (auto ch : sweepSrc) {
     if (!strchr(MemTypeStr, ch)) {
       printf("[ERROR] Unrecognized memory type '%c' specified for sweep source\n", ch);
-      exit(1);
+      return 1;
     }
     if (strchr(sweepSrc.c_str(), ch) != strrchr(sweepSrc.c_str(), ch)) {
       printf("[ERROR] Duplicate memory type '%c' specified for sweep source\n", ch);
-      exit(1);
+      return 1;
     }
   }
 
   for (auto ch : sweepDst) {
     if (!strchr(MemTypeStr, ch)) {
       printf("[ERROR] Unrecognized memory type '%c' specified for sweep destination\n", ch);
-      exit(1);
+      return 1;
     }
     if (strchr(sweepDst.c_str(), ch) != strrchr(sweepDst.c_str(), ch)) {
       printf("[ERROR] Duplicate memory type '%c' specified for sweep destination\n", ch);
-      exit(1);
+      return 1;
     }
   }
 
   for (auto ch : sweepExe) {
     if (!strchr(ExeTypeStr, ch)) {
       printf("[ERROR] Unrecognized executor type '%c' specified for sweep executor\n", ch);
-      exit(1);
+      return 1;
     }
     if (strchr(sweepExe.c_str(), ch) != strrchr(sweepExe.c_str(), ch)) {
       printf("[ERROR] Duplicate executor type '%c' specified for sweep executor\n", ch);
-      exit(1);
+      return 1;
     }
   }
 
@@ -281,7 +278,7 @@ void SweepPreset(EnvVars&           ev,
 
   if (sweepMin > numPossible) {
     printf("No valid test configurations exist\n");
-    return;
+    return 0;
   }
 
   if (ev.outputToCsv) {
@@ -341,10 +338,10 @@ void SweepPreset(EnvVars&           ev,
     LogTransfers(fp, ++numTestsRun, transfers);
 
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      if (!continueOnErr) exit(1);
+      Utils::PrintErrors(results.errResults);
+      if (!continueOnErr) return 1;
     } else {
-      PrintResults(ev, numTestsRun, transfers, results);
+      Utils::PrintResults(ev, numTestsRun, transfers, results);
     }
 
     // Check for test limit
@@ -374,4 +371,5 @@ void SweepPreset(EnvVars&           ev,
     }
   }
   if (fp) fclose(fp);
+  return 0;
 }

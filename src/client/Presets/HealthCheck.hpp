@@ -186,7 +186,7 @@ int TestUnidir(int modelId, bool verbose)
         }
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       } else {
-        PrintErrors(results.errResults);
+        Utils::PrintErrors(results.errResults);
       }
     }
 
@@ -232,7 +232,7 @@ int TestUnidir(int modelId, bool verbose)
         }
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       } else {
-        PrintErrors(results.errResults);
+        Utils::PrintErrors(results.errResults);
       }
     }
 
@@ -298,7 +298,7 @@ int TestBidir(int modelId, bool verbose)
         }
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       } else {
-        PrintErrors(results.errResults);
+        Utils::PrintErrors(results.errResults);
       }
     }
 
@@ -423,7 +423,7 @@ int TestHbmPerformance(int modelId, bool verbose)
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       }
     } else {
-      PrintErrors(results.errResults);
+      Utils::PrintErrors(results.errResults);
     }
 
     if (fails.size() == 0) {
@@ -439,16 +439,13 @@ int TestHbmPerformance(int modelId, bool verbose)
   return hasFail;
 }
 
-void HealthCheckPreset(EnvVars&           ev,
-                       size_t      const  numBytesPerTransfer,
-                       std::string const  presetName)
+int HealthCheckPreset(EnvVars&           ev,
+                      size_t      const  numBytesPerTransfer,
+                      std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR] Healthcheck preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR] Healthcheck preset currently not supported for multi-node\n");
+    return 1;
   }
 
   // Check for supported platforms
@@ -476,5 +473,5 @@ void HealthCheckPreset(EnvVars&           ev,
   numFails += TestUnidir(modelId, verbose);
   numFails += TestBidir(modelId, verbose);
   numFails += TestAllToAll(modelId, verbose);
-  exit(numFails ? 1 : 0);
+  return numFails ? 1 : 0;
 }

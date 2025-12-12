@@ -22,16 +22,13 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
-void AllToAllRdmaPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int AllToAllRdmaPreset(EnvVars&           ev,
+                       size_t      const  numBytesPerTransfer,
+                       std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR]a2an preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR]a2an preset currently not supported for multi-node\n");
+    return 1;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -54,7 +51,7 @@ void AllToAllRdmaPreset(EnvVars&           ev,
   // Validate env vars
   if (numGpus < 0 || numGpus > numDetectedGpus) {
     printf("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    exit(1);
+    return 1;
   }
 
   MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
@@ -81,7 +78,7 @@ void AllToAllRdmaPreset(EnvVars&           ev,
   printf("==========================\n");
   printf("- Copying %lu bytes between all pairs of GPUs using %d QPs per Transfer (%lu Transfers)\n",
          numBytesPerTransfer, numQueuePairs, transfers.size());
-  if (transfers.size() == 0) return;
+  if (transfers.size() == 0) return 0;
 
   // Execute Transfers
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
@@ -91,7 +88,7 @@ void AllToAllRdmaPreset(EnvVars&           ev,
       printf("%s\n", err.errMsg.c_str());
     exit(0);
   } else {
-    PrintResults(ev, 1, transfers, results);
+    Utils::PrintResults(ev, 1, transfers, results);
   }
 
   // Print results
@@ -144,5 +141,7 @@ void AllToAllRdmaPreset(EnvVars&           ev,
   printf("Aggregate bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu);
   printf("Aggregate bandwidth       (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
 
-  PrintErrors(results.errResults);
+  Utils::PrintErrors(results.errResults);
+
+  return 0;
 }

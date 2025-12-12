@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,23 +19,20 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
-void SchmooPreset(EnvVars&           ev,
-                  size_t      const  numBytesPerTransfer,
-                  std::string const  presetName)
+int SchmooPreset(EnvVars&           ev,
+                 size_t      const  numBytesPerTransfer,
+                 std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR] Schmoo preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR] Schmoo preset currently not supported for multi-node\n");
+    return 1;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   if (numDetectedGpus < 2) {
     printf("[ERROR] Schmoo benchmark requires at least 2 GPUs\n");
-    exit(1);
+    return 1;
   }
 
   // Collect env vars for this preset
@@ -61,7 +58,7 @@ void SchmooPreset(EnvVars&           ev,
   // Validate env vars
   if (localIdx >= numDetectedGpus || remoteIdx >= numDetectedGpus) {
     printf("[ERROR] Cannot execute schmoo test with local GPU device %d, remote GPU device %d\n", localIdx, remoteIdx);
-    exit(1);
+    return 1;
   }
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
@@ -93,18 +90,18 @@ void SchmooPreset(EnvVars&           ev,
     // Local Read
     t.srcs = {{memType, localIdx}};
     t.dsts = {};
-    if (!RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      exit(1);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      Utils::PrintErrors(results.errResults);
+      return 1;
     }
     double const localRead = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Local Write
     t.srcs = {};
     t.dsts = {{memType, localIdx}};
-    if (!RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      exit(1);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      Utils::PrintErrors(results.errResults);
+      return 1;
     }
     double const localWrite = results.tfrResults[0].avgBandwidthGbPerSec;
 
@@ -113,40 +110,41 @@ void SchmooPreset(EnvVars&           ev,
     t.dsts = {{memType, localIdx}};
     t.srcs = {};
     t.dsts = {{memType, localIdx}};
-    if (!RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      exit(1);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      Utils::PrintErrors(results.errResults);
+      return 1;
     }
     double const localCopy = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Remote Read
     t.srcs = {{memType, remoteIdx}};
     t.dsts = {};
-    if (!RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      exit(1);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      Utils::PrintErrors(results.errResults);
+      return 1;
     }
     double const remoteRead = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Remote Write
     t.srcs = {};
     t.dsts = {{memType, remoteIdx}};
-    if (!RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      exit(1);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      Utils::PrintErrors(results.errResults);
+      return 1;
     }
     double const remoteWrite = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Remote Copy
     t.srcs = {{memType, localIdx}};
     t.dsts = {{memType, remoteIdx}};
-    if (!RunTransfers(cfg, transfers, results)) {
-      PrintErrors(results.errResults);
-      exit(1);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      Utils::PrintErrors(results.errResults);
+      return 1;
     }
     double const remoteCopy = results.tfrResults[0].avgBandwidthGbPerSec;
 
     printf("   %3d   %11.3f   %11.3f   %11.3f   %11.3f   %11.3f   %11.3f  \n",
            numCUs, localRead, localWrite, localCopy, remoteRead, remoteWrite, remoteCopy);
   }
+  return 0;
 }

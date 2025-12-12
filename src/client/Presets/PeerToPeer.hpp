@@ -20,16 +20,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-void PeerToPeerPreset(EnvVars&           ev,
-                      size_t      const  numBytesPerTransfer,
-                      std::string const  presetName)
+int PeerToPeerPreset(EnvVars&           ev,
+                     size_t      const  numBytesPerTransfer,
+                     std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR] Peer-to-peer preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR] Peer-to-peer preset currently not supported for multi-node\n");
+    return 1;
   }
 
   int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
@@ -175,7 +172,7 @@ void PeerToPeerPreset(EnvVars&           ev,
           if (!TransferBench::RunTransfers(cfg, transfers, results)) {
             for (auto const& err : results.errResults)
               printf("%s\n", err.errMsg.c_str());
-            exit(1);
+            return 1;
           }
 
           for (int dir = 0; dir <= isBidirectional; dir++) {
@@ -313,4 +310,5 @@ void PeerToPeerPreset(EnvVars&           ev,
       printf("\n\n");
     }
   }
+  return 0;
 }

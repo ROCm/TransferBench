@@ -20,10 +20,17 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-#include "Client.hpp"
 #include "Presets.hpp"
 #include "Topology.hpp"
 #include <fstream>
+
+void DisplayVersion();
+void DisplayUsage(char const* cmdName);
+
+using namespace TransferBench;
+using namespace TransferBench::Utils;
+
+size_t constexpr DEFAULT_BYTES_PER_TRANSFER = (1<<28);
 
 int main(int argc, char **argv)
 {
@@ -32,20 +39,13 @@ int main(int argc, char **argv)
 
   // Display usage instructions and detected topology
   if (argc <= 1) {
-    int rank     = TransferBench::GetRank();
-    int numRanks = TransferBench::GetNumRanks();
-    if (numRanks == 1) {
+    if (RankDoesOutput()) {
       if (!ev.outputToCsv) {
         DisplayVersion();
         DisplayUsage(argv[0]);
         DisplayPresets();
       }
       DisplayTopology(ev.outputToCsv);
-    } else {
-      if (RankDoesOutput()) {
-        DisplayVersion();
-        DisplayMultiNodeTopology(ev.outputToCsv);
-      }
     }
     exit(0);
   }
@@ -62,12 +62,16 @@ int main(int argc, char **argv)
     }
   }
   if (numBytesPerTransfer % 4) {
-    printf("[ERROR] numBytesPerTransfer (%lu) must be a multiple of 4\n", numBytesPerTransfer);
+    Print("[ERROR] numBytesPerTransfer (%lu) must be a multiple of 4\n", numBytesPerTransfer);
     exit(1);
   }
 
+  // Display TransferBench version and build configuration
+  DisplayVersion();
+
   // Run preset benchmark if requested
-  if (RunPreset(ev, numBytesPerTransfer, argc, argv)) exit(0);
+  int retCode = 0;
+  if (RunPreset(ev, numBytesPerTransfer, argc, argv, retCode)) return retCode;
 
   // Read input from command line or configuration file
   bool isDryRun = !strcmp(argv[1], "dryrun");
@@ -81,41 +85,38 @@ int main(int argc, char **argv)
     } else {
       std::ifstream cfgFile(argv[1]);
       if (!cfgFile.is_open()) {
-        printf("[ERROR] Unable to open transfer configuration file: [%s]\n", argv[1]);
+        Print("[ERROR] Unable to open transfer configuration file: [%s]\n", argv[1]);
         exit(1);
-      }
+     }
       while (std::getline(cfgFile, line))
         lines.push_back(line);
       cfgFile.close();
     }
   }
 
-  TransferBench::ConfigOptions cfgOptions = ev.ToConfigOptions();
-  TransferBench::TestResults results;
+  ConfigOptions cfgOptions = ev.ToConfigOptions();
+  TestResults results;
   std::vector<ErrResult> errors;
 
   // Dry run prints off transfers (and errors)
   if (isDryRun) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("Transfers to be executed (dry-run):\n");
-      printf("================================================================================\n");
-      std::vector<Transfer> transfers;
-      CheckForError(TransferBench::ParseTransfers(lines[0], transfers));
-      if (transfers.empty()) {
-        printf("<none>\n");
-      } else {
-        bool isMultiNode = GetNumRanks() > 1;
-        for (size_t i = 0; i < transfers.size(); i++) {
-          Transfer const& t = transfers[i];
-          printf("Transfer %5lu: (%s->", i, MemDevicesToStr(t.srcs).c_str());
-          if (isMultiNode) printf("R%d", t.exeDevice.exeRank);
-          printf("%c%d", TransferBench::ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
-          if (t.exeDevice.exeSlot) printf("%c", 'A' + t.exeDevice.exeSlot);
-          if (t.exeSubIndex != -1) printf(".%d", t.exeSubIndex);
-          if (t.exeSubSlot != 0) printf("%c", 'A' + t.exeSubSlot);
-          printf("->%s)\n", MemDevicesToStr(t.dsts).c_str());
-        }
+    Print("Transfers to be executed (dry-run):\n");
+    Print("================================================================================\n");
+    std::vector<Transfer> transfers;
+    CheckForError(ParseTransfers(lines[0], transfers));
+    if (transfers.empty()) {
+      Print("<none>\n");
+    } else {
+      bool isMultiNode = GetNumRanks() > 1;
+      for (size_t i = 0; i < transfers.size(); i++) {
+        Transfer const& t = transfers[i];
+        Print("Transfer %5lu: (%s->", i, MemDevicesToStr(t.srcs).c_str());
+        if (isMultiNode) Print("R%d", t.exeDevice.exeRank);
+        Print("%c%d", ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
+        if (t.exeDevice.exeSlot) Print("%c", 'A' + t.exeDevice.exeSlot);
+        if (t.exeSubIndex != -1) Print(".%d", t.exeSubIndex);
+        if (t.exeSubSlot != 0) Print("%c", 'A' + t.exeSubSlot);
+        Print("->%s)\n", MemDevicesToStr(t.dsts).c_str());
       }
     }
     return 0;
@@ -125,7 +126,7 @@ int main(int argc, char **argv)
   if (RankDoesOutput()) {
     ev.DisplayEnvVars();
     if (ev.outputToCsv)
-      printf("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
+      Print("Test#,Transfer#,NumBytes,Src,Exe,Dst,CUs,BW(GB/s),Time(ms),SrcAddr,DstAddr\n");
   }
 
   // Process each line as a Test
@@ -136,7 +137,7 @@ int main(int argc, char **argv)
 
     // Parse set of parallel Transfers to execute
     std::vector<Transfer> transfers;
-    CheckForError(TransferBench::ParseTransfers(line, transfers));
+    CheckForError(ParseTransfers(line, transfers));
     if (transfers.empty()) continue;
 
     // Check for variable sub-executors Transfers
@@ -146,8 +147,8 @@ int main(int argc, char **argv)
       std::map<ExeDevice, int> varTransferCount;
       for (auto const& t : transfers) {
         if (t.numSubExecs == 0) {
-          if (t.exeDevice.exeType != EXE_GPU_GFX && RankDoesOutput()) {
-            printf("[ERROR] Variable number of subexecutors is only supported on GFX executors\n");
+          if (t.exeDevice.exeType != EXE_GPU_GFX) {
+            Print("[ERROR] Variable number of subexecutors is only supported on GFX executors\n");
             exit(1);
           }
           numVariableTransfers++;
@@ -155,8 +156,8 @@ int main(int argc, char **argv)
           maxVarCount = max(maxVarCount, varTransferCount[t.exeDevice]);
         }
       }
-      if (numVariableTransfers > 0 && numVariableTransfers != transfers.size() && RankDoesOutput()) {
-        printf("[ERROR] All or none of the Transfers in the Test must use variable number of Subexecutors\n");
+      if (numVariableTransfers > 0 && numVariableTransfers != transfers.size()) {
+        Print("[ERROR] All or none of the Transfers in the Test must use variable number of Subexecutors\n");
         exit(1);
       }
     }
@@ -180,7 +181,7 @@ int main(int argc, char **argv)
         }
 
         if (maxVarCount == 0) {
-          if (TransferBench::RunTransfers(cfgOptions, transfers, results)) {
+          if (RunTransfers(cfgOptions, transfers, results)) {
             PrintResults(ev, ++testNum, transfers, results);
           }
           if (RankDoesOutput()) {
@@ -190,10 +191,10 @@ int main(int argc, char **argv)
           // Variable subexecutors - Determine how many subexecutors to sweep up to
           int maxNumVarSubExec = ev.maxNumVarSubExec;
           if (maxNumVarSubExec == 0) {
-            maxNumVarSubExec = TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0}) / maxVarCount;
+            maxNumVarSubExec = GetNumSubExecutors({EXE_GPU_GFX, 0}) / maxVarCount;
           }
 
-          TransferBench::TestResults bestResults;
+          TestResults bestResults;
           std::vector<Transfer> bestTransfers;
           for (int numSubExecs = ev.minNumVarSubExec; numSubExecs <= maxNumVarSubExec; numSubExecs++) {
             std::vector<Transfer> tempTransfers = transfers;
@@ -201,8 +202,8 @@ int main(int argc, char **argv)
               if (t.numSubExecs == 0) t.numSubExecs = numSubExecs;
             }
 
-            TransferBench::TestResults tempResults;
-            if (!TransferBench::RunTransfers(cfgOptions, tempTransfers, tempResults)) {
+            TestResults tempResults;
+            if (!RunTransfers(cfgOptions, tempTransfers, tempResults)) {
               PrintErrors(tempResults.errResults);
             } else {
               if (tempResults.avgTotalBandwidthGbPerSec > bestResults.avgTotalBandwidthGbPerSec) {
@@ -224,8 +225,7 @@ int main(int argc, char **argv)
 
 void DisplayVersion()
 {
-  bool nicSupport = false;
-  bool mpiSupport = false;
+  bool nicSupport = false, mpiSupport = false;
 #if NIC_EXEC_ENABLED
   nicSupport = true;
 #endif
@@ -239,192 +239,33 @@ void DisplayVersion()
   else if (nicSupport)          support = " (with NIC support)";
 
   std::string multiNodeMode = "";
-  switch (TransferBench::GetCommMode()) {
-  case TransferBench::COMM_NONE:   multiNodeMode = " (Single-node mode)";       break;
-  case TransferBench::COMM_SOCKET: multiNodeMode = " (Multi-node via sockets)"; break;
-  case TransferBench::COMM_MPI:    multiNodeMode = " (Multi-node via MPI)";     break;
+  switch (GetCommMode()) {
+  case COMM_NONE:   multiNodeMode = " (Single-node mode)";       break;
+  case COMM_SOCKET: multiNodeMode = " (Multi-node via sockets)"; break;
+  case COMM_MPI:    multiNodeMode = " (Multi-node via MPI)";     break;
   }
 
-  printf("TransferBench v%s.%s%s%s\n", TransferBench::VERSION, CLIENT_VERSION, support.c_str(), multiNodeMode.c_str());
-  printf("=============================================================================================================\n");
+  Print("TransferBench v%s.%s%s%s\n", VERSION, CLIENT_VERSION, support.c_str(), multiNodeMode.c_str());
+  Print("=============================================================================================================\n");
 }
 
 void DisplayUsage(char const* cmdName)
 {
   if (numa_available() == -1) {
-    printf("[ERROR] NUMA library not supported. Check to see if libnuma has been installed on this system\n");
+    Print("[ERROR] NUMA library not supported. Check to see if libnuma has been installed on this system\n");
     exit(1);
   }
 
-  printf("Usage: %s config <N>\n", cmdName);
-  printf("  config: Either:\n");
-  printf("          - Filename of configFile containing Transfers to execute (see example.cfg for format)\n");
-  printf("          - Name of preset config:\n");
-  printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
-  printf("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
-         DEFAULT_BYTES_PER_TRANSFER);
-  printf("          If 0 is specified, a range of Ns will be benchmarked\n");
-  printf("          May append a suffix ('K', 'M', 'G') for kilobytes / megabytes / gigabytes\n");
-  printf("\n");
+  Print("Usage: %s config <N>\n", cmdName);
+  Print("  config: Either:\n");
+  Print("          - Filename of configFile containing Transfers to execute (see example.cfg for format)\n");
+  Print("          - Name of preset config:\n");
+  Print("  N     : (Optional) Number of bytes to copy per Transfer.\n");
+  Print("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
+        DEFAULT_BYTES_PER_TRANSFER);
+  Print("          If 0 is specified, a range of Ns will be benchmarked\n");
+  Print("          May append a suffix ('K', 'M', 'G') for kilobytes / megabytes / gigabytes\n");
+  Print("\n");
 
   EnvVars::DisplayUsage();
-}
-
-std::string MemDevicesToStr(std::vector<MemDevice> const& memDevices) {
-  if (memDevices.empty()) return "N";
-  bool isMultiNode = GetNumRanks() > 1;
-  std::stringstream ss;
-  for (auto const& m : memDevices) {
-    if (isMultiNode) {
-      ss << "R" << m.memRank;
-    }
-    ss << TransferBench::MemTypeStr[m.memType] << m.memIndex;
-  }
-  return ss.str();
-}
-
-void PrintResults(EnvVars const& ev, int const testNum,
-                  std::vector<Transfer> const& transfers,
-                  TransferBench::TestResults const& results)
-{
-  // When running in MPI mode, only the first rank produces output
-  bool const rankDoesOutput = (TransferBench::GetCommMode() != TransferBench::COMM_MPI
-                               || TransferBench::GetRank() == 0);
-  if (!RankDoesOutput()) return;
-
-  bool isMultiNode = TransferBench::GetNumRanks() > 1;
-  char sep = ev.outputToCsv ? ',' : '|';
-  size_t numTimedIterations = results.numTimedIterations;
-
-  if (!ev.outputToCsv) printf("Test %d:\n", testNum);
-
-  std::string rankGap = (isMultiNode ? "      " : "");
-  // Loop over each executor
-  for (auto exeInfoPair : results.exeResults) {
-    ExeDevice const& exeDevice = exeInfoPair.first;
-    ExeResult const& exeResult = exeInfoPair.second;
-    ExeType const    exeType   = exeDevice.exeType;
-    int32_t const    exeIndex  = exeDevice.exeIndex;
-
-    char exeRankStr[32] = "";
-    char exeRankStr2[32] = "";
-    char exeHostStr[256] = "";
-    if (isMultiNode) {
-      sprintf(exeRankStr, "R%04d ", exeDevice.exeRank);
-      sprintf(exeRankStr2, "R%d", exeDevice.exeRank);
-      sprintf(exeHostStr, " %c %s", sep, GetHostname(exeDevice.exeRank).c_str());
-    }
-
-    printf(" Executor: %s%3s %02d %c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %-7.3f GB/s (sum)%s\n",
-           exeRankStr, ExeTypeName[exeType], exeIndex, sep, exeResult.avgBandwidthGbPerSec, sep,
-           exeResult.avgDurationMsec, sep, exeResult.numBytes, sep, exeResult.sumBandwidthGbPerSec,
-           exeHostStr);
-
-    // Loop over each executor
-    for (int idx : exeResult.transferIdx) {
-      Transfer const& t = transfers[idx];
-      TransferResult const& r = results.tfrResults[idx];
-
-      char exeSubIndexStr[32] = "";
-      if (t.exeSubIndex != -1)
-        sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
-
-      printf("     Transfer %02d  %s%c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c %s -> %s%c%d%s:%d -> %s\n",
-             idx, rankGap.c_str(),   sep,
-             r.avgBandwidthGbPerSec, sep,
-             r.avgDurationMsec,      sep,
-             r.numBytes,             sep,
-             MemDevicesToStr(t.srcs).c_str(),
-             exeRankStr2, TransferBench::ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-             exeSubIndexStr, t.numSubExecs,
-             MemDevicesToStr(t.dsts).c_str());
-
-      // Show per-iteration timing information
-      if (ev.showIterations) {
-
-        // Check that per-iteration information exists
-        if (r.perIterMsec.size() != numTimedIterations) {
-          printf("[ERROR] Per iteration timing data unavailable: Expected %lu data points, but have %lu\n",
-                 numTimedIterations, r.perIterMsec.size());
-          exit(1);
-        }
-
-        // Compute standard deviation and track iterations by speed
-        std::set<std::pair<double, int>> times;
-        double stdDevTime = 0;
-        double stdDevBw = 0;
-        for (int i = 0; i < numTimedIterations; i++) {
-          times.insert(std::make_pair(r.perIterMsec[i], i+1));
-          double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
-          stdDevTime += varTime * varTime;
-
-          double iterBandwidthGbs = (t.numBytes / 1.0E9) / r.perIterMsec[i] * 1000.0f;
-          double const varBw = fabs(iterBandwidthGbs - r.avgBandwidthGbPerSec);
-          stdDevBw += varBw * varBw;
-        }
-        stdDevTime = sqrt(stdDevTime / numTimedIterations);
-        stdDevBw = sqrt(stdDevBw / numTimedIterations);
-
-        // Loop over iterations (fastest to slowest)
-        for (auto& time : times) {
-          double iterDurationMsec = time.first;
-          double iterBandwidthGbs = (t.numBytes / 1.0E9) / iterDurationMsec * 1000.0f;
-          printf("      Iter %03d    %s%c %8.3f GB/s %c %8.3f ms %c", time.second, rankGap.c_str(),
-                 sep, iterBandwidthGbs, sep, iterDurationMsec, sep);
-
-          std::set<int> usedXccs;
-          if (time.second - 1 < r.perIterCUs.size()) {
-            printf(" CUs:");
-            for (auto x : r.perIterCUs[time.second - 1]) {
-              printf(" %02d:%02d", x.first, x.second);
-              usedXccs.insert(x.first);
-            }
-          }
-
-          printf(" XCCs:");
-          for (auto x : usedXccs)
-            printf(" %02d", x);
-          printf("\n");
-        }
-        printf("      StandardDev %s%c %8.3f GB/s %c %8.3f ms %c\n", rankGap.c_str(), sep, stdDevBw, sep, stdDevTime, sep);
-      }
-    }
-  }
-  printf(" Aggregate (CPU)  %s%c %8.3f GB/s %c %8.3f ms %c %12lu bytes %c Overhead: %.3f ms\n",
-         rankGap.c_str(),
-         sep, results.avgTotalBandwidthGbPerSec,
-         sep, results.avgTotalDurationMsec,
-         sep, results.totalBytesTransferred,
-         sep, results.overheadMsec);
-}
-
-void CheckForError(ErrResult const& error)
-{
-  switch (error.errType) {
-  case ERR_NONE: return;
-  case ERR_WARN:
-    printf("[WARN] %s\n", error.errMsg.c_str());
-    return;
-  case ERR_FATAL:
-    printf("[ERROR] %s\n", error.errMsg.c_str());
-    exit(1);
-  default:
-    break;
-  }
-}
-
-void PrintErrors(std::vector<ErrResult> const& errors)
-{
-  // When running in MPI mode, only the first rank produces output
-  bool isFatal = false;
-  for (auto const& err : errors) {
-    if (RankDoesOutput())
-      printf("[%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
-    isFatal |= (err.errType == ERR_FATAL);
-  }
-  if (isFatal) exit(1);
-}
-
-bool RankDoesOutput() {
-  return (TransferBench::GetCommMode() != TransferBench::COMM_MPI || TransferBench::GetRank() == 0);
-}
+};

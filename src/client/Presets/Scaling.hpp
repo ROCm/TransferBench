@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,16 +20,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-void ScalingPreset(EnvVars&           ev,
-                   size_t      const  numBytesPerTransfer,
-                   std::string const  presetName)
+int ScalingPreset(EnvVars&           ev,
+                  size_t      const  numBytesPerTransfer,
+                  std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR] Scaling preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR] Scaling preset currently not supported for multi-node\n");
+    return 1;
   }
 
   int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
@@ -57,7 +54,7 @@ void ScalingPreset(EnvVars&           ev,
   // Validate env vars
   if (localIdx >= numDetectedGpus) {
     printf("[ERROR] Cannot execute scaling test with local GPU device %d\n", localIdx);
-    exit(1);
+    return 1;
   }
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
@@ -92,8 +89,8 @@ void ScalingPreset(EnvVars&           ev,
       t.dsts = {{i < numCpuDevices ? MEM_CPU : MEM_GPU,
                  i < numCpuDevices ? i : i - numCpuDevices}};
       if (!RunTransfers(cfg, transfers, results)) {
-        PrintErrors(results.errResults);
-        exit(1);
+        Utils::PrintErrors(results.errResults);
+        return 1;
       }
       double bw = results.tfrResults[0].avgBandwidthGbPerSec;
       printf("%c%7.2f     ", separator, bw);
@@ -110,4 +107,5 @@ void ScalingPreset(EnvVars&           ev,
   for (int i = 0; i < numDevices; i++)
     printf("%c%7.2f(%3d)", separator, bestResult[i].first, bestResult[i].second);
   printf("\n");
+  return 0;
 }

@@ -71,7 +71,7 @@ static void PrintNicToGPUTopo(bool outputToCsv)
 #endif
 }
 
-void DisplayTopology(bool outputToCsv)
+void DisplaySingleRankTopology(bool outputToCsv)
 {
   int numCpus = TransferBench::GetNumExecutors(EXE_CPU);
   int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -224,67 +224,79 @@ typedef std::tuple<
   std::vector<int>               // NIC is active
   > GroupKey;
 
-void DisplayMultiNodeTopology(bool outputToCsv)
+typedef std::map<GroupKey, std::vector<int>> GroupRankMap;
+
+GroupRankMap& GetGroupRankMap()
 {
-  std::map<GroupKey, std::vector<int>> groups;
+  static GroupRankMap groups;
+  static bool initialized = false;
 
-  // Build GroupKey for each rank
-  for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
+  if (!initialized) {
+    // Build GroupKey for each rank
+    for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
 
-    std::string rackId = TransferBench::GetRackId(rank);
-    int         vpodId = TransferBench::GetVpodId(rank);
+      std::string rackId = TransferBench::GetRackId(rank);
+      int         vpodId = TransferBench::GetVpodId(rank);
 
-    // CPU information
-    int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
-    std::vector<std::string> cpuNames;
-    std::vector<int> cpuNumSubExecs;
-    for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
-      ExeDevice exeDevice = {EXE_CPU, exeIndex, rank};
-      cpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
-      cpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
-    }
-
-    // GPU information
-    int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, rank);
-    std::vector<std::string> gpuNames;
-    std::vector<int> gpuNumSubExecs;
-    std::vector<int> gpuClosestCpu;
-    for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-      ExeDevice exeDevice = {EXE_GPU_GFX, exeIndex, rank};
-      gpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
-      gpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
-      gpuClosestCpu.push_back(TransferBench::GetClosestCpuNumaToGpu(exeIndex, rank));
-    }
-
-    // NIC information
-    int numNics = TransferBench::GetNumExecutors(EXE_NIC, rank);
-
-    std::vector<int> nicClosestGpu(numNics, -1);
-    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
-      std::vector<int> nicIndices;
-      TransferBench::GetClosestNicsToGpu(nicIndices, gpuIndex, rank);
-      for (auto nicIndex : nicIndices) {
-        nicClosestGpu[nicIndex] = gpuIndex;
+      // CPU information
+      int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
+      std::vector<std::string> cpuNames;
+      std::vector<int> cpuNumSubExecs;
+      for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+        ExeDevice exeDevice = {EXE_CPU, exeIndex, rank};
+        cpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
+        cpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
       }
+
+      // GPU information
+      int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, rank);
+      std::vector<std::string> gpuNames;
+      std::vector<int> gpuNumSubExecs;
+      std::vector<int> gpuClosestCpu;
+      for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+        ExeDevice exeDevice = {EXE_GPU_GFX, exeIndex, rank};
+        gpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
+        gpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
+        gpuClosestCpu.push_back(TransferBench::GetClosestCpuNumaToGpu(exeIndex, rank));
+      }
+
+      // NIC information
+      int numNics = TransferBench::GetNumExecutors(EXE_NIC, rank);
+
+      std::vector<int> nicClosestGpu(numNics, -1);
+      for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+        std::vector<int> nicIndices;
+        TransferBench::GetClosestNicsToGpu(nicIndices, gpuIndex, rank);
+        for (auto nicIndex : nicIndices) {
+          nicClosestGpu[nicIndex] = gpuIndex;
+        }
+      }
+
+      std::vector<std::string> nicNames;
+      std::vector<int> nicClosestCpu;
+      std::vector<int> nicIsActive;
+      for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+        ExeDevice exeDevice = {EXE_NIC, exeIndex, rank};
+        nicNames.push_back(TransferBench::GetExecutorName(exeDevice));
+        nicClosestCpu.push_back(TransferBench::GetClosestCpuNumaToNic(exeIndex, rank));
+        nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
+      }
+
+      GroupKey key(rackId, vpodId,
+                   cpuNames, cpuNumSubExecs,
+                   gpuNames, gpuNumSubExecs, gpuClosestCpu,
+                   nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
+
+      groups[key].push_back(rank);
     }
-
-    std::vector<std::string> nicNames;
-    std::vector<int> nicClosestCpu;
-    std::vector<int> nicIsActive;
-    for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
-      ExeDevice exeDevice = {EXE_NIC, exeIndex, rank};
-      nicNames.push_back(TransferBench::GetExecutorName(exeDevice));
-      nicClosestCpu.push_back(TransferBench::GetClosestCpuNumaToNic(exeIndex, rank));
-      nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
-    }
-
-    GroupKey key(rackId, vpodId,
-                 cpuNames, cpuNumSubExecs,
-                 gpuNames, gpuNumSubExecs, gpuClosestCpu,
-                 nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
-
-    groups[key].push_back(rank);
+    initialized = true;
   }
+  return groups;
+}
+
+void DisplayMultiRankTopology(bool outputToCsv)
+{
+  GroupRankMap& groups = GetGroupRankMap();
 
   printf("%d rank(s) in %lu homogeneous group(s)\n", TransferBench::GetNumRanks(), groups.size());
   printf("-------------------------------------------------------------------------------------------------------------\n");
@@ -416,4 +428,12 @@ void DisplayMultiNodeTopology(bool outputToCsv)
   if (HasDuplicateHostname()) {
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
+}
+
+void DisplayTopology(bool outputToCsv)
+{
+  if (GetNumRanks() > 1)
+    DisplayMultiRankTopology(outputToCsv);
+  else
+    DisplaySingleRankTopology(outputToCsv);
 }

@@ -39,7 +39,8 @@ THE SOFTWARE.
 #include <numa.h>
 #include <random>
 #include <time.h>
-#include "Client.hpp"
+
+#define CLIENT_VERSION "00"
 
 #include "TransferBench.hpp"
 using namespace TransferBench;
@@ -69,6 +70,7 @@ public:
   int numIterations;                 // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numSubIterations;              // Number of subiterations to perform
   int numWarmups;                    // Number of un-timed warmup iterations to perform
+  int showBorders;                   // Show ASCII box-drawing characaters in tables
   int showIterations;                // Show per-iteration timing info
   int useInteractive;                // Pause for user-input before starting transfer loop
 
@@ -160,6 +162,7 @@ public:
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , 3);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
+    showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
@@ -349,6 +352,7 @@ public:
     printf(" ROCE_VERSION      - RoCE version (default=2)\n");
 #endif
     printf(" SAMPLING_FACTOR   - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
+    printf(" SHOW_BORDERS      - Show ASCII box-drawing characaters in tables\n");
     printf(" SHOW_ITERATIONS   - Show per-iteration timing info\n");
     printf(" USE_HIP_EVENTS    - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA       - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
@@ -388,7 +392,6 @@ public:
     nicSupport = " (with NIC support)";
 #endif
     if (!outputToCsv) {
-      DisplayVersion();
       if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }
     else if (!hideEnv)
@@ -465,6 +468,7 @@ public:
     Print("ROCE_VERSION", roceVersion,
           "RoCE version is set to %d", roceVersion);
 #endif
+    Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("USE_HIP_EVENTS", useHipEvents,

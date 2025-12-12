@@ -1967,6 +1967,22 @@ namespace {
       break;
       }
 
+      // Check for multi-node support
+      // Currently this is not supported for CPU/GPU executors
+      if (IsCpuExeType(t.exeDevice.exeType) || IsGpuExeType(t.exeDevice.exeType)) {
+        bool crossRank = false;
+        for (auto const& src : t.srcs) {
+          crossRank |= (src.memRank != t.exeDevice.exeRank);
+        }
+        for (auto const& dst : t.dsts) {
+          crossRank |= (dst.memRank != t.exeDevice.exeRank);
+        }
+        if (crossRank) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
+              i, t.exeDevice.exeRank});
+        }
+      }
+
       // Check subexecutors
       if (t.numSubExecs <= 0)
         errors.push_back({ERR_FATAL, "Transfer %d: # of subexecutors must be positive", i});

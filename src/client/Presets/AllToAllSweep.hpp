@@ -22,16 +22,13 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
-void AllToAllSweepPreset(EnvVars&           ev,
-                         size_t      const  numBytesPerTransfer,
-                         std::string const  presetName)
+int AllToAllSweepPreset(EnvVars&           ev,
+                        size_t      const  numBytesPerTransfer,
+                        std::string const  presetName)
 {
   if (TransferBench::GetNumRanks() > 1) {
-    if (RankDoesOutput()) {
-      DisplayVersion();
-      printf("[ERROR] All to All Sweep preset currently not supported for multi-node\n");
-    }
-    exit(0);
+    Utils::Print("[ERROR] All to All Sweep preset currently not supported for multi-node\n");
+    return 1;
   }
 
   enum
@@ -180,7 +177,7 @@ void AllToAllSweepPreset(EnvVars&           ev,
   printf("- Copying %lu bytes between %s pairs of GPUs\n", numBytesPerTransfer, a2aDirect ? "directly connected" : "all");
   if (transfers.size() == 0) {
     printf("[WARN} No transfers requested. Try adjusting A2A_DIRECT or A2A_LOCAL\n");
-    return;
+    return 0;
   }
 
   // Execute Transfers
@@ -235,9 +232,10 @@ void AllToAllSweepPreset(EnvVars&           ev,
       for (int c : numCusList) {
         for (int u : unrollList) {
           printf("CUs: %d Unroll %d\n", c, u);
-          PrintResults(ev, ++testNum, transfers, results[std::make_pair(c,u)]);
+          Utils::PrintResults(ev, ++testNum, transfers, results[std::make_pair(c,u)]);
         }
       }
     }
   }
+  return 1;
 }
