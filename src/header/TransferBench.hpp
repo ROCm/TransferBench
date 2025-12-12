@@ -23,15 +23,19 @@ THE SOFTWARE.
 /// @cond
 #pragma once
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cstring>
 #include <future>
 #include <map>
+#include <netinet/in.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
 #include <random>
 #include <set>
 #include <sstream>
 #include <stdarg.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -42,7 +46,7 @@ THE SOFTWARE.
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <arpa/inet.h>
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <filesystem>

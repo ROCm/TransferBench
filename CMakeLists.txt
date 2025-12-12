@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
 
@@ -24,6 +24,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 #==================================================================================================
 option(BUILD_LOCAL_GPU_TARGET_ONLY "Build only for GPUs detected on this machine" OFF)
 option(ENABLE_NIC_EXEC             "Enable RDMA NIC Executor in TransferBench"    OFF)
+option(ENABLE_MPI_COMM             "Enable MPI Communicator support"              OFF)
 
 # Default GPU architectures to build
 #==================================================================================================
@@ -134,7 +135,7 @@ endif()
 if(DEFINED ENV{DISABLE_NIC_EXEC} AND "$ENV{DISABLE_NIC_EXEC}" STREQUAL "1")
   message(STATUS "Disabling NIC Executor support as env. flag DISABLE_NIC_EXEC was enabled")
 elseif(NOT ENABLE_NIC_EXEC)
-  message(STATUS "For CMake builds, NIC executor so requires explicit opt-in by setting CMake flag -DENABLE_NIC_EXEC=1")
+  message(STATUS "For CMake builds, NIC executor so requires explicit opt-in by setting CMake flag -DENABLE_NIC_EXEC=ON")
   message(STATUS "Disabling NIC Executor support")
 else()
   find_library(IBVERBS_LIBRARY ibverbs)
@@ -154,6 +155,40 @@ else()
   endif()
 endif()
 
+## Check for MPI support
+set(MPI_PATH "" CACHE PATH "Path to MPI installation (takes priority over system MPI)")
+if(NOT ENABLE_MPI_COMM)
+  message(STATUS "For CMake builds, MPI Communicator requires explicit opt-in by setting CMake flag -DENABLE_MPI_COMM=ON")
+  message(STATUS "Disabling MPI Communicator support")
+else()
+  # First check user-specified MPI_PATH (similar to Makefile)
+  if(MPI_PATH AND EXISTS "${MPI_PATH}/include/mpi.h")
+    find_library(MPI_LIBRARY NAMES mpi PATHS ${MPI_PATH}/lib NO_DEFAULT_PATH)
+    if(MPI_LIBRARY)
+      set(MPI_COMM_FOUND 1)
+      set(MPI_INCLUDE_DIR "${MPI_PATH}/include")
+      set(MPI_LINK_DIR "${MPI_PATH}/lib")
+      message(STATUS "Building with MPI Communicator support (found at MPI_PATH: ${MPI_PATH})")
+    else()
+      message(WARNING "Found mpi.h at ${MPI_PATH}/include but could not find MPI library at ${MPI_PATH}/lib")
+    endif()
+  else()
+    # Fall back to find_package
+    if(MPI_PATH)
+      message(STATUS "Unable to find mpi.h at ${MPI_PATH}/include, trying find_package")
+    endif()
+    find_package(MPI QUIET)
+    if(MPI_CXX_FOUND)
+      set(MPI_COMM_FOUND 1)
+      message(STATUS "Building with MPI Communicator support (found via find_package)")
+      message(STATUS "- Using MPI include path: ${MPI_CXX_INCLUDE_PATH}")
+      message(STATUS "- Using MPI library:: ${MPI_CXX_LIBRARIES}")
+    else()
+      message(WARNING "MPI not found. Please specify appropriate MPI_PATH or install MPI libraries (e.g., OpenMPI or MPICH)")
+    endif()
+  endif()
+endif()
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY .)
 
 add_executable(TransferBench src/client/Client.cpp)
@@ -168,6 +203,18 @@ if(IBVERBS_FOUND)
   target_link_libraries(TransferBench PRIVATE ${IBVERBS_LIBRARY})
   target_compile_definitions(TransferBench PRIVATE NIC_EXEC_ENABLED)
 endif()
+if(MPI_COMM_FOUND)
+  if(TARGET MPI::MPI_CXX)
+    # Found via find_package
+    target_include_directories(TransferBench PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+    target_link_libraries(TransferBench PRIVATE MPI::MPI_CXX)
+  else()
+    # Found via MPI_PATH fallback
+    target_include_directories(TransferBench PRIVATE ${MPI_INCLUDE_DIR})
+    target_link_libraries(TransferBench PRIVATE ${MPI_LIBRARY})
+  endif()
+  target_compile_definitions(TransferBench PRIVATE MPI_COMM_ENABLED)
+endif()
 if (HAVE_PARALLEL_JOBS)
   target_compile_options(TransferBench PRIVATE -parallel-jobs=12)
 endif()
@@ -180,15 +227,6 @@ target_link_libraries(TransferBench PRIVATE hip::device)
 target_link_libraries(TransferBench PRIVATE dl)
 target_link_libraries(TransferBench PRIVATE ${NUMA_LIBRARY})
 target_link_libraries(TransferBench PRIVATE ${HSA_LIBRARY})
-## Reserve 16GB for each linker job. Limit max number of linker jobs to 16
-if (HAVE_PARALLEL_JOBS)
-  math(EXPR num_linker_jobs "(${memory_in_gb} + 15) / 16")
-  if (${num_linker_jobs} GREATER_EQUAL "16")
-    set(num_linker_jobs "16")
-  endif()
-  message(STATUS "Use ${num_linker_jobs} jobs for linking")
-  target_link_options(TransferBench PRIVATE -parallel-jobs=${num_linker_jobs})       # Use multiple threads to link
-endif()
 
 rocm_install(TARGETS TransferBench COMPONENT devel)
 rocm_setup_version(VERSION ${VERSION_STRING})
