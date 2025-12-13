@@ -41,7 +41,8 @@ namespace TransferBench::Utils
       BORDER_TOP   = 1,
       BORDER_BOT   = 2,
       BORDER_LEFT  = 4,
-      BORDER_RIGHT = 8
+      BORDER_RIGHT = 8,
+      BORDER_ALL   = 15,
     } BorderType;
 
     // Helper class to print off tabled data

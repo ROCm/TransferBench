@@ -200,7 +200,7 @@ int AllToAllPreset(EnvVars&           ev,
   if (!Utils::RankDoesOutput()) return 0;
 
   // Prepare table of results
-  int numRows   = 1 + (numGpus + 1) * (1 + 2*numResults);
+  int numRows   = 2 + (numGpus + 1) * (1 + 2*numResults);
   int numCols   = 1 + (numGpus + (numQueuePairs > 1 ? 1 : 0) + 2) * (numResults > 0 ? 2 : 1);
   int precision = 2;
   Utils::TableHelper table(numRows, numCols, precision);
@@ -209,10 +209,12 @@ int AllToAllPreset(EnvVars&           ev,
   int rowIdx = 0, colIdx = 0;
   table.DrawRowBorder(rowIdx);
   table.DrawColBorder(colIdx);
-  table.Set(rowIdx, colIdx++, "SRC \\ DST");
+  table.Set(rowIdx, colIdx++, " SRC\\DST ");
   for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-    table.DrawColBorder(colIdx);
-    table.Set(rowIdx, colIdx++, "GPU %02d", gpuIdx);
+    if (numResults > 0 || gpuIdx == 0) {
+      table.DrawColBorder(colIdx);
+    }
+    table.Set(rowIdx, colIdx++, " GPU %02d ", gpuIdx);
     if (numResults > 0) {
       table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
       table.Set(rowIdx, colIdx++, "(Rnk)");
@@ -221,7 +223,7 @@ int AllToAllPreset(EnvVars&           ev,
   table.DrawColBorder(colIdx);
 
   if (numQueuePairs > 0) {
-    table.Set(rowIdx, colIdx++, "NIC", numQueuePairs);
+    table.Set(rowIdx, colIdx++, " NIC ", numQueuePairs);
     if (numResults > 0) {
       table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
       table.Set(rowIdx, colIdx++, "(Rnk)");
@@ -229,14 +231,14 @@ int AllToAllPreset(EnvVars&           ev,
     table.DrawColBorder(colIdx);
   }
 
-  table.Set(rowIdx, colIdx++, "STotal");
+  table.Set(rowIdx, colIdx++, " STotal ");
   if (numResults > 0) {
     table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
     table.Set(rowIdx, colIdx++, "(Rnk)");
   }
   table.DrawColBorder(colIdx);
 
-  table.Set(rowIdx, colIdx++, "Actual");
+  table.Set(rowIdx, colIdx++, " Actual ");
   if (numResults > 0) {
     table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
     table.Set(rowIdx, colIdx++, "(Rnk)");
@@ -246,33 +248,32 @@ int AllToAllPreset(EnvVars&           ev,
   table.DrawRowBorder(rowIdx);
 
   // Header column
-  //table.SetColAlignment(0, Utils::TableHelper::ALIGN_CENTER);
   for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
     // MAX results
     for (int i = 0; i < numResults; i++) {
-      if (i == 0) table.Set(rowIdx, 0, "GPU %02d MAX", gpuIdx);
+      if (i == 0) table.Set(rowIdx, 0, " GPU %02d MAX ", gpuIdx);
       rowIdx++;
     }
     // Avg result
-    table.Set(rowIdx++, 0, "GPU %02d%s", gpuIdx, numResults > 0 ? " AVG" : "");
+    table.Set(rowIdx++, 0, " GPU %02d%s ", gpuIdx, numResults > 0 ? " AVG" : "");
     // MIN results
     for (int i = numResults-1; i >= 0; i--) {
-      if (i == 0) table.Set(rowIdx, 0, "GPU %02d MIN", gpuIdx);
+      if (i == 0) table.Set(rowIdx, 0, " GPU %02d MIN ", gpuIdx);
       rowIdx++;
     }
-    table.DrawRowBorder(rowIdx);
+    if (numResults > 0 || gpuIdx == numGpus - 1) table.DrawRowBorder(rowIdx);
   }
 
   // RTotal
   for (int i = 0; i < numResults; i++) {
-    if (i == 0) table.Set(rowIdx, 0, "RTotal MAX");
+    if (i == 0) table.Set(rowIdx, 0, " RTotal MAX ");
     rowIdx++;
   }
   // Avg result
-  table.Set(rowIdx++, 0, "RTotal%s", numResults > 0 ? " AVG" : "");
+  table.Set(rowIdx++, 0, " RTotal%s ", numResults > 0 ? " AVG" : "");
   // MIN results
   for (int i = numResults-1; i >= 0; i--) {
-    if (i == 0) table.Set(rowIdx, 0, "RTotal MIN");
+    if (i == 0) table.Set(rowIdx, 0, " RTotal MIN ");
     rowIdx++;
   }
   table.DrawRowBorder(rowIdx);
@@ -307,7 +308,7 @@ int AllToAllPreset(EnvVars&           ev,
         }
       }
       if (bws.size() == 0) {
-        table.Set(rowBase + numResults, colBase, "N/A");
+        table.Set(rowBase + numResults, colBase, " N/A ");
       } else {
         std::sort(bws.begin(), bws.end());
         average /= bws.size();
@@ -315,17 +316,17 @@ int AllToAllPreset(EnvVars&           ev,
 
         // MAX results
         for (int i = 0; i < numResults; i++) {
-          table.Set(rowBase + i, colBase  , bws[bws.size()-1-i].first);
-          table.Set(rowBase + i, colBase+1, bws[bws.size()-1-i].second);
+          table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
+          table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
         }
 
         // AVG results
-        table.Set(rowBase + numResults, colBase, average);
+        table.Set(rowBase + numResults, colBase, " %.2f ", average);
 
         // MIN results
         for (int i = 0; i < numResults; i++) {
-          table.Set(rowBase + numResults + 1 + i, colBase   , bws[numResults-1-i].first);
-          table.Set(rowBase + numResults + 1 + i, colBase+1 , bws[numResults-1-i].second);
+          table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
+          table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
         }
       }
     }
@@ -353,17 +354,17 @@ int AllToAllPreset(EnvVars&           ev,
 
       // MAX results
       for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + i, colBase  , bws[bws.size()-1-i].first);
-        table.Set(rowBase + i, colBase+1, bws[bws.size()-1-i].second);
+        table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
+        table.Set(rowBase + i, colBase+1,  "%d ", bws[bws.size()-1-i].second);
       }
 
       // AVG results
-      table.Set(rowBase + numResults, colBase, average);
+      table.Set(rowBase + numResults, colBase, " %.2f ", average);
 
       // MIN results
       for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + numResults + 1 + i, colBase   , bws[numResults-1-i].first);
-        table.Set(rowBase + numResults + 1 + i, colBase+1 , bws[numResults-1-i].second);
+        table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
+        table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
       }
     }
 
@@ -384,17 +385,17 @@ int AllToAllPreset(EnvVars&           ev,
 
       // MAX results
       for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + i, colBase  , bws[bws.size()-1-i].first);
-        table.Set(rowBase + i, colBase+1, bws[bws.size()-1-i].second);
+        table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
+        table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
       }
 
       // AVG results
-      table.Set(rowBase + numResults, colBase, average);
+      table.Set(rowBase + numResults, colBase, " %.2f ", average);
 
       // MIN results
       for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + numResults + 1 + i, colBase   , bws[numResults-1-i].first);
-        table.Set(rowBase + numResults + 1 + i, colBase+1 , bws[numResults-1-i].second);
+        table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
+        table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
       }
     }
 
@@ -415,17 +416,17 @@ int AllToAllPreset(EnvVars&           ev,
 
       // MAX results
       for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + i, colBase  , bws[bws.size()-1-i].first);
-        table.Set(rowBase + i, colBase+1, bws[bws.size()-1-i].second);
+        table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
+        table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
       }
 
       // AVG results
-      table.Set(rowBase + numResults, colBase, average);
+      table.Set(rowBase + numResults, colBase, " %.2f ", average);
 
       // MIN results
       for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + numResults + 1 + i, colBase   , bws[numResults-1-i].first);
-        table.Set(rowBase + numResults + 1 + i, colBase+1 , bws[numResults-1-i].second);
+        table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
+        table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
       }
     }
   }
@@ -446,19 +447,27 @@ int AllToAllPreset(EnvVars&           ev,
 
     // MAX results
     for (int i = 0; i < numResults; i++) {
-      table.Set(rowBase + i, colBase  , bws[bws.size()-1-i].first);
-      table.Set(rowBase + i, colBase+1, bws[bws.size()-1-i].second);
+      table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
+      table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
     }
 
     // AVG results
-    table.Set(rowBase + numResults, colBase, average);
+    table.Set(rowBase + numResults, colBase, " %.2f ", average);
 
     // MIN results
     for (int i = 0; i < numResults; i++) {
-      table.Set(rowBase + numResults + 1 + i, colBase   , bws[numResults-1-i].first);
-      table.Set(rowBase + numResults + 1 + i, colBase+1 , bws[numResults-1-i].second);
+      table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
+      table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
     }
   }
+
+  // Add CPU results
+  table.Set(numRows - 1, numCols - 2, " CPU Timed: ");
+  table.Set(numRows - 1, numCols - 1, " %.2f ", results.avgTotalBandwidthGbPerSec);
+  for (int col = 0; col < numCols - 2; col++)
+    table.SetCellBorder(numRows - 1, col, Utils::TableHelper::BORDER_TOP);
+  table.SetCellBorder(numRows - 1, numCols - 2, Utils::TableHelper::BORDER_ALL);
+  table.SetCellBorder(numRows - 1, numCols - 1, Utils::TableHelper::BORDER_ALL);
 
   table.PrintTable(ev.outputToCsv, ev.showBorders);
   Utils::Print("\n");
