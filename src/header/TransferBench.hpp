@@ -716,7 +716,6 @@ namespace {
 //========================================================================================
 
   int   constexpr MAX_BLOCKSIZE  = 1024;               // Max threadblock size
-  int   constexpr MAX_WAVEGROUPS = MAX_BLOCKSIZE / 64; // Max wavegroups/warps
   int   constexpr MAX_UNROLL     = 8;                  // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                  // Max srcs per Transfer
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
@@ -3827,8 +3826,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Kernel for GFX execution
-  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
-  __global__ void __launch_bounds__(BLOCKSIZE)
+  template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
+  __global__ void __launch_bounds__(LAUNCH_BOUND)
     GpuReduceKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
   {
     int64_t startCycle;
@@ -3843,8 +3842,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       subExecIdx = blockIdx.y;
     } else {
       // Warp-level: each warp is a subexecutor
-      int warpIdx = threadIdx.x / warpSize;
-      int warpsPerBlock = BLOCKSIZE / warpSize;
+      int warpIdx       = threadIdx.x / warpSize;
+      int warpsPerBlock = blockDim.x  / warpSize;
       subExecIdx = blockIdx.y * warpsPerBlock + warpIdx;
     }
 
@@ -3874,7 +3873,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int32_t nWaves, waveIdx;
     if (seType == 0) {
       // Threadblock-level: all wavefronts in block work together
-      nWaves  = BLOCKSIZE / warpSize;                // Number of wavefronts within this threadblock
+      nWaves  = blockDim.x  / warpSize;              // Number of wavefronts within this threadblock
       waveIdx = threadIdx.x / warpSize;              // Index of this wavefront within the threadblock
     } else {
       // Warp-level: each warp works independently
@@ -4005,47 +4004,35 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)           \
-  {GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_NONE>,      \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_LOAD>,      \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_STORE>,     \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_BOTH>}
+#define GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, DWORD)           \
+  {GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_NONE>,      \
+   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_LOAD>,      \
+   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_STORE>,     \
+   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_BOTH>}
 
-#define GPU_KERNEL_DWORD_DECL(BLOCKSIZE, UNROLL)        \
-  {GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float),  \
-   GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float2), \
-   GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float4)}
+#define GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, UNROLL)        \
+  {GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float),  \
+   GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2), \
+   GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float4)}
 
-#define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE)    \
-  {GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 1),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 2),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 3),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 4),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 5),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 6),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 7),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 8)}
+#define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND)    \
+  {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 1),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 2),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 3),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 4),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 5),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 6),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 7),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 8)}
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
 #ifndef SINGLE_KERNEL
-  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
+  GpuKernelFuncPtr GpuKernelTable[4][MAX_UNROLL][3][4] =
   {
-    GPU_KERNEL_UNROLL_DECL(64),
-    GPU_KERNEL_UNROLL_DECL(128),
-    GPU_KERNEL_UNROLL_DECL(192),
     GPU_KERNEL_UNROLL_DECL(256),
-    GPU_KERNEL_UNROLL_DECL(320),
-    GPU_KERNEL_UNROLL_DECL(384),
-    GPU_KERNEL_UNROLL_DECL(448),
     GPU_KERNEL_UNROLL_DECL(512),
-    GPU_KERNEL_UNROLL_DECL(576),
-    GPU_KERNEL_UNROLL_DECL(640),
-    GPU_KERNEL_UNROLL_DECL(704),
     GPU_KERNEL_UNROLL_DECL(768),
-    GPU_KERNEL_UNROLL_DECL(832),
-    GPU_KERNEL_UNROLL_DECL(896),
-    GPU_KERNEL_UNROLL_DECL(960),
     GPU_KERNEL_UNROLL_DECL(1024),
   };
 #endif
@@ -4077,7 +4064,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #ifdef SINGLE_KERNEL
     auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
 #else
-    auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+    auto gpuKernel = GpuKernelTable[(cfg.gfx.blockSize+255)/256 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
 #endif
 
 #if defined(__NVCC__)
@@ -4158,7 +4145,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #ifdef SINGLE_KERNEL
       auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
 #else
-      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+      auto gpuKernel = GpuKernelTable[(cfg.gfx.blockSize+255)/256 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
 #endif
 
 #if defined(__NVCC__)
