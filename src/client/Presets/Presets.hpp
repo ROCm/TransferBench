@@ -48,7 +48,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
-  {"p2p"   ,      {PeerToPeerPreset,    " Peer-to-peer device memory bandwidth test"}},
+  {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
   {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
