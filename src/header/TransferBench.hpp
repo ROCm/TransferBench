@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
 #include <random>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdarg.h>
@@ -2328,9 +2329,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int numIbvDevices = 0;
       ibv_device** deviceList = ibv_get_device_list(&numIbvDevices);
 
+      // Check for NIC_FILTER
+      // By default, accept all NIC names
+      std::string nicFilterPattern = getenv("NIC_FILTER") ? getenv("NIC_FILTER") : "*";
+
       if (deviceList && numIbvDevices > 0) {
         // Loop over each device to collect information
         for (int i = 0; i < numIbvDevices; i++) {
+
+          // Filter by name
+          if (!std::regex_match(deviceList[i]->name, std::regex(nicFilterPattern))) continue;
+
           IbvDevice ibvDevice;
           ibvDevice.devicePtr = deviceList[i];
           ibvDevice.name = deviceList[i]->name;

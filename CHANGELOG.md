@@ -48,6 +48,8 @@ Documentation for TransferBench is available at
     contains the correct set of Transfers
 - Adding nicrings preset
   - This new preset runs parallel transfers forming rings that connect identical NICs across ranks
+- Adding NIC_FILTER to allow for filtering which NICs to detect.  NIC_FILTER accepts regular-expression syntax
+
 ### Modified
 - Refactored front-end client code to facilitate simpler and more consistent presets.
 - Refactored tabular data display to simplify code.  Output result tables now use ASCII box-drawing
