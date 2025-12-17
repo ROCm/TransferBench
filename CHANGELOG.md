@@ -46,6 +46,8 @@ Documentation for TransferBench is available at
   - This new preset is similar to cmdline however it only shows the list of transfers that will be executed
   - This new dryrun preset may be useful when using the new wildcard expressions to ensure that the Test
     contains the correct set of Transfers
+- Adding nicrings preset
+  - This new preset runs parallel transfers forming rings that connect identical NICs across ranks
 ### Modified
 - Refactored front-end client code to facilitate simpler and more consistent presets.
 - Refactored tabular data display to simplify code.  Output result tables now use ASCII box-drawing

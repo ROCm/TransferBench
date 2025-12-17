@@ -31,6 +31,7 @@ THE SOFTWARE.
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
 #include "HealthCheck.hpp"
+#include "NicRings.hpp"
 #include "OneToAll.hpp"
 #include "PeerToPeer.hpp"
 #include "Scaling.hpp"
@@ -47,6 +48,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
+  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},

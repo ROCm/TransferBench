@@ -177,8 +177,15 @@ Here is the list of preset configurations that can be used instead of configurat
    * - ``cmdline``
      - Allows transfers to run from the command line instead of a configuration file
 
+   * - ``dryrun``
+     - Lists the set of transfers to be executed as provided from the command line
+     - This is useful when using wildcards to ensure correctness
+
    * - ``healthcheck``
      - Simple health check (supported on AMD Instinct MI300 series only)
+
+   * - ``nic_rings``
+     - Measure performance of NICs set up in a ring across ranks
 
    * - ``p2p``
      - Peer-to-peer benchmark test

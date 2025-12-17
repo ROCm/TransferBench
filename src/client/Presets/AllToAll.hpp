@@ -475,5 +475,10 @@ int AllToAllPreset(EnvVars&           ev,
   Utils::Print("Aggregate bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu);
   Utils::Print("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
   Utils::PrintErrors(results.errResults);
+
+  if (Utils::HasDuplicateHostname()) {
+    printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
+  }
+
   return 0;
 }

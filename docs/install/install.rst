@@ -50,6 +50,12 @@ Here are the steps to build TransferBench:
 
   If ROCm is installed in a folder other than ``/opt/rocm/``, set ``ROCM_PATH`` appropriately.
 
+  NIC executor support will be enabled if IBVerbs is detected and if ``infiniband/verbs.h`` is found in the default include path.
+  NIC executor support can be disabled explicitly by setting ``DISABLE_NIC_EXEC=1``
+
+  MPI support will be enabled if mpi.h is found in ``MPI_PATH/include/``
+  MPI executor support can be disabled explicitly by setting ``DISABLE_MPI_COMM=1``
+
 Building documentation
 -----------------------
 

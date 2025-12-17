@@ -82,6 +82,28 @@ namespace TransferBench::Utils
     std::unordered_map<int, std::unordered_set<int>> colBorders;
   };
 
+  // Group information
+  typedef std::tuple<
+    std::string,                   // RackId
+    int,                           // VPod
+    std::vector<std::string>,      // CPU Names
+    std::vector<int>,              // CPU #Subexecutors
+    std::vector<std::string>,      // GPU Names
+    std::vector<int>,              // GPU #Subexecutors
+    std::vector<int>,              // GPU Closest NUMA
+    std::vector<std::string>,      // NIC Names
+    std::vector<int>,              // NIC Closest NUMA
+    std::vector<int>,              // NIC Closest GPU
+    std::vector<int>               // NIC is active
+    > GroupKey;
+
+  typedef std::map<GroupKey, std::vector<int>> RankGroupMap;
+
+  // Get information about how ranks can be organized into homogenous groups
+  RankGroupMap& GetRankGroupMap();
+
+  // Return the number of homogenous groups of ranks
+  int numRankGroups();
 
   // Helper function to convert an ExeType to a string
   std::string ExeTypeToStr(ExeType exeType);
@@ -106,6 +128,8 @@ namespace TransferBench::Utils
                     std::vector<Transfer> const& transfers,
                     TestResults const& results);
 
+  // Returns true if more than one rank share the same hostname
+  bool HasDuplicateHostname();
 
   // Implementation details below
   //================================================================
@@ -252,6 +276,79 @@ namespace TransferBench::Utils
       }
       Print("\n");
     }
+  }
+
+  RankGroupMap& GetRankGroupMap()
+  {
+    static RankGroupMap groups;
+    static bool initialized = false;
+
+    if (!initialized) {
+      // Build GroupKey for each rank
+      for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
+
+        std::string ppodId = TransferBench::GetPpodId(rank);
+        int         vpodId = TransferBench::GetVpodId(rank);
+
+        // CPU information
+        int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
+        std::vector<std::string> cpuNames;
+        std::vector<int> cpuNumSubExecs;
+        for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+          ExeDevice exeDevice = {EXE_CPU, exeIndex, rank};
+          cpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
+          cpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
+        }
+
+        // GPU information
+        int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, rank);
+        std::vector<std::string> gpuNames;
+        std::vector<int> gpuNumSubExecs;
+        std::vector<int> gpuClosestCpu;
+        for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+          ExeDevice exeDevice = {EXE_GPU_GFX, exeIndex, rank};
+          gpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
+          gpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
+          gpuClosestCpu.push_back(TransferBench::GetClosestCpuNumaToGpu(exeIndex, rank));
+        }
+
+        // NIC information
+        int numNics = TransferBench::GetNumExecutors(EXE_NIC, rank);
+
+        std::vector<int> nicClosestGpu(numNics, -1);
+        for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+          std::vector<int> nicIndices;
+          TransferBench::GetClosestNicsToGpu(nicIndices, gpuIndex, rank);
+          for (auto nicIndex : nicIndices) {
+            nicClosestGpu[nicIndex] = gpuIndex;
+          }
+        }
+
+        std::vector<std::string> nicNames;
+        std::vector<int> nicClosestCpu;
+        std::vector<int> nicIsActive;
+        for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+          ExeDevice exeDevice = {EXE_NIC, exeIndex, rank};
+          nicNames.push_back(TransferBench::GetExecutorName(exeDevice));
+          nicClosestCpu.push_back(TransferBench::GetClosestCpuNumaToNic(exeIndex, rank));
+          nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
+        }
+
+        GroupKey key(ppodId, vpodId,
+                     cpuNames, cpuNumSubExecs,
+                     gpuNames, gpuNumSubExecs, gpuClosestCpu,
+                     nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
+
+        groups[key].push_back(rank);
+      }
+      initialized = true;
+    }
+    return groups;
+  }
+
+  int GetNumRankGroups()
+  {
+    return GetRankGroupMap().size();
   }
 
   // Helper function to convert an ExeType to a string
@@ -486,5 +583,16 @@ namespace TransferBench::Utils
     table.DrawRowBorder(rowIdx);
 
     table.PrintTable(ev.outputToCsv, ev.showBorders);
+  }
+
+  bool HasDuplicateHostname()
+  {
+    std::set<std::string> seenHosts;
+    for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
+      std::string hostname = TransferBench::GetHostname(rank);
+      if (seenHosts.count(hostname)) return true;
+      seenHosts.insert(hostname);
+    }
+    return false;
   }
 };

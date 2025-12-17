@@ -200,104 +200,10 @@ void DisplaySingleRankTopology(bool outputToCsv)
 #endif
 }
 
-bool HasDuplicateHostname()
-{
-  std::set<std::string> seenHosts;
-  for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
-    std::string hostname = TransferBench::GetHostname(rank);
-    if (seenHosts.count(hostname)) return true;
-    seenHosts.insert(hostname);
-  }
-  return false;
-}
-
-typedef std::tuple<
-  std::string,                   // RackId
-  int,                           // VPod
-  std::vector<std::string>,      // CPU Names
-  std::vector<int>,              // CPU #Subexecutors
-  std::vector<std::string>,      // GPU Names
-  std::vector<int>,              // GPU #Subexecutors
-  std::vector<int>,              // GPU Closest NUMA
-  std::vector<std::string>,      // NIC Names
-  std::vector<int>,              // NIC Closest NUMA
-  std::vector<int>,              // NIC Closest GPU
-  std::vector<int>               // NIC is active
-  > GroupKey;
-
-typedef std::map<GroupKey, std::vector<int>> GroupRankMap;
-
-GroupRankMap& GetGroupRankMap()
-{
-  static GroupRankMap groups;
-  static bool initialized = false;
-
-  if (!initialized) {
-    // Build GroupKey for each rank
-    for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
-
-      std::string ppodId = TransferBench::GetPpodId(rank);
-      int         vpodId = TransferBench::GetVpodId(rank);
-
-      // CPU information
-      int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
-      std::vector<std::string> cpuNames;
-      std::vector<int> cpuNumSubExecs;
-      for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
-        ExeDevice exeDevice = {EXE_CPU, exeIndex, rank};
-        cpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
-        cpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
-      }
-
-      // GPU information
-      int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, rank);
-      std::vector<std::string> gpuNames;
-      std::vector<int> gpuNumSubExecs;
-      std::vector<int> gpuClosestCpu;
-      for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        ExeDevice exeDevice = {EXE_GPU_GFX, exeIndex, rank};
-        gpuNames.push_back(TransferBench::GetExecutorName(exeDevice));
-        gpuNumSubExecs.push_back(TransferBench::GetNumSubExecutors(exeDevice));
-        gpuClosestCpu.push_back(TransferBench::GetClosestCpuNumaToGpu(exeIndex, rank));
-      }
-
-      // NIC information
-      int numNics = TransferBench::GetNumExecutors(EXE_NIC, rank);
-
-      std::vector<int> nicClosestGpu(numNics, -1);
-      for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
-        std::vector<int> nicIndices;
-        TransferBench::GetClosestNicsToGpu(nicIndices, gpuIndex, rank);
-        for (auto nicIndex : nicIndices) {
-          nicClosestGpu[nicIndex] = gpuIndex;
-        }
-      }
-
-      std::vector<std::string> nicNames;
-      std::vector<int> nicClosestCpu;
-      std::vector<int> nicIsActive;
-      for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
-        ExeDevice exeDevice = {EXE_NIC, exeIndex, rank};
-        nicNames.push_back(TransferBench::GetExecutorName(exeDevice));
-        nicClosestCpu.push_back(TransferBench::GetClosestCpuNumaToNic(exeIndex, rank));
-        nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
-      }
-
-      GroupKey key(ppodId, vpodId,
-                   cpuNames, cpuNumSubExecs,
-                   gpuNames, gpuNumSubExecs, gpuClosestCpu,
-                   nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
-
-      groups[key].push_back(rank);
-    }
-    initialized = true;
-  }
-  return groups;
-}
 
 void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
 {
-  GroupRankMap& groups = GetGroupRankMap();
+  Utils::RankGroupMap& groups = Utils::GetRankGroupMap();
 
   printf("%d rank(s) in %lu homogeneous group(s)\n", TransferBench::GetNumRanks(), groups.size());
   printf("\n");
@@ -306,7 +212,7 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
   int groupNum = 1;
 
   for (auto const& group : groups) {
-    GroupKey const& key           = group.first;
+    Utils::GroupKey const& key    = group.first;
     std::vector<int> const& hosts = group.second;
 
     std::string              ppodId        = std::get<0>(key);
@@ -405,7 +311,7 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     table.PrintTable(outputToCsv, showBorders);
   }
 
-  if (HasDuplicateHostname()) {
+  if (Utils::HasDuplicateHostname()) {
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
 }
