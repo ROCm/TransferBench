@@ -24,12 +24,16 @@ THE SOFTWARE.
 #pragma once
 #include <algorithm>
 #include <arpa/inet.h>
+#include <atomic>
+#include <barrier>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <map>
+#include <mutex>
 #include <netinet/in.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
@@ -2331,7 +2335,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Check for NIC_FILTER
       // By default, accept all NIC names
-      std::string nicFilterPattern = getenv("NIC_FILTER") ? getenv("NIC_FILTER") : "*";
+      std::string nicFilterPattern = getenv("NIC_FILTER") ? getenv("NIC_FILTER") : ".*";
 
       if (deviceList && numIbvDevices > 0) {
         // Loop over each device to collect information
