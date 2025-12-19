@@ -39,15 +39,15 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
 
   CXXFLAGS = -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
   HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
-  HIPFLAGS = -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
-  NVFLAGS  = -x cu -lnuma -arch=native
+  HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
+  NVFLAGS  = -extrawarn -x cu -lnuma -arch=native
 
   ifeq ($(SINGLE_KERNEL), 1)
     CXXFLAGS += -DSINGLE_KERNEL
   endif
 
   ifeq ($(DEBUG), 0)
-    COMMON_FLAGS += -O3 -Wall
+    COMMON_FLAGS += -O3
   else
     COMMON_FLAGS += -O0 -g -ggdb3
   endif
