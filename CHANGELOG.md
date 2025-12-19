@@ -63,6 +63,7 @@ Documentation for TransferBench is available at
     - N:    Null memory                     (index ignored)
   - As a result, the a2a preset has deprecated USE_FINE_GRAIN for MEM_TYPE to allow for selecting between various GPU memory types
   - A warning message is issued if USE_FINE_GRAIN is used, however previous matching functionality remains for now
+  - The p2p preset has also deprecated USE_FINE_GRAIN for CPU_MEM_TYPE and GPU_MEM_TYPE
 ### Modified
 - Refactored front-end client code to facilitate simpler and more consistent presets.
 - Refactored tabular data display to simplify code.  Output result tables now use ASCII box-drawing

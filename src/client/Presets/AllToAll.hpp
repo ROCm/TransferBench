@@ -45,7 +45,7 @@ int AllToAllPreset(EnvVars&           ev,
   // Collect env vars for this preset
   int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , 1);
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
-  int devMemType    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
   int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
@@ -87,19 +87,11 @@ int AllToAllPreset(EnvVars&           ev,
 
   // Deprecated env var check
   if (useFineGrain != -999) {
-    devMemType = useFineGrain ? 2 : 0;
+    memTypeIdx = useFineGrain ? 2 : 0;
   }
 
-  MemType memType;
-  std::string devMemTypeStr;
-  switch (devMemType) {
-  case 0: memType = MEM_GPU;          devMemTypeStr = "default";      break;
-  case 1: memType = MEM_GPU_FINE;     devMemTypeStr = "fine-grained"; break;
-  case 2: memType = MEM_GPU_UNCACHED; devMemTypeStr = "uncached";     break;
-  default:
-    Utils::Print("[ERROR] MEM_TYPE must be either 0 (default), 1 (fine-grained), or 2 (uncached), not %d\n", devMemType);
-    return 1;
-  }
+  MemType memType = Utils::GetGpuMemType(memTypeIdx);
+  std::string devMemTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
 
   // Print off environment variables
   if (Utils::RankDoesOutput()) {
@@ -111,7 +103,7 @@ int AllToAllPreset(EnvVars&           ev,
       ev.Print("A2A_MODE"       , (a2aMode == A2A_CUSTOM) ?  std::to_string(numSrcs) + ":" + std::to_string(numDsts) : std::to_string(a2aMode),
                                   (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
                                                              std::to_string(numDsts) + " write(s)").c_str(): a2aModeStr[a2aMode]);
-      ev.Print("MEM_TYPE"       , devMemType   , "Using %s GPU memory (0=default, 1=fine-grained, 2=uncached)", devMemTypeStr.c_str());
+      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       if (numRanks > 1)
@@ -499,7 +491,7 @@ int AllToAllPreset(EnvVars&           ev,
 
   if (useFineGrain != -999) {
     Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
-    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", devMemType, useFineGrain);
+    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", memTypeIdx, useFineGrain);
   }
 
   return 0;

@@ -35,18 +35,18 @@ int NicRingsPreset(EnvVars&           ev,
 
   // Collect topology
   int numRanks = TransferBench::GetNumRanks();
-  int numDetectedNics = TransferBench::GetNumExecutors(EXE_NIC);
 
   // Read in environment variables
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useCpuMem     = EnvVars::GetEnvVar("USE_CPU_MEM"    , 0);
-  int devMemType    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
   int useRdmaRead   = EnvVars::GetEnvVar("USE_RDMA_READ"  , 0);
 
   // Print off environment variables
-  std::string memTypeStr;
-  MemType memType;
+  MemType memType        = Utils::GetMemType(memTypeIdx, useCpuMem);
+  std::string memTypeStr = Utils::GetMemTypeStr(memTypeIdx, useCpuMem);
+
   if (Utils::RankDoesOutput()) {
     ev.DisplayEnvVars();
     if (!ev.hideEnv) {
@@ -54,39 +54,11 @@ int NicRingsPreset(EnvVars&           ev,
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_CPU_MEM"    , useCpuMem    , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
-      if (useCpuMem) {
-        switch (devMemType) {
-        case 0:  memTypeStr = "default pinned CPU";     memType = MEM_CPU;             break;
-        case 1:  memTypeStr = "coherent pinned CPU";    memType = MEM_CPU_COHERENT;    break;
-        case 2:  memTypeStr = "noncoherent pinned CPU"; memType = MEM_CPU_NONCOHERENT; break;
-        case 3:  memTypeStr = "uncached pinned CPU";    memType = MEM_CPU_UNCACHED;    break;
-        case 4:  memTypeStr = "unpinned CPU";           memType = MEM_CPU_UNPINNED;    break;
-        default: memTypeStr = "unknown";
-        }
-        ev.Print("MEM_TYPE"     , devMemType ,   "Using %s memory (0=default,1=coherent,2=noncoherent,3=uncached,4=unpinned)",
-                 memTypeStr.c_str());
-      } else {
-        switch (devMemType) {
-        case 0:  memTypeStr = "default GPU";      memType = MEM_GPU;          break;
-        case 1:  memTypeStr = "fine-grained GPU"; memType = MEM_GPU_FINE;     break;
-        case 2:  memTypeStr = "uncached";         memType = MEM_GPU_UNCACHED; break;
-        case 3:  memTypeStr = "managed";          memType = MEM_MANAGED;      break;
-        default: memTypeStr = "unknown";
-        }
-        ev.Print("MEM_TYPE"     , devMemType ,   "Using %s memory (0=default,1=fine,2=uncached,3=managed)",
-                 memTypeStr.c_str());
-      }
+      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllMemTypeStr(useCpuMem).c_str());
       if (numRanks > 1)
         ev.Print("USE_RDMA_READ", useRdmaRead  , "Performing RDMA %s", useRdmaRead ? "reads" : "writes");
       printf("\n");
     }
-  }
-
-  // Validate env vars
-  if (memTypeStr == "unknown") {
-    Utils::Print("[ERROR] Invalid MEM_TYPE. For %s mem, MEM_TYPE must be between 0 and %d\n",
-                 useCpuMem ? "CPU" : "GPU", useCpuMem ? 4 : 3);
-    return 1;
   }
 
   // Prepare list of transfers

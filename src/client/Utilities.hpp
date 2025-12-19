@@ -131,6 +131,21 @@ namespace TransferBench::Utils
   // Returns true if more than one rank share the same hostname
   bool HasDuplicateHostname();
 
+  // Helper function to map between integer index and memory types
+  MemType GetCpuMemType(int memTypeIdx);
+  MemType GetGpuMemType(int memTypeIdx);
+  MemType GetMemType(int memTypeIdx, bool isCpu);
+
+  // Helper function to map between integer index and memory type name
+  std::string GetCpuMemTypeStr(int memTypeIdx);
+  std::string GetGpuMemTypeStr(int memTypeIdx);
+  std::string GetMemTypeStr(int memTypeIdx, bool isCpu);
+
+  // Helper function to list all available options
+  std::string GetAllCpuMemTypeStr();
+  std::string GetAllGpuMemTypeStr();
+  std::string GetAllMemTypeStr(bool isCpu);
+
   // Implementation details below
   //================================================================
   TableHelper::TableHelper(int numRows, int numCols, int precision) :
@@ -594,5 +609,76 @@ namespace TransferBench::Utils
       seenHosts.insert(hostname);
     }
     return false;
+  }
+
+  // Helper function to map between integer index and memory types
+  MemType GetCpuMemType(int memTypeIdx)
+  {
+    switch (memTypeIdx) {
+    case 0: return MEM_CPU;
+    case 1: return MEM_CPU_COHERENT;
+    case 2: return MEM_CPU_NONCOHERENT;
+    case 3: return MEM_CPU_UNCACHED;
+    case 4: return MEM_CPU_UNPINNED;
+    default: return MEM_CPU;
+    }
+  }
+
+  MemType GetGpuMemType(int memTypeIdx)
+  {
+    switch (memTypeIdx) {
+    case 0: return MEM_GPU;
+    case 1: return MEM_GPU_FINE;
+    case 2: return MEM_GPU_UNCACHED;
+    case 3: return MEM_MANAGED;
+    default: return MEM_GPU;
+    }
+  }
+
+  MemType GetMemType(int memTypeIdx, bool isCpu)
+  {
+    return isCpu ? GetCpuMemType(memTypeIdx) : GetGpuMemType(memTypeIdx);
+  }
+
+  // Helper function to map between integer index and memory type name
+  std::string GetCpuMemTypeStr(int memTypeIdx)
+  {
+    switch (memTypeIdx) {
+    case 0: return "default CPU";
+    case 1: return "coherent CPU";
+    case 2: return "non-coherent CPU";
+    case 3: return "uncached CPU";
+    case 4: return "unpinned CPU";
+    default: return "default CPU";
+    }
+  }
+
+  std::string GetGpuMemTypeStr(int memTypeIdx)
+  {
+    switch (memTypeIdx) {
+    case 0: return "default GPU";
+    case 1: return "fine-grained GPU";
+    case 2: return "uncached GPU";
+    case 3: return "managed";
+    default: return "default GPU";
+    }
+  }
+
+  std::string GetMemTypeStr(int memTypeIdx, bool isCpu)
+  {
+    return isCpu ? GetCpuMemTypeStr(memTypeIdx) : GetGpuMemTypeStr(memTypeIdx);
+  }
+
+  std::string GetAllCpuMemTypeStr()
+  {
+    return "0=default, 1=coherent, 2=non-coherent, 3=uncached, 4=unpinned";
+  }
+  std::string GetAllGpuMemTypeStr()
+  {
+    return "0=default, 1=fine-grained, 2=uncached, 3=managed";
+  }
+  std::string GetAllMemTypeStr(bool isCpu)
+  {
+    return isCpu ? GetAllCpuMemTypeStr() : GetAllGpuMemTypeStr();
   }
 };

@@ -36,15 +36,16 @@ int AllToAllRdmaPreset(EnvVars&           ev,
   // Collect env vars for this preset
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
-  int gpuMemType    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -1); // Deprecated
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
+  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
 
-  // Check for deprecated env var
-  if (useFineGrain != -1) {
-    Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
-    gpuMemType = (useFineGrain) ? 2 : 0;
-    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", gpuMemType, useFineGrain);
+  // Deprecated env var check
+  if (useFineGrain != -999) {
+    memTypeIdx = useFineGrain ? 2 : 0;
   }
+
+  MemType memType = Utils::GetGpuMemType(memTypeIdx);
+  std::string memTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
 
   // Print off environment variables
   if (Utils::RankDoesOutput()) {
@@ -53,10 +54,7 @@ int AllToAllRdmaPreset(EnvVars&           ev,
       if (!ev.outputToCsv) printf("[AllToAll Network Related]\n");
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
-      ev.Print("MEM_TYPE"       , gpuMemType   , "Using %s memory (0=default, 1=fine-grained, 2=uncached)",
-               (gpuMemType == 0 ? "default" :
-                gpuMemType == 1 ? "fine-grained"
-                                : "uncached"));
+      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       printf("\n");
     }
   }
@@ -66,14 +64,7 @@ int AllToAllRdmaPreset(EnvVars&           ev,
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return 1;
   }
-  if (gpuMemType < 0 || gpuMemType > 2) {
-    Utils::Print("[ERROR] MEM_TYPE must be between 0 and 2\n");
-    return 1;
-  }
 
-  MemType memType = (gpuMemType == 0 ? MEM_GPU :
-                     gpuMemType == 1 ? MEM_GPU_FINE
-                                     : MEM_GPU_UNCACHED);
 
   std::map<std::pair<int, int>, int> reIndex;
   std::vector<Transfer> transfers;
