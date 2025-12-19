@@ -49,7 +49,20 @@ Documentation for TransferBench is available at
 - Adding nicrings preset
   - This new preset runs parallel transfers forming rings that connect identical NICs across ranks
 - Adding NIC_FILTER to allow for filtering which NICs to detect.  NIC_FILTER accepts regular-expression syntax
-
+- Added new memory types based on latest HIP memory allocation flags
+    Supported memory locations are:
+    - C:    Pinned host memory              (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - P:    Pinned host memory              (on NUMA node, indexed by closest GPU [#GPUs -1])
+    - B:    Coherent pinned host memory     (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - D:    Non-coherent pinned host memory (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - K:    Uncached pinned host memory     (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - H:    Unpinned host memory            (on NUMA node, indexed from 0 to [# NUMA nodes-1])
+    - G:    Global device memory            (on GPU device indexed from 0 to [# GPUs - 1])
+    - F:    Fine-grain device memory        (on GPU device indexed from 0 to [# GPUs - 1])
+    - U:    Uncached device memory          (on GPU device indexed from 0 to [# GPUs - 1])
+    - N:    Null memory                     (index ignored)
+  - As a result, the a2a preset has deprecated USE_FINE_GRAIN for MEM_TYPE to allow for selecting between various GPU memory types
+  - A warning message is issued if USE_FINE_GRAIN is used, however previous matching functionality remains for now
 ### Modified
 - Refactored front-end client code to facilitate simpler and more consistent presets.
 - Refactored tabular data display to simplify code.  Output result tables now use ASCII box-drawing
@@ -57,6 +70,7 @@ Documentation for TransferBench is available at
 - The All-to-all preset is now multi-rank compatible.  When executed on multiple ranks, it runs
   inter-rank all-to-all and then reports the min/max across all ranks.  The number of extrema
   results shown can be adjusted by NUM_RESULTS
+
 ### Fixed
 - Added guard for ROCM version when using __syncwarp();
 - Exiting with non-zero code on fatal errors

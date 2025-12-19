@@ -45,13 +45,14 @@ int AllToAllPreset(EnvVars&           ev,
   // Collect env vars for this preset
   int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , 1);
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
+  int devMemType    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
   int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
+  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
   // Check that all ranks have at least the number of GPUs requested
@@ -77,11 +78,27 @@ int AllToAllPreset(EnvVars&           ev,
   } else {
     a2aMode = EnvVars::GetEnvVar("A2A_MODE", 0);
     if (a2aMode < 0 || a2aMode > 2) {
-      printf("[ERROR] a2aMode must be between 0 and 2, or else numSrcs:numDsts\n");
+      Utils::Print("[ERROR] a2aMode must be between 0 and 2, or else numSrcs:numDsts\n");
       return 1;
     }
     numSrcs = (a2aMode == A2A_WRITE_ONLY ? 0 : 1);
     numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
+  }
+
+  // Deprecated env var check
+  if (useFineGrain != -999) {
+    devMemType = useFineGrain ? 2 : 0;
+  }
+
+  MemType memType;
+  std::string devMemTypeStr;
+  switch (devMemType) {
+  case 0: memType = MEM_GPU;          devMemTypeStr = "default";      break;
+  case 1: memType = MEM_GPU_FINE;     devMemTypeStr = "fine-grained"; break;
+  case 2: memType = MEM_GPU_UNCACHED; devMemTypeStr = "uncached";     break;
+  default:
+    Utils::Print("[ERROR] MEM_TYPE must be either 0 (default), 1 (fine-grained), or 2 (uncached), not %d\n", devMemType);
+    return 1;
   }
 
   // Print off environment variables
@@ -94,6 +111,7 @@ int AllToAllPreset(EnvVars&           ev,
       ev.Print("A2A_MODE"       , (a2aMode == A2A_CUSTOM) ?  std::to_string(numSrcs) + ":" + std::to_string(numDsts) : std::to_string(a2aMode),
                                   (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
                                                              std::to_string(numDsts) + " write(s)").c_str(): a2aModeStr[a2aMode]);
+      ev.Print("MEM_TYPE"       , devMemType   , "Using %s GPU memory (0=default, 1=fine-grained, 2=uncached)", devMemTypeStr.c_str());
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       if (numRanks > 1)
@@ -101,7 +119,6 @@ int AllToAllPreset(EnvVars&           ev,
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
-      ev.Print("USE_FINE_GRAIN" , useFineGrain , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
     }
@@ -121,7 +138,6 @@ int AllToAllPreset(EnvVars&           ev,
   }
 
   // Collect the number of GPU devices to use
-  MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
   std::vector<std::map<std::pair<int, int>, int>> reIndex(numRanks);
@@ -181,8 +197,9 @@ int AllToAllPreset(EnvVars&           ev,
 
   Utils::Print("GPU-%s All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
   Utils::Print("==============================\n");
-  Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [NIC QueuePairs:%d] [#Ranks:%d]\n",
-                numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts, numQueuePairs, numRanks);
+  Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
+               numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts,
+               devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
   // Execute Transfers
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
@@ -478,6 +495,11 @@ int AllToAllPreset(EnvVars&           ev,
 
   if (Utils::HasDuplicateHostname()) {
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
+  }
+
+  if (useFineGrain != -999) {
+    Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
+    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", devMemType, useFineGrain);
   }
 
   return 0;

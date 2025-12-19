@@ -36,25 +36,44 @@ int AllToAllRdmaPreset(EnvVars&           ev,
   // Collect env vars for this preset
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
+  int gpuMemType    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
+  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -1); // Deprecated
+
+  // Check for deprecated env var
+  if (useFineGrain != -1) {
+    Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
+    gpuMemType = (useFineGrain) ? 2 : 0;
+    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", gpuMemType, useFineGrain);
+  }
 
   // Print off environment variables
-  ev.DisplayEnvVars();
-  if (!ev.hideEnv) {
-    if (!ev.outputToCsv) printf("[AllToAll Network Related]\n");
-    ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
-    ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
-    ev.Print("USE_FINE_GRAIN" , useFineGrain , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
-    printf("\n");
+  if (Utils::RankDoesOutput()) {
+    ev.DisplayEnvVars();
+    if (!ev.hideEnv) {
+      if (!ev.outputToCsv) printf("[AllToAll Network Related]\n");
+      ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
+      ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
+      ev.Print("MEM_TYPE"       , gpuMemType   , "Using %s memory (0=default, 1=fine-grained, 2=uncached)",
+               (gpuMemType == 0 ? "default" :
+                gpuMemType == 1 ? "fine-grained"
+                                : "uncached"));
+      printf("\n");
+    }
   }
 
   // Validate env vars
   if (numGpus < 0 || numGpus > numDetectedGpus) {
-    printf("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
+    Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
+    return 1;
+  }
+  if (gpuMemType < 0 || gpuMemType > 2) {
+    Utils::Print("[ERROR] MEM_TYPE must be between 0 and 2\n");
     return 1;
   }
 
-  MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
+  MemType memType = (gpuMemType == 0 ? MEM_GPU :
+                     gpuMemType == 1 ? MEM_GPU_FINE
+                                     : MEM_GPU_UNCACHED);
 
   std::map<std::pair<int, int>, int> reIndex;
   std::vector<Transfer> transfers;
@@ -74,9 +93,9 @@ int AllToAllRdmaPreset(EnvVars&           ev,
     }
   }
 
-  printf("GPU-RDMA All-To-All benchmark:\n");
-  printf("==========================\n");
-  printf("- Copying %lu bytes between all pairs of GPUs using %d QPs per Transfer (%lu Transfers)\n",
+  Utils::Print("GPU-RDMA All-To-All benchmark:\n");
+  Utils::Print("==========================\n");
+  Utils::Print("- Copying %lu bytes between all pairs of GPUs using %d QPs per Transfer (%lu Transfers)\n",
          numBytesPerTransfer, numQueuePairs, transfers.size());
   if (transfers.size() == 0) return 0;
 
@@ -85,20 +104,20 @@ int AllToAllRdmaPreset(EnvVars&           ev,
   TransferBench::TestResults results;
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
-      printf("%s\n", err.errMsg.c_str());
-    exit(0);
+      Utils::Print("%s\n", err.errMsg.c_str());
+    return 1;
   } else {
     Utils::PrintResults(ev, 1, transfers, results);
   }
 
   // Print results
   char separator = (ev.outputToCsv ? ',' : ' ');
-  printf("\nSummary: [%lu bytes per Transfer]\n", numBytesPerTransfer);
-  printf("==========================================================\n");
-  printf("SRC\\DST ");
+  Utils::Print("\nSummary: [%lu bytes per Transfer]\n", numBytesPerTransfer);
+  Utils::Print("==========================================================\n");
+  Utils::Print("SRC\\DST ");
   for (int dst = 0; dst < numGpus; dst++)
-    printf("%cGPU %02d    ", separator, dst);
-  printf("   %cSTotal     %cActual\n", separator, separator);
+    Utils::Print("%cGPU %02d    ", separator, dst);
+  Utils::Print("   %cSTotal     %cActual\n", separator, separator);
 
   double totalBandwidthGpu = 0.0;
   double minActualBandwidth = std::numeric_limits<double>::max();
@@ -108,7 +127,7 @@ int AllToAllRdmaPreset(EnvVars&           ev,
     double rowTotalBandwidth = 0;
     int    transferCount = 0;
     double minBandwidth = std::numeric_limits<double>::max();
-    printf("GPU %02d", src);
+    Utils::Print("GPU %02d", src);
     for (int dst = 0; dst < numGpus; dst++) {
       if (reIndex.count(std::make_pair(src, dst))) {
         int const transferIdx = reIndex[std::make_pair(src,dst)];
@@ -118,28 +137,28 @@ int AllToAllRdmaPreset(EnvVars&           ev,
         totalBandwidthGpu       += r.avgBandwidthGbPerSec;
         minBandwidth             = std::min(minBandwidth, r.avgBandwidthGbPerSec);
         transferCount++;
-        printf("%c%8.3f  ", separator, r.avgBandwidthGbPerSec);
+        Utils::Print("%c%8.3f  ", separator, r.avgBandwidthGbPerSec);
       } else {
-        printf("%c%8s  ", separator, "N/A");
+        Utils::Print("%c%8s  ", separator, "N/A");
       }
     }
     double actualBandwidth = minBandwidth * transferCount;
-    printf("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, actualBandwidth);
+    Utils::Print("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, actualBandwidth);
     minActualBandwidth = std::min(minActualBandwidth, actualBandwidth);
     maxActualBandwidth = std::max(maxActualBandwidth, actualBandwidth);
     colTotalBandwidth[numGpus+1] += rowTotalBandwidth;
   }
-  printf("\nRTotal");
+  Utils::Print("\nRTotal");
   for (int dst = 0; dst < numGpus; dst++) {
-    printf("%c%8.3f  ", separator, colTotalBandwidth[dst]);
+    Utils::Print("%c%8.3f  ", separator, colTotalBandwidth[dst]);
   }
-  printf("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus+1],
+  Utils::Print("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus+1],
          separator, minActualBandwidth, separator, maxActualBandwidth);
-  printf("\n");
+  Utils::Print("\n");
 
-  printf("Average   bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());
-  printf("Aggregate bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu);
-  printf("Aggregate bandwidth       (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
+  Utils::Print("Average   bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());
+  Utils::Print("Aggregate bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu);
+  Utils::Print("Aggregate bandwidth       (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
 
   Utils::PrintErrors(results.errResults);
 

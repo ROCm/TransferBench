@@ -123,18 +123,21 @@ namespace TransferBench
    */
   enum MemType
   {
-    MEM_CPU          = 0,                       ///< Coarse-grained pinned CPU memory
-    MEM_GPU          = 1,                       ///< Coarse-grained global GPU memory
-    MEM_CPU_FINE     = 2,                       ///< Fine-grained pinned CPU memory
-    MEM_GPU_FINE     = 3,                       ///< Fine-grained global GPU memory
-    MEM_CPU_UNPINNED = 4,                       ///< Unpinned CPU memory
-    MEM_NULL         = 5,                       ///< NULL memory - used for empty
-    MEM_MANAGED      = 6,                       ///< Managed memory
-    MEM_CPU_CLOSEST  = 7,                       ///< Coarse-grained pinned CPU memory indexed by closest GPU
+    MEM_CPU             = 0,                    ///< Default pinned CPU memory     (via hipHostMalloc)
+    MEM_CPU_CLOSEST     = 1,                    ///< Default pinned CPU memory     (indexed by closest GPU)
+    MEM_CPU_COHERENT    = 2, MEM_CPU_FINE = 2,  ///< Coherent pinned CPU memory    (via hipHostMallocCoherent flag)
+    MEM_CPU_NONCOHERENT = 3,                    ///< Noncoherent pinned CPU memory (via hipHostMallocNonCoherent flag)
+    MEM_CPU_UNCACHED    = 4,                    ///< Uncached pinned CPU memory    (via hipHostMallocUncached flag)
+    MEM_CPU_UNPINNED    = 5,                    ///< Unpinned CPU memory
+    MEM_GPU             = 6,                    ///< Default GPU memory            (via hipMalloc)
+    MEM_GPU_FINE        = 7,                    ///< Fine-grained GPU memory       (via hipDeviceMallocFinegrained flag)
+    MEM_GPU_UNCACHED    = 8,                    ///< Uncached GPU memory           (via hipDeviceMallocUncached flag)
+    MEM_MANAGED         = 9,                    ///< Managed memory
+    MEM_NULL            = 10,                   ///< NULL memory - used for empty
   };
-  char const MemTypeStr[9] = "CGBFUNMP";
-  inline bool IsCpuMemType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED || m == MEM_CPU_CLOSEST); }
-  inline bool IsGpuMemType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
+  char const MemTypeStr[12] = "CPBDKHGFUMN";
+  inline bool IsCpuMemType(MemType m) { return (MEM_CPU <= m && m <= MEM_CPU_UNPINNED);}
+  inline bool IsGpuMemType(MemType m) { return (MEM_GPU <= m && m <= MEM_MANAGED);}
 
   /**
    * A MemDevice indicates a memory type on a specific device
@@ -1322,17 +1325,33 @@ namespace {
       numa_set_preferred(numaIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
-      if (memType == MEM_CPU_FINE) {
-#if defined (__NVCC__)
-        return {ERR_FATAL, "Fine-grained CPU memory not supported on NVIDIA platform"};
-#else
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocCoherent));
+      int flags = 0;
+#if !defined(__NVCC__)
+      flags |= hipHostMallocNumaUser;
 #endif
-      } else if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
+      if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags));
+      } else if (memType == MEM_CPU_COHERENT) {
 #if defined (__NVCC__)
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, 0));
+        return {ERR_FATAL, "Coherent pinned-CPU memory not supported on NVIDIA platform"};
 #else
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent));
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags | hipHostMallocCoherent));
+#endif
+      } else if (memType == MEM_CPU_NONCOHERENT) {
+#if defined (__NVCC__)
+        return {ERR_FATAL, "Non-coherent pinned-CPU memory not supported on NVIDIA platform"};
+#else
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags | hipHostMallocNonCoherent));
+#endif
+      } else if (memType == MEM_CPU_UNCACHED) {
+#if defined (__NVCC__)
+        return {ERR_FATAL, "Coherent CPU memory not supported on NVIDIA platform"};
+#else
+#if HIP_VERSION_MAJOR >= 7
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags | hipHostMallocUncached));
+#else
+        return {ERR_FATAL, "Uncached pinned-CPU memory requires ROCm 7.0"};
+#endif
 #endif
       } else if (memType == MEM_CPU_UNPINNED) {
         *memPtr = numa_alloc_onnode(numBytes, numaIdx);
@@ -1354,6 +1373,13 @@ namespace {
       } else if (memType == MEM_GPU_FINE) {
 #if defined (__NVCC__)
         return {ERR_FATAL, "Fine-grained GPU memory not supported on NVIDIA platform"};
+#else
+        int flag = hipDeviceMallocFinegrained;
+        ERR_CHECK(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
+#endif
+      } else if (memType == MEM_GPU_UNCACHED) {
+#if defined (__NVCC__)
+        return {ERR_FATAL, "Uncached GPU memory not supported on NVIDIA platform"};
 #else
         int flag = hipDeviceMallocUncached;
         ERR_CHECK(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
@@ -1379,7 +1405,7 @@ namespace {
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
     switch (memType) {
-    case MEM_CPU: case MEM_CPU_FINE: case MEM_CPU_CLOSEST:
+    case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
     {
       ERR_CHECK(hipHostFree(memPtr));
       break;
@@ -1389,7 +1415,7 @@ namespace {
       numa_free(memPtr, bytes);
       break;
     }
-    case MEM_GPU : case MEM_GPU_FINE: case MEM_MANAGED:
+    case MEM_GPU : case MEM_GPU_FINE: case MEM_GPU_UNCACHED: case MEM_MANAGED:
     {
       ERR_CHECK(hipFree(memPtr));
       break;

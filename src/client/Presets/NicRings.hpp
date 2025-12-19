@@ -29,7 +29,7 @@ int NicRingsPreset(EnvVars&           ev,
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] NIC-rings preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    exit(1);
+    return 1;
   }
 
   // Collect topology
@@ -40,10 +40,12 @@ int NicRingsPreset(EnvVars&           ev,
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useCpuMem     = EnvVars::GetEnvVar("USE_CPU_MEM"    , 0);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
+  int devMemType    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
   int useRdmaRead   = EnvVars::GetEnvVar("USE_RDMA_READ"  , 0);
 
   // Print off environment variables
+  std::string memTypeStr;
+  MemType memType;
   if (Utils::RankDoesOutput()) {
     ev.DisplayEnvVars();
     if (!ev.hideEnv) {
@@ -51,18 +53,43 @@ int NicRingsPreset(EnvVars&           ev,
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_CPU_MEM"    , useCpuMem    , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
-      ev.Print("USE_FINE_GRAIN" , useFineGrain , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
+      if (useCpuMem) {
+        switch (devMemType) {
+        case 0:  memTypeStr = "default pinned CPU";     memType = MEM_CPU;             break;
+        case 1:  memTypeStr = "coherent pinned CPU";    memType = MEM_CPU_COHERENT;    break;
+        case 2:  memTypeStr = "noncoherent pinned CPU"; memType = MEM_CPU_NONCOHERENT; break;
+        case 3:  memTypeStr = "uncached pinned CPU";    memType = MEM_CPU_UNCACHED;    break;
+        case 4:  memTypeStr = "unpinned CPU";           memType = MEM_CPU_UNPINNED;    break;
+        default: memTypeStr = "unknown";
+        }
+        ev.Print("MEM_TYPE"     , devMemType ,   "Using %s memory (0=default,1=coherent,2=noncoherent,3=uncached,4=unpinned)",
+                 memTypeStr.c_str());
+      } else {
+        switch (devMemType) {
+        case 0:  memTypeStr = "default GPU";      memType = MEM_GPU;          break;
+        case 1:  memTypeStr = "fine-grained GPU"; memType = MEM_GPU_FINE;     break;
+        case 2:  memTypeStr = "uncached";         memType = MEM_GPU_UNCACHED; break;
+        case 3:  memTypeStr = "managed";          memType = MEM_MANAGED;      break;
+        default: memTypeStr = "unknown";
+        }
+        ev.Print("MEM_TYPE"     , devMemType ,   "Using %s memory (0=default,1=fine,2=uncached,3=managed)",
+                 memTypeStr.c_str());
+      }
       if (numRanks > 1)
         ev.Print("USE_RDMA_READ", useRdmaRead  , "Performing RDMA %s", useRdmaRead ? "reads" : "writes");
       printf("\n");
     }
   }
 
-  // Prepare list of transfers
-  MemType memType = (useFineGrain ? (useCpuMem ? MEM_CPU_FINE : MEM_GPU_FINE)
-                                  : (useCpuMem ? MEM_CPU      : MEM_GPU));
-  int numDevices = TransferBench::GetNumExecutors(useCpuMem ? EXE_CPU : EXE_GPU_GFX);
+  // Validate env vars
+  if (memTypeStr == "unknown") {
+    Utils::Print("[ERROR] Invalid MEM_TYPE. For %s mem, MEM_TYPE must be between 0 and %d\n",
+                 useCpuMem ? "CPU" : "GPU", useCpuMem ? 4 : 3);
+    return 1;
+  }
 
+  // Prepare list of transfers
+  int numDevices = TransferBench::GetNumExecutors(useCpuMem ? EXE_CPU : EXE_GPU_GFX);
   std::vector<Transfer> transfers;
   int numRings = 0;
   for (int memIndex = 0; memIndex < numDevices; memIndex++) {
@@ -92,10 +119,8 @@ int NicRingsPreset(EnvVars&           ev,
 
   Utils::Print("NIC Rings benchmark\n");
   Utils::Print("==============================\n");
-  Utils::Print("%d parallel RDMA-%s rings(s) using %s-grained %s memory across %d ranks\n",
-               numRings, useRdmaRead ? "read" : "write",
-               useFineGrain ? "fine" : "coarse",
-               useCpuMem ? "CPU" : "GPU", numRanks);
+  Utils::Print("%d parallel RDMA-%s rings(s) using %s memory across %d ranks\n",
+               numRings, useRdmaRead ? "read" : "write", memTypeStr.c_str(), numRanks);
   Utils::Print("%d queue pairs per NIC.  %lu bytes per Transfer.  All numbers are GB/s\n",
                numQueuePairs, numBytesPerTransfer);
   Utils::Print("\n");
