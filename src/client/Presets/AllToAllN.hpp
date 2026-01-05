@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22,36 +22,49 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
-void AllToAllRdmaPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int AllToAllRdmaPreset(EnvVars&           ev,
+                       size_t      const  numBytesPerTransfer,
+                       std::string const  presetName)
 {
-
+  if (TransferBench::GetNumRanks() > 1) {
+    Utils::Print("[ERROR]a2an preset currently not supported for multi-node\n");
+    return 1;
+  }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
+  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
+
+  // Deprecated env var check
+  if (useFineGrain != -999) {
+    memTypeIdx = useFineGrain ? 2 : 0;
+  }
+
+  MemType memType = Utils::GetGpuMemType(memTypeIdx);
+  std::string memTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
 
   // Print off environment variables
-  ev.DisplayEnvVars();
-  if (!ev.hideEnv) {
-    if (!ev.outputToCsv) printf("[AllToAll Network Related]\n");
-    ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
-    ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
-    ev.Print("USE_FINE_GRAIN" , useFineGrain , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
-    printf("\n");
+  if (Utils::RankDoesOutput()) {
+    ev.DisplayEnvVars();
+    if (!ev.hideEnv) {
+      if (!ev.outputToCsv) printf("[AllToAll Network Related]\n");
+      ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
+      ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
+      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
+      printf("\n");
+    }
   }
 
   // Validate env vars
   if (numGpus < 0 || numGpus > numDetectedGpus) {
-    printf("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    exit(1);
+    Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
+    return 1;
   }
 
-  MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
 
   std::map<std::pair<int, int>, int> reIndex;
   std::vector<Transfer> transfers;
@@ -71,31 +84,31 @@ void AllToAllRdmaPreset(EnvVars&           ev,
     }
   }
 
-  printf("GPU-RDMA All-To-All benchmark:\n");
-  printf("==========================\n");
-  printf("- Copying %lu bytes between all pairs of GPUs using %d QPs per Transfer (%lu Transfers)\n",
+  Utils::Print("GPU-RDMA All-To-All benchmark:\n");
+  Utils::Print("==========================\n");
+  Utils::Print("- Copying %lu bytes between all pairs of GPUs using %d QPs per Transfer (%lu Transfers)\n",
          numBytesPerTransfer, numQueuePairs, transfers.size());
-  if (transfers.size() == 0) return;
+  if (transfers.size() == 0) return 0;
 
   // Execute Transfers
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
-      printf("%s\n", err.errMsg.c_str());
-    exit(0);
+      Utils::Print("%s\n", err.errMsg.c_str());
+    return 1;
   } else {
-    PrintResults(ev, 1, transfers, results);
+    Utils::PrintResults(ev, 1, transfers, results);
   }
 
   // Print results
   char separator = (ev.outputToCsv ? ',' : ' ');
-  printf("\nSummary: [%lu bytes per Transfer]\n", numBytesPerTransfer);
-  printf("==========================================================\n");
-  printf("SRC\\DST ");
+  Utils::Print("\nSummary: [%lu bytes per Transfer]\n", numBytesPerTransfer);
+  Utils::Print("==========================================================\n");
+  Utils::Print("SRC\\DST ");
   for (int dst = 0; dst < numGpus; dst++)
-    printf("%cGPU %02d    ", separator, dst);
-  printf("   %cSTotal     %cActual\n", separator, separator);
+    Utils::Print("%cGPU %02d    ", separator, dst);
+  Utils::Print("   %cSTotal     %cActual\n", separator, separator);
 
   double totalBandwidthGpu = 0.0;
   double minActualBandwidth = std::numeric_limits<double>::max();
@@ -105,7 +118,7 @@ void AllToAllRdmaPreset(EnvVars&           ev,
     double rowTotalBandwidth = 0;
     int    transferCount = 0;
     double minBandwidth = std::numeric_limits<double>::max();
-    printf("GPU %02d", src);
+    Utils::Print("GPU %02d", src);
     for (int dst = 0; dst < numGpus; dst++) {
       if (reIndex.count(std::make_pair(src, dst))) {
         int const transferIdx = reIndex[std::make_pair(src,dst)];
@@ -115,28 +128,30 @@ void AllToAllRdmaPreset(EnvVars&           ev,
         totalBandwidthGpu       += r.avgBandwidthGbPerSec;
         minBandwidth             = std::min(minBandwidth, r.avgBandwidthGbPerSec);
         transferCount++;
-        printf("%c%8.3f  ", separator, r.avgBandwidthGbPerSec);
+        Utils::Print("%c%8.3f  ", separator, r.avgBandwidthGbPerSec);
       } else {
-        printf("%c%8s  ", separator, "N/A");
+        Utils::Print("%c%8s  ", separator, "N/A");
       }
     }
     double actualBandwidth = minBandwidth * transferCount;
-    printf("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, actualBandwidth);
+    Utils::Print("   %c%8.3f   %c%8.3f\n", separator, rowTotalBandwidth, separator, actualBandwidth);
     minActualBandwidth = std::min(minActualBandwidth, actualBandwidth);
     maxActualBandwidth = std::max(maxActualBandwidth, actualBandwidth);
     colTotalBandwidth[numGpus+1] += rowTotalBandwidth;
   }
-  printf("\nRTotal");
+  Utils::Print("\nRTotal");
   for (int dst = 0; dst < numGpus; dst++) {
-    printf("%c%8.3f  ", separator, colTotalBandwidth[dst]);
+    Utils::Print("%c%8.3f  ", separator, colTotalBandwidth[dst]);
   }
-  printf("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus+1],
+  Utils::Print("   %c%8.3f   %c%8.3f   %c%8.3f\n", separator, colTotalBandwidth[numGpus+1],
          separator, minActualBandwidth, separator, maxActualBandwidth);
-  printf("\n");
+  Utils::Print("\n");
 
-  printf("Average   bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());
-  printf("Aggregate bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu);
-  printf("Aggregate bandwidth       (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
+  Utils::Print("Average   bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());
+  Utils::Print("Aggregate bandwidth (Tx Thread Timed): %8.3f GB/s\n", totalBandwidthGpu);
+  Utils::Print("Aggregate bandwidth       (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
 
-  PrintErrors(results.errResults);
+  Utils::PrintErrors(results.errResults);
+
+  return 0;
 }

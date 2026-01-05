@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,14 +20,19 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-void OneToAllPreset(EnvVars&           ev,
-                    size_t      const  numBytesPerTransfer,
-                    std::string const  presetName)
+int OneToAllPreset(EnvVars&           ev,
+                   size_t      const  numBytesPerTransfer,
+                   std::string const  presetName)
 {
+  if (TransferBench::GetNumRanks() > 1) {
+    Utils::Print("[ERROR] One-to-All preset currently not supported for multi-node\n");
+    return 1;
+  }
+
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   if (numDetectedGpus < 2) {
     printf("[ERROR] One-to-all benchmark requires machine with at least 2 GPUs\n");
-    exit(1);
+    return 1;
   }
 
   // Collect env vars for this preset
@@ -61,7 +66,7 @@ void OneToAllPreset(EnvVars&           ev,
   for (auto ch : sweepExe) {
     if (ch != 'G' && ch != 'D') {
       printf("[ERROR] Unrecognized executor type '%c' specified\n", ch);
-      exit(1);
+      return 1;
     }
   }
 
@@ -98,7 +103,7 @@ void OneToAllPreset(EnvVars&           ev,
         for (int i = 0; i < numGpuDevices; i++) {
           if (bitmask & (1<<i)) {
             Transfer t;
-            CheckForError(TransferBench::CharToExeType(exe, t.exeDevice.exeType));
+            Utils::CheckForError(TransferBench::CharToExeType(exe, t.exeDevice.exeType));
             t.exeDevice.exeIndex = exeIndex;
             t.exeSubIndex = -1;
             t.numSubExecs = numSubExecs;
@@ -108,7 +113,7 @@ void OneToAllPreset(EnvVars&           ev,
               t.srcs.clear();
             } else {
               t.srcs.resize(1);
-              CheckForError(TransferBench::CharToMemType(src, t.srcs[0].memType));
+              Utils::CheckForError(TransferBench::CharToMemType(src, t.srcs[0].memType));
               t.srcs[0].memIndex = sweepDir == 0 ? exeIndex : i;
             }
 
@@ -116,15 +121,15 @@ void OneToAllPreset(EnvVars&           ev,
               t.dsts.clear();
             } else {
               t.dsts.resize(1);
-              CheckForError(TransferBench::CharToMemType(dst, t.dsts[0].memType));
+              Utils::CheckForError(TransferBench::CharToMemType(dst, t.dsts[0].memType));
               t.dsts[0].memIndex = sweepDir == 0 ? i : exeIndex;
             }
             transfers.push_back(t);
           }
         }
         if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-          PrintErrors(results.errResults);
-          exit(1);
+          Utils::PrintErrors(results.errResults);
+          return 1;
         }
 
         int counter = 0;
@@ -138,12 +143,13 @@ void OneToAllPreset(EnvVars&           ev,
         printf(" %d %d", p, numSubExecs);
         for (auto i = 0; i < transfers.size(); i++) {
           printf(" (%s %c%d %s)",
-                 MemDevicesToStr(transfers[i].srcs).c_str(),
+                 Utils::MemDevicesToStr(transfers[i].srcs).c_str(),
                  ExeTypeStr[transfers[i].exeDevice.exeType], transfers[i].exeDevice.exeIndex,
-                 MemDevicesToStr(transfers[i].dsts).c_str());
+                 Utils::MemDevicesToStr(transfers[i].dsts).c_str());
         }
         printf("\n");
       }
     }
   }
+  return 0;
 }

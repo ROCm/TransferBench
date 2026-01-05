@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,39 +20,60 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-void PeerToPeerPreset(EnvVars&           ev,
-                      size_t      const  numBytesPerTransfer,
-                      std::string const  presetName)
+int PeerToPeerPreset(EnvVars&           ev,
+                     size_t      const  numBytesPerTransfer,
+                     std::string const  presetName)
 {
+  if (TransferBench::GetNumRanks() > 1) {
+    Utils::Print("[ERROR] Peer-to-peer preset currently not supported for multi-node\n");
+    return 1;
+  }
+
   int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
   int useDmaCopy     = EnvVars::GetEnvVar("USE_GPU_DMA",     0);
+
+  int cpuMemTypeIdx  = EnvVars::GetEnvVar("CPU_MEM_TYPE",    0);
+  int gpuMemTypeIdx  = EnvVars::GetEnvVar("GPU_MEM_TYPE",    0);
   int numCpuDevices  = EnvVars::GetEnvVar("NUM_CPU_DEVICES", numDetectedCpus);
   int numCpuSubExecs = EnvVars::GetEnvVar("NUM_CPU_SE",      4);
   int numGpuDevices  = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numGpuSubExecs = EnvVars::GetEnvVar("NUM_GPU_SE",      useDmaCopy ? 1 : TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0}));
   int p2pMode        = EnvVars::GetEnvVar("P2P_MODE",        0);
-  int useFineGrain   = EnvVars::GetEnvVar("USE_FINE_GRAIN",  0);
+  int useFineGrain   = EnvVars::GetEnvVar("USE_FINE_GRAIN",  -999); // Deprecated
   int useRemoteRead  = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
+  MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
+  MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
+
   // Display environment variables
-  ev.DisplayEnvVars();
-  if (!ev.hideEnv) {
-    int outputToCsv = ev.outputToCsv;
-    if (!outputToCsv) printf("[P2P Related]\n");
-    ev.Print("NUM_CPU_DEVICES", numCpuDevices,  "Using %d CPUs", numCpuDevices);
-    ev.Print("NUM_CPU_SE",      numCpuSubExecs, "Using %d CPU threads per Transfer", numCpuSubExecs);
-    ev.Print("NUM_GPU_DEVICES", numGpuDevices,  "Using %d GPUs", numGpuDevices);
-    ev.Print("NUM_GPU_SE",      numGpuSubExecs, "Using %d GPU subexecutors/CUs per Transfer", numGpuSubExecs);
-    ev.Print("P2P_MODE",        p2pMode,        "Running %s transfers", p2pMode == 0 ? "Uni + Bi" :
-                                                                        p2pMode == 1 ? "Unidirectional"
-                                                                                     : "Bidirectional");
-    ev.Print("USE_FINE_GRAIN",  useFineGrain,   "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
-    ev.Print("USE_GPU_DMA",     useDmaCopy,     "Using GPU-%s as GPU executor", useDmaCopy ? "DMA" : "GFX");
-    ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
-    printf("\n");
+
+  if (Utils::RankDoesOutput()) {
+    ev.DisplayEnvVars();
+    if (!ev.hideEnv) {
+      int outputToCsv = ev.outputToCsv;
+      if (!outputToCsv) printf("[P2P Related]\n");
+      ev.Print("CPU_MEM_TYPE"   , cpuMemTypeIdx,  "Using %s (%s)", Utils::GetCpuMemTypeStr(cpuMemTypeIdx).c_str(), Utils::GetAllCpuMemTypeStr().c_str());
+      ev.Print("GPU_MEM_TYPE"   , gpuMemTypeIdx,  "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
+      ev.Print("NUM_CPU_DEVICES", numCpuDevices,  "Using %d CPUs", numCpuDevices);
+      ev.Print("NUM_CPU_SE",      numCpuSubExecs, "Using %d CPU threads per Transfer", numCpuSubExecs);
+      ev.Print("NUM_GPU_DEVICES", numGpuDevices,  "Using %d GPUs", numGpuDevices);
+      ev.Print("NUM_GPU_SE",      numGpuSubExecs, "Using %d GPU subexecutors/CUs per Transfer", numGpuSubExecs);
+      ev.Print("P2P_MODE",        p2pMode,        "Running %s transfers", p2pMode == 0 ? "Uni + Bi" :
+                                                                          p2pMode == 1 ? "Unidirectional"
+                                                                                       : "Bidirectional");
+      ev.Print("USE_GPU_DMA",     useDmaCopy,     "Using GPU-%s as GPU executor", useDmaCopy ? "DMA" : "GFX");
+      ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
+      printf("\n");
+    }
+  }
+
+  // Check for deprecated env vars
+  if (useFineGrain != -999) {
+    Utils::Print("[ERROR] USE_FINE_GRAIN has been deprecated and replaced by CPU_MEM_TYPE and GPU_MEM_TYPE\n");
+    return 1;
   }
 
   char const separator = ev.outputToCsv ? ',' : ' ';
@@ -66,8 +87,8 @@ void PeerToPeerPreset(EnvVars&           ev,
 
   // Perform unidirectional / bidirectional
   for (int isBidirectional = 0; isBidirectional <= 1; isBidirectional++) {
-    if (p2pMode == 1 && isBidirectional == 1 ||
-        p2pMode == 2 && isBidirectional == 0) continue;
+    if ((p2pMode == 1 && isBidirectional == 1) ||
+        (p2pMode == 2 && isBidirectional == 0)) continue;
 
     printf("%sdirectional copy peak bandwidth GB/s [%s read / %s write] (GPU-Executor: %s)\n", isBidirectional ? "Bi" : "Uni",
            useRemoteRead ? "Remote" : "Local",
@@ -102,11 +123,10 @@ void PeerToPeerPreset(EnvVars&           ev,
 
     // Loop over all possible src/dst pairs
     for (int src = 0; src < numDevices; src++) {
-      MemType const srcType  = (src < numCpuDevices ? MEM_CPU : MEM_GPU);
-      int     const srcIndex = (srcType == MEM_CPU ? src : src - numCpuDevices);
-      MemType const srcTypeActual = ((useFineGrain && srcType == MEM_CPU) ? MEM_CPU_FINE :
-                                     (useFineGrain && srcType == MEM_GPU) ? MEM_GPU_FINE :
-                                                                               srcType);
+      int     const srcIdx   = (src < numCpuDevices ? 0 : 1);
+      MemType const srcType  = (src < numCpuDevices ? cpuMemType : gpuMemType);
+      int     const srcIndex = (src < numCpuDevices ? src        : src - numCpuDevices);
+
       std::vector<std::vector<double>> avgBandwidth(isBidirectional + 1);
       std::vector<std::vector<double>> minBandwidth(isBidirectional + 1);
       std::vector<std::vector<double>> maxBandwidth(isBidirectional + 1);
@@ -114,18 +134,17 @@ void PeerToPeerPreset(EnvVars&           ev,
 
       if (src == numCpuDevices && src != 0) printf("\n");
       for (int dst = 0; dst < numDevices; dst++) {
-        MemType const dstType  = (dst < numCpuDevices ? MEM_CPU : MEM_GPU);
-        int     const dstIndex = (dstType == MEM_CPU ? dst : dst - numCpuDevices);
-        MemType const dstTypeActual = ((useFineGrain && dstType == MEM_CPU) ? MEM_CPU_FINE :
-                                       (useFineGrain && dstType == MEM_GPU) ? MEM_GPU_FINE :
-                                                                                 dstType);
+        int     const dstIdx   = (dst < numCpuDevices ? 0 : 1);
+        MemType const dstType  = (dst < numCpuDevices ? cpuMemType : gpuMemType);
+        int     const dstIndex = (dst < numCpuDevices ? dst        : dst - numCpuDevices);
+
         // Prepare Transfers
         std::vector<Transfer> transfers(isBidirectional + 1);
 
         // SRC -> DST
         transfers[0].numBytes = numBytesPerTransfer;
-        transfers[0].srcs.push_back({srcTypeActual, srcIndex});
-        transfers[0].dsts.push_back({dstTypeActual, dstIndex});
+        transfers[0].srcs.push_back({srcType, srcIndex});
+        transfers[0].dsts.push_back({dstType, dstIndex});
         transfers[0].exeDevice = {IsGpuMemType(useRemoteRead ? dstType : srcType) ? gpuExeType : EXE_CPU,
                                   (useRemoteRead ? dstIndex : srcIndex)};
         transfers[0].exeSubIndex = -1;
@@ -134,8 +153,8 @@ void PeerToPeerPreset(EnvVars&           ev,
         // DST -> SRC
         if (isBidirectional) {
           transfers[1].numBytes = numBytesPerTransfer;
-          transfers[1].srcs.push_back({dstTypeActual, dstIndex});
-          transfers[1].dsts.push_back({srcTypeActual, srcIndex});
+          transfers[1].srcs.push_back({dstType, dstIndex});
+          transfers[1].dsts.push_back({srcType, srcIndex});
           transfers[1].exeDevice = {IsGpuMemType(useRemoteRead ? srcType : dstType) ? gpuExeType : EXE_CPU,
                                     (useRemoteRead ? srcIndex : dstIndex)};
           transfers[1].exeSubIndex = -1;
@@ -167,7 +186,7 @@ void PeerToPeerPreset(EnvVars&           ev,
           if (!TransferBench::RunTransfers(cfg, transfers, results)) {
             for (auto const& err : results.errResults)
               printf("%s\n", err.errMsg.c_str());
-            exit(1);
+            return 1;
           }
 
           for (int dir = 0; dir <= isBidirectional; dir++) {
@@ -175,8 +194,8 @@ void PeerToPeerPreset(EnvVars&           ev,
             avgBandwidth[dir].push_back(avgBw);
 
             if (!(srcType == dstType && srcIndex == dstIndex)) {
-              avgBwSum[srcType][dstType] += avgBw;
-              avgCount[srcType][dstType]++;
+              avgBwSum[srcIdx][dstIdx] += avgBw;
+              avgCount[srcIdx][dstIdx]++;
             }
 
             if (ev.showIterations) {
@@ -209,7 +228,7 @@ void PeerToPeerPreset(EnvVars&           ev,
       }
 
       for (int dir = 0; dir <= isBidirectional; dir++) {
-        printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, dir ? "<- " : " ->");
+        printf("%5s %02d %3s", (srcType == cpuMemType) ? "CPU" : "GPU", srcIndex, dir ? "<- " : " ->");
         if (ev.outputToCsv) printf(",");
 
         for (int dst = 0; dst < numDevices; dst++) {
@@ -226,7 +245,7 @@ void PeerToPeerPreset(EnvVars&           ev,
 
         if (ev.showIterations) {
           // minBw
-          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "min");
+          printf("%5s %02d %3s", (srcType == cpuMemType) ? "CPU" : "GPU", srcIndex, "min");
           if (ev.outputToCsv) printf(",");
           for (int i = 0; i < numDevices; i++) {
             double const minBw = minBandwidth[dir][i];
@@ -240,7 +259,7 @@ void PeerToPeerPreset(EnvVars&           ev,
           printf("\n");
 
           // maxBw
-          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "max");
+          printf("%5s %02d %3s", (srcType == cpuMemType) ? "CPU" : "GPU", srcIndex, "max");
           if (ev.outputToCsv) printf(",");
           for (int i = 0; i < numDevices; i++) {
             double const maxBw = maxBandwidth[dir][i];
@@ -254,7 +273,7 @@ void PeerToPeerPreset(EnvVars&           ev,
           printf("\n");
 
           // stddev
-          printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, " sd");
+          printf("%5s %02d %3s", (srcType == cpuMemType) ? "CPU" : "GPU", srcIndex, " sd");
           if (ev.outputToCsv) printf(",");
           for (int i = 0; i < numDevices; i++) {
             double const sd = stdDev[dir][i];
@@ -271,7 +290,7 @@ void PeerToPeerPreset(EnvVars&           ev,
       }
 
       if (isBidirectional) {
-        printf("%5s %02d %3s", (srcType == MEM_CPU) ? "CPU" : "GPU", srcIndex, "<->");
+        printf("%5s %02d %3s", (srcType == cpuMemType) ? "CPU" : "GPU", srcIndex, "<->");
         if (ev.outputToCsv) printf(",");
         for (int dst = 0; dst < numDevices; dst++) {
           double const sumBw = avgBandwidth[0][dst] + avgBandwidth[1][dst];
@@ -289,14 +308,14 @@ void PeerToPeerPreset(EnvVars&           ev,
 
     if (!ev.outputToCsv) {
       printf("                         ");
-      for (int srcType : {MEM_CPU, MEM_GPU})
-        for (int dstType : {MEM_CPU, MEM_GPU})
-          printf("  %cPU->%cPU", srcType == MEM_CPU ? 'C' : 'G', dstType == MEM_CPU ? 'C' : 'G');
+      for (int srcType = 0; srcType <= 1; srcType++)
+        for (int dstType = 0; dstType <= 1; dstType++)
+          printf("  %cPU->%cPU", srcType == 0 ? 'C' : 'G', dstType == 0 ? 'C' : 'G');
       printf("\n");
 
       printf("Averages (During %s):",  isBidirectional ? " BiDir" : "UniDir");
-      for (int srcType : {MEM_CPU, MEM_GPU})
-        for (int dstType : {MEM_CPU, MEM_GPU}) {
+      for (int srcType = 0; srcType <= 1; srcType++)
+        for (int dstType = 0; dstType <= 1; dstType++) {
           if (avgCount[srcType][dstType])
             printf("%10.2f", avgBwSum[srcType][dstType] / avgCount[srcType][dstType]);
           else
@@ -305,4 +324,5 @@ void PeerToPeerPreset(EnvVars&           ev,
       printf("\n\n");
     }
   }
+  return 0;
 }

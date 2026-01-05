@@ -23,34 +23,46 @@ THE SOFTWARE.
 /// @cond
 #pragma once
 #include <algorithm>
+#include <arpa/inet.h>
+#include <atomic>
+#include <barrier>
 #include <cstring>
+#include <fcntl.h>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <future>
 #include <map>
+#include <mutex>
+#include <netinet/in.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
 #include <random>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 #ifdef NIC_EXEC_ENABLED
 #include <infiniband/verbs.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <filesystem>
-#include <fstream>
+#endif
+
+#ifdef MPI_COMM_ENABLED
+#include <mpi.h>
 #endif
 
 #if defined(__NVCC__)
 #include <cuda_runtime.h>
+#include <nvml.h>
 #else
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
@@ -66,7 +78,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.65";
+  constexpr char VERSION[] = "1.66";
 
   /**
    * Enumeration of supported Executor types
@@ -93,9 +105,14 @@ namespace TransferBench
   {
     ExeType exeType;                            ///< Executor type
     int32_t exeIndex;                           ///< Executor index
+    int32_t exeRank = 0;                        ///< Executor rank
+    int32_t exeSlot = 0;                        ///< Executor slot
 
     bool operator<(ExeDevice const& other) const {
-      return (exeType < other.exeType) || (exeType == other.exeType && exeIndex < other.exeIndex);
+      return ((exeRank  != other.exeRank)  ? (exeRank  < other.exeRank)  :
+              (exeType  != other.exeType)  ? (exeType  < other.exeType)  :
+              (exeIndex != other.exeIndex) ? (exeIndex < other.exeIndex) :
+                                             (exeSlot  < other.exeSlot));
     }
   };
 
@@ -106,18 +123,21 @@ namespace TransferBench
    */
   enum MemType
   {
-    MEM_CPU          = 0,                       ///< Coarse-grained pinned CPU memory
-    MEM_GPU          = 1,                       ///< Coarse-grained global GPU memory
-    MEM_CPU_FINE     = 2,                       ///< Fine-grained pinned CPU memory
-    MEM_GPU_FINE     = 3,                       ///< Fine-grained global GPU memory
-    MEM_CPU_UNPINNED = 4,                       ///< Unpinned CPU memory
-    MEM_NULL         = 5,                       ///< NULL memory - used for empty
-    MEM_MANAGED      = 6,                       ///< Managed memory
-    MEM_CPU_CLOSEST  = 7,                       ///< Coarse-grained pinned CPU memory indexed by closest GPU
+    MEM_CPU             = 0,                    ///< Default pinned CPU memory     (via hipHostMalloc)
+    MEM_CPU_CLOSEST     = 1,                    ///< Default pinned CPU memory     (indexed by closest GPU)
+    MEM_CPU_COHERENT    = 2, MEM_CPU_FINE = 2,  ///< Coherent pinned CPU memory    (via hipHostMallocCoherent flag)
+    MEM_CPU_NONCOHERENT = 3,                    ///< Noncoherent pinned CPU memory (via hipHostMallocNonCoherent flag)
+    MEM_CPU_UNCACHED    = 4,                    ///< Uncached pinned CPU memory    (via hipHostMallocUncached flag)
+    MEM_CPU_UNPINNED    = 5,                    ///< Unpinned CPU memory
+    MEM_GPU             = 6,                    ///< Default GPU memory            (via hipMalloc)
+    MEM_GPU_FINE        = 7,                    ///< Fine-grained GPU memory       (via hipDeviceMallocFinegrained flag)
+    MEM_GPU_UNCACHED    = 8,                    ///< Uncached GPU memory           (via hipDeviceMallocUncached flag)
+    MEM_MANAGED         = 9,                    ///< Managed memory
+    MEM_NULL            = 10,                   ///< NULL memory - used for empty
   };
-  char const MemTypeStr[9] = "CGBFUNMP";
-  inline bool IsCpuMemType(MemType m) { return (m == MEM_CPU || m == MEM_CPU_FINE || m == MEM_CPU_UNPINNED || m == MEM_CPU_CLOSEST); }
-  inline bool IsGpuMemType(MemType m) { return (m == MEM_GPU || m == MEM_GPU_FINE || m == MEM_MANAGED); }
+  char const MemTypeStr[12] = "CPBDKHGFUMN";
+  inline bool IsCpuMemType(MemType m) { return (MEM_CPU <= m && m <= MEM_CPU_UNPINNED);}
+  inline bool IsGpuMemType(MemType m) { return (MEM_GPU <= m && m <= MEM_MANAGED);}
 
   /**
    * A MemDevice indicates a memory type on a specific device
@@ -126,9 +146,17 @@ namespace TransferBench
   {
     MemType memType;                            ///< Memory type
     int32_t memIndex;                           ///< Device index
+    int32_t memRank = 0;                        ///< Rank index
 
     bool operator<(MemDevice const& other) const {
-      return (memType < other.memType) || (memType == other.memType && memIndex < other.memIndex);
+      return ((memType  != other.memType)  ? (memType  < other.memType) :
+              (memIndex != other.memIndex) ? (memIndex < other.memIndex) :
+                                             (memRank  < other.memRank));
+    }
+    bool operator==(MemDevice const& other) const {
+      return (memType  == other.memType &&
+              memIndex == other.memIndex &&
+              memRank  == other.memRank);
     }
   };
 
@@ -142,6 +170,7 @@ namespace TransferBench
     vector<MemDevice> dsts        = {};         ///< List of destination memory devices
     ExeDevice         exeDevice   = {};         ///< Executor to use
     int32_t           exeSubIndex = -1;         ///< Executor subindex
+    int32_t           exeSubSlot  = 0;          ///< Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
   };
 
@@ -204,12 +233,12 @@ namespace TransferBench
    */
   struct NicOptions
   {
-    vector<int> closestNics     = {};           ///< Overrides the auto-detected closest NIC per GPU
+    size_t      chunkBytes      = 1<<30;        ///< How much bytes to transfer at a time
     int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
     uint8_t     ibPort          = 1;            ///< NIC port number to be used
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
     int         maxRecvWorkReq  = 16;           ///< Maximum number of recv work requests per queue pair
-    int         maxSendWorkReq  = 16;           ///< Maximum number of send work requests per queue pair
+    int         maxSendWorkReq  = 1024;         ///< Maximum number of send work requests per queue pair
     int         queueSize       = 100;          ///< Completion queue size
     int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
     int         useRelaxedOrder = 1;            ///< Use relaxed ordering
@@ -263,6 +292,16 @@ namespace TransferBench
     "RoCEv2 IPv6",
     "RoCEv1 IPv4-mapped IPv6",
     "RoCEv2 IPv4-mapped IPv6"
+  };
+
+  /**
+   * Enumeration of possible communication mode types
+   */
+  enum CommType
+  {
+    COMM_NONE   = 0,                             ///< Single node only
+    COMM_MPI    = 1,                             ///< MPI-based communication
+    COMM_SOCKET = 2                              ///< Socket-based communication
   };
 
   /**
@@ -377,12 +416,22 @@ namespace TransferBench
   std::string GetStrAttribute(StrAttribute attribute);
 
   /**
-   * Returns information about number of available available Executors
+   * Returns information about number of available Executors given an executor type
    *
-   * @param[in] exeType    Executor type to query
+   * @param[in] exeType         Executor type to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected Executors of exeType
    */
-  int GetNumExecutors(ExeType exeType);
+  int GetNumExecutors(ExeType exeType, int targetRank = -1);
+
+  /**
+   * Returns information about number of available Executors given a memory type
+   *
+   * @param[in] memType         Memory type to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @returns Number of detected Executors for memType
+   */
+  int GetNumExecutors(MemType memType, int targetRank = -1);
 
   /**
    * Returns the number of possible Executor subindices
@@ -391,7 +440,7 @@ namespace TransferBench
    * @note For GFX, this refers to the number of XCDs
    * @note For DMA, this refers to the number of DMA engines
    *
-   * @param[in] exeDevice The specific Executor to query
+   * @param[in] exeDevice       The specific Executor to query
    * @returns Number of detected executor subindices
    */
   int GetNumExecutorSubIndices(ExeDevice exeDevice);
@@ -399,7 +448,7 @@ namespace TransferBench
   /**
    * Returns number of subExecutors for a given ExeDevice
    *
-   * @param[in] exeDevice   The specific Executor to query
+   * @param[in] exeDevice       The specific Executor to query
    * @returns Number of detected subExecutors for the given ExePair
    */
   int GetNumSubExecutors(ExeDevice exeDevice);
@@ -407,27 +456,99 @@ namespace TransferBench
   /**
    * Returns the index of the NUMA node closest to the given GPU
    *
-   * @param[in] gpuIndex Index of the GPU to query
+   * @param[in] gpuIndex        Index of the GPU to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns NUMA node index closest to GPU gpuIndex, or -1 if unable to detect
    */
-  int GetClosestCpuNumaToGpu(int gpuIndex);
+  int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank = -1);
 
   /**
    * Returns the index of the NUMA node closest to the given NIC
    *
-   * @param[in] nicIndex Index of the NIC to query
+   * @param[in] nicIndex        Index of the NIC to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns NUMA node index closest to the NIC nicIndex, or -1 if unable to detect
    */
-  int GetClosestCpuNumaToNic(int nicIndex);
+  int GetClosestCpuNumaToNic(int nicIndex, int targetRank = -1);
 
   /**
-   * Returns the index of the NIC closest to the given GPU
+   * Returns the index of a NIC closest to the given GPU
    *
-   * @param[in] gpuIndex Index of the GPU to query
+   * @param[in] gpuIndex        Index of the GPU to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns IB Verbs capable NIC index closest to GPU gpuIndex, or -1 if unable to detect
    */
-  int GetClosestNicToGpu(int gpuIndex);
+  int GetClosestNicToGpu(int gpuIndex, int targetRank = -1);
+
+  /**
+   * Returns the indices of the NICs closest to the given CPU
+   *
+   * @param[out] nicIndices     Vector that will contain NIC indices closest to given CPU
+   * @param[in]  cpuIndex       Index of the CPU to query
+   * @param[in]  targetRank     Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns IB Verbs capable NIC indices closest to CPU cpuIndex, or empty if unable to detect
+   */
+  void GetClosestNicsToCpu(std::vector<int>& nicIndices, int cpuIndex, int targetRank = -1);
+
+  /**
+   * Returns the indices of the NICs closest to the given GPU
+   *
+   * @param[out] nicIndices     Vector that will contain NIC indices closest to given GPU
+   * @param[in]  gpuIndex       Index of the GPU to query
+   * @param[in]  targetRank     Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns IB Verbs capable NIC indices closest to GPU gpuIndex, or empty if unable to detect
+   */
+  void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+
+  /**
+   * @returns 0-indexed rank for this process
+   */
+  int GetRank();
+
+  /**
+   * @returns The total numbers of ranks participating
+   */
+  int GetNumRanks();
+
+  /**
+   * @returns Gets the current communication mode
+   */
+  int GetCommMode();
+
+  /**
+   * @param[in] targetRank  Rank to query (-1 for local rank)
+   * @returns Gets the hostname for the target rank
+   **/
+  std::string GetHostname(int targetRank = -1);
+
+  /**
+   * @param[in] targetRank  Rank to query (-1 for local rank)
+   * @returns Gets the physical pod identifier for the target rank
+   **/
+  std::string GetPpodId(int targetRank = -1);
+
+  /**
+   * @param[in] targetRank  Rank to query (-1 for local rank)
+   * @returns Gets the virtual pod identifier for the target rank
+   **/
+  int GetVpodId(int targetRank = -1);
+
+  /**
+   * @param[in] exeDevice       The specific Executor to query
+   * @returns Name of the executor
+   */
+  std::string GetExecutorName(ExeDevice exeDevice);
+
+  /**
+   *
+   * @param[in] nicIndex        The NIC index to query
+   * @param[in] targetRank Rank to query (-1 for local rank)
+   * @returns Returns 1 if and only if NIC exists and has an active port
+   */
+  int NicIsActive(int nicIndex, int targetRank = -1);
 
   /**
    * Helper function to parse a line containing Transfers into a vector of Transfers
@@ -603,7 +724,6 @@ namespace {
 //========================================================================================
 
   int   constexpr MAX_BLOCKSIZE  = 1024;               // Max threadblock size
-  int   constexpr MAX_WAVEGROUPS = MAX_BLOCKSIZE / 64; // Max wavegroups/warps
   int   constexpr MAX_UNROLL     = 8;                  // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                  // Max srcs per Transfer
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
@@ -642,9 +762,252 @@ namespace {
     return numSubExecs;
   }
 
+// System singleton
+//========================================================================================
+/**
+   * System singleton class used for multi-node capability / topology dectection
+   *
+   * This supports three possible communication modes - Socket-based, MPI-based, disabled
+   *
+   * - Will first attempt to use sockets if TB_RANK env var is detected
+   * - Will then try MPI-based, if compiled with MPI support
+   * - Drop back to single node functionality
+
+   * - Configuration for socket-based communicator is read via environment variables
+   *   - TB_RANK:        Rank of this process (0-based)
+   *   - TB_NUM_RANKS:   Total number of processes
+   *   - TB_MASTER_ADDR: IP address of rank 0
+   *   - TB_MASTER_PORT: Port for communication (default: 29500)
+   */
+  class System
+  {
+  public:
+    static System& Get() {
+      static System instance;
+      return instance;
+    }
+
+    /**
+     * @returns 0-indexed rank for this process
+     */
+    int GetRank() const { return rank; }
+
+    /**
+     * @returns The total numbers of ranks participating
+     */
+    int GetNumRanks() const { return numRanks; }
+
+    /**
+     * @returns The communication mode
+     */
+    int GetCommMode() const { return commMode; }
+
+    bool& IsVerbose() { return verbose; }
+
+    // Communication functions
+    /**
+     * Barrier that all ranks must arrive at before proceeding
+     */
+    void Barrier();
+
+    /**
+     * Send data to a single destination rank
+     * Requires a matching call to RecvData on destination rank
+     * NOTE: For socket-based communicator, this must involve rank 0
+     *
+     * @param[in] dstRank       Rank to send to
+     * @param[in] numBytes      Number of bytes to send
+     * @param[in] sendData      Data to send
+     */
+    void SendData(int dstRank, size_t const numBytes, const void* sendData) const;
+
+    /**
+     * Recevive data from a single source rank
+     * Requires a matching call to SendData on source rank
+     * NOTE: For socket-based communicator, this must involve rank 0
+     *
+     * @param[in] srcRank       Rank to receive from
+     * @param[in] numBytes      Number of bytes to receive
+     * @param[in] recvData      Buffer to receive data into
+     */
+    void RecvData(int srcRank, size_t const numBytes, void* recvData) const;
+
+    /**
+     * Modifies provided input to true if any rank provides a true input
+     *
+     * @param[in] flag          Flag to compare across ranks
+     * @returns   True if and only if any rank provided a flag with value of true
+     */
+    bool Any(bool const flag) const;
+
+    /**
+     * Broadcast data from root to all ranks
+     * All ranks must participate in this call
+     *
+     * @param[in] root          Rank that sends data
+     * @param[in] numBytes      Number of bytes to transfer
+     * @param[in/out] data      Buffer to send from root / to receive into on other ranks
+     */
+    void Broadcast(int root, size_t const numBytes, void* data) const;
+
+    /**
+     * Collect errors across ranks
+     * @param[in,out] errResults List of errors per rank
+     */
+    void AllGatherErrors(vector<ErrResult>& errResults) const;
+
+    // Topology functions
+    /**
+     * Returns information about number of available Executors
+     *
+     * @param[in] exeType       Executor type to query
+     * @param[in] targetRank    Rank to query.  (-1 for local rank)
+     * @returns Number of detected Executors of exeType
+     */
+    int GetNumExecutors(ExeType exeType, int targetRank = -1) const;
+
+    /**
+     * Returns the number of possible Executor subindices
+     *
+     * @note For CPU, this is 0
+     * @note For GFX, this refers to the number of XCDs
+     * @note For DMA, this refers to the number of DMA engines
+     *
+     * @param[in] exeDevice     The specific Executor to query
+     * @returns Number of detected executor subindices
+     */
+    int GetNumExecutorSubIndices(ExeDevice exeDevice) const;
+
+    /**
+     * Returns number of subExecutors for a given ExeDevice
+     *
+     * @param[in] exeDevice     The specific Executor to query
+     * @returns Number of detected subExecutors for the given ExePair
+     */
+    int GetNumSubExecutors(ExeDevice exeDevice) const;
+
+    /**
+     * Returns the index of the NUMA node closest to the given GPU
+     *
+     * @param[in] gpuIndex      Index of the GPU to query
+     * @param[in] targetRank    Rank to query (-1 for local rank)
+     * @returns NUMA node index closest to GPU gpuIndex, or -1 if unable to detect
+     */
+    int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank = -1) const;
+
+    /**
+     * Returns the index of the NUMA node closest to the given NIC
+     *
+     * @param[in] nicIndex      Index of the NIC to query
+     * @param[in] targetRank    Rank to query (-1 for local rank)
+     * @returns NUMA node index closest to the NIC nicIndex, or -1 if unable to detect
+     */
+    int GetClosestCpuNumaToNic(int nicIndex, int targetRank = -1) const;
+
+    /**
+     * Returns the indices of the NICs closest to the given GPU
+     *
+     * @param[out] nicIndices     Vector that will contain NIC indices closest to given GPU
+     * @param[in] gpuIndex        Index of the GPU to query
+     * @param[in] targetRank      Rank to query (-1 for local rank)
+     * @note This function is applicable when the IBV/RDMA executor is available
+     * @returns IB Verbs capable NIC indices closest to GPU gpuIndex, or empty if unable to detect
+     */
+    void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1) const;
+
+    std::string GetHostname(int targetRank) const;
+    std::string GetPpodId(int targetRank) const;
+    int GetVpodId(int targetRank) const;
+    std::string GetExecutorName(ExeDevice exeDevice) const;
+    int NicIsActive(int nicIndex, int targetRank) const;
+
+#if !defined(__NVCC__)
+    ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
+    ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
+#endif
+
+    template <typename T>
+    void BroadcastVector(int root, vector<T>& data) const;
+    void BroadcastString(int root, std::string& string) const;
+    void BroadcastExeResult(int root, ExeResult& exeResult) const;
+    void BroadcastTfrResult(int root, TransferResult& tfrResult) const;
+
+
+  private:
+    System();
+    ~System();
+    System(System const&)            = delete;
+    System(System&&)                 = delete;
+    System& operator=(System const&) = delete;
+    System& operator=(System&&)      = delete;
+
+    int rank;
+    int numRanks;
+    bool verbose = false;
+
+#if !defined(__NVCC__)
+    std::vector<hsa_agent_t> cpuAgents;
+    std::vector<hsa_agent_t> gpuAgents;
+#endif
+
+    int commMode;                             ///< Communication mode
+
+#ifdef MPI_COMM_ENABLED
+    bool mpiInit = false;                     ///< Whether or not MPI_Init was called
+    MPI_Comm comm;                            ///< MPI communicator
+#endif
+
+    // Socket related
+    std::string      masterAddr;              ///< Rank 0 master address
+    int              masterPort;              ///< Rank 0 master port
+    std::vector<int> sockets;                 ///< Master list of sockets
+    int              listenSocket;            ///< Master listener socket
+
+    // Topology related
+    struct RankTopology
+    {
+      char hostname[33];
+      char ppodId[256];
+      int  vpodId;
+
+      std::map<ExeType,            int>         numExecutors;
+      std::map<pair<ExeType, int>, int>         numExecutorSubIndices;
+      std::map<pair<ExeType, int>, int>         numSubExecutors;
+      std::map<int,                int>         closestCpuNumaToGpu;
+      std::map<int,                int>         closestCpuNumaToNic;
+      std::map<int,                int>         nicIsActive;
+      std::map<int,                vector<int>> closestNicsToGpu;
+      std::map<pair<ExeType, int>, std::string> executorName;
+    };
+
+    std::vector<RankTopology> rankInfo;       ///< Topology of each rank
+
+    void SetupSocketCommunicator();
+    void SetupMpiCommunicator();
+    void GetRankTopology(RankTopology& topo);
+    void CollectTopology();
+    std::string GetCpuName() const;
+
+    template <typename KeyType, typename ValType>
+    void SendMap(int peerRank, std::map<KeyType, std::vector<ValType>> const& mapToSend) const;
+    template <typename KeyType, typename ValType>
+    void SendMap(int peerRank, std::map<KeyType, ValType> const& mapToSend) const;
+    template <typename KeyType>
+    void SendMap(int peerRank, std::map<KeyType, std::string> const& mapToSend) const;
+
+    template <typename KeyType, typename ValType>
+    void RecvMap(int peerRank, std::map<KeyType, std::vector<ValType>>& mapToRecv) const;
+    template <typename KeyType, typename ValType>
+    void RecvMap(int peerRank, std::map<KeyType, ValType>& mapToRecv) const;
+    template <typename KeyType>
+    void RecvMap(int peerRank, std::map<KeyType, std::string>& mapToRecv) const;
+
+    void SendRankTopo(int peerRank, RankTopology const& topo) const;
+    void RecvRankTopo(int peerRank, RankTopology& topo) const;
+  };
+
 // Parsing-related functions
 //========================================================================================
-
   static ErrResult CharToMemType(char const c, MemType& memType)
   {
     char const* val = strchr(MemTypeStr, toupper(c));
@@ -665,47 +1028,223 @@ namespace {
     return {ERR_FATAL, "Unexpected executor type (%c)", c};
   }
 
-  static ErrResult ParseMemType(std::string const& token,
-                                std::vector<MemDevice>& memDevices)
+  struct WildcardMemDevice
   {
-    char memTypeChar;
-    int offset = 0, memIndex, inc;
     MemType memType;
-    bool found = false;
+    vector<int> memRanks;
+    vector<int> memIndices;
+  };
 
-    memDevices.clear();
-    while (sscanf(token.c_str() + offset, " %c %d%n", &memTypeChar, &memIndex, &inc) == 2) {
-      offset += inc;
+  struct WildcardExeDevice
+  {
+    ExeType exeType;
+    std::vector<int> exeRanks;
+    std::vector<int> exeIndices;
+    std::vector<int> exeSlots;
+    std::vector<int> exeSubIndices;
+    std::vector<int> exeSubSlots;
+  };
 
-      ErrResult err = CharToMemType(memTypeChar, memType);
-      if (err.errType != ERR_NONE) return err;
+  struct WildcardTransfer
+  {
+    std::vector<WildcardMemDevice> mem[2]; // 0 = SRCs, 1 = DSTs
+    WildcardExeDevice exe;
+  };
 
-      if (memType != MEM_NULL)
-        memDevices.push_back({memType, memIndex});
-      found = true;
+  static char const* ParseRange(char const* start, int fullCount, std::vector<int>& range)
+  {
+    range.clear();
+
+    char const* ptr = start;
+    if (!ptr) return 0;
+
+    // Full wildcard
+    if (*ptr == '*') {
+      if (fullCount >= 0) {
+        for (int i = 0; i < fullCount; i++)
+        range.push_back(i);
+      } else {
+        range.push_back(fullCount);
+      }
+      return ++ptr;
     }
-    if (found) return ERR_NONE;
-    return {ERR_FATAL,
-            "Unable to parse memory type token %s.  Expected one of %s followed by an index",
-            token.c_str(), MemTypeStr};
+
+    // Ranged wildcard
+    if (*ptr == '[') {
+      std::string rangeStr(++ptr);
+      size_t endPos = rangeStr.find(']');
+      if (endPos == std::string::npos) return 0;
+      rangeStr.erase(endPos);
+      ptr += endPos+1;
+
+      std::set<int> values;
+      char* token = strtok(rangeStr.data(), ",");
+      while (token) {
+        int start, end;
+        if (sscanf(token, "%d..%d", &start, &end) == 2) {
+          if (start < 0 || end < 0 || end <= start) return 0;
+          for (int i = start; i <= end; i++)
+            values.insert(i);
+        } else if (sscanf(token, "%d", &start) == 1) {
+          values.insert(start);
+        } else {
+          return 0;
+        }
+        token = strtok(NULL, ",");
+      }
+      if (values.empty()) return 0;
+      for (auto v : values) range.push_back(v);
+      return ptr;
+    }
+
+    // Single number
+    char* endPtr;
+    int val = strtol(ptr, &endPtr, 10);
+    if (endPtr == ptr) return 0;
+    else range.push_back(val);
+    return endPtr;
+  }
+
+  static char const* ParseAlphaRange(char const* start, std::vector<int>& range)
+  {
+    range.clear();
+
+    char const* ptr = start;
+    if (!ptr) return 0;
+
+    // Full wildcard
+    if (*ptr == '*') {
+      range.push_back(-1);
+      return ++ptr;
+    }
+
+    // Ranged wildcard
+    if (*ptr == '[') {
+      std::string rangeStr(++ptr);
+      size_t endPos = rangeStr.find(']');
+      if (endPos == std::string::npos) return 0;
+      rangeStr.erase(endPos);
+      ptr += endPos+1;
+
+      std::set<int> values;
+      char* token = strtok(rangeStr.data(), ",");
+      while (token) {
+        char start, end;
+        if (sscanf(token, "%c..%c", &start, &end) == 2 && isalpha(toupper(start)) && isalpha(toupper(end))) {
+          int realStart = toupper(start) - 'A';
+          int realEnd   = toupper(end)   - 'A';
+          if (realStart < 0 || realEnd < 0) return 0;
+          for (int i = realStart; i <= realEnd; i++)
+            values.insert(i);
+        } else if (sscanf(token, "%c", &start) == 1 && isalpha(toupper(start))) {
+          int realStart = toupper(start) - 'A';
+          values.insert(realStart);
+        } else {
+          return 0;
+        }
+        token = strtok(NULL, ",");
+      }
+      for (auto v : values) range.push_back(v);
+      return ptr;
+    }
+
+    // Single character
+    if (isalpha(toupper(*ptr))) {
+      range.push_back(toupper(*ptr)-'A');
+      ++ptr;
+    }
+    return ptr;
+  }
+
+  static ErrResult ParseMemType(std::string const& token,
+                                std::vector<WildcardMemDevice>& memDevices)
+  {
+    memDevices.clear();
+
+    char const* ptr = token.c_str();
+    while (*ptr) {
+      WildcardMemDevice w;
+
+      // Parse memory rank if it exists
+      if (*ptr == 'R' || *ptr == 'r') {
+        ptr++; // Skip 'R'
+        ptr = ParseRange(ptr, GetNumRanks(), w.memRanks);
+        if (!ptr) return {ERR_FATAL, "Unable to parse rank index in memory token %s", token.c_str()};
+      } else {
+        // Otherwise will be replaced by "local" wildcard
+        w.memRanks.clear();
+      }
+
+      // Parse memory type
+      ERR_CHECK(CharToMemType(*ptr, w.memType));
+      ptr++; // Skip memory type
+
+      // Parse memory index
+      if (w.memType != MEM_NULL) {
+        ptr = ParseRange(ptr, -1, w.memIndices);
+        if (!ptr) return {ERR_FATAL, "Unable to parse device index in memory token %s", token.c_str()};
+        memDevices.push_back(w);
+      }
+    }
+    return ERR_NONE;
   }
 
   static ErrResult ParseExeType(std::string const& token,
-                                ExeDevice& exeDevice,
-                                int& exeSubIndex)
+                                WildcardExeDevice& exeDevice)
   {
-    char exeTypeChar;
-    exeSubIndex = -1;
+    char const* ptr = token.c_str();
 
-    int numTokensParsed = sscanf(token.c_str(),
-                                 " %c%d.%d", &exeTypeChar, &exeDevice.exeIndex, &exeSubIndex);
-    if (numTokensParsed < 2) {
-      return {ERR_FATAL,
-              "Unable to parse valid executor token (%s)."
-              "Expected one of %s followed by an index",
-              token.c_str(), ExeTypeStr};
+    // Check for rank prefix
+    if (*ptr == 'R' || *ptr == 'r') {
+      ptr++; // Skip 'R'
+      ptr = ParseRange(ptr, GetNumRanks(), exeDevice.exeRanks);
+      if (!ptr) return {ERR_FATAL, "Unable to parse rank index in executor token %s", token.c_str()};
+    } else {
+      exeDevice.exeRanks.clear();
     }
-    return CharToExeType(exeTypeChar, exeDevice.exeType);
+
+    // Parse executor type
+    ERR_CHECK(CharToExeType(*ptr, exeDevice.exeType));
+    ptr++; // Skip executor type char
+
+    // Parse executor index
+    // This is optional for EXE_NIC_NEAREST as long as nothing further is specified
+    char const* endPtr = ParseRange(ptr, -1, exeDevice.exeIndices);
+    if (!endPtr) {
+      if (exeDevice.exeType == EXE_NIC_NEAREST && *endPtr == 0) {
+        if (exeDevice.exeRanks.size() != 0) {
+          return {ERR_FATAL, "Wildcard NIC executor may not be specified with rank in executor token %s", token.c_str()};
+        }
+        exeDevice.exeIndices.clear();
+        return ERR_NONE;
+      } else {
+        return {ERR_FATAL, "Unable to parse device index in executor token %s", token.c_str()};
+      }
+    } else {
+      ptr = endPtr;
+    }
+
+    // Parse (optional) executor slot
+    ptr = ParseAlphaRange(ptr, exeDevice.exeSlots);
+    if (!ptr) return {ERR_FATAL, "Unable to parse executor slot in executor token %s", token.c_str()};
+
+    // Check for subindex after device
+    if (*ptr == '.') {
+      ptr++; // Skip '.'
+      ptr = ParseRange(ptr, -2, exeDevice.exeSubIndices);
+      if (!ptr) return {ERR_FATAL, "Unable to parse subindex in executor token %s", token.c_str()};
+    }
+
+    // Ensure that EXE_NIC has non-empty subindex
+    if (exeDevice.exeType == EXE_NIC && exeDevice.exeSubIndices.size() == 0) {
+      return {ERR_FATAL, "NIC executor requires specification of a subindex in executor token %s", token.c_str()};
+    }
+
+    // Parse (optional) executor subslot
+    ptr = ParseAlphaRange(ptr, exeDevice.exeSubSlots);
+    if (!ptr) return {ERR_FATAL, "Unable to parse subslot in executor token %s", token.c_str()};
+
+    return ERR_NONE;
   }
 
 // Memory-related functions
@@ -766,7 +1305,7 @@ namespace {
   }
 
   // Allocate memory
-  static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr)
+  static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr, bool isShareable = false)
   {
     if (numBytes == 0) {
       return {ERR_FATAL, "Unable to allocate 0 bytes"};
@@ -786,17 +1325,33 @@ namespace {
       numa_set_preferred(numaIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
-      if (memType == MEM_CPU_FINE) {
-#if defined (__NVCC__)
-        return {ERR_FATAL, "Fine-grained CPU memory not supported on NVIDIA platform"};
-#else
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocCoherent));
+      int flags = 0;
+#if !defined(__NVCC__)
+      flags |= hipHostMallocNumaUser;
 #endif
-      } else if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
+      if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags));
+      } else if (memType == MEM_CPU_COHERENT) {
 #if defined (__NVCC__)
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, 0));
+        return {ERR_FATAL, "Coherent pinned-CPU memory not supported on NVIDIA platform"};
 #else
-        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, hipHostMallocNumaUser | hipHostMallocNonCoherent));
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags | hipHostMallocCoherent));
+#endif
+      } else if (memType == MEM_CPU_NONCOHERENT) {
+#if defined (__NVCC__)
+        return {ERR_FATAL, "Non-coherent pinned-CPU memory not supported on NVIDIA platform"};
+#else
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags | hipHostMallocNonCoherent));
+#endif
+      } else if (memType == MEM_CPU_UNCACHED) {
+#if defined (__NVCC__)
+        return {ERR_FATAL, "Coherent CPU memory not supported on NVIDIA platform"};
+#else
+#if HIP_VERSION_MAJOR >= 7
+        ERR_CHECK(hipHostMalloc((void **)memPtr, numBytes, flags | hipHostMallocUncached));
+#else
+        return {ERR_FATAL, "Uncached pinned-CPU memory requires ROCm 7.0"};
+#endif
 #endif
       } else if (memType == MEM_CPU_UNPINNED) {
         *memPtr = numa_alloc_onnode(numBytes, numaIdx);
@@ -818,6 +1373,13 @@ namespace {
       } else if (memType == MEM_GPU_FINE) {
 #if defined (__NVCC__)
         return {ERR_FATAL, "Fine-grained GPU memory not supported on NVIDIA platform"};
+#else
+        int flag = hipDeviceMallocFinegrained;
+        ERR_CHECK(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
+#endif
+      } else if (memType == MEM_GPU_UNCACHED) {
+#if defined (__NVCC__)
+        return {ERR_FATAL, "Uncached GPU memory not supported on NVIDIA platform"};
 #else
         int flag = hipDeviceMallocUncached;
         ERR_CHECK(hipExtMallocWithFlags((void**)memPtr, numBytes, flag));
@@ -843,7 +1405,7 @@ namespace {
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
     switch (memType) {
-    case MEM_CPU: case MEM_CPU_FINE: case MEM_CPU_CLOSEST:
+    case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
     {
       ERR_CHECK(hipHostFree(memPtr));
       break;
@@ -853,7 +1415,7 @@ namespace {
       numa_free(memPtr, bytes);
       break;
     }
-    case MEM_GPU : case MEM_GPU_FINE: case MEM_MANAGED:
+    case MEM_GPU : case MEM_GPU_FINE: case MEM_GPU_UNCACHED: case MEM_MANAGED:
     {
       ERR_CHECK(hipFree(memPtr));
       break;
@@ -864,104 +1426,33 @@ namespace {
     return ERR_NONE;
   }
 
-// HSA-related functions
-//========================================================================================
-
-#if !defined(__NVCC__)
-  // Get the hsa_agent_t associated with a ExeDevice
-  static ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent)
-  {
-    static bool isInitialized = false;
-    static std::vector<hsa_agent_t> cpuAgents;
-    static std::vector<hsa_agent_t> gpuAgents;
-
-    int const& exeIndex = exeDevice.exeIndex;
-    int const numCpus   = GetNumExecutors(EXE_CPU);
-    int const numGpus   = GetNumExecutors(EXE_GPU_GFX);
-
-    // Initialize results on first use
-    if (!isInitialized) {
-      hsa_amd_pointer_info_t info;
-      info.size = sizeof(info);
-
-      ErrResult err;
-      int32_t* tempBuffer;
-
-      // Index CPU agents
-      cpuAgents.clear();
-      for (int i = 0; i < numCpus; i++) {
-        ERR_CHECK(AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer));
-        ERR_CHECK(hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL));
-        cpuAgents.push_back(info.agentOwner);
-        ERR_CHECK(DeallocateMemory(MEM_CPU, tempBuffer, 1024));
-      }
-
-      // Index GPU agents
-      gpuAgents.clear();
-      for (int i = 0; i < numGpus; i++) {
-        ERR_CHECK(AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer));
-        ERR_CHECK(hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL));
-        gpuAgents.push_back(info.agentOwner);
-        ERR_CHECK(DeallocateMemory(MEM_GPU, tempBuffer, 1024));
-      }
-      isInitialized = true;
-    }
-
-    switch (exeDevice.exeType) {
-    case EXE_CPU:
-      if (exeIndex < 0 || exeIndex >= numCpus)
-        return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
-      agent = cpuAgents[exeDevice.exeIndex];
-      break;
-    case EXE_GPU_GFX: case EXE_GPU_DMA:
-      if (exeIndex < 0 || exeIndex >= numGpus)
-
-        return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
-      agent = gpuAgents[exeIndex];
-      break;
-    default:
-      return {ERR_FATAL,
-              "Attempting to get HSA agent of unknown or unsupported executor type (%d)",
-              exeDevice.exeType};
-    }
-    return ERR_NONE;
-  }
-
-  // Get the hsa_agent_t associated with a MemDevice
-  static ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent)
-  {
-    if (memDevice.memType == MEM_CPU_CLOSEST)
-      return GetHsaAgent({EXE_CPU, GetClosestCpuNumaToGpu(memDevice.memIndex)}, agent);
-    if (IsCpuMemType(memDevice.memType)) return GetHsaAgent({EXE_CPU, memDevice.memIndex}, agent);
-    if (IsGpuMemType(memDevice.memType)) return GetHsaAgent({EXE_GPU_GFX, memDevice.memIndex}, agent);
-    return {ERR_FATAL,
-            "Unable to get HSA agent for memDevice (%d,%d)",
-            memDevice.memType, memDevice.memIndex};
-  }
-#endif
-
 // Setup validation-related functions
 //========================================================================================
-
-  static ErrResult GetActualExecutor(ConfigOptions const& cfg,
-                                     ExeDevice     const& origExeDevice,
-                                     ExeDevice&           actualExeDevice)
+  // This function resolves executors that may be indexed by "nearest"
+  static ErrResult GetActualExecutor(ExeDevice     const& origExeDevice,
+                                     ExeDevice&           actualExeDevice,
+                                     int                  rankOverride = -1)
   {
     // By default, nothing needs to change
     actualExeDevice = origExeDevice;
 
+    // Check that executor rank is valid
+    int exeRank = (rankOverride == -1 ? origExeDevice.exeRank : rankOverride);
+    if (exeRank < 0 || exeRank >= GetNumRanks())
+      return {ERR_FATAL, "Rank index must be between 0 and %d (instead of %d)", GetNumRanks() - 1, exeRank};
+
     // When using NIC_NEAREST, remap to the closest NIC to the GPU
     if (origExeDevice.exeType == EXE_NIC_NEAREST) {
       actualExeDevice.exeType  = EXE_NIC;
-
-      if (cfg.nic.closestNics.size() > 0) {
-        if (origExeDevice.exeIndex < 0 || origExeDevice.exeIndex >= cfg.nic.closestNics.size())
-          return {ERR_FATAL, "NIC index is out of range (%d)", origExeDevice.exeIndex};
-
-        actualExeDevice.exeIndex = cfg.nic.closestNics[origExeDevice.exeIndex];
-      } else {
-        actualExeDevice.exeIndex = GetClosestNicToGpu(origExeDevice.exeIndex);
+      actualExeDevice.exeRank  = exeRank;
+      std::vector<int> nicIndices;
+      GetClosestNicsToGpu(nicIndices, origExeDevice.exeIndex, exeRank);
+      if (origExeDevice.exeSlot < 0 || origExeDevice.exeSlot >= nicIndices.size()) {
+        return {ERR_FATAL, "Rank %d GPU %d closest NIC slot %d is invalid (%lu slots detected)",
+          exeRank, origExeDevice.exeIndex, origExeDevice.exeSlot, nicIndices.size()};
       }
+      actualExeDevice.exeIndex = nicIndices[actualExeDevice.exeSlot];
+      actualExeDevice.exeSlot = 0;
     }
     return ERR_NONE;
   }
@@ -972,27 +1463,145 @@ namespace {
     if (memDevice.memType == MEM_NULL)
       return ERR_NONE;
 
+    if (memDevice.memRank < 0 || memDevice.memRank >= GetNumRanks()) {
+      return {ERR_FATAL,
+              "Rank index must be between 0 and %d (instead of %d)", GetNumRanks() - 1, memDevice.memRank};
+    }
+
     if (IsCpuMemType(memDevice.memType) && memDevice.memType != MEM_CPU_CLOSEST) {
-      int numCpus = GetNumExecutors(EXE_CPU);
+      int numCpus = GetNumExecutors(EXE_CPU, memDevice.memRank);
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numCpus)
         return {ERR_FATAL,
-                "CPU index must be between 0 and %d (instead of %d)", numCpus - 1, memDevice.memIndex};
+                "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
       return ERR_NONE;
     }
 
     if (IsGpuMemType(memDevice.memType) || memDevice.memType == MEM_CPU_CLOSEST) {
-    int numGpus = GetNumExecutors(EXE_GPU_GFX);
+      int numGpus = GetNumExecutors(EXE_GPU_GFX, memDevice.memRank);
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numGpus)
         return {ERR_FATAL,
-                "GPU index must be between 0 and %d (instead of %d)", numGpus - 1, memDevice.memIndex};
+                "GPU index must be between 0 and %d (instead of %d) on rank %d", numGpus - 1, memDevice.memIndex, memDevice.memRank};
       if (memDevice.memType == MEM_CPU_CLOSEST) {
-        if (GetClosestCpuNumaToGpu(memDevice.memIndex) == -1) {
-          return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d", memDevice.memIndex};
+        if (GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) == -1) {
+          return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
       }
       return ERR_NONE;
     }
     return {ERR_FATAL, "Unsupported memory type (%d)", memDevice.memType};
+  }
+
+  static void CheckMultiNodeConfigConsistency(ConfigOptions const& cfg,
+                                              std::vector<ErrResult>& errors)
+  {
+    if (GetCommMode() == COMM_NONE) return;
+    if (System::Get().IsVerbose()) {
+      printf("[INFO] Rank %d checking config consistency\n", GetRank());
+    }
+
+    // To check consistency, compare against rank 0
+    int root = 0;
+
+    #define ADD_ERROR(STR) errors.push_back({ERR_FATAL, STR " must be consistent across all ranks"})
+
+    // Compare general options
+    {
+      GeneralOptions general = cfg.general;
+      System::Get().Broadcast(root, sizeof(general), &general);
+      if (general.numIterations      != cfg.general.numIterations)      ADD_ERROR("cfg.general.numIterations");
+      if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
+      if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
+      if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
+      if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
+    }
+
+    // Compare data options
+    {
+      DataOptions data = cfg.data;
+      System::Get().Broadcast(root, sizeof(data), &data);
+
+      // data.alwaysValidate is permitted to be different across ranks
+
+      if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
+      if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
+
+      size_t fillPatternSize = cfg.data.fillPattern.size();
+      System::Get().Broadcast(root, sizeof(fillPatternSize), &fillPatternSize);
+      if (fillPatternSize != cfg.data.fillPattern.size()) {
+        ADD_ERROR("cfg.data.fillPattern");
+      } else if (fillPatternSize > 0) {
+        auto fillPatternTemp = cfg.data.fillPattern;
+        System::Get().BroadcastVector(0, fillPatternTemp);
+        for (size_t i = 0; i < fillPatternSize; i++) {
+          if (fillPatternTemp[i] != cfg.data.fillPattern[i]) {
+            ADD_ERROR("cfg.data.fillPattern");
+            break;
+          }
+        }
+      }
+
+      size_t fillCompressSize = cfg.data.fillCompress.size();
+      System::Get().Broadcast(root, sizeof(fillCompressSize), &fillCompressSize);
+      if (fillCompressSize != cfg.data.fillCompress.size()) {
+        ADD_ERROR("cfg.data.fillCompress");
+      } else if (fillCompressSize > 0) {
+        auto fillCompressTemp = cfg.data.fillCompress;
+        System::Get().BroadcastVector(0, fillCompressTemp);
+        for (size_t i = 0; i < fillCompressSize; i++) {
+          if (fillCompressTemp[i] != cfg.data.fillCompress[i]) {
+            ADD_ERROR("cfg.data.fillCompress");
+            break;
+          }
+        }
+      }
+
+      // data.validateDirect is permitted to be different across ranks
+      // data.validateSource is permitted to be different across ranks
+    }
+
+    // Compare GFX Executor options
+    {
+      GfxOptions gfx = cfg.gfx;
+      System::Get().Broadcast(root, sizeof(gfx), &gfx);
+      if (gfx.blockOrder     != cfg.gfx.blockOrder)     ADD_ERROR("cfg.gfx.blockOrder");
+      if (gfx.blockSize      != cfg.gfx.blockSize)      ADD_ERROR("cfg.gfx.blockSize");
+      // gfx.cuMask       is permitted to be different across ranks
+      // gfx.perfXccTable is permitted to be different across ranks
+      if (gfx.seType         != cfg.gfx.seType)         ADD_ERROR("cfg.gfx.seType");
+      if (gfx.temporalMode   != cfg.gfx.temporalMode)   ADD_ERROR("cfg.gfx.temporalMode");
+      if (gfx.unrollFactor   != cfg.gfx.unrollFactor)   ADD_ERROR("cfg.gfx.unrollFactor)");
+      if (gfx.useHipEvents   != cfg.gfx.useHipEvents)   ADD_ERROR("cfg.gfx.useHipEvents");
+      if (gfx.useMultiStream != cfg.gfx.useMultiStream) ADD_ERROR("cfg.gfx.useMultiStream");
+      if (gfx.useSingleTeam  != cfg.gfx.useSingleTeam)  ADD_ERROR("cfg.gfx.useSingleTeam");
+      if (gfx.waveOrder      != cfg.gfx.waveOrder)      ADD_ERROR("cfg.gfx.waveOrder");
+      if (gfx.wordSize       != cfg.gfx.wordSize)       ADD_ERROR("cfg.gfx.wordSize");
+    }
+
+    // Compare DMA Executor options
+    {
+      DmaOptions dma = cfg.dma;
+      System::Get().Broadcast(root, sizeof(dma), &dma);
+      if (dma.useHipEvents != cfg.dma.useHipEvents) ADD_ERROR("cfg.dma.useHipEvents");
+      if (dma.useHsaCopy   != cfg.dma.useHsaCopy)   ADD_ERROR("cfg.dma.useHsaCopy");
+    }
+
+    // Compare NIC options
+    {
+      NicOptions nic = cfg.nic;
+      System::Get().Broadcast(root, sizeof(nic), &nic);
+      if (nic.chunkBytes      != cfg.nic.chunkBytes)      ADD_ERROR("cfg.nic.chunkBytes");
+      // nic.ibGidIndex  is permitted to be different across ranks
+      // nic.ibPort      is permitted to be different across ranks
+      if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
+      if (nic.maxRecvWorkReq  != cfg.nic.maxRecvWorkReq)  ADD_ERROR("cfg.nic.maxRecvWorkReq");
+      if (nic.maxSendWorkReq  != cfg.nic.maxSendWorkReq)  ADD_ERROR("cfg.nic.maxSendWorkReq");
+      // nic.queueSize   is permitted to be different across ranks
+      if (nic.roceVersion     != cfg.nic.roceVersion)     ADD_ERROR("cfg.nic.roceVersion");
+      if (nic.useRelaxedOrder != cfg.nic.useRelaxedOrder) ADD_ERROR("cfg.nic.useRelaxedOrder");
+      if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
+    }
+
+    #undef ADD_ERROR
   }
 
   // Validate configuration options - return trues if and only if an fatal error is detected
@@ -1002,6 +1611,9 @@ namespace {
     // Check general options
     if (cfg.general.numWarmups < 0)
       errors.push_back({ERR_FATAL, "[general.numWarmups] must be a non-negative number"});
+
+    // Check that config options are consistent (where necessary) across all ranks
+    CheckMultiNodeConfigConsistency(cfg, errors);
 
     // Check data options
     if (cfg.data.blockBytes == 0 || cfg.data.blockBytes % 4)
@@ -1085,16 +1697,9 @@ namespace {
 
     // Check NIC options
 #ifdef NIC_EXEC_ENABLED
-    int numNics = GetNumExecutors(EXE_NIC);
-    for (auto const& nic : cfg.nic.closestNics)
-      if (nic < 0 || nic >= numNics)
-        errors.push_back({ERR_FATAL, "NIC index (%d) in user-specified closest NIC list must be between 0 and %d",
-            nic, numNics - 1});
-
-    size_t closetNicsSize = cfg.nic.closestNics.size();
-    if (closetNicsSize > 0 && closetNicsSize < numGpus)
-      errors.push_back({ERR_FATAL, "User-specified closest NIC list must match GPU count of %d",
-          numGpus});
+    if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
+      errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    }
 #endif
 
     // NVIDIA specific
@@ -1123,19 +1728,72 @@ namespace {
     return false;
   }
 
+  static void CheckMultiNodeTransferConsistency(std::vector<Transfer> const& transfers,
+                                                std::vector<ErrResult>& errors)
+  {
+    if (GetCommMode() == COMM_NONE) return;
+
+    if (System::Get().IsVerbose()) {
+      printf("[INFO] Rank %d checking transfers consistency\n", GetRank());
+    }
+
+    // To check consistency, compare against rank 0
+    int root = 0;
+
+    #define ADD_ERROR(STR)         \
+    do {                          \
+      isInconsistent = true;                                            \
+      if (System::Get().IsVerbose())                                    \
+        errors.push_back({ERR_FATAL, STR " must be the same for Transfer %d on all ranks", i}); \
+    } while(0)
+
+    size_t numTransfers = transfers.size();
+    System::Get().Broadcast(root, sizeof(numTransfers), &numTransfers);
+    if (numTransfers != transfers.size()) {
+      errors.push_back({ERR_FATAL, "The number of Transfers to run must be consistent across ranks"});
+    }
+
+    bool isInconsistent = false;
+    for (size_t i = 0; i < numTransfers; i++) {
+      Transfer t = transfers[i];
+
+      System::Get().Broadcast(root, sizeof(t.numBytes), &t.numBytes);
+      System::Get().BroadcastVector(root, t.srcs);
+      System::Get().BroadcastVector(root, t.dsts);
+      System::Get().Broadcast(root, sizeof(t.exeDevice),   &t.exeDevice);
+      System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
+      System::Get().Broadcast(root, sizeof(t.exeSubSlot),  &t.exeSubSlot);
+      System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
+
+      if (t.numBytes    != transfers[i].numBytes)    ADD_ERROR("numBytes");
+      if (t.srcs        != transfers[i].srcs)        ADD_ERROR("Source memory locations");
+      if (t.dsts        != transfers[i].dsts)        ADD_ERROR("Destination memory locations");
+      if (t.exeDevice < transfers[i].exeDevice ||
+          transfers[i].exeDevice < t.exeDevice)      ADD_ERROR("Executor device");
+      if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
+      if (t.exeSubSlot  != transfers[i].exeSubSlot)  ADD_ERROR("Executor dst slot");
+      if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
+    }
+
+    if (isInconsistent && !System::Get().IsVerbose()) {
+      errors.push_back({ERR_FATAL, "Transfers to execute must be identical across all ranks"});
+    }
+
+    #undef ADD_ERROR
+  }
+
   // Validate Transfers to execute - returns true if and only if fatal error detected
   static bool TransfersHaveErrors(ConfigOptions         const& cfg,
                                   std::vector<Transfer> const& transfers,
                                   std::vector<ErrResult>&      errors)
   {
-    int numCpus = GetNumExecutors(EXE_CPU);
-    int numGpus = GetNumExecutors(EXE_GPU_GFX);
-    int numNics = GetNumExecutors(EXE_NIC);
-
     std::set<ExeDevice>      executors;
     std::map<ExeDevice, int> transferCount;
     std::map<ExeDevice, int> useSubIndexCount;
     std::map<ExeDevice, int> totalSubExecs;
+
+    // Check that the set of requested transfers is consistent across all ranks
+    CheckMultiNodeTransferConsistency(transfers, errors);
 
     // Per-Transfer checks
     for (size_t i = 0; i < transfers.size(); i++) {
@@ -1144,6 +1802,9 @@ namespace {
       if (t.numBytes == 0)
         errors.push_back({ERR_FATAL, "Transfer %d: Cannot perform 0-byte transfers", i});
 
+      // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
+      // mean that some subexecutors might not have any work assigned to them if the amount to
+      // transfer is small
       if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU) {
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
@@ -1152,8 +1813,8 @@ namespace {
 
         if (maxSubExecToUse < t.numSubExecs)
           errors.push_back({ERR_WARN,
-                            "Transfer %d data size is too small - will only use %d of %d subexecutors",
-                            i, maxSubExecToUse, t.numSubExecs});
+                            "Transfer %d data size is too small - will only use %d of %d subexecutors due to blockBytes of %d",
+                            i, maxSubExecToUse, t.numSubExecs, cfg.data.blockBytes});
       }
 
       // Check sources and destinations
@@ -1171,21 +1832,29 @@ namespace {
           errors.push_back({ERR_FATAL, "Transfer %d: DST %d: %s", i, j, err.errMsg.c_str()});
       }
 
-      // Check executor
+      // Check executor rank
+      if (t.exeDevice.exeRank < 0 || t.exeDevice.exeRank >= GetNumRanks()) {
+        errors.push_back({ERR_FATAL,
+            "Rank index for executor must be between 0 and %d (instead of %d)", GetNumRanks() - 1, t.exeDevice.exeRank});
+        continue;
+      }
+
       executors.insert(t.exeDevice);
       transferCount[t.exeDevice]++;
+      int numExecutors = GetNumExecutors(t.exeDevice.exeType, t.exeDevice.exeRank);
+
       switch (t.exeDevice.exeType) {
       case EXE_CPU:
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numCpus)
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors)
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: CPU index must be between 0 and %d (instead of %d)",
-                            i, numCpus - 1, t.exeDevice.exeIndex});
+                            "Transfer %d: CPU index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
         break;
       case EXE_GPU_GFX:
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numGpus) {
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: GFX index must be between 0 and %d (instead of %d)",
-                            i, numGpus - 1, t.exeDevice.exeIndex});
+                            "Transfer %d: GFX index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
         } else {
           if (t.exeSubIndex != -1) {
 #if defined(__NVCC__)
@@ -1196,7 +1865,7 @@ namespace {
             int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
             if (t.exeSubIndex >= numSubIndices)
               errors.push_back({ERR_FATAL,
-                                "Transfer %d: GFX subIndex (XCC) must be between 0 and %d", i, numSubIndices - 1});
+                  "Transfer %d: GFX subIndex (XCC) must be between 0 and %d for rank %d", i, numSubIndices - 1, t.exeDevice.exeRank});
 #endif
           }
         }
@@ -1207,10 +1876,10 @@ namespace {
                             "Transfer %d: DMA executor must have exactly 1 source and 1 destination", i});
         }
 
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numGpus) {
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: DMA index must be between 0 and %d (instead of %d)",
-                            i, numGpus - 1, t.exeDevice.exeIndex});
+                            "Transfer %d: DMA index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
           // Cannot proceed with any further checks
           continue;
         }
@@ -1230,12 +1899,12 @@ namespace {
           // Check that engine Id exists between agents
           hsa_agent_t srcAgent, dstAgent;
           ErrResult err;
-          err = GetHsaAgent(t.srcs[0], srcAgent);
+          err = System::Get().GetHsaAgent(t.srcs[0], srcAgent);
           if (err.errType != ERR_NONE) {
             errors.push_back(err);
             if (err.errType == ERR_FATAL) break;
           }
-          err = GetHsaAgent(t.dsts[0], dstAgent);
+          err = System::Get().GetHsaAgent(t.dsts[0], dstAgent);
           if (err.errType != ERR_NONE) {
             errors.push_back(err);
             if (err.errType == ERR_FATAL) break;
@@ -1268,44 +1937,82 @@ namespace {
           if (IsGpuMemType(t.srcs[0].memType)) {
             if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
               errors.push_back({ERR_WARN,
-                  "Transfer %d: DMA executor will automatically switch to using the source memory device (%d) not (%d)",
+                  "Transfer %d: DMA executor may automatically switch to using the source memory device (%d) not (%d)",
                   i, t.srcs[0].memIndex, t.exeDevice.exeIndex});
             }
           } else if (t.dsts[0].memIndex != t.exeDevice.exeIndex) {
             errors.push_back({ERR_WARN,
-                "Transfer %d: DMA executor will automatically switch to using the destination memory device (%d) not (%d)",
+                "Transfer %d: DMA executor may automatically switch to using the destination memory device (%d) not (%d)",
                 i, t.dsts[0].memIndex, t.exeDevice.exeIndex});
           }
         }
         break;
-      case EXE_NIC:
+      case EXE_NIC: case EXE_NIC_NEAREST:
 #ifdef NIC_EXEC_ENABLED
       {
-        int srcIndex = t.exeDevice.exeIndex;
-        int dstIndex = t.exeSubIndex;
-        if (srcIndex < 0 || srcIndex >= numNics)
-          errors.push_back({ERR_FATAL, "Transfer %d: src NIC executor indexes an out-of-range NIC (%d)", i, srcIndex});
-        if (dstIndex < 0 || dstIndex >= numNics)
-          errors.push_back({ERR_FATAL, "Transfer %d: dst NIC executor indexes an out-of-range NIC (%d)", i, dstIndex});
-      }
-#else
-        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available", i});
-#endif
-        break;
-      case EXE_NIC_NEAREST:
-#ifdef NIC_EXEC_ENABLED
-      {
+        // NIC Executors can only execute a copy operation
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+          errors.push_back({ERR_FATAL, "Transfer %d: NIC executor requires single SRC and single DST", i});
+          break;
+        }
+
+        // NIC executor cannot do remote read + remote write - either src or dst must be local
+        int srcExeRank = t.exeDevice.exeRank;
+        int srcMemRank = t.srcs[0].memRank;
+        int dstMemRank = t.dsts[0].memRank;
+        int dstExeRank = (srcExeRank == srcMemRank ? dstMemRank : srcMemRank);
+        if (srcMemRank != srcExeRank && dstMemRank != srcExeRank) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: NIC executor rank (%d) must be same as SRC memory rank (%d) or DST memory rank (%d)", i, srcExeRank, srcMemRank, dstMemRank});
+          break;
+        }
+
+        // The SRC NIC executor is the one that initiates either a (remote read/local write) or (local read/remote write) copy operation
         ExeDevice srcExeDevice;
-        ErrResult errSrc = GetActualExecutor(cfg, t.exeDevice, srcExeDevice);
+        ErrResult errSrc = GetActualExecutor(t.exeDevice, srcExeDevice);
         if (errSrc.errType != ERR_NONE) errors.push_back(errSrc);
+
+        // Check that the SRC NIC exists and is active
+        if (srcExeDevice.exeIndex < 0 || srcExeDevice.exeIndex >= GetNumExecutors(EXE_NIC, srcExeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d SRC NIC executor indexes an out-of-range NIC (%d).  Detected %d NICs",
+              i, srcExeRank, srcExeDevice.exeIndex, GetNumExecutors(EXE_NIC, srcExeRank)});
+        } else if (!NicIsActive(srcExeDevice.exeIndex, srcExeDevice.exeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d SRC NIC executor %d is not active", i, srcExeDevice.exeRank, srcExeDevice.exeIndex});
+        }
+
+        // The DST NIC executor facilitates the copy but issues no commands
+        ExeDevice dstOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, dstExeRank, t.exeSubSlot};
         ExeDevice dstExeDevice;
-        ErrResult errDst = GetActualExecutor(cfg, {t.exeDevice.exeType, t.exeSubIndex}, dstExeDevice);
-        if (errDst.errType != ERR_NONE) errors.push_back(errDst);
+        ErrResult errDst = GetActualExecutor(dstOrgDevice, dstExeDevice);
+
+        // Check that the DST NIC exists and is active
+        if (dstExeDevice.exeIndex < 0 || dstExeDevice.exeIndex >= GetNumExecutors(EXE_NIC, dstExeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d DST NIC executor indexes an out-of-range NIC (%d).  Detected %d NICs",
+              i, dstExeRank, dstExeDevice.exeIndex, GetNumExecutors(EXE_NIC, dstExeRank)});
+        } else if (!NicIsActive(dstExeDevice.exeIndex, dstExeDevice.exeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Rank %d DST NIC executor %d is not active", i, dstExeDevice.exeRank, dstExeDevice.exeIndex});
+        }
       }
 #else
-        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available", i});
+      errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
 #endif
-        break;
+      break;
+      }
+
+      // Check for multi-node support
+      // Currently this is not supported for CPU/GPU executors
+      if (IsCpuExeType(t.exeDevice.exeType) || IsGpuExeType(t.exeDevice.exeType)) {
+        bool crossRank = false;
+        for (auto const& src : t.srcs) {
+          crossRank |= (src.memRank != t.exeDevice.exeRank);
+        }
+        for (auto const& dst : t.dsts) {
+          crossRank |= (dst.memRank != t.exeDevice.exeRank);
+        }
+        if (crossRank) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
+              i, t.exeDevice.exeRank});
+        }
       }
 
       // Check subexecutors
@@ -1462,8 +2169,9 @@ namespace {
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
-    vector<ibv_sge>            sgePerQueuePair;   ///< Scatter-gather elements per queue pair
-    vector<ibv_send_wr>        sendWorkRequests;  ///< Send work requests per queue pair
+    bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
+    vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
+    vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
 #endif
 
     // Counters
@@ -1651,9 +2359,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int numIbvDevices = 0;
       ibv_device** deviceList = ibv_get_device_list(&numIbvDevices);
 
+      // Check for NIC_FILTER
+      // By default, accept all NIC names
+      std::string nicFilterPattern = getenv("NIC_FILTER") ? getenv("NIC_FILTER") : ".*";
+
       if (deviceList && numIbvDevices > 0) {
         // Loop over each device to collect information
         for (int i = 0; i < numIbvDevices; i++) {
+
+          // Filter by name
+          if (!std::regex_match(deviceList[i]->name, std::regex(nicFilterPattern))) continue;
+
           IbvDevice ibvDevice;
           ibvDevice.devicePtr = deviceList[i];
           ibvDevice.name = deviceList[i]->name;
@@ -1730,9 +2446,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 //========================================================================================
 
   // Prints off PCIe tree
-  static void PrintPCIeTree(PCIeNode    const& node,
-                            std::string const& prefix = "",
-                            bool               isLast = true)
+  static inline void PrintPCIeTree(PCIeNode    const& node,
+                                   std::string const& prefix = "",
+                                   bool               isLast = true)
   {
     if (!node.address.empty()) {
       printf("%s%s%s", prefix.c_str(), (isLast ? "└── " : "├── "), node.address.c_str());
@@ -1781,7 +2497,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Build PCIe tree on first use
     if (!isInitialized) {
       // Add NICs to the tree
-      int numNics = GetNumExecutors(EXE_NIC);
       auto const& ibvDeviceList = GetIbvDeviceList();
       for (IbvDevice const& ibvDevice : ibvDeviceList) {
         if (!ibvDevice.hasActivePort || ibvDevice.busId == "") continue;
@@ -1789,7 +2504,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
 
       // Add GPUs to the tree
-      int numGpus = GetNumExecutors(EXE_GPU_GFX);
+      int numGpus = 0;
+      if (hipGetDeviceCount(&numGpus) != hipSuccess) numGpus = 0;
       for (int i = 0; i < numGpus; ++i) {
         char hipPciBusId[64];
         if (hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i) == hipSuccess) {
@@ -1960,12 +2676,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  // Structure used to exchange connection information
+  struct __attribute__((packed)) ConnInfo
+  {
+    uint16_t lid;     // Local  routing id
+    ibv_gid  gid;     // Global routing id (RoCE)
+    int      gidIdx;  // Global routing id index (RoCE)
+    uint32_t qpn;     // Queue pair number
+    uint32_t rkey;    // Remote memory access key
+    uint64_t vaddr;   // Remote virtual address of the memory region
+  };
+
   // Transition QueuePair to Ready to Receive State
   static ErrResult TransitionQpToRtr(ibv_qp*         qp,
-                                     uint16_t const& dlid,
-                                     uint32_t const& dqpn,
-                                     ibv_gid  const& gid,
-                                     uint8_t  const& gidIndex,
+                                     ConnInfo const& connInfo,
                                      uint8_t  const& port,
                                      bool     const& isRoCE,
                                      ibv_mtu  const& mtu)
@@ -1979,19 +2703,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     attr.min_rnr_timer      = 12;
     if (isRoCE) {
       attr.ah_attr.is_global                     = 1;
-      attr.ah_attr.grh.dgid.global.subnet_prefix = gid.global.subnet_prefix;
-      attr.ah_attr.grh.dgid.global.interface_id  = gid.global.interface_id;
+      attr.ah_attr.grh.dgid.global.subnet_prefix = connInfo.gid.global.subnet_prefix;
+      attr.ah_attr.grh.dgid.global.interface_id  = connInfo.gid.global.interface_id;
       attr.ah_attr.grh.flow_label                = 0;
-      attr.ah_attr.grh.sgid_index                = gidIndex;
+      attr.ah_attr.grh.sgid_index                = connInfo.gidIdx;
       attr.ah_attr.grh.hop_limit                 = 255;
     } else {
       attr.ah_attr.is_global = 0;
-      attr.ah_attr.dlid      = dlid;
+      attr.ah_attr.dlid      = connInfo.lid;
     }
     attr.ah_attr.sl            = 0;
     attr.ah_attr.src_path_bits = 0;
     attr.ah_attr.port_num      = port;
-    attr.dest_qp_num           = dqpn;
+    attr.dest_qp_num           = connInfo.qpn;
 
     // Modify the QP
     int ret = ibv_modify_qp(qp, &attr,
@@ -2033,38 +2757,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
-                                               ExeDevice     const& srcExeDevice,
+                                               ExeDevice     const& nicExeDevice,
                                                Transfer      const& t,
                                                TransferResources&   rss)
 
   {
-    // Switch to the closest NUMA node to this NIC
-    int numaNode = GetIbvDeviceList()[srcExeDevice.exeIndex].numaNode;
-    if (numaNode != -1)
-      numa_run_on_node(numaNode);
+    // The NIC executor is the one that initiates either a (remote read/local write) or (local read/remote write) copy operation
+    // The NON executor is the NIC executor that facilitates the copy but issues no commands
+    // TransferResources will be mostly prepared only on the ranks that are involved in this transfer, although all ranks pass
+    // through this code
+    int const srcMemRank = t.srcs[0].memRank;
+    int const dstMemRank = t.dsts[0].memRank;
+    int const nicExeRank = nicExeDevice.exeRank;
+    int const nonExeRank = (nicExeRank == srcMemRank ? dstMemRank : srcMemRank);
+    rss.srcIsExeNic = (srcMemRank == nicExeRank);
 
-    int const port = cfg.nic.ibPort;
+    // Figure out non Executor (Accounts for possible remap due to use of EXE_NIC_NEAREST)
+    ExeDevice nonOrgDevice = {t.exeDevice.exeType, t.exeSubIndex, nonExeRank, t.exeSubSlot};
+    ExeDevice nonExeDevice;
+    ERR_CHECK(GetActualExecutor(nonOrgDevice, nonExeDevice));
 
-    // Figure out destination NIC (Accounts for possible remap due to use of EXE_NIC_NEAREST)
-    ExeDevice dstExeDevice;
-    ERR_CHECK(GetActualExecutor(cfg, {t.exeDevice.exeType, t.exeSubIndex}, dstExeDevice));
-
-    rss.srcNicIndex = srcExeDevice.exeIndex;
-    rss.dstNicIndex = dstExeDevice.exeIndex;
+    // All ranks track which NIC was used and number of queue pairs used
+    rss.srcNicIndex = (nicExeRank == srcMemRank ? nicExeDevice.exeIndex : nonExeDevice.exeIndex);
+    rss.dstNicIndex = (nicExeRank == srcMemRank ? nonExeDevice.exeIndex : nicExeDevice.exeIndex);
     rss.qpCount     = t.numSubExecs;
 
-    // Check for valid NICs and active ports
-    int numNics = GetNumExecutors(EXE_NIC);
-    if (rss.srcNicIndex < 0 || rss.srcNicIndex >= numNics)
-      return {ERR_FATAL, "SRC NIC index is out of range (%d)", rss.srcNicIndex};
-    if (rss.dstNicIndex < 0 || rss.dstNicIndex >= numNics)
-      return {ERR_FATAL, "DST NIC index is out of range (%d)", rss.dstNicIndex};
-    if (!GetIbvDeviceList()[rss.srcNicIndex].hasActivePort)
-      return {ERR_FATAL, "SRC NIC %d is not active\n", rss.srcNicIndex};
-    if (!GetIbvDeviceList()[rss.dstNicIndex].hasActivePort)
-      return {ERR_FATAL, "DST NIC %d is not active\n", rss.dstNicIndex};
-
-    // Queue pair flags
+    // Establish memory access flags
     unsigned int rdmaAccessFlags = (IBV_ACCESS_LOCAL_WRITE    |
                                     IBV_ACCESS_REMOTE_READ    |
                                     IBV_ACCESS_REMOTE_WRITE   |
@@ -2073,129 +2791,221 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     unsigned int rdmaMemRegFlags = rdmaAccessFlags;
     if (cfg.nic.useRelaxedOrder) rdmaMemRegFlags |= IBV_ACCESS_RELAXED_ORDERING;
 
-    // Open NIC contexts
-    IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
-    IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
+    int const port = cfg.nic.ibPort;
 
-    // Open protection domains
-    IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
-    IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
-
-    // Register memory region
-    IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
-    IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
-
-    // Create completion queues
-    IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
-    IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
-
-    // Get port attributes
-    IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
-    IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
-
-
-    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer)
-      return {ERR_FATAL, "SRC NIC (%d) and DST NIC (%d) do not have the same link layer", rss.srcNicIndex, rss.dstNicIndex};
-
-    // Prepare GID index
+    // Prepare NIC on SRC mem rank
     int srcGidIndex = cfg.nic.ibGidIndex;
+    bool srcIsRoCE = false;
+    if (GetRank() == srcMemRank) {
+      // Switch to closest CPU NUMA domain
+      int numaNode = GetIbvDeviceList()[rss.srcNicIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
+      // Open SRC NIC context
+      IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
+      // Open SRC protection domain
+      IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
+      // Register SRC memory region
+      IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+      // Create SRC completion queues
+      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Get SRC port attributes
+      IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
+      // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+      srcIsRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+      if (srcIsRoCE) {
+        // Try to auto-detect the GID index
+        std::pair<int, std::string> srcGidInfo (srcGidIndex, "");
+        ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, port, srcGidInfo));
+        srcGidIndex = srcGidInfo.first;
+        IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
+      }
+
+      // Prepare queue pairs and send elements
+      rss.srcQueuePairs.resize(rss.qpCount);
+      for (int i = 0; i < rss.qpCount; i++) {
+       // Create SRC queue pair
+        ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
+        // Initialize SRC queue pairs
+        ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
+      }
+    }
+
+    // Prepare NIC on DST mem rank
     int dstGidIndex = cfg.nic.ibGidIndex;
-
-    // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
-    bool isRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
-    if (isRoCE) {
-      // Try to auto-detect the GID index
-      std::pair<int, std::string> srcGidInfo (srcGidIndex, "");
-      std::pair<int, std::string> dstGidInfo (dstGidIndex, "");
-      ERR_CHECK(GetGidIndex(rss.srcContext, rss.srcPortAttr.gid_tbl_len, cfg.nic.ibPort, srcGidInfo));
-      ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, cfg.nic.ibPort, dstGidInfo));
-      srcGidIndex = srcGidInfo.first;
-      dstGidIndex = dstGidInfo.first;
-      IBV_CALL(ibv_query_gid, rss.srcContext, port, srcGidIndex, &rss.srcGid);
-      IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
+    bool dstIsRoCE = false;
+    if (GetRank() == dstMemRank) {
+      // Switch to closest CPU NUMA domain
+      int numaNode = GetIbvDeviceList()[rss.dstNicIndex].numaNode;
+      if (numaNode != -1)
+        numa_run_on_node(numaNode);
+      // Open DST NIC contexts
+      IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
+      // Open DST protection domain
+      IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
+      // Register DST memory region
+      IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+      // Create DST completion queues
+      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Get DST port attributes
+      IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
+      // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
+      dstIsRoCE = (rss.dstPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
+      if (dstIsRoCE) {
+        // Try to auto-detect the GID index
+        std::pair<int, std::string> dstGidInfo (dstGidIndex, "");
+        ERR_CHECK(GetGidIndex(rss.dstContext, rss.dstPortAttr.gid_tbl_len, port, dstGidInfo));
+        dstGidIndex = dstGidInfo.first;
+        IBV_CALL(ibv_query_gid, rss.dstContext, port, dstGidIndex, &rss.dstGid);
+      }
+      // Prepare queue pairs
+      rss.dstQueuePairs.resize(rss.qpCount);
+      for (int i = 0; i < rss.qpCount; i++) {
+        // Create DST queue pair
+        ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
+        // Initialize SRC/DST queue pairs
+        ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
+      }
     }
 
-    // Prepare queue pairs and send elements
-    rss.srcQueuePairs.resize(rss.qpCount);
-    rss.dstQueuePairs.resize(rss.qpCount);
-    rss.sgePerQueuePair.resize(rss.qpCount);
-    rss.sendWorkRequests.resize(rss.qpCount);
-
-    for (int i = 0; i < rss.qpCount; ++i) {
-
-      // Create scatter-gather element for the portion of memory assigned to this queue pair
-      ibv_sge sg = {};
-      sg.addr   = (uint64_t)rss.subExecParamCpu[i].src[0];
-      sg.length = rss.subExecParamCpu[i].N * sizeof(float);
-      sg.lkey   = rss.srcMemRegion->lkey;
-      rss.sgePerQueuePair[i] = sg;
-
-      // Create send work request
-      ibv_send_wr wr = {};
-      wr.wr_id                = i;
-      wr.sg_list              = &rss.sgePerQueuePair[i];
-      wr.num_sge              = 1;
-      wr.opcode               = IBV_WR_RDMA_WRITE;
-      wr.send_flags           = IBV_SEND_SIGNALED;
-      wr.wr.rdma.remote_addr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
-      wr.wr.rdma.rkey         = rss.dstMemRegion->rkey;
-      rss.sendWorkRequests[i] = wr;
-
-      // Create SRC/DST queue pairs
-      ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCompQueue, rss.srcQueuePairs[i]));
-      ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCompQueue, rss.dstQueuePairs[i]));
-
-      // Initialize SRC/DST queue pairs
-      ERR_CHECK(InitQueuePair(rss.srcQueuePairs[i], port, rdmaAccessFlags));
-      ERR_CHECK(InitQueuePair(rss.dstQueuePairs[i], port, rdmaAccessFlags));
-
-      // Transition the SRC queue pair to ready to receive
-      ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], rss.dstPortAttr.lid,
-                                  rss.dstQueuePairs[i]->qp_num, rss.dstGid,
-                                  dstGidIndex, port, isRoCE,
-                                  rss.srcPortAttr.active_mtu));
-
-      // Transition the SRC queue pair to ready to send
-      ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
-
-      // Transition the DST queue pair to ready to receive
-      ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], rss.srcPortAttr.lid,
-                                  rss.srcQueuePairs[i]->qp_num, rss.srcGid,
-                                  srcGidIndex, port, isRoCE,
-                                  rss.dstPortAttr.active_mtu));
-
-      // Transition the DST queue pair to ready to send
-      ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+    // Executor rank prepares send elements and work requests
+    if (GetRank() == nicExeRank) {
+      rss.sgePerQueuePair.resize(rss.qpCount);
+      rss.sendWorkRequests.resize(rss.qpCount);
     }
 
+    // Broadcast SRC/DST port link_layer so that all ranks know it so that they can be compared
+    System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
+    System::Get().Broadcast(dstMemRank, sizeof(rss.dstPortAttr.link_layer), &rss.dstPortAttr.link_layer);
+    if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer) {
+      printf("[ERROR] Link layer do not match (%d vs %d)\n", rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer);
+      return {ERR_FATAL, "SRC NIC (%d) [Rank %d] and DST NIC (%d) [Rank %d] do not have the same link layer [%d vs %d]",
+        rss.srcNicIndex, srcMemRank, rss.dstNicIndex, dstMemRank, rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer};
+    }
+
+    ConnInfo dstConnInfo = {};
+    ConnInfo srcConnInfo = {};
+    for (int i = 0; i < rss.qpCount; i++) {
+      // Prepare and exchange SRC connection information
+      if (GetRank() == srcMemRank) {
+        srcConnInfo.lid    = rss.srcPortAttr.lid;
+        srcConnInfo.gid    = rss.srcGid;
+        srcConnInfo.gidIdx = srcGidIndex;
+        srcConnInfo.qpn    = rss.srcQueuePairs[i]->qp_num;
+        srcConnInfo.rkey   = rss.srcMemRegion->rkey;
+        srcConnInfo.vaddr  = (uint64_t)rss.subExecParamCpu[i].src[0];
+      }
+      System::Get().Broadcast(srcMemRank, sizeof(srcConnInfo), &srcConnInfo);
+
+      // Prepare and exchange DST connection information
+      if (GetRank() == dstMemRank) {
+        dstConnInfo.lid    = rss.dstPortAttr.lid;
+        dstConnInfo.gid    = rss.dstGid;
+        dstConnInfo.gidIdx = dstGidIndex;
+        dstConnInfo.qpn    = rss.dstQueuePairs[i]->qp_num;
+        dstConnInfo.rkey   = rss.dstMemRegion->rkey;
+        dstConnInfo.vaddr  = (uint64_t)rss.subExecParamCpu[i].dst[0];
+      }
+      System::Get().Broadcast(dstMemRank, sizeof(dstConnInfo), &dstConnInfo);
+
+      // Move queue pairs to ready-to-receive (RTR), using exchanged connection info
+      // Then move them to read-to-send (RTS)
+      if (GetRank() == srcMemRank) {
+        ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu));
+        ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+      }
+      if (GetRank() == dstMemRank) {
+        ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu));
+        ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+      }
+
+      // Prepare scatter-gather element / work request for this queue pair in advance
+      if (GetRank() == nicExeRank) {
+        // Process the data to transfer in chunks (of cfg.nic.chunkBytes)
+        size_t       remaining = rss.subExecParamCpu[i].N * sizeof(float);
+        size_t const numChunks = (remaining + cfg.nic.chunkBytes - 1) / cfg.nic.chunkBytes;
+        uint8_t*     local     = (nicExeRank == srcMemRank ? (uint8_t*)rss.subExecParamCpu[i].src[0]
+                                                           : (uint8_t*)rss.subExecParamCpu[i].dst[0]);
+        auto const   opcode    = (nicExeRank == srcMemRank ? IBV_WR_RDMA_WRITE             : IBV_WR_RDMA_READ);
+        uint64_t     remote    = (nicExeRank == srcMemRank ? dstConnInfo.vaddr             : srcConnInfo.vaddr);
+        auto const   lkey      = (nicExeRank == srcMemRank ? rss.srcMemRegion->lkey        : rss.dstMemRegion->lkey);
+        auto const   rkey      = (nicExeRank == srcMemRank ? dstConnInfo.rkey              : srcConnInfo.rkey);
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Transfer %d SubExec %d executed by rank %d NIC %d is %s with %lu chunks\n",
+                 rss.transferIdx, i, nicExeRank, nicExeDevice.exeIndex,
+                 (opcode == IBV_WR_RDMA_WRITE ? "remote write" : "remote read"),
+                 numChunks);
+        }
+        rss.sgePerQueuePair[i].resize(numChunks, {});
+        rss.sendWorkRequests[i].resize(numChunks, {});
+
+        for (size_t chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+          bool   isLastChunk    = (chunkIdx == numChunks - 1);
+          size_t currChunkBytes = isLastChunk ? remaining : cfg.nic.chunkBytes;
+
+          // Prepare scatter gather element
+          ibv_sge& sg = rss.sgePerQueuePair[i][chunkIdx];
+          sg.length = currChunkBytes;
+          sg.addr   = (uintptr_t)local;
+          sg.lkey   = lkey;
+
+          // Prepare work request
+          ibv_send_wr& wr = rss.sendWorkRequests[i][chunkIdx];
+          wr.wr_id               = i;
+          wr.sg_list             = &rss.sgePerQueuePair[i][chunkIdx];
+          wr.num_sge             = 1;
+          wr.send_flags          = isLastChunk ? IBV_SEND_SIGNALED : 0;  // Only last chunk is signalled
+          wr.opcode              = opcode;
+          wr.wr.rdma.remote_addr = remote;
+          wr.wr.rdma.rkey        = rkey;
+
+          if (System::Get().IsVerbose()) {
+            printf("[INFO] Transfer %d SubExec %d chunk %lu local %p remote %p of size %lu\n",
+                   rss.transferIdx, i, chunkIdx, (void*)local, (void*)remote, currChunkBytes);
+          }
+
+          // Increment locations
+          remaining -= currChunkBytes;
+          local     += currChunkBytes;
+          remote    += currChunkBytes;
+        }
+      }
+    }
     return ERR_NONE;
   }
 
-  static ErrResult TeardownNicTransferResources(TransferResources& rss)
+  static ErrResult TeardownNicTransferResources(TransferResources& rss, Transfer const& t)
   {
+    bool isSrcRank = (GetRank() == t.srcs[0].memRank);
+    bool isDstRank = (GetRank() == t.dsts[0].memRank);
+
     // Deregister memory regions
-    IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
-    IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
+    if (isSrcRank) IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
+    if (isDstRank) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
     // Destroy queue pairs
-    for (auto srcQueuePair : rss.srcQueuePairs)
-      IBV_CALL(ibv_destroy_qp, srcQueuePair);
-    rss.srcQueuePairs.clear();
-    for (auto dstQueuePair : rss.dstQueuePairs)
-      IBV_CALL(ibv_destroy_qp, dstQueuePair);
-    rss.dstQueuePairs.clear();
+    if (isSrcRank) {
+      for (auto srcQueuePair : rss.srcQueuePairs)
+        IBV_CALL(ibv_destroy_qp, srcQueuePair);
+      rss.srcQueuePairs.clear();
+    }
+    if (isDstRank) {
+      for (auto dstQueuePair : rss.dstQueuePairs)
+        IBV_CALL(ibv_destroy_qp, dstQueuePair);
+      rss.dstQueuePairs.clear();
+    }
 
     // Destroy completion queues
-    IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
-    IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
+    if (isSrcRank) IBV_CALL(ibv_destroy_cq, rss.srcCompQueue);
+    if (isDstRank) IBV_CALL(ibv_destroy_cq, rss.dstCompQueue);
 
     // Deallocate protection domains
-    IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
-    IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
+    if (isSrcRank) IBV_CALL(ibv_dealloc_pd, rss.srcProtect);
+    if (isDstRank) IBV_CALL(ibv_dealloc_pd, rss.dstProtect);
 
     // Destroy context
-    IBV_CALL(ibv_close_device, rss.srcContext);
-    IBV_CALL(ibv_close_device, rss.dstContext);
+    if (isSrcRank) IBV_CALL(ibv_close_device, rss.srcContext);
+    if (isDstRank) IBV_CALL(ibv_close_device, rss.dstContext);
 
     return ERR_NONE;
   }
@@ -2351,6 +3161,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < rss->dstMem.size(); dstIdx++) {
+        // Validation is only done on the rank the destination memory is on
+        if (t.dsts[dstIdx].memRank != GetRank()) continue;
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
           output = (rss->dstMem[dstIdx]) + initOffset;
         } else {
@@ -2363,8 +3175,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           // Difference found - find first error
           for (size_t i = 0; i < N; i++) {
             if (output[i] != expected[i]) {
-              return {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d: Expected %10.5f Actual: %10.5f",
-                transferIdx, i, dstIdx, expected[i], output[i]};
+              return {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
+                transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
             }
           }
           return {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
@@ -2388,11 +3200,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Figure out the sub-array each subExecutor works on for this Transfer
     // - Partition N as evenly as possible, but try to keep subarray sizes as multiples of data.blockBytes
     //   except the very last one, for alignment reasons
-    size_t const N              = transfer.numBytes / sizeof(float);
+    size_t const N              = transfer.numBytes   / sizeof(float);
     int    const initOffset     = cfg.data.byteOffset / sizeof(float);
     int    const targetMultiple = cfg.data.blockBytes / sizeof(float);
 
-    // In some cases, there may not be enough data for all subExectors
+    // In some cases, there may not be enough data for all subExecutors
     int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                          (size_t)transfer.numSubExecs);
 
@@ -2461,11 +3273,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                    ExeInfo&                exeInfo)
   {
     exeInfo.totalDurationMsec = 0.0;
+    int const localRank = GetRank();
+    if (System::Get().IsVerbose()) {
+      printf("[INFO] Rank %d preparing executor (%c%d on Rank %d)\n",
+             localRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank);
+    }
 
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
       rss.numBytes = t.numBytes;
+
+      if (System::Get().IsVerbose()) {
+        printf("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST)\n",
+               localRank, rss.transferIdx, t.srcs.size(), t.dsts.size());
+      }
 
       // Allocate source memory
       rss.srcMem.resize(t.srcs.size());
@@ -2473,11 +3295,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         MemDevice const& srcMemDevice = t.srcs[iSrc];
 
         // Ensure executing GPU can access source memory
-        if (IsGpuExeType(exeDevice.exeType) && IsGpuMemType(srcMemDevice.memType) &&
+        // This only applies to memory being accessed by a local GPU executor
+        if (IsGpuExeType(exeDevice.exeType)    &&
+            IsGpuMemType(srcMemDevice.memType) &&
+            srcMemDevice.memRank == localRank  &&
+            exeDevice.exeRank    == localRank  &&
             srcMemDevice.memIndex != exeDevice.exeIndex) {
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, srcMemDevice.memIndex));
         }
-        ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
+
+        // Allocate source memory (on the correct rank)
+        if (srcMemDevice.memRank == localRank) {
+          ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
+        }
+
+        // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
+        System::Get().Broadcast(srcMemDevice.memRank, sizeof(rss.srcMem[iSrc]), &rss.srcMem[iSrc]);
       }
 
       // Allocate destination memory
@@ -2486,14 +3319,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         MemDevice const& dstMemDevice = t.dsts[iDst];
 
         // Ensure executing GPU can access destination memory
-        if (IsGpuExeType(exeDevice.exeType) && IsGpuMemType(dstMemDevice.memType) &&
+        if (IsGpuExeType(exeDevice.exeType)    &&
+            IsGpuMemType(dstMemDevice.memType) &&
+            dstMemDevice.memRank == localRank  &&
+            exeDevice.exeRank    == localRank  &&
             dstMemDevice.memIndex != exeDevice.exeIndex) {
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, dstMemDevice.memIndex));
         }
-        ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
+
+        // Allocate destination memory (on the correct rank)
+        if (dstMemDevice.memRank == localRank) {
+          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
+        }
+        // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
+        System::Get().Broadcast(dstMemDevice.memRank, sizeof(rss.dstMem[iDst]), &rss.dstMem[iDst]);
       }
 
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
+      // Prepare HSA DMA copy specific resources
+      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
@@ -2512,18 +3355,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       }
 
-      // Prepare subexecutor parameters
+      // Prepare subexecutor parameters (on all ranks)
       ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
     }
 
     // Prepare additional requirements for GPU-based executors
-    if (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA ||
-                                   (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
-        ? exeInfo.resources.size() : 1;
+                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
+                                  ? exeInfo.resources.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
 
       // Create streams
@@ -2551,7 +3394,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Prepare for GPU GFX executor
-    if (exeDevice.exeType == EXE_GPU_GFX) {
+    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
       // Allocate one contiguous chunk of GPU memory for threadblock parameters
       // This allows support for executing one transfer per stream, or all transfers in a single stream
 #if !defined(__NVCC__)
@@ -2575,7 +3418,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
         // Threadblocks are ordered sequentially one transfer at a time
         for (auto& rss : exeInfo.resources) {
-          Transfer const& t = transfers[rss.transferIdx];
           rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
           for (auto p : rss.subExecParamCpu) {
             rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
@@ -2648,23 +3490,29 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                     vector<Transfer> const& transfers,
                                     ExeInfo&                exeInfo)
   {
+    int const localRank = GetRank();
+
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
 
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
+        if (t.srcs[iSrc].memRank == localRank) {
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
+        }
       }
 
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
+        if (t.dsts[iDst].memRank == localRank) {
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
+        }
       }
 
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy)) {
+      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
         ERR_CHECK(hsa_signal_destroy(rss.signal));
       }
 #endif
@@ -2672,13 +3520,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Destroy NIC related resources
 #ifdef NIC_EXEC_ENABLED
       if (IsNicExeType(exeDevice.exeType)) {
-        ERR_CHECK(TeardownNicTransferResources(rss));
+        ERR_CHECK(TeardownNicTransferResources(rss, t));
       }
 #endif
     }
 
     // Teardown additional requirements for GPU-based executors
-    if (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
@@ -2689,7 +3537,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    if (exeDevice.exeType == EXE_GPU_GFX) {
+    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
       MemType memType = MEM_GPU;
 #else
@@ -2806,15 +3654,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
-
-
-    // Loop over each of the queue pairs and post the send
+    // Loop over each of the queue pairs and post work request
     ibv_send_wr* badWorkReq;
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-      int error = ibv_post_send(rss.srcQueuePairs[qpIndex], &rss.sendWorkRequests[qpIndex], &badWorkReq);
-      if (error)
-        return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d Error code %d\n",
-          rss.transferIdx, qpIndex, error};
+      size_t numChunks = rss.sendWorkRequests[qpIndex].size();
+      for (size_t chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+        int error = ibv_post_send(rss.srcIsExeNic ? rss.srcQueuePairs[qpIndex] : rss.dstQueuePairs[qpIndex],
+                                  &rss.sendWorkRequests[qpIndex][chunkIdx], &badWorkReq);
+        if (error)
+          return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d chunk %lu of %lu (Error code %d = %s)\n",
+            rss.transferIdx, qpIndex, chunkIdx, numChunks, error, strerror(error)};
+      }
     }
     return ERR_NONE;
   }
@@ -2855,11 +3705,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
             ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcCompQueue, 1, &wc);
+            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, 1, &wc);
             if (nc > 0) {
               receivedQPs[i]++;
               if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion", rss.transferIdx};
+                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc.status};
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
@@ -3015,8 +3865,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Kernel for GFX execution
-  template <typename PACKED_FLOAT, int BLOCKSIZE, int UNROLL, int TEMPORAL_MODE>
-  __global__ void __launch_bounds__(BLOCKSIZE)
+  template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
+  __global__ void __launch_bounds__(LAUNCH_BOUND)
     GpuReduceKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
   {
     int64_t startCycle;
@@ -3031,8 +3881,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       subExecIdx = blockIdx.y;
     } else {
       // Warp-level: each warp is a subexecutor
-      int warpIdx = threadIdx.x / warpSize;
-      int warpsPerBlock = BLOCKSIZE / warpSize;
+      int warpIdx       = threadIdx.x / warpSize;
+      int warpsPerBlock = blockDim.x  / warpSize;
       subExecIdx = blockIdx.y * warpsPerBlock + warpIdx;
     }
 
@@ -3062,7 +3912,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int32_t nWaves, waveIdx;
     if (seType == 0) {
       // Threadblock-level: all wavefronts in block work together
-      nWaves  = BLOCKSIZE / warpSize;                // Number of wavefronts within this threadblock
+      nWaves  = blockDim.x  / warpSize;              // Number of wavefronts within this threadblock
       waveIdx = threadIdx.x / warpSize;              // Index of this wavefront within the threadblock
     } else {
       // Warp-level: each warp works independently
@@ -3193,48 +4043,39 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#define GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, DWORD)           \
-  {GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_NONE>,      \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_LOAD>,      \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_STORE>,     \
-   GpuReduceKernel<DWORD, BLOCKSIZE, UNROLL, TEMPORAL_BOTH>}
+#define GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, DWORD)           \
+  {GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_NONE>,      \
+   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_LOAD>,      \
+   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_STORE>,     \
+   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_BOTH>}
 
-#define GPU_KERNEL_DWORD_DECL(BLOCKSIZE, UNROLL)        \
-  {GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float),  \
-   GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float2), \
-   GPU_KERNEL_TEMPORAL_DECL(BLOCKSIZE, UNROLL, float4)}
+#define GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, UNROLL)        \
+  {GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float),  \
+   GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2), \
+   GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float4)}
 
-#define GPU_KERNEL_UNROLL_DECL(BLOCKSIZE)    \
-  {GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 1),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 2),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 3),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 4),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 5),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 6),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 7),      \
-   GPU_KERNEL_DWORD_DECL(BLOCKSIZE, 8)}
+#define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND)    \
+  {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 1),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 2),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 3),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 4),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 5),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 6),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 7),      \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 8)}
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
-  GpuKernelFuncPtr GpuKernelTable[MAX_WAVEGROUPS][MAX_UNROLL][3][4] =
+#ifndef SINGLE_KERNEL
+  GpuKernelFuncPtr GpuKernelTable[4][MAX_UNROLL][3][4] =
   {
-    GPU_KERNEL_UNROLL_DECL(64),
-    GPU_KERNEL_UNROLL_DECL(128),
-    GPU_KERNEL_UNROLL_DECL(192),
     GPU_KERNEL_UNROLL_DECL(256),
-    GPU_KERNEL_UNROLL_DECL(320),
-    GPU_KERNEL_UNROLL_DECL(384),
-    GPU_KERNEL_UNROLL_DECL(448),
     GPU_KERNEL_UNROLL_DECL(512),
-    GPU_KERNEL_UNROLL_DECL(576),
-    GPU_KERNEL_UNROLL_DECL(640),
-    GPU_KERNEL_UNROLL_DECL(704),
     GPU_KERNEL_UNROLL_DECL(768),
-    GPU_KERNEL_UNROLL_DECL(832),
-    GPU_KERNEL_UNROLL_DECL(896),
-    GPU_KERNEL_UNROLL_DECL(960),
     GPU_KERNEL_UNROLL_DECL(1024),
   };
+#endif
+
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
@@ -3259,7 +4100,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                       cfg.gfx.wordSize == 2 ? 1 :
                                               2;
-    auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+#ifdef SINGLE_KERNEL
+    auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
+#else
+    auto gpuKernel = GpuKernelTable[(cfg.gfx.blockSize+255)/256 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+#endif
 
 #if defined(__NVCC__)
     if (startEvent != NULL)
@@ -3336,7 +4181,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
                         cfg.gfx.wordSize == 2 ? 1 :
                                                 2;
-      auto gpuKernel = GpuKernelTable[cfg.gfx.blockSize/64 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+#ifdef SINGLE_KERNEL
+      auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
+#else
+      auto gpuKernel = GpuKernelTable[(cfg.gfx.blockSize+255)/256 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+#endif
 
 #if defined(__NVCC__)
       if (cfg.gfx.useHipEvents)
@@ -3575,11 +4424,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     auto& errResults = results.errResults;
     errResults.clear();
 
-    // Check for valid configuration
-    if (ConfigOptionsHaveErrors(cfg, errResults)) return false;
+    // Check for valid configuration and quit if any rank has fatal error
+    if (System::Get().Any(ConfigOptionsHaveErrors(cfg, errResults))) {
+      System::Get().AllGatherErrors(errResults);
+      return false;
+    }
 
-    // Check for valid transfers
-    if (TransfersHaveErrors(cfg, transfers, errResults)) return false;
+    // Check for valid transfers and quit if any rank has fatal error
+    if (System::Get().Any(TransfersHaveErrors(cfg, transfers, errResults))) {
+      System::Get().AllGatherErrors(errResults);
+      return false;
+    }
 
     // Collect up transfers by executor
     int minNumSrcs = MAX_SRCS + 1;
@@ -3589,7 +4444,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int i = 0; i < transfers.size(); i++) {
       Transfer const& t = transfers[i];
       ExeDevice exeDevice;
-      ERR_APPEND(GetActualExecutor(cfg, t.exeDevice, exeDevice), errResults);
+      ERR_APPEND(GetActualExecutor(t.exeDevice, exeDevice), errResults);
 
       TransferResources resource = {};
       resource.transferIdx = i;
@@ -3607,6 +4462,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Loop over each executor and prepare
     // - Allocates memory for each Transfer
     // - Set up work for subexecutors
+    int const localRank = GetRank();
+    vector<ExeDevice> localExecutors;
     vector<TransferResources*> transferResources;
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
@@ -3615,6 +4472,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       for (auto& resource : exeInfo.resources) {
         transferResources.push_back(&resource);
+      }
+      // Track executors that are on this rank
+      if (exeDevice.exeRank == localRank) {
+        localExecutors.push_back(exeDevice);
       }
     }
 
@@ -3637,33 +4498,39 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
         dstReference[numSrcs].clear();
 
-      // Initialize all src memory buffers
+      // Initialize all src memory buffers (if on local rank)
       for (auto resource : transferResources) {
+        Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
-          ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
-                               hipMemcpyDefault), errResults);
+          if (t.srcs[srcIdx].memRank == localRank) {
+            ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
+                                 hipMemcpyDefault), errResults);
+          }
         }
       }
     }
 
     // Pause before starting when running in iteractive mode
     if (cfg.general.useInteractive) {
-      printf("Memory prepared:\n");
+      if (localRank == 0) {
+        printf("Memory prepared:\n");
 
-      for (int i = 0; i < transfers.size(); i++) {
-        ExeInfo const& exeInfo = executorMap[transfers[i].exeDevice];
-        printf("Transfer %03d:\n", i);
-        for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
-          printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
-        for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
-          printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+        for (int i = 0; i < transfers.size(); i++) {
+          printf("Transfer %03d:\n", i);
+          for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
+            printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
+          for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
+            printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+        }
+        printf("Hit <Enter> to continue: ");
+        fflush(stdout);
+        if (scanf("%*c") != 0) {
+          printf("[ERROR] Unexpected input\n");
+          exit(1);
+        }
+        printf("\n");
       }
-      printf("Hit <Enter> to continue: ");
-      if (scanf("%*c") != 0) {
-        printf("[ERROR] Unexpected input\n");
-        exit(1);
-      }
-      printf("\n");
+      System::Get().Barrier();
     }
 
     // Perform iterations
@@ -3672,20 +4539,26 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int iteration = -cfg.general.numWarmups; ; iteration++) {
       // Stop if number of iterations/seconds has reached limit
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
-      if (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations) break;
 
+      // NOTE: Time-based limit is based on first rank to avoid any skew issues
+      bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
+      System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
+      if (shouldStop) break;
+
+      // Wait for all ranks before starting any timing
+      System::Get().Barrier();
 
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
       // Execute all Transfers in parallel
       std::vector<std::future<ErrResult>> asyncExecutors;
-      for (auto& exeInfoPair : executorMap) {
+      for (auto const& exeDevice : localExecutors) {
         asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
                                                iteration,
                                                std::cref(cfg),
-                                               std::cref(exeInfoPair.first),
-                                               std::ref(exeInfoPair.second)));
+                                               std::cref(exeDevice),
+                                               std::ref(executorMap[exeDevice])));
       }
 
       // Wait for all threads to finish
@@ -3693,7 +4566,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         ERR_APPEND(asyncExecutor.get(), errResults);
       }
 
-       // Stop CPU timing for this iteration
+      // Wait for all ranks to finish
+      System::Get().Barrier();
+
+      // Stop CPU timing for this iteration
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
@@ -3710,12 +4586,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Pause for interactive mode
     if (cfg.general.useInteractive) {
-      printf("Transfers complete. Hit <Enter> to continue: ");
-      if (scanf("%*c") != 0)  {
-        printf("[ERROR] Unexpected input\n");
-        exit(1);
+      if (localRank == 0) {
+        printf("Transfers complete. Hit <Enter> to continue: ");
+        if (scanf("%*c") != 0)  {
+          printf("[ERROR] Unexpected input\n");
+          exit(1);
+        }
+        printf("\n");
+        fflush(stdout);
       }
-      printf("\n");
+      System::Get().Barrier();
     }
 
     // Validate results
@@ -3736,38 +4616,50 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
 
-      // Copy over executor results
-      ExeResult& exeResult = results.exeResults[exeDevice];
-      exeResult.numBytes = exeInfo.totalBytes;
-      exeResult.avgDurationMsec = exeInfo.totalDurationMsec / numTimedIterations;
-      exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
-      exeResult.sumBandwidthGbPerSec = 0.0;
-      exeResult.transferIdx.clear();
       results.totalBytesTransferred += exeInfo.totalBytes;
+
+      // Copy over executor results
+      ExeResult exeResult;
+      if (exeDevice.exeRank == localRank) {
+        // Local executor collects results
+        exeResult.numBytes             = exeInfo.totalBytes;
+        exeResult.avgDurationMsec      = exeInfo.totalDurationMsec / numTimedIterations;
+        exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
+        exeResult.sumBandwidthGbPerSec = 0.0;
+        exeResult.transferIdx.clear();
+
+        // Copy over transfer results
+        for (auto const& rss : exeInfo.resources) {
+          int const transferIdx = rss.transferIdx;
+          exeResult.transferIdx.push_back(transferIdx);
+
+          TransferResult& tfrResult      = results.tfrResults[transferIdx];
+          tfrResult.exeDevice            = exeDevice;
+#ifdef NIC_EXEC_ENABLED
+          tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
+#else
+          tfrResult.exeDstDevice         = exeDevice;
+#endif
+          tfrResult.numBytes             = rss.numBytes;
+          tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
+          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
+          if (cfg.general.recordPerIteration) {
+            tfrResult.perIterMsec = rss.perIterMsec;
+            tfrResult.perIterCUs  = rss.perIterCUs;
+          }
+          exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
+        }
+      }
+
+      // Send executor and transfer result to all ranks
+      System::Get().BroadcastExeResult(exeDevice.exeRank, exeResult);
+      for (int const transferIdx : exeResult.transferIdx) {
+        System::Get().BroadcastTfrResult(exeDevice.exeRank, results.tfrResults[transferIdx]);
+      }
+
+      results.exeResults[exeDevice] = exeResult;
       results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
                                                              exeResult.avgDurationMsec));
-
-      // Copy over transfer results
-      for (auto const& rss : exeInfo.resources) {
-        int const transferIdx = rss.transferIdx;
-        exeResult.transferIdx.push_back(transferIdx);
-
-        TransferResult& tfrResult      = results.tfrResults[transferIdx];
-        tfrResult.exeDevice            = exeDevice;
-#ifdef NIC_EXEC_ENABLED
-        tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-#else
-        tfrResult.exeDstDevice         = exeDevice;
-#endif
-        tfrResult.numBytes             = rss.numBytes;
-        tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
-        tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
-        if (cfg.general.recordPerIteration) {
-          tfrResult.perIterMsec = rss.perIterMsec;
-          tfrResult.perIterCUs  = rss.perIterCUs;
-        }
-        exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
-      }
     }
     results.avgTotalBandwidthGbPerSec = (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec;
 
@@ -3778,6 +4670,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ERR_APPEND(TeardownExecutor(cfg, exeDevice, transfers, exeInfo), errResults);
     }
 
+    System::Get().AllGatherErrors(errResults);
+
+    for (auto const& err : errResults) {
+      if (err.errType == ERR_FATAL) return false;
+    }
     return true;
   }
 
@@ -3800,6 +4697,330 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+  bool RecursiveWildcardTransferExpansion(WildcardTransfer& wc,
+                                          int const& baseRankIndex,
+                                          size_t const& numBytes,
+                                          int const& numSubExecs,
+                                          std::vector<Transfer>& transfers)
+  {
+    // Basic implementation idea:
+    // - This recursive function procedes through each Transfer characteristic that has multiple possible values,
+    //   selects one, then proceeds.
+    // - At the "end", each characteristic will only have one option, which will then be used to specify the
+    //   Transfer to be added to transfers
+    bool result = false;
+
+    // Resolve memory wildcards first
+    for (int isDst = 0; isDst <= 1; isDst++) {
+      for (int iMem = 0; iMem < wc.mem[isDst].size(); iMem++) {
+
+        // Resolve mem rank wildcards first
+        if (wc.mem[isDst][iMem].memRanks.size() == 0) {
+          // Replace empty rank with baseRankIndex
+          wc.mem[isDst][iMem].memRanks = {baseRankIndex};
+          RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          wc.mem[isDst][iMem].memRanks.clear();
+          return true;
+        } else if (wc.mem[isDst][iMem].memRanks.size() > 1) {
+          // Loop over each possible rank and recurse
+          std::vector<int> memRanks;
+          memRanks.swap(wc.mem[isDst][iMem].memRanks);
+          for (auto x : memRanks) {
+            wc.mem[isDst][iMem].memRanks = {x};
+            result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          }
+          wc.mem[isDst][iMem].memRanks.swap(memRanks);
+          return result;
+        }
+        // At this point, there should be only 1 (valid) rank assigned to this SRC
+        if (wc.mem[isDst][iMem].memRanks.size() != 1 || wc.mem[isDst][iMem].memRanks[0] < 0) {
+          printf("[ERROR] Unexpected number of ranks / invalid number of ranks for %s %d\n", isDst ? "DST" : "SRC", iMem);
+          exit(1);
+        }
+
+        // Resolve mem index wildcards
+        // Mem devices should have at least one index
+        if (wc.mem[isDst][iMem].memIndices.size() == 0) {
+          printf("[ERROR] MemIndex for %s %d cannot be empty\n", isDst ? "DST" : "SRC", iMem);
+          exit(1);
+        }
+
+        // Loop over user provided list of device indices
+        if (wc.mem[isDst][iMem].memIndices.size() > 1) {
+          std::vector<int> memIndices;
+          memIndices.swap(wc.mem[isDst][iMem].memIndices);
+          for (auto x : memIndices) {
+            wc.mem[isDst][iMem].memIndices = {x};
+            result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          }
+          wc.mem[isDst][iMem].memIndices.swap(memIndices);
+          return result;
+        } else if (wc.mem[isDst][iMem].memIndices.size() == 1 && wc.mem[isDst][iMem].memIndices[0] == -1) {
+          // Wildcard - loop over all possible device indices for this memory type
+          int numExecutors = GetNumExecutors(wc.mem[isDst][iMem].memType, wc.mem[isDst][iMem].memRanks[0]);
+          for (int x = 0; x < numExecutors; x++) {
+            wc.mem[isDst][iMem].memIndices[0] = x;
+            result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          }
+          wc.mem[isDst][iMem].memIndices[0] = -1;
+          return result;
+        }
+      }
+    }
+
+    // Check for NIC wildcard (device index) first
+    if (wc.exe.exeType == EXE_NIC_NEAREST &&
+        wc.exe.exeRanks.size() == 0 &&
+        wc.exe.exeIndices.size() == 0 &&
+        wc.exe.exeSlots.size() == 0 &&
+        wc.exe.exeSubIndices.size() == 0 &&
+        wc.exe.exeSubSlots.size() == 0) {
+
+      // Find (first) closest NIC to the SRC memory location
+      std::vector<int> srcNicIndices;
+      if (IsCpuMemType(wc.mem[0][0].memType)) {
+        GetClosestNicsToCpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      }
+      // Find (first) closest NIC to the DST memory location
+      std::vector<int> dstNicIndices;
+      if (IsCpuMemType(wc.mem[1][0].memType)) {
+        GetClosestNicsToCpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      }
+
+      // If valid, fill in all wildcards
+      if (srcNicIndices.size() > 0 && dstNicIndices.size() > 0) {
+        wc.exe.exeRanks      = {wc.mem[0][0].memRanks[0]};
+        wc.exe.exeIndices    = {srcNicIndices[0]};
+        wc.exe.exeSlots      = {0};
+        wc.exe.exeSubIndices = {dstNicIndices[0]};
+        wc.exe.exeSubSlots   = {0};
+
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+
+        wc.exe.exeRanks.clear();
+        wc.exe.exeIndices.clear();
+        wc.exe.exeSlots.clear();
+        wc.exe.exeSubIndices.clear();
+        wc.exe.exeSubSlots.clear();
+        return result;
+      } else {
+        return false;
+      }
+    }
+
+    // Resolve EXE rank
+    if (wc.exe.exeRanks.size() == 0)  {
+      // No rank provided - Assign the current base rank index
+      wc.exe.exeRanks = {baseRankIndex};
+      RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      wc.exe.exeRanks.clear();
+      return true;
+    } else if (wc.exe.exeRanks.size() > 1) {
+      // Loop over user provided ranks
+      std::vector<int> exeRanks;
+      exeRanks.swap(wc.exe.exeRanks);
+      for (auto x : exeRanks) {
+        wc.exe.exeRanks = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeRanks.swap(exeRanks);
+      return result;
+    } else if (wc.exe.exeRanks[0] == -1) {
+      printf("[ERROR] Exe rank should not be -1\n");
+      exit(1);
+    }
+
+    // Resolve EXE indices
+    if (wc.exe.exeIndices.size() == 0) {
+      printf("[ERROR] Exe index should never be empty\n");
+      exit(1);
+    } else if (wc.exe.exeIndices.size() > 1) {
+      // Loop over user provided indices
+      std::vector<int> exeIndices;
+      exeIndices.swap(wc.exe.exeIndices);
+      for (auto x : exeIndices) {
+        wc.exe.exeIndices = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeIndices.swap(exeIndices);
+      return result;
+    } else if (wc.exe.exeIndices[0] == -1) {
+      // Wildcard - loop over all possible executor indices
+      int numExecutors = GetNumExecutors(wc.exe.exeType, wc.exe.exeRanks[0]);
+      for (int x = 0; x < numExecutors; x++) {
+        wc.exe.exeIndices[0] = x;
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeIndices[0] = -1;
+      return result;
+    }
+
+    // Resolve EXE slots (only apples to EXE_NIC_NEAREST)
+    if (wc.exe.exeSlots.size() == 0) {
+      // Slot won't be used, so just assign 0
+      wc.exe.exeSlots = {0};
+      result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      wc.exe.exeSlots.clear();
+      return result;
+    } else if (wc.exe.exeSlots.size() > 1) {
+      // Loop over user provided slots
+      std::vector<int> exeSlots;
+      exeSlots.swap(wc.exe.exeSlots);
+      for (auto x : exeSlots) {
+        wc.exe.exeSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSlots.swap(exeSlots);
+      return result;
+    } else if (wc.exe.exeSlots[0] == -1) {
+      // Wildcard - Loop over all possible slots, based on SRC memory type
+      std::vector<int> srcNicIndices;
+      if (IsCpuMemType(wc.mem[0][0].memType)) {
+        GetClosestNicsToCpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(srcNicIndices, wc.mem[0][0].memIndices[0], wc.mem[0][0].memRanks[0]);
+      }
+      for (auto x : srcNicIndices) {
+        wc.exe.exeSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSlots = {-1};
+      return result;
+    }
+
+    // Resolve EXE subindex
+    if (wc.exe.exeSubIndices.size() == 0) {
+      if (IsCpuExeType(wc.exe.exeType) || IsGpuExeType(wc.exe.exeType)) {
+        wc.exe.exeSubIndices = {-1};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        wc.exe.exeSubIndices.clear();
+        return result;
+      } else if (wc.exe.exeType == EXE_NIC) {
+        printf("[ERROR] NIC executor requires a subindex be specified\n");
+        exit(1);
+      } else if (wc.exe.exeType == EXE_NIC_NEAREST) {
+        // Assign NIC closest to DST mem
+        std::vector<int> dstNicIndices;
+        if (IsCpuMemType(wc.mem[1][0].memType)) {
+          GetClosestNicsToCpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+        } else {
+          GetClosestNicsToGpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+        }
+        if (dstNicIndices.size() > 0) {
+          wc.exe.exeSubIndices = {dstNicIndices[0]};
+          result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+          wc.exe.exeSubIndices.clear();
+        }
+        return result;
+      }
+    } else if (wc.exe.exeSubIndices.size() > 1) {
+      // Loop over all user provided subindices
+      std::vector<int> exeSubIndices;
+      exeSubIndices.swap(wc.exe.exeSubIndices);
+      for (auto x : exeSubIndices) {
+        wc.exe.exeSubIndices = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSubIndices.swap(exeSubIndices);
+      return result;
+    } else if (wc.exe.exeSubIndices[0] == -2) {
+      switch (wc.exe.exeType) {
+      case EXE_CPU:
+        wc.exe.exeSubIndices[0] = -1;
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        wc.exe.exeSubIndices[0] = -2;
+        return result;
+      case EXE_GPU_GFX: case EXE_GPU_DMA:
+      {
+        // Iterate over all available subindices
+        ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
+        int numSubIndices = GetNumExecutorSubIndices(exeDevice);
+        for (int x = 0; x < numSubIndices; x++) {
+          wc.exe.exeSubIndices = {x};
+          result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        }
+        wc.exe.exeSubIndices = {-1};
+        return result;
+      }
+      case EXE_NIC: case EXE_NIC_NEAREST:
+      {
+        // Iterates over total number of DST NICs
+        int numIndices = 0;
+        if (wc.exe.exeType == EXE_NIC) {
+          numIndices = GetNumExecutors(EXE_NIC, wc.mem[1][0].memRanks[0]);
+        } else {
+          numIndices = GetNumExecutors(EXE_GPU_GFX, wc.mem[1][0].memRanks[0]);
+        }
+        for (int x = 0; x < numIndices; x++) {
+          wc.exe.exeSubIndices = {x};
+          result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        }
+        wc.exe.exeSubIndices = {-1};
+        return result;
+      }
+      }
+      return result;
+    }
+
+    // Resolve EXE subslots (only apples to EXE_NIC_NEAREST)
+    if (wc.exe.exeSubSlots.size() == 0) {
+      // Subslot won't be used, so just assign 0
+      wc.exe.exeSubSlots = {0};
+      result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      wc.exe.exeSubSlots.clear();
+      return result;
+    } else if (wc.exe.exeSubSlots.size() > 1) {
+      // Loop over user provided slots
+      std::vector<int> exeSubSlots;
+      exeSubSlots.swap(wc.exe.exeSubSlots);
+      for (auto x : exeSubSlots) {
+        wc.exe.exeSubSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSubSlots.swap(exeSubSlots);
+      return result;
+    } else if (wc.exe.exeSubSlots[0] == -1) {
+      // Wildcard - Loop over all possible slots, based on DST memory type
+      std::vector<int> dstNicIndices;
+      if (IsCpuMemType(wc.mem[1][0].memType)) {
+        GetClosestNicsToCpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      } else {
+        GetClosestNicsToGpu(dstNicIndices, wc.mem[1][0].memIndices[0], wc.mem[1][0].memRanks[0]);
+      }
+      for (auto x : dstNicIndices) {
+        wc.exe.exeSubSlots = {x};
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+      }
+      wc.exe.exeSubSlots = {-1};
+      return result;
+    }
+
+    // Only reach here when each candidate has been narrowed down to 1 option
+    // Create Transfer and add to list
+    Transfer t;
+    t.numBytes    = numBytes;
+    t.numSubExecs = numSubExecs;
+
+    for (int iSrc = 0; iSrc < wc.mem[0].size(); iSrc++)
+      t.srcs.push_back({wc.mem[0][iSrc].memType, wc.mem[0][iSrc].memIndices[0], wc.mem[0][iSrc].memRanks[0]});
+    for (int iDst = 0; iDst < wc.mem[1].size(); iDst++)
+      t.dsts.push_back({wc.mem[1][iDst].memType, wc.mem[1][iDst].memIndices[0], wc.mem[1][iDst].memRanks[0]});
+    t.exeDevice.exeType  = wc.exe.exeType;
+    t.exeDevice.exeIndex = wc.exe.exeIndices[0];
+    t.exeDevice.exeRank  = wc.exe.exeRanks[0];
+    t.exeDevice.exeSlot  = wc.exe.exeSlots[0];
+    t.exeSubIndex        = wc.exe.exeSubIndices[0];
+    t.exeSubSlot         = wc.exe.exeSubSlots[0];
+
+    transfers.push_back(t);
+
+    return false;
+  }
+
   ErrResult ParseTransfers(std::string            line,
                            std::vector<Transfer>& transfers)
   {
@@ -3809,7 +5030,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     transfers.clear();
 
-    // Read in number of transfers
+    // Read in number of transfers descriptions
+    // NOTE: Transfers descriptions with wildcards get expanded to multiple transfers
     int numTransfers = 0;
     std::istringstream iss(line);
     iss >> numTransfers;
@@ -3832,261 +5054,1130 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     for (int i = 0; i < numTransfers; i++) {
-      Transfer transfer;
-
+      size_t numBytes;
       if (!advancedMode) {
         iss >> srcStr >> exeStr >> dstStr;
-        transfer.numSubExecs = numSubExecs;
         if (iss.fail()) {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet", i+1};
         }
-        transfer.numBytes = 0;
+        numBytes = 0;
       } else {
-        iss >> srcStr >> exeStr >> dstStr >> transfer.numSubExecs >> numBytesToken;
+        iss >> srcStr >> exeStr >> dstStr >> numSubExecs >> numBytesToken;
         if (iss.fail()) {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST $CU #Bytes) tuple", i+1};
         }
-        if (sscanf(numBytesToken.c_str(), "%lu", &transfer.numBytes) != 1) {
+        if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1) {
           return {ERR_FATAL,
             "Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple", i+1};
         }
 
         char units = numBytesToken.back();
         switch (toupper(units)) {
-        case 'G': transfer.numBytes *= 1024;
-        case 'M': transfer.numBytes *= 1024;
-        case 'K': transfer.numBytes *= 1024;
+        case 'G': numBytes *= 1024;
+        case 'M': numBytes *= 1024;
+        case 'K': numBytes *= 1024;
         }
       }
 
-      ERR_CHECK(ParseMemType(srcStr, transfer.srcs));
-      ERR_CHECK(ParseMemType(dstStr, transfer.dsts));
-      ERR_CHECK(ParseExeType(exeStr, transfer.exeDevice, transfer.exeSubIndex));
-      transfers.push_back(transfer);
+      WildcardTransfer wct;
+      ERR_CHECK(ParseMemType(srcStr, wct.mem[0]));
+      ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
+      ERR_CHECK(ParseExeType(exeStr, wct.exe));
+
+      // Perform wildcard expansion
+      int numRanks = GetNumRanks();
+      for (int localRankIndex = 0; localRankIndex < numRanks; localRankIndex++) {
+        bool localRankModified = RecursiveWildcardTransferExpansion(wct, localRankIndex, numBytes, numSubExecs, transfers);
+        if (!localRankModified) break;
+      }
+    }
+
+    return ERR_NONE;
+  }
+
+  // System related
+  //========================================================================================
+  System::System() :
+    rank(0), numRanks(1), commMode(COMM_NONE)
+  {
+    verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
+
+    if (getenv("TB_PAUSE")) {
+      printf("Pausing for debug attachment\n");
+      volatile bool pause = true;
+      while (pause);
+    }
+
+    // Priority 1: Socket communicator
+    SetupSocketCommunicator();
+
+    // Priority 2: MPI communicator
+    if (commMode == COMM_NONE) {
+      SetupMpiCommunicator();
+    }
+
+    if (verbose && commMode == COMM_NONE) {
+      printf("[INFO] Running in single node mode\n");
+    }
+
+    // Collect topology and distribute across all ranks
+    CollectTopology();
+  }
+
+  System::~System()
+  {
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      if (mpiInit == true)  {
+        MPI_Finalize();
+      }
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      // Close all sockets
+      for (auto& sock : sockets) {
+        if (sock != -1) {
+          close(sock);
+          sock = -1;
+        }
+      }
+
+      if (listenSocket != -1) {
+        close(listenSocket);
+        listenSocket = -1;
+      }
+    }
+  }
+
+  void System::SetupSocketCommunicator()
+  {
+    char* rankStr       = getenv("TB_RANK");
+    char* numRanksStr   = getenv("TB_NUM_RANKS");
+    char* masterAddrStr = getenv("TB_MASTER_ADDR");
+    char* masterPortStr = getenv("TB_MASTER_PORT");
+
+    // Socket communicator requires rank / numRanks / masterAddr
+    if (!rankStr || !numRanksStr || !masterAddrStr) {
+      if (verbose) {
+        printf("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
+      }
+      return;
+    }
+
+    rank       = atoi(rankStr);
+    numRanks   = atoi(numRanksStr);
+    masterAddr = masterAddrStr;
+    masterPort = masterPortStr ? atoi(masterPortStr) : 29500;
+
+    if (rank < 0 || rank >= numRanks) {
+      printf("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
+      exit(1);
+    }
+
+    sockets.resize(numRanks, -1);
+
+    // Rank 0 acts as server for others to connect to
+    int opt = 1;
+    if (rank == 0) {
+      // Create listening socket
+      listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (listenSocket == -1) {
+        printf("[ERROR] Unable to create listener socket\n");
+        exit(1);
+      }
+
+      // Allow address reuse
+      setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+      // Bind to port
+      sockaddr_in serverAddr;
+      memset(&serverAddr, 0, sizeof(serverAddr));
+      serverAddr.sin_family      = AF_INET;
+      serverAddr.sin_addr.s_addr = INADDR_ANY;
+      serverAddr.sin_port        = htons(masterPort);
+
+      if (bind(listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
+        printf("[ERROR] Failed to bind listen socket\n");
+        exit(1);
+      }
+
+      if (listen(listenSocket, numRanks) == -1) {
+        printf("[ERROR] Failed to listen on socket\n");
+        exit(1);
+      }
+      // Accept connections from other ranks
+      printf("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
+             numRanks-1, masterAddr.c_str(), masterPort);
+
+      for (int i = 1; i < numRanks; i++) {
+        sockaddr_in clientAddr;
+        socklen_t clientAddrLen = sizeof(clientAddr);
+
+        auto clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
+        if (clientSocket == -1) {
+          printf("[ERROR] Failed to accept connection from rank %d\n", i);
+          exit(1);
+        }
+
+        // Receive rank ID from client
+        int clientRank;
+        recv(clientSocket, (char*)&clientRank, sizeof(clientRank), 0);
+
+        if (clientRank < 0 || clientRank >= numRanks) {
+          close(clientSocket);
+          printf("[ERROR] Invalid rank received: %d\n", clientRank);
+          exit(1);
+        }
+        if (verbose) {
+          printf("[INFO] Rank 0 accepted connection from rank %d\n", clientRank);
+        }
+        sockets[clientRank] = clientSocket;
+      }
+    } else {
+      // All other ranks connect to rank 0
+      int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (sock == -1) {
+        printf("[ERROR] Failed to create socket\n");
+        exit(1);
+      }
+
+      sockaddr_in serverAddr;
+      memset(&serverAddr, 0, sizeof(serverAddr));
+      serverAddr.sin_family = AF_INET;
+      serverAddr.sin_port = htons(masterPort);
+      if (inet_pton(AF_INET, masterAddr.c_str(), &serverAddr.sin_addr) <= 0) {
+        printf("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
+        exit(1);
+      }
+
+      // Retry connection with backoff
+      if (verbose)
+        printf("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
+      int maxRetries = 50;
+      for (int retry = 0; retry < maxRetries; retry++) {
+        if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
+          break;
+        }
+        if (retry == maxRetries - 1) {
+          printf("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
+        }
+        sleep(1);
+      }
+
+      // Send local rank to the server
+      send(sock, (char*)&rank, sizeof(rank), 0);
+      sockets[0] = sock;
+    }
+
+    commMode = COMM_SOCKET;
+  };
+
+  void System::SetupMpiCommunicator()
+  {
+#ifdef MPI_COMM_ENABLED
+    int flag;
+    MPI_Initialized(&flag);
+    if (!flag) {
+      MPI_Init(NULL, NULL);
+      mpiInit = true;
+    }
+
+    comm = MPI_COMM_WORLD;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &numRanks);
+    if (numRanks > 1) {
+      if (verbose) {
+        printf("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
+      }
+      commMode = COMM_MPI;
+    } else if (mpiInit) {
+      // Drop out of MPI use for single node
+      MPI_Finalize();
+    }
+#endif
+  }
+
+  void System::Barrier()
+  {
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Barrier(comm);
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      char dummy = 0;
+
+      // Simple barrier using rank 0 to coordinate
+      if (rank == 0) {
+        // Wait for notification from all ranks
+        for (int peerRank = 1; peerRank < numRanks; peerRank++)
+          RecvData(peerRank, 1, &dummy);
+
+        // Release all ranks
+        for (int peerRank = 1; peerRank < numRanks; peerRank++)
+          SendData(peerRank, 1, &dummy);
+      } else {
+        // Send notification to root
+        SendData(0, 1, &dummy);
+
+        // Wait for release from root
+        RecvData(0, 1, &dummy);
+      }
+    }
+  }
+
+  void System::SendData(int dstRank, size_t const numBytes, const void* sendData) const
+  {
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Send(sendData, numBytes, MPI_BYTE, dstRank, 1234, comm);
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      if (rank != 0 && dstRank != 0) {
+        printf("[ERROR] Socket communicator is limited to sending from/to rank 0\n");
+        exit(1);
+      }
+      auto sock = sockets[dstRank];
+
+      // Send data
+      size_t totalSent = 0;
+      while (totalSent < numBytes) {
+        auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, 0);
+        if (sent == -1) {
+          printf("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
+          exit(1);
+        }
+        totalSent += sent;
+      }
+    }
+  }
+
+  void System::RecvData(int srcRank, size_t const numBytes, void* recvData) const
+  {
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      MPI_Status status;
+      MPI_Recv(recvData, numBytes, MPI_BYTE, srcRank, 1234, comm, &status);
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      if (rank != 0 && srcRank != 0) {
+        printf("[ERROR] Socket communicator is limited to receiving from/at rank 0\n");
+        exit(1);
+      }
+
+      auto sock = sockets[srcRank];
+      size_t totalRecv = 0;
+      while (totalRecv < numBytes) {
+        auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);
+        if (recvd == -1 || recvd == 0) {
+          printf("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
+          perror("recv");
+          exit(1);
+        }
+        totalRecv += recvd;
+      }
+    }
+  }
+
+  void System::Broadcast(int root, size_t const numBytes, void* data) const
+  {
+    if (numBytes == 0) return;
+
+#ifdef MPI_COMM_ENABLED
+    if (commMode == COMM_MPI) {
+      int err = MPI_Bcast(data, numBytes, MPI_CHAR, root, comm);
+      if (err != MPI_SUCCESS) {
+        printf("[ERROR] MPI_Bcast failed with error code %d\n", err);
+      }
+      return;
+    }
+#endif
+    if (commMode == COMM_SOCKET) {
+      // Relay through rank 0 first
+      if (root != 0) {
+        if (rank == root) {
+          SendData(0, numBytes, data);
+        } else if (rank == 0) {
+          RecvData(root, numBytes, data);
+        }
+      }
+      if (rank == 0) {
+        for (int peer = 1; peer < numRanks; peer++) {
+          SendData(peer, numBytes, data);
+        }
+      } else {
+        RecvData(0, numBytes, data);
+      }
+    }
+  }
+
+  bool System::Any(bool const flag) const
+  {
+    bool result = false;
+    for (int i = 0; i < numRanks; i++) {
+      bool flagToSend = flag;
+      Broadcast(i, sizeof(flagToSend), &flagToSend);
+      result |= flagToSend;
+      if (result) break;
+    }
+    return result;
+  }
+
+  std::string System::GetCpuName() const
+  {
+    std::ifstream cpuInfo("/proc/cpuinfo");
+    std::string line;
+
+    if (cpuInfo.is_open()) {
+      while (std::getline(cpuInfo, line)) {
+        if (line.find("model name") != std::string::npos) {
+          size_t colonIdx = line.find(":");
+          if (colonIdx != std::string::npos) {
+            return line.substr(colonIdx + 2);
+          }
+        }
+      }
+    }
+    return "Unknown CPU";
+  }
+
+  void System::GetRankTopology(RankTopology& topo)
+  {
+    // Clear topology structure first
+    topo.numExecutors.clear();
+    topo.numExecutorSubIndices.clear();
+    topo.numSubExecutors.clear();
+    topo.closestCpuNumaToGpu.clear();
+    topo.closestCpuNumaToNic.clear();
+    topo.closestNicsToGpu.clear();
+
+    memset(topo.hostname, 0, sizeof(topo.hostname));
+    gethostname(topo.hostname, 32);
+    char* firstDotPtr = std::strchr(topo.hostname, '.');
+    if (firstDotPtr) *firstDotPtr = 0;
+
+    // NOTE: Placeholder values
+    strcpy(topo.ppodId, "N/A");
+    topo.vpodId = -1;
+
+    // CPU Executor
+    int numCpus = numa_num_configured_nodes();
+    topo.numExecutors[EXE_CPU] = numCpus;
+
+    std::string cpuName = GetCpuName();
+
+    for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+      topo.numExecutorSubIndices[{EXE_CPU, exeIndex}] = 0;
+      topo.executorName[{EXE_CPU, exeIndex}] = cpuName;
+    }
+
+    for (int cpuCore = 0; cpuCore < numa_num_configured_cpus(); cpuCore++) {
+      topo.numSubExecutors[{EXE_CPU, numa_node_of_cpu(cpuCore)}]++;
+    }
+
+    if (verbose) {
+      for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
+        printf("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores (%s)\n", rank, exeIndex, numCpus,
+               topo.numSubExecutors[{EXE_CPU, exeIndex}],
+               topo.executorName[{EXE_CPU, exeIndex}].c_str());
+      }
+    }
+
+    // GPU Executor
+    int numGpus = 0;
+    hipError_t status = hipGetDeviceCount(&numGpus);
+    if (status != hipSuccess) numGpus = 0;
+    topo.numExecutors[EXE_GPU_GFX] = numGpus;
+    topo.numExecutors[EXE_GPU_DMA] = numGpus;
+
+    for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+      int numDeviceCUs  = 0;
+      int numXccs       = 0;
+      int numDmaEngines = 0;
+      int closestNuma   = -1;
+
+      if (hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, exeIndex) != hipSuccess) {
+        numDeviceCUs = 0;
+      }
+
+      std::string gpuName = "Unknown GPU";
+      hipDeviceProp_t props;
+      if (hipGetDeviceProperties(&props, exeIndex) == hipSuccess) {
+        gpuName = props.name;
+      }
+      topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
+
+#if !defined(__NVCC__)
+      hsa_agent_t gpuAgent = gpuAgents[exeIndex];
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_XCC, &numXccs) != HSA_STATUS_SUCCESS)
+        numXccs = 1;
+
+      int numEnginesA, numEnginesB;
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_ENG, &numEnginesA)
+          == HSA_STATUS_SUCCESS)
+        numDmaEngines += numEnginesA;
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_XGMI_ENG, &numEnginesB)
+          == HSA_STATUS_SUCCESS)
+        numDmaEngines += numEnginesB;
+
+      hsa_agent_t closestCpuAgent;
+      if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NEAREST_CPU, &closestCpuAgent)
+          == HSA_STATUS_SUCCESS) {
+        for (int cpuIndex = 0; cpuIndex < numCpus; cpuIndex++) {
+          hsa_agent_t cpuAgent = cpuAgents[cpuIndex];
+          if (cpuAgent.handle == closestCpuAgent.handle) {
+            closestNuma = cpuIndex;
+            break;
+          }
+        }
+      }
+#endif
+      topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}] = numXccs;
+      topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
+      topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
+      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
+      topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
+      topo.closestNicsToGpu[exeIndex] = {};
+    }
+
+    // NIC Executor
+    int numNics = 0;
+#ifdef NIC_EXEC_ENABLED
+    numNics = GetIbvDeviceList().size();
+    for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+      topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+      topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
+      topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
+      if (verbose) {
+        printf("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
+      }
+    }
+#endif
+    topo.numExecutors[EXE_NIC] = topo.numExecutors[EXE_NIC_NEAREST] = numNics;
+
+    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+      topo.numSubExecutors[{EXE_NIC, nicIndex}] = 0;
+      topo.numExecutorSubIndices[{EXE_NIC, nicIndex}] = 0;
+      std::string gpuName = "Unknown GPU";
+
+    }
+    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+      topo.numSubExecutors[{EXE_NIC_NEAREST, gpuIndex}] = 0;
+      topo.numExecutorSubIndices[{EXE_NIC_NEAREST, gpuIndex}] = 0;
+    }
+
+    // Figure out closest NICs to GPUs
+#ifdef NIC_EXEC_ENABLED
+
+    // Build up list of NIC bus addresses
+    std::vector<std::string> ibvAddressList;
+    auto const& ibvDeviceList = GetIbvDeviceList();
+    for (auto const& ibvDevice : ibvDeviceList)
+      ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
+
+    // Track how many times a device has been assigned as "closest"
+    // This allows distributed work across devices using multiple ports (sharing the same busID)
+    // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
+    // Counter example:
+    //
+    //  G0 prefers (N0,N1), picks N0
+    //  G1 prefers (N1,N2), picks N1
+    //  G2 prefers N0,      picks N0
+    //
+    //  instead of G0->N1, G1->N2, G2->N0
+
+    std::vector<int> assignedCount(ibvDeviceList.size(), 0);
+
+    // Loop over each GPU to find the closest NIC(s) based on PCIe address
+    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+      // Collect PCIe address for the GPU
+      char hipPciBusId[64];
+      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIndex);
+      if (err != hipSuccess) {
+#ifdef VERBS_DEBUG
+        printf("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
+#endif
+        continue;
+      }
+
+      // Find closest NICs
+      std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
+
+      // Pick the least-used NIC to assign as closest
+      int closestIdx = -1;
+      for (auto idx : closestNicIdxs) {
+        if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
+          closestIdx = idx;
+      }
+
+      // The following will only use distance between bus IDs
+      // to determine the closest NIC to GPU if the PCIe tree approach fails
+      if (closestIdx < 0) {
+#ifdef VERBS_DEBUG
+        printf("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+#endif
+        int minDistance = std::numeric_limits<int>::max();
+        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+          if (ibvDeviceList[nicIndex].busId != "") {
+            int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
+            if (distance < minDistance && distance >= 0) {
+              minDistance = distance;
+              closestIdx = nicIndex;
+            }
+          }
+        }
+      }
+      if (closestIdx != -1) {
+        topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
+        assignedCount[closestIdx]++;
+      }
+    }
+#endif
+
+    if (verbose) {
+      for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
+               topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
+               topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
+               topo.closestCpuNumaToGpu[exeIndex]);
+        if (topo.closestNicsToGpu[exeIndex].size() == 0) {
+          printf(" none");
+        } else {
+          for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
+            printf(" %d", nicIndex);
+          }
+          printf("\n");
+        }
+      }
+    }
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::SendMap(int peerRank, std::map<KeyType, std::vector<ValType>> const& mapToSend) const
+  {
+    size_t mapSize = mapToSend.size();
+    SendData(peerRank, sizeof(mapSize), &mapSize);
+    for (auto const& p : mapToSend) {
+      SendData(peerRank, sizeof(p.first), &p.first);
+      size_t vectorSize = p.second.size();
+      SendData(peerRank, sizeof(vectorSize), &vectorSize);
+      for (auto const& v : p.second) {
+        SendData(peerRank, sizeof(v), &v);
+      }
+    }
+    fflush(stdout);
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::SendMap(int peerRank, std::map<KeyType, ValType> const& mapToSend) const
+  {
+    size_t mapSize = mapToSend.size();
+    SendData(peerRank, sizeof(mapSize), &mapSize);
+    for (auto const p : mapToSend) {
+      SendData(peerRank, sizeof(p), &p);
+    }
+  }
+
+  template <typename KeyType>
+  void System::SendMap(int peerRank, std::map<KeyType, std::string> const& mapToSend) const
+  {
+    size_t mapSize = mapToSend.size();
+    SendData(peerRank, sizeof(mapSize), &mapSize);
+    for (auto const p : mapToSend) {
+      size_t strlen = p.second.size();
+      SendData(peerRank, sizeof(p.first), &p.first);
+      SendData(peerRank, sizeof(strlen), &strlen);
+      if (strlen) SendData(peerRank, strlen, p.second.data());
+    }
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::RecvMap(int peerRank, std::map<KeyType, std::vector<ValType>>& mapToRecv) const
+  {
+    mapToRecv.clear();
+    size_t mapSize;
+    RecvData(peerRank, sizeof(mapSize), &mapSize);
+    for (size_t i = 0; i < mapSize; i++) {
+      KeyType key;
+      size_t vectorSize;
+      std::vector<ValType> values;
+      RecvData(peerRank, sizeof(key), &key);
+      RecvData(peerRank, sizeof(vectorSize), &vectorSize);
+      if (vectorSize) {
+        values.resize(vectorSize);
+        for (size_t j = 0; j < vectorSize; j++) {
+          RecvData(peerRank, sizeof(ValType), &values[j]);
+        }
+      }
+      mapToRecv[key] = values;
+    }
+  }
+
+  template <typename KeyType>
+  void System::RecvMap(int peerRank, std::map<KeyType, std::string>& mapToRecv) const
+  {
+    mapToRecv.clear();
+    size_t mapSize;
+    RecvData(peerRank, sizeof(mapSize), &mapSize);
+    for (size_t i = 0; i < mapSize; i++) {
+      KeyType key;
+      size_t strlen;
+      std::string value;
+      RecvData(peerRank, sizeof(key), &key);
+      RecvData(peerRank, sizeof(size_t), &strlen);
+      if (strlen) {
+        value.resize(strlen);
+        RecvData(peerRank, strlen, value.data());
+      }
+      mapToRecv[key] = value;
+    }
+  }
+
+  template <typename KeyType, typename ValType>
+  void System::RecvMap(int peerRank, std::map<KeyType, ValType>& mapToRecv) const
+  {
+    mapToRecv.clear();
+    size_t mapSize;
+    RecvData(peerRank, sizeof(mapSize), &mapSize);
+    for (size_t i = 0; i < mapSize; i++) {
+      std::pair<KeyType, ValType> p;
+      RecvData(peerRank, sizeof(p), &p);
+      mapToRecv[p.first] = p.second;
+    }
+  }
+
+  void System::SendRankTopo(int peerRank, RankTopology const& topo) const
+  {
+    SendData(peerRank, sizeof(topo.hostname), topo.hostname);
+    SendData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
+    SendData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
+    SendMap(peerRank, topo.numExecutors);
+    SendMap(peerRank, topo.numExecutorSubIndices);
+    SendMap(peerRank, topo.numSubExecutors);
+    SendMap(peerRank, topo.closestCpuNumaToGpu);
+    SendMap(peerRank, topo.closestCpuNumaToNic);
+    SendMap(peerRank, topo.nicIsActive);
+    SendMap(peerRank, topo.closestNicsToGpu);
+    SendMap(peerRank, topo.executorName);
+  };
+
+  void System::RecvRankTopo(int peerRank, RankTopology& topo) const
+  {
+    RecvData(peerRank, sizeof(topo.hostname), topo.hostname);
+    RecvData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
+    RecvData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
+    RecvMap(peerRank, topo.numExecutors);
+    RecvMap(peerRank, topo.numExecutorSubIndices);
+    RecvMap(peerRank, topo.numSubExecutors);
+    RecvMap(peerRank, topo.closestCpuNumaToGpu);
+    RecvMap(peerRank, topo.closestCpuNumaToNic);
+    RecvMap(peerRank, topo.nicIsActive);
+    RecvMap(peerRank, topo.closestNicsToGpu);
+    RecvMap(peerRank, topo.executorName);
+  }
+
+  template <typename T>
+  void System::BroadcastVector(int root, vector<T>& data) const
+  {
+    // This assumes T is trivially copyable
+    static_assert(std::is_trivially_copyable<T>::value);
+
+    size_t len = data.size();
+    Broadcast(root, sizeof(len), &len);
+    data.resize(len);
+    if (len) {
+      Broadcast(root, sizeof(T) * len, data.data());
+    }
+  }
+
+  void System::BroadcastString(int root, std::string& string) const
+  {
+    size_t len = string.size();
+    Broadcast(root, sizeof(len), &len);
+    string.resize(len);
+    if (len) {
+      Broadcast(root, len, string.data());
+    }
+  }
+
+  void System::BroadcastExeResult(int root, ExeResult& exeResult) const
+  {
+    #define BROADCAST(X)  Broadcast(root, sizeof(X), &X)
+    BROADCAST(exeResult.numBytes);
+    BROADCAST(exeResult.avgDurationMsec);
+    BROADCAST(exeResult.avgBandwidthGbPerSec);
+    BROADCAST(exeResult.sumBandwidthGbPerSec);
+    BroadcastVector(root, exeResult.transferIdx);
+    #undef BROADCAST
+  }
+
+  void System::BroadcastTfrResult(int root, TransferResult& tfrResult) const
+  {
+    #define BROADCAST(X)  Broadcast(root, sizeof(X), &X)
+    BROADCAST(tfrResult.numBytes);
+    BROADCAST(tfrResult.avgDurationMsec);
+    BROADCAST(tfrResult.avgBandwidthGbPerSec);
+    BroadcastVector(root, tfrResult.perIterMsec);
+    BROADCAST(tfrResult.exeDevice);
+    BROADCAST(tfrResult.exeDstDevice);
+
+    // Per-Iteration CU results need to be handled in a custom manner
+    size_t perIterCuSize = tfrResult.perIterCUs.size();
+    BROADCAST(perIterCuSize);
+
+    if (perIterCuSize > 0) {
+      tfrResult.perIterCUs.resize(perIterCuSize);
+      for (size_t i = 0; i < perIterCuSize; i++) {
+        size_t setSize;
+
+        //vector<set<pair<int,int>>> perIterCUs;      ///< GFX-Executor only. XCC:CU used per iteration
+
+        if (GetRank() == root) {
+          setSize = tfrResult.perIterCUs[i].size();
+          BROADCAST(setSize);
+          if (setSize > 0) {
+            for (pair<int,int> const& x : tfrResult.perIterCUs[i]) {
+              pair<int, int> p = x;
+              BROADCAST(p);
+            }
+          }
+        } else {
+          BROADCAST(setSize);
+          tfrResult.perIterCUs[i].clear();
+          if (setSize > 0) {
+            pair<int, int> p;
+            BROADCAST(p);
+            tfrResult.perIterCUs[i].insert(p);
+          }
+        }
+      }
+    } else {
+      tfrResult.perIterCUs.clear();
+    }
+    #undef BROADCAST
+  };
+
+  void System::AllGatherErrors(vector<ErrResult>& errResults) const
+  {
+    if (commMode == COMM_NONE) return;
+
+    vector<ErrResult> tempResults = std::move(errResults);
+
+    for (int i = 0; i < numRanks; i++) {
+      size_t errListSize = tempResults.size();
+      Broadcast(i, sizeof(errListSize), &errListSize);
+      for (size_t j = 0; j < errListSize; j++) {
+        ErrResult errResult;
+        if (rank == i) errResult = tempResults[j];
+        Broadcast(i, sizeof(errResult.errType), &errResult.errType);
+        BroadcastString(i, errResult.errMsg);
+        errResult.errMsg += " (Rank " + std::to_string(i) + ")";
+        errResults.push_back(errResult);
+      }
+    }
+  }
+
+#if !defined(__NVCC__)
+  // Get the hsa_agent_t associated with a ExeDevice
+  ErrResult System::GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const
+  {
+    int numCpus = static_cast<int>(cpuAgents.size());
+    int numGpus = static_cast<int>(gpuAgents.size());
+    int exeIndex = exeDevice.exeIndex;
+
+    switch (exeDevice.exeType) {
+    case EXE_CPU:
+      if (exeIndex < 0 || exeIndex >= numCpus)
+        return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
+      agent = cpuAgents[exeDevice.exeIndex];
+      break;
+    case EXE_GPU_GFX: case EXE_GPU_DMA:
+      if (exeIndex < 0 || exeIndex >= numGpus)
+        return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
+      agent = gpuAgents[exeIndex];
+      break;
+    default:
+      return {ERR_FATAL,
+              "Attempting to get HSA agent of unknown or unsupported executor type (%d)",
+              exeDevice.exeType};
     }
     return ERR_NONE;
   }
 
-  int GetNumExecutors(ExeType exeType)
+  // Get the hsa_agent_t associated with a MemDevice
+  ErrResult System::GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const
   {
-    switch (exeType) {
-    case EXE_CPU:
-      return numa_num_configured_nodes();
-    case EXE_GPU_GFX: case EXE_GPU_DMA:
+    if (memDevice.memType == MEM_CPU_CLOSEST)
+      return GetHsaAgent({EXE_CPU, GetClosestCpuNumaToGpu(memDevice.memIndex)}, agent);
+    if (IsCpuMemType(memDevice.memType)) return GetHsaAgent({EXE_CPU, memDevice.memIndex}, agent);
+    if (IsGpuMemType(memDevice.memType)) return GetHsaAgent({EXE_GPU_GFX, memDevice.memIndex}, agent);
+    return {ERR_FATAL,
+            "Unable to get HSA agent for memDevice (%d,%d)",
+            memDevice.memType, memDevice.memIndex};
+  }
+#endif
+
+  void System::CollectTopology()
+  {
+    // Cache the HSA agents for each device
+#if !defined(__NVCC__)
     {
-      int numDetectedGpus = 0;
-      hipError_t status = hipGetDeviceCount(&numDetectedGpus);
-      if (status != hipSuccess) numDetectedGpus = 0;
-      return numDetectedGpus;
-    }
-#ifdef NIC_EXEC_ENABLED
-    case EXE_NIC: case EXE_NIC_NEAREST:
-    {
-      return GetIbvDeviceList().size();
+      hsa_amd_pointer_info_t info;
+      info.size = sizeof(info);
+
+      ErrResult err;
+      int32_t* tempBuffer;
+
+      // Index CPU agents
+      cpuAgents.clear();
+      int numCpus = numa_num_configured_nodes();
+      for (int i = 0; i < numCpus; i++) {
+        AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer);
+        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
+        cpuAgents.push_back(info.agentOwner);
+        DeallocateMemory(MEM_CPU, tempBuffer, 1024);
+      }
+
+      // Index GPU agents
+      int numGpus = 0;
+      hipError_t status = hipGetDeviceCount(&numGpus);
+      if (status != hipSuccess) numGpus = 0;
+      gpuAgents.clear();
+      for (int i = 0; i < numGpus; i++) {
+        AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
+        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
+        gpuAgents.push_back(info.agentOwner);
+        DeallocateMemory(MEM_GPU, tempBuffer, 1024);
+      }
     }
 #endif
-    default:
-      return 0;
+
+    // Collect the topology of the local node
+    RankTopology localTopo;
+    GetRankTopology(localTopo);
+
+    // Distribute amongst all ranks
+    rankInfo.resize(numRanks);
+
+    if (rank == 0) {
+      // Receive topology info from each rank
+      rankInfo[0] = localTopo;
+      for (int peerRank = 1; peerRank < numRanks; peerRank++) {
+        if (verbose) {
+          printf("[INFO] Rank 0 receives topology from Rank %d\n", peerRank);
+        }
+        RecvRankTopo(peerRank, rankInfo[peerRank]);
+      }
+
+      // Send out full set of info to each rank
+      for (int peerRank = 1; peerRank < numRanks; peerRank++) {
+        for (int i = 0; i < numRanks; i++) {
+          if (verbose) {
+            printf("[INFO] Rank 0 sends topology %d to Rank %d\n", i, peerRank);
+          }
+          SendRankTopo(peerRank, rankInfo[i]);
+        }
+      }
+    } else {
+      // Send local topology info back to root
+      if (verbose) {
+        printf("[INF0] Rank %d sends topology from Rank 0\n", rank);
+      }
+      SendRankTopo(0, localTopo);
+
+      for (int i = 0; i < numRanks; i++) {
+        RecvRankTopo(0, rankInfo[i]);
+        if (verbose) {
+          printf("[INF0] Rank %d receives topology %d from Rank 0\n", rank, i);
+        }
+      }
     }
+  }
+
+  int System::GetNumExecutors(ExeType exeType, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].numExecutors.count(exeType) == 0) return 0;
+    return rankInfo[targetRank].numExecutors.at(exeType);
+  }
+
+  int System::GetNumExecutorSubIndices(ExeDevice exeDevice) const
+  {
+    int targetRank = exeDevice.exeRank;
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].numExecutorSubIndices.count({exeDevice.exeType, exeDevice.exeIndex}) == 0)
+      return 0;
+    return rankInfo[targetRank].numExecutorSubIndices.at({exeDevice.exeType, exeDevice.exeIndex});
+  }
+
+  int System::GetNumSubExecutors(ExeDevice exeDevice) const
+  {
+    int targetRank = exeDevice.exeRank;
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].numSubExecutors.count({exeDevice.exeType, exeDevice.exeIndex}) == 0)
+      return 0;
+    return rankInfo[targetRank].numSubExecutors.at({exeDevice.exeType, exeDevice.exeIndex});
+  }
+
+  int System::GetClosestCpuNumaToGpu(int gpuIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (gpuIndex < 0 || gpuIndex >= GetNumExecutors(EXE_GPU_GFX, targetRank)) return 0;
+    return rankInfo[targetRank].closestCpuNumaToGpu.at(gpuIndex);
+  }
+
+  int System::GetClosestCpuNumaToNic(int nicIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (nicIndex < 0 || nicIndex >= GetNumExecutors(EXE_NIC, targetRank)) return 0;
+    return rankInfo[targetRank].closestCpuNumaToNic.at(nicIndex);
+  }
+
+  void System::GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank) const
+  {
+    nicIndices.clear();
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (gpuIndex < 0 || gpuIndex >= GetNumExecutors(EXE_GPU_GFX, targetRank)) return;
+    nicIndices = rankInfo[targetRank].closestNicsToGpu.at(gpuIndex);
+  }
+
+  std::string System::GetHostname(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].hostname;
+  }
+
+  std::string System::GetPpodId(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].ppodId;
+  }
+
+  int System::GetVpodId(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return rankInfo[targetRank].vpodId;
+  }
+
+  std::string System::GetExecutorName(ExeDevice exeDevice) const
+  {
+    int targetRank = exeDevice.exeRank;
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+
+    if (rankInfo[targetRank].executorName.count({exeDevice.exeType, exeDevice.exeIndex}) == 0)
+      return "Unknown device";
+    return rankInfo[targetRank].executorName.at({exeDevice.exeType, exeDevice.exeIndex});
+  }
+
+  int System::NicIsActive(int nicIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].nicIsActive.count(nicIndex) == 0) return 0;
+    return rankInfo[targetRank].nicIsActive.at(nicIndex);
+  }
+
+  int GetNumExecutors(ExeType exeType, int targetRank)
+  {
+    return System::Get().GetNumExecutors(exeType, targetRank);
+  }
+
+  int GetNumExecutors(MemType memType, int targetRank)
+  {
+    if (IsCpuMemType(memType)) return GetNumExecutors(EXE_CPU,     targetRank);
+    if (IsGpuMemType(memType)) return GetNumExecutors(EXE_GPU_GFX, targetRank);
+    return 0;
   }
 
   int GetNumSubExecutors(ExeDevice exeDevice)
   {
-    int const& exeIndex = exeDevice.exeIndex;
-
-    switch(exeDevice.exeType) {
-    case EXE_CPU:
-    {
-      int numCores = 0;
-      for (int i = 0; i < numa_num_configured_cpus(); i++)
-        if (numa_node_of_cpu(i) == exeIndex) numCores++;
-      return numCores;
-    }
-    case EXE_GPU_GFX:
-    {
-      int numGpus = GetNumExecutors(EXE_GPU_GFX);
-      if (exeIndex < 0 || numGpus <= exeIndex) return 0;
-      int numDeviceCUs = 0;
-      hipError_t status = hipDeviceGetAttribute(&numDeviceCUs, hipDeviceAttributeMultiprocessorCount, exeIndex);
-      if (status != hipSuccess) numDeviceCUs = 0;
-      return numDeviceCUs;
-    }
-    case EXE_GPU_DMA:
-    {
-      return 1;
-    }
-    default:
-      return 0;
-    }
+    return System::Get().GetNumSubExecutors(exeDevice);
   }
 
   int GetNumExecutorSubIndices(ExeDevice exeDevice)
   {
-    // Executor subindices are not supported on NVIDIA hardware
-#if defined(__NVCC__)
-    return 0;
-#else
-    int const& exeIndex = exeDevice.exeIndex;
-
-    switch(exeDevice.exeType) {
-    case EXE_CPU: return 0;
-    case EXE_GPU_GFX:
-    {
-      hsa_agent_t agent;
-      ErrResult err = GetHsaAgent(exeDevice, agent);
-      if (err.errType != ERR_NONE) return 0;
-      int numXccs = 1;
-      if (hsa_agent_get_info(agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_XCC, &numXccs) != HSA_STATUS_SUCCESS)
-        return 1;
-      return numXccs;
-    }
-    case EXE_GPU_DMA:
-    {
-      std::set<int> engineIds;
-      ErrResult err;
-
-      // Get HSA agent for this GPU
-      hsa_agent_t agent;
-      err = GetHsaAgent(exeDevice, agent);
-      if (err.errType != ERR_NONE) return 0;
-
-      int numTotalEngines = 0, numEnginesA = 0, numEnginesB = 0;
-      if (hsa_agent_get_info(agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_ENG, &numEnginesA)
-          == HSA_STATUS_SUCCESS)
-        numTotalEngines += numEnginesA;
-      if (hsa_agent_get_info(agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NUM_SDMA_XGMI_ENG, &numEnginesB)
-          == HSA_STATUS_SUCCESS)
-        numTotalEngines += numEnginesB;
-
-      return numTotalEngines;
-    }
-    default:
-      return 0;
-    }
-#endif
+    return System::Get().GetNumExecutorSubIndices(exeDevice);
   }
 
-  int GetClosestCpuNumaToGpu(int gpuIndex)
+  int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank)
   {
-    // Closest NUMA is not supported on NVIDIA hardware at this time
-#if defined(__NVCC__)
-    return -1;
-#else
-    hsa_agent_t gpuAgent;
-    ErrResult err = GetHsaAgent({EXE_GPU_GFX, gpuIndex}, gpuAgent);
-    if (err.errType != ERR_NONE) return -1;
+    return System::Get().GetClosestCpuNumaToGpu(gpuIndex, targetRank);
+  }
 
-    hsa_agent_t closestCpuAgent;
-    if (hsa_agent_get_info(gpuAgent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_NEAREST_CPU, &closestCpuAgent)
-        == HSA_STATUS_SUCCESS) {
-      int numCpus = GetNumExecutors(EXE_CPU);
-      for (int i = 0; i < numCpus; i++) {
-        hsa_agent_t cpuAgent;
-        err = GetHsaAgent({EXE_CPU, i}, cpuAgent);
-        if (err.errType != ERR_NONE) return -1;
-        if (cpuAgent.handle == closestCpuAgent.handle) return i;
+  int GetClosestCpuNumaToNic(int nicIndex, int targetRank)
+  {
+    return System::Get().GetClosestCpuNumaToNic(nicIndex, targetRank);
+  }
+
+  int GetClosestNicToGpu(int gpuIndex, int targetRank)
+  {
+    std::vector<int> nicIndices;
+    System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+    if (nicIndices.size() == 0) return -1;
+    return nicIndices[0];
+  }
+
+  void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank)
+  {
+    System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+  }
+
+  void GetClosestNicsToCpu(std::vector<int>& nicIndices, int cpuIndex, int targetRank)
+  {
+    int numNics = GetNumExecutors(EXE_NIC, targetRank);
+    nicIndices.clear();
+    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+      if (GetClosestCpuNumaToNic(nicIndex, targetRank) == cpuIndex) {
+        nicIndices.push_back(nicIndex);
       }
     }
-    return -1;
-#endif
   }
 
-  int GetClosestCpuNumaToNic(int nicIndex)
+  int GetRank()
   {
-#ifdef NIC_EXEC_ENABLED
-    int numNics = GetNumExecutors(EXE_NIC);
-    if (nicIndex < 0 || nicIndex >= numNics) return -1;
-    return GetIbvDeviceList()[nicIndex].numaNode;
-#else
-    return -1;
-#endif
+    return System::Get().GetRank();
   }
 
-
-  int GetClosestNicToGpu(int gpuIndex)
+  int GetNumRanks()
   {
-#ifdef NIC_EXEC_ENABLED
-    static bool isInitialized = false;
-    static std::vector<int> closestNicId;
+    return System::Get().GetNumRanks();
+  }
 
-    int numGpus = GetNumExecutors(EXE_GPU_GFX);
-    if (gpuIndex < 0 || gpuIndex >= numGpus) return -1;
+  int GetCommMode()
+  {
+    return System::Get().GetCommMode();
+  }
 
-    // Build closest NICs per GPU on first use
-    if (!isInitialized) {
-      closestNicId.resize(numGpus, -1);
+  std::string GetHostname(int targetRank)
+  {
+    return System::Get().GetHostname(targetRank);
+  }
 
-      // Build up list of NIC bus addresses
-      std::vector<std::string> ibvAddressList;
-      auto const& ibvDeviceList = GetIbvDeviceList();
-      for (auto const& ibvDevice : ibvDeviceList)
-        ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
+  std::string GetPpodId(int targetRank)
+  {
+    return System::Get().GetPpodId(targetRank);
+  }
 
-      // Track how many times a device has been assigned as "closest"
-      // This allows distributed work across devices using multiple ports (sharing the same busID)
-      // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
-      // Counter example:
-      //
-      //  G0 prefers (N0,N1), picks N0
-      //  G1 prefers (N1,N2), picks N1
-      //  G2 prefers N0,      picks N0
-      //
-      //  instead of G0->N1, G1->N2, G2->N0
+  int GetVpodId(int targetRank)
+  {
+    return System::Get().GetVpodId(targetRank);
+  }
 
-      std::vector<int> assignedCount(ibvDeviceList.size(), 0);
+  std::string GetExecutorName(ExeDevice exeDevice)
+  {
+    return System::Get().GetExecutorName(exeDevice);
+  }
 
-      // Loop over each GPU to find the closest NIC(s) based on PCIe address
-      for (int i = 0; i < numGpus; i++) {
-        // Collect PCIe address for the GPU
-        char hipPciBusId[64];
-        hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), i);
-        if (err != hipSuccess) {
-#ifdef VERBS_DEBUG
-          printf("Failed to get PCI Bus ID for HIP device %d: %s\n", i, hipGetErrorString(err));
-#endif
-          closestNicId[i] = -1;
-          continue;
-        }
-
-        // Find closest NICs
-        std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
-
-        // Pick the least-used NIC to assign as closest
-        int closestIdx = -1;
-        for (auto idx : closestNicIdxs) {
-          if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
-            closestIdx = idx;
-        }
-
-        // The following will only use distance between bus IDs
-        // to determine the closest NIC to GPU if the PCIe tree approach fails
-        if (closestIdx < 0) {
-#ifdef VERBS_DEBUG
-          printf("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
-#endif
-
-          int minDistance = std::numeric_limits<int>::max();
-          for (int j = 0; j < ibvDeviceList.size(); j++) {
-            if (ibvDeviceList[j].busId != "") {
-              int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[j].busId);
-              if (distance < minDistance && distance >= 0) {
-                minDistance = distance;
-                closestIdx = j;
-              }
-            }
-          }
-        }
-        closestNicId[i] = closestIdx;
-        if (closestIdx != -1) assignedCount[closestIdx]++;
-      }
-      isInitialized = true;
-    }
-    return closestNicId[gpuIndex];
-#else
-    return -1;
-#endif
+  int NicIsActive(int nicIndex, int targetRank)
+  {
+    return System::Get().NicIsActive(nicIndex, targetRank);
   }
 
 // Undefine CUDA compatibility macros

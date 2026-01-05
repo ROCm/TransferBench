@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -21,22 +21,26 @@ THE SOFTWARE.
 */
 
 #pragma once
+#include <map>
 
-// Included after EnvVars and Executors
+// EnvVars is available to all presets
+#include "EnvVars.hpp"
+#include "Utilities.hpp"
+
 #include "AllToAll.hpp"
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
 #include "HealthCheck.hpp"
+#include "NicRings.hpp"
 #include "OneToAll.hpp"
 #include "PeerToPeer.hpp"
 #include "Scaling.hpp"
 #include "Schmoo.hpp"
 #include "Sweep.hpp"
-#include <map>
 
-typedef void (*PresetFunc)(EnvVars&          ev,
-                           size_t      const numBytesPerTransfer,
-                           std::string const presetName);
+typedef int (*PresetFunc)(EnvVars&          ev,
+                          size_t      const numBytesPerTransfer,
+                          std::string const presetName);
 
 std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 {
@@ -44,8 +48,9 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
+  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
-  {"p2p"   ,      {PeerToPeerPreset,    " Peer-to-peer device memory bandwidth test"}},
+  {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
   {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
@@ -63,11 +68,12 @@ void DisplayPresets()
 int RunPreset(EnvVars&       ev,
               size_t   const numBytesPerTransfer,
               int      const argc,
-              char**   const argv)
+              char**   const argv,
+              int&           retCode)
 {
   std::string preset = (argc > 1 ? argv[1] : "");
   if (presetFuncMap.count(preset)) {
-    (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset);
+    retCode = (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset);
     return 1;
   }
   return 0;
