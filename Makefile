@@ -10,6 +10,15 @@ MPI_PATH  ?= /usr/local/openmpi
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
 
+# ROCm device libraries can live in different locations depending on packaging.
+# hipcc/clang needs to find the amdgcn bitcode directory at link time.
+ROCM_DEVICE_LIB_PATH ?=
+ifneq ($(wildcard $(ROCM_PATH)/amdgcn/bitcode),)
+  ROCM_DEVICE_LIB_PATH := $(ROCM_PATH)/amdgcn/bitcode
+else ifneq ($(wildcard $(ROCM_PATH)/lib/llvm/amdgcn/bitcode),)
+  ROCM_DEVICE_LIB_PATH := $(ROCM_PATH)/lib/llvm/amdgcn/bitcode
+endif
+
 # Option to compile with single GFX kernel to drop compilation time
 SINGLE_KERNEL ?= 0
 
@@ -40,6 +49,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   CXXFLAGS = -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
   HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
   HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
+  ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
+    HIPFLAGS += --rocm-device-lib-path=$(ROCM_DEVICE_LIB_PATH)
+  endif
   NVFLAGS  = -x cu -lnuma -arch=native
 
   ifeq ($(SINGLE_KERNEL), 1)
@@ -111,7 +123,7 @@ endif
 all: $(EXE)
 
 TransferBench: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
-	$(HIPCC) $(CXXFLAGS) $(HIPFLAGS) $(COMMON_FLAGS) $< -o $@ $(HIPLDFLAGS) $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(HIPFLAGS) $(COMMON_FLAGS) $< -o $@ $(HIPLDFLAGS) $(LDFLAGS)
 
 TransferBenchCuda: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
 	$(NVCC) $(NVFLAGS) $(COMMON_FLAGS) $< -o $@ $(LDFLAGS)
