@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+// Helper functions
 MemType parseMemType(std::string const memTypeIdx) {
   bool isCpu = false;
   int  memType = 2;
@@ -47,9 +48,15 @@ MemType parseMemType(std::string const memTypeIdx) {
   return Utils::GetMemType(memType, isCpu);
 }
 
+int GetClosestDeviceToNic(MemType memType, int nicIdx, int rank) {
+  return TransferBench::IsCpuMemType(memType) ?
+         TransferBench::GetClosestCpuNumaToNic(nicIdx, rank) :
+         TransferBench::GetClosestGpuToNic(nicIdx, rank);
+}
+
 int NicPeerToPeerPreset(EnvVars&           ev,
-                         size_t      const  numBytesPerTransfer,
-                         std::string const  presetName)
+                        size_t      const  numBytesPerTransfer,
+                        std::string const  presetName)
 {
   int numRanks = TransferBench::GetNumRanks();
 
@@ -131,6 +138,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
           }
           if (rank1 != rank2) {
             roundPairs.push_back({rank1, rank2});
+            roundPairs.push_back({rank2, rank1});
           }
         }
         schedule.push_back(roundPairs);
@@ -144,11 +152,18 @@ int NicPeerToPeerPreset(EnvVars&           ev,
           int rank2 = (round + numRanks - 1 - i) % numRanks;
           if (rank1 != rank2) {
             roundPairs.push_back({rank1, rank2});
+            roundPairs.push_back({rank2, rank1});
           }
         }
         schedule.push_back(roundPairs);
       }
     }
+    // Finally, a round where every rank does loopback
+    std::vector<std::pair<int, int>> selfRound;
+    for (int rank = 0; rank < numRanks; rank++) {
+      selfRound.push_back({rank, rank});
+    }
+    schedule.push_back(selfRound);
   }
 
   // Display EnvVars
@@ -161,12 +176,16 @@ int NicPeerToPeerPreset(EnvVars&           ev,
       ev.Print("OUTPUT_FORMAT",   showFullMatrix, "Printing results in %s format", showFullMatrix ? "full matrix" : "column");
       ev.Print("NIC_FILTER",      nicFilter,      "Selecting %d NICs", nicFilter.size());
       // TODO: Display filtered NICs?
+      // TODO: More detailed info about mem type?
+      ev.Print("SRC_MEM",         srcMemIdx,      "Source memory type");
+      ev.Print("DST_MEM",         dstMemIdx,      "Destination memory type");
       ev.Print("FAST_EXE",        rr,             "Executing p2p node pairs in parallel");
       printf("\n");
     }
   }
 
   // TODO: validate env vars
+  // TODO: assert same RR schedule
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
@@ -195,40 +214,106 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   //std::vector<double> maxBandwidth;
   //std::vector<double> stdDev;
 
-  // Loop over all possible src+NIC/dst+NIC pairs across all ranks and collect P2P results
-  for (int srcRank = 0; srcRank < numRanks; srcRank++) {
-    for (int srcNicIdx = 0; srcNicIdx < numNicsPerRank; srcNicIdx++) {
-      for (int dstRank = 0; dstRank < numRanks; dstRank++) {
+  // Transfer starts
+  if (rr) {
+    // Pre-allocate result vectors for all transfer combinations
+    int totalTransfers = numRanks * numNicsPerRank * numRanks * numNicsPerRank;
+    avgBandwidth.resize(totalTransfers);
+    srcExes.resize(totalTransfers);
+    dstExes.resize(totalTransfers);
+    srcMems.resize(totalTransfers);
+    dstMems.resize(totalTransfers);
+    for (auto const& roundPairs : schedule) {
+      for (int srcNicIdx = 0; srcNicIdx < numNicsPerRank; srcNicIdx++) {
         for (int dstNicIdx = 0; dstNicIdx < numNicsPerRank; dstNicIdx++) {
-          std::vector<Transfer> transfers(1);
-          
-          int srcNic = nicIndices[srcNicIdx];
-          int dstNic = nicIndices[dstNicIdx];
+          std::vector<Transfer> transfers;
+          for (auto const& pair : roundPairs) {
+            Transfer transfer;
+            int srcRank = pair.first;
+            int dstRank = pair.second;
 
-          // Determine which GPU memory to use based on NIC proximity and its info
-          int srcGpuIndex = TransferBench::GetClosestGpuToNic(srcNic, srcRank);
-          int dstGpuIndex = TransferBench::GetClosestGpuToNic(dstNic, dstRank);
+            int srcNic = nicIndices[srcNicIdx];
+            int dstNic = nicIndices[dstNicIdx];
 
-          // TODO: error msg
-          if (srcGpuIndex == -1 || dstGpuIndex == -1) ;
-          transfers[0].numBytes = numBytesPerTransfer;
-          transfers[0].srcs.push_back({srcTypeActual, srcGpuIndex, srcRank});
-          transfers[0].dsts.push_back({dstTypeActual, dstGpuIndex, dstRank});
-          transfers[0].exeDevice = {EXE_NIC, (useRemoteRead ? dstGpuIndex : srcGpuIndex), (useRemoteRead ? dstRank : srcRank)};
-          transfers[0].exeSubIndex = (useRemoteRead ? srcGpuIndex : dstGpuIndex);
-          transfers[0].numSubExecs = numQueuePairs;
+            // Determine which GPU memory/CPU NUMA to use based on NIC proximity and its info
+            int srcMemIndex = GetClosestDeviceToNic(srcTypeActual, srcNic, srcRank);
+            int dstMemIndex = GetClosestDeviceToNic(dstTypeActual, dstNic, dstRank);
+
+            // TODO: error msg
+            if (srcMemIndex == -1 || dstMemIndex == -1) ;
+            transfer.numBytes = numBytesPerTransfer;
+            transfer.srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
+            transfer.dsts.push_back({dstTypeActual, dstMemIndex, dstRank});
+            transfer.exeDevice = {EXE_NIC, (useRemoteRead ? dstMemIndex : srcMemIndex), (useRemoteRead ? dstRank : srcRank)};
+            transfer.exeSubIndex = (useRemoteRead ? srcMemIndex : dstMemIndex);
+            transfer.numSubExecs = numQueuePairs;
+
+            transfers.push_back(transfer);
+          }
 
           if (!TransferBench::RunTransfers(cfg, transfers, results)) {
             for (auto const& err : results.errResults)
               Utils::Print("%s\n", err.errMsg.c_str());
             return 1;
           }
-          avgBandwidth.push_back(results.tfrResults[0].avgBandwidthGbPerSec);
-          srcExes.push_back(TransferBench::GetExecutorName(results.tfrResults[0].exeDevice));
-          dstExes.push_back(TransferBench::GetExecutorName(results.tfrResults[0].exeDstDevice));
-	  
-          srcMems.push_back(srcGpuIndex);
-          dstMems.push_back(dstGpuIndex);
+
+          for (size_t i = 0; i < results.tfrResults.size(); i++) {
+            int srcRank = transfers[i].srcs[0].memRank;
+            int dstRank = transfers[i].dsts[0].memRank;
+
+            // Calculate index in table-rendering order: srcRank x srcNicIdx x dstRank x dstNicIdx
+            int idx = srcRank * (numNicsPerRank * numRanks * numNicsPerRank)
+                    + srcNicIdx * (numRanks * numNicsPerRank)
+                    + dstRank * numNicsPerRank
+                    + dstNicIdx;
+
+            avgBandwidth[idx] = results.tfrResults[i].avgBandwidthGbPerSec;
+            srcExes[idx] = TransferBench::GetExecutorName(results.tfrResults[i].exeDevice);
+            dstExes[idx] = TransferBench::GetExecutorName(results.tfrResults[i].exeDstDevice);
+            // TODO: add mem device info in transfer result?
+            srcMems[idx] = transfers[i].srcs[0].memIndex;
+            dstMems[idx] = transfers[i].dsts[0].memIndex;
+
+          }
+        }
+      }
+    }
+  } else {
+    // Loop over all possible src+NIC/dst+NIC pairs across all ranks and collect P2P results
+    for (int srcRank = 0; srcRank < numRanks; srcRank++) {
+      for (int srcNicIdx = 0; srcNicIdx < numNicsPerRank; srcNicIdx++) {
+        for (int dstRank = 0; dstRank < numRanks; dstRank++) {
+          for (int dstNicIdx = 0; dstNicIdx < numNicsPerRank; dstNicIdx++) {
+            std::vector<Transfer> transfers(1);
+
+            int srcNic = nicIndices[srcNicIdx];
+            int dstNic = nicIndices[dstNicIdx];
+
+            // Determine which GPU memory/CPU NUMA to use based on NIC proximity and its info
+            int srcMemIndex = GetClosestDeviceToNic(srcTypeActual, srcNic, srcRank);
+            int dstMemIndex = GetClosestDeviceToNic(dstTypeActual, dstNic, dstRank);
+
+            // TODO: error msg
+            if (srcMemIndex == -1 || dstMemIndex == -1) ;
+            transfers[0].numBytes = numBytesPerTransfer;
+            transfers[0].srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
+            transfers[0].dsts.push_back({dstTypeActual, dstMemIndex, dstRank});
+            transfers[0].exeDevice = {EXE_NIC, (useRemoteRead ? dstMemIndex : srcMemIndex), (useRemoteRead ? dstRank : srcRank)};
+            transfers[0].exeSubIndex = (useRemoteRead ? srcMemIndex : dstMemIndex);
+            transfers[0].numSubExecs = numQueuePairs;
+
+            if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+              for (auto const& err : results.errResults)
+                Utils::Print("%s\n", err.errMsg.c_str());
+              return 1;
+            }
+            avgBandwidth.push_back(results.tfrResults[0].avgBandwidthGbPerSec);
+            srcExes.push_back(TransferBench::GetExecutorName(results.tfrResults[0].exeDevice));
+            dstExes.push_back(TransferBench::GetExecutorName(results.tfrResults[0].exeDstDevice));
+
+            srcMems.push_back(srcMemIndex);
+            dstMems.push_back(dstMemIndex);
+          }
         }
       }
     }
@@ -257,9 +342,9 @@ int NicPeerToPeerPreset(EnvVars&           ev,
       table.Set(0, rowIdx, " Rank %02d ", rank);
       for (int nic = 0; nic < numNicsPerRank; nic++) {
         table.Set(rowIdx, 1, " %s ", srcExes[entryIdx].c_str());
-        table.Set(rowIdx, 2, " GPU %02d ", srcMems[entryIdx]);
+        table.Set(rowIdx, 2, " %cPU %02d ", TransferBench::IsCpuMemType(srcTypeActual) ? 'C' : 'G', srcMems[entryIdx]);
         table.Set(1, rowIdx, " %s ", dstExes[rowIdx - 3].c_str());
-        table.Set(2, rowIdx, " GPU %02d ", dstMems[rowIdx - 3]);
+        table.Set(2, rowIdx, " %cPU %02d ", TransferBench::IsCpuMemType(dstTypeActual) ? 'C' : 'G', dstMems[rowIdx - 3]);
         int colIdx = 3;
         for (int dstRank = 0; dstRank < numRanks; dstRank++) {
           for (int dstNic = 0; dstNic < numNicsPerRank; dstNic++) {
@@ -288,10 +373,10 @@ int NicPeerToPeerPreset(EnvVars&           ev,
           for (int j = 0; j < numNicsPerRank; j++) {
             table.Set(rowIdx, 0, " Rank %02d ", src);
             table.Set(rowIdx, 1, " %s ", srcExes[rowIdx - 1].c_str());
-            table.Set(rowIdx, 2, " GPU %02d ", srcMems[rowIdx - 1]);
+            table.Set(rowIdx, 2, " %cPU %02d ", TransferBench::IsCpuMemType(srcTypeActual) ? 'C' : 'G', srcMems[rowIdx - 1]);
             table.Set(rowIdx, 3, " Rank %02d ", dst);
             table.Set(rowIdx, 4, " %s ", dstExes[rowIdx - 1].c_str());
-            table.Set(rowIdx, 5, " GPU %02d ", dstMems[rowIdx - 1]);
+            table.Set(rowIdx, 5, " %cPU %02d ", TransferBench::IsCpuMemType(dstTypeActual) ? 'C' : 'G', dstMems[rowIdx - 1]);
             table.Set(rowIdx, 6, " %.2f ", avgBandwidth[rowIdx - 1]);
             rowIdx++;
           }
@@ -303,6 +388,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   table.PrintTable(ev.outputToCsv, ev.showBorders);
 
   // Ranking fastest/slowest connection
+  // TODO: expand length of the list via user passed in value
   Utils::TableHelper summaryTable(11, 6, precision);
   Utils::Print("Summary of top 10 fastest/slowest connection\n");
 
@@ -354,11 +440,6 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   }
   summaryTable.PrintTable(ev.outputToCsv, ev.showBorders);
 
-/*
-  if (!ev.outputToCsv && avgCount > 0) {
-    Utils::Print("\n");
-  }
-*/
   return 0;
 }
 
