@@ -1176,7 +1176,10 @@ namespace {
       }
 
       // Parse memory type
-      ERR_CHECK(CharToMemType(*ptr, w.memType));
+      ErrResult err = CharToMemType(*ptr, w.memType);
+      if (err.errType != ERR_NONE) {
+        return {err.errType, "Error parsing token [%s]: %s\n", token.c_str(), err.errMsg.c_str()};
+      }
       ptr++; // Skip memory type
 
       // Parse memory index
@@ -1184,6 +1187,8 @@ namespace {
         ptr = ParseRange(ptr, -1, w.memIndices);
         if (!ptr) return {ERR_FATAL, "Unable to parse device index in memory token %s", token.c_str()};
         memDevices.push_back(w);
+      } else {
+        break;
       }
     }
     return ERR_NONE;

@@ -3,6 +3,14 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.66.01
+## Fixed
+- Adding support for TheRock
+- Fixing parsing issue when using NULL memory type
+- Fixing CUAD compilation flags when enabling NIC/MPI
+## Modified
+- TransferBenchCuda must now be explicitly built with via 'make TransferBenchCuda'
+
 ## v1.66.00
 ### Added
 - Adding multi-node support

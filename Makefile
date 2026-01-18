@@ -26,15 +26,21 @@ SINGLE_KERNEL ?= 0
 # Default is the native GPU target
 GPU_TARGETS ?= native
 
+EXE=TransferBench
 DEBUG ?= 0
 
+# Only perform this check if 'make clean' is not the target
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
-  # Compile TransferBenchCuda if nvidia-smi returns successfully and nvcc detected
-  ifeq ("$(shell nvidia-smi > /dev/null 2>&1 && test -e $(NVCC) && echo found)", "found")
-    EXE=TransferBenchCuda
-    CXX=$(NVCC)
+  ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+    # Check for nvcc
+    ifneq ($(shell test -e $(NVCC) && echo found), found)
+      $(error "Could not find $(NVCC).  Please set CUDA_PATH appropriately")
+    else
+      $(info Compiling TransferBenchCuda using $(NVCC))
+    endif
+    NVFLAGS = -x cu -lnuma -arch=native
   else
-    EXE=TransferBench
+    # Check for HIP compiler
     ifeq ("$(shell test -e $(HIPCC) && echo found)", "found")
       CXX=$(HIPCC)
     else ifeq ("$(shell test -e $(ROCM_PATH)/bin/hipcc && echo found)", "found")
@@ -44,18 +50,17 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       $(error "Could not find $(HIPCC) or $(ROCM_PATH)/bin/hipcc. Check if the path is correct if you want to build $(EXE)")
     endif
     GPU_TARGETS_FLAGS = $(foreach target,$(GPU_TARGETS),"--offload-arch=$(target)")
-  endif
 
-  CXXFLAGS = -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
-  HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
-  HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
-  ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
-    HIPFLAGS += --rocm-device-lib-path=$(ROCM_DEVICE_LIB_PATH)
+    CXXFLAGS = -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
+    HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
+    HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
+    ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
+      HIPFLAGS += --rocm-device-lib-path=$(ROCM_DEVICE_LIB_PATH)
+    endif
   endif
-  NVFLAGS  = -x cu -lnuma -arch=native
 
   ifeq ($(SINGLE_KERNEL), 1)
-    CXXFLAGS += -DSINGLE_KERNEL
+    COMMON_FLAGS += -DSINGLE_KERNEL
   endif
 
   ifeq ($(DEBUG), 0)
@@ -79,7 +84,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     else ifeq ("$(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'infiniband/verbs.h')", "0")
       $(info infiniband/verbs.h not found)
     else
-      CXXFLAGS += -DNIC_EXEC_ENABLED
+      COMMON_FLAGS += -DNIC_EXEC_ENABLED
       LDFLAGS += -libverbs
       NIC_ENABLED = 1
     endif
@@ -101,7 +106,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       $(info Unable to find mpi.h at $(MPI_PATH)/include.  Please specify appropriate MPI_PATH)
     else
       MPI_ENABLED = 1
-      CXXFLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
+      COMMON_FLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
       LDFLAGS += -L/$(MPI_PATH)/lib -lmpi
       ifeq ($(DEBUG), 1)
         LDFLAGS += -lmpi_cxx
