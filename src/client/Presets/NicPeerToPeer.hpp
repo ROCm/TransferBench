@@ -21,6 +21,81 @@ THE SOFTWARE.
 */
 
 // Helper functions
+
+// Returns a schedule of round robin pairing of N elements,
+// each round containing n pairs, where n is between 1 to N/2
+void roundRobinGen(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                   int N, int n = 0) {
+  if (n <= 0) n = N/2;
+  if (N <= 0 || n > N/2 || (N/2) % n != 0) // Assuming balanced load for each round
+  {
+        //...
+    printf("cannot create round robin schedule, falling back to serial");
+  }
+
+  // Step 1: Generate standard round-robin tournament (maximum parallelism)
+  std::vector<std::vector<std::pair<int, int>>> fullSchedule;
+
+  if (N % 2 == 0) {
+    // Even number of items: use round-robin tournament scheduling
+    for (int round = 0; round < N - 1; round++) {
+      std::vector<std::pair<int, int>> roundPairs;
+      std::vector<std::pair<int, int>> roundPairsReversed;
+      for (int i = 0; i < N / 2; i++) {
+        int item1 = i;
+        int item2 = N - 1 - i;
+        if (round > 0) {
+          // Rotate all except the first item
+          if (item1 > 0) item1 = ((item1 - 1 + round) % (N - 1)) + 1;
+          if (item2 > 0) item2 = ((item2 - 1 + round) % (N - 1)) + 1;
+        }
+        if (item1 != item2) {
+          roundPairs.push_back({item1, item2});
+          roundPairsReversed.push_back({item2, item1});
+        }
+      }
+      fullSchedule.push_back(roundPairs);
+      fullSchedule.push_back(roundPairsReversed);
+    }
+  } else {
+    // Odd number of items: one item sits out each round
+    for (int round = 0; round < N; round++) {
+      std::vector<std::pair<int, int>> roundPairs;
+      std::vector<std::pair<int, int>> roundPairsReversed;
+      for (int i = 0; i < N / 2; i++) {
+        int item1 = (round + i) % N;
+        int item2 = (round + N - 1 - i) % N;
+        if (item1 != item2) {
+          roundPairs.push_back({item1, item2});
+          roundPairsReversed.push_back({item2, item1});
+        }
+      }
+      fullSchedule.push_back(roundPairs);
+      fullSchedule.push_back(roundPairsReversed);
+    }
+  }
+
+  // A loopback round
+  std::vector<std::pair<int, int>> selfRound;
+  for (int i = 0; i < N; i++) {
+    selfRound.push_back({i, i});
+  }
+  fullSchedule.push_back(selfRound);
+
+  // Step 2: Split each full round into sub-rounds with at most n pairs
+  for (auto const& fullRound : fullSchedule) {
+    for (size_t start = 0; start < fullRound.size(); start += n) {
+      std::vector<std::pair<int, int>> subRound;
+      for (size_t i = start; i < start + n && i < fullRound.size(); i++) {
+        subRound.push_back(fullRound[i]);
+      }
+      if (!subRound.empty()) {
+        schedule.push_back(subRound);
+      }
+    }
+  }
+}
+
 MemType parseMemType(std::string const memTypeIdx) {
   bool isCpu = false;
   int  memType = 2;
@@ -59,8 +134,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
                         std::string const  presetName)
 {
   int numRanks = TransferBench::GetNumRanks();
-
-  int numDetectedNics = TransferBench::GetNumExecutors(EXE_NIC);
+  int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
 
   // Collect env vars for this preset
   //int numCpuDevices  = EnvVars::GetEnvVar("NUM_CPU_DEVICES", numDetectedCpus);
@@ -68,103 +142,13 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   int numQueuePairs  = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
   int useRemoteRead  = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int showFullMatrix    = EnvVars::GetEnvVar("OUTPUT_FORMAT", 1);
-  std::string nicFilter = EnvVars::GetEnvVar("NIC_FILTER", "");
   std::string srcMemIdx = EnvVars::GetEnvVar("SRC_MEM", "G2");
   std::string dstMemIdx = EnvVars::GetEnvVar("DST_MEM", "G2");
   int rr = EnvVars::GetEnvVar("FAST_EXE", 0);
 
-  // Parse NIC_FILTER to build list of NIC indices to use
-  std::vector<int> nicIndices;
-  if (nicFilter.empty()) {
-    // No filter specified, use all detected NICs
-    for (int i = 0; i < numDetectedNics; i++) {
-      nicIndices.push_back(i);
-    }
-  } else {
-    // Parse comma-separated list of NIC indices or names
-    std::istringstream ss(nicFilter);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-      // Trim whitespace
-      token.erase(0, token.find_first_not_of(" \t"));
-      token.erase(token.find_last_not_of(" \t") + 1);
-
-      // Check if token is a number (NIC index)
-      bool isNumber = !token.empty() && std::all_of(token.begin(), token.end(), ::isdigit);
-
-      if (isNumber) {
-        int nicIdx = std::stoi(token);
-        if (nicIdx >= 0 && nicIdx < numDetectedNics) {
-          nicIndices.push_back(nicIdx);
-        } else {
-          Utils::Print("WARNING: NIC index %d out of range (0-%d), ignoring\n", nicIdx, numDetectedNics - 1);
-        }
-      } else {
-        // Try to match by NIC name
-        bool found = false;
-        for (int nicIdx = 0; nicIdx < numDetectedNics; nicIdx++) {
-          std::string nicName = TransferBench::GetExecutorName({EXE_NIC, nicIdx});
-          if (nicName == token) {
-            nicIndices.push_back(nicIdx);
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          Utils::Print("WARNING: NIC '%s' not found, ignoring\n", token.c_str());
-        }
-      }
-    }
-  }
-
   // Parse Memtype for src/dst
   MemType srcTypeActual = parseMemType(srcMemIdx);
   MemType dstTypeActual = parseMemType(dstMemIdx);
-
-  // Create a round-robin schedule for all-to-all communication
-  std::vector<std::vector<std::pair<int, int>>> schedule;
-  if (rr) {
-    if (numRanks % 2 == 0) {
-      // Even number of ranks: use round-robin tournament scheduling
-      for (int round = 0; round < numRanks - 1; round++) {
-        std::vector<std::pair<int, int>> roundPairs;
-        for (int i = 0; i < numRanks / 2; i++) {
-          int rank1 = i;
-          int rank2 = numRanks - 1 - i;
-          if (round > 0) {
-            // Rotate all except the first rank
-            if (rank1 > 0) rank1 = ((rank1 - 1 + round) % (numRanks - 1)) + 1;
-            if (rank2 > 0) rank2 = ((rank2 - 1 + round) % (numRanks - 1)) + 1;
-          }
-          if (rank1 != rank2) {
-            roundPairs.push_back({rank1, rank2});
-            roundPairs.push_back({rank2, rank1});
-          }
-        }
-        schedule.push_back(roundPairs);
-      }
-    } else {
-      // Odd number of ranks: one rank sits out each round
-      for (int round = 0; round < numRanks; round++) {
-        std::vector<std::pair<int, int>> roundPairs;
-        for (int i = 0; i < numRanks / 2; i++) {
-          int rank1 = (round + i) % numRanks;
-          int rank2 = (round + numRanks - 1 - i) % numRanks;
-          if (rank1 != rank2) {
-            roundPairs.push_back({rank1, rank2});
-            roundPairs.push_back({rank2, rank1});
-          }
-        }
-        schedule.push_back(roundPairs);
-      }
-    }
-    // Finally, a round where every rank does loopback
-    std::vector<std::pair<int, int>> selfRound;
-    for (int rank = 0; rank < numRanks; rank++) {
-      selfRound.push_back({rank, rank});
-    }
-    schedule.push_back(selfRound);
-  }
 
   // Display EnvVars
   if (Utils::RankDoesOutput()) {
@@ -174,7 +158,6 @@ int NicPeerToPeerPreset(EnvVars&           ev,
       ev.Print("NUM_NIC_SE",      numQueuePairs,  "Using %d queue pairs per Transfer", numQueuePairs);
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("OUTPUT_FORMAT",   showFullMatrix, "Printing results in %s format", showFullMatrix ? "full matrix" : "column");
-      ev.Print("NIC_FILTER",      nicFilter,      "Selecting %d NICs", nicFilter.size());
       // TODO: Display filtered NICs?
       // TODO: More detailed info about mem type?
       ev.Print("SRC_MEM",         srcMemIdx,      "Source memory type");
@@ -192,11 +175,10 @@ int NicPeerToPeerPreset(EnvVars&           ev,
 
   // Calculate total IB devices per rank
   // TODO: assert same # of NIC all ranks
-  int const numNicsPerRank = nicIndices.size();
   int const numTotalNics = numNicsPerRank * numRanks;
 
   // Initialize output table
-  Utils::Print("Unidirectional copy peak bandwidth GB/s (Using Nearest NIC RDMA)\n");
+  Utils::Print("Unidirectional copy peak bandwidth GB/s (NIC RDMA Using Nearest Device)\n");
 
   int numRows = showFullMatrix ? 3 + numTotalNics : 1 + numTotalNics * numTotalNics;
   int numCols = showFullMatrix ? numRows : 7;
@@ -210,112 +192,98 @@ int NicPeerToPeerPreset(EnvVars&           ev,
 
   // Query closest device to each NIC available, store device info to a map
   std::vector<double> avgBandwidth;
-  //std::vector<double> minBandwidth;
-  //std::vector<double> maxBandwidth;
-  //std::vector<double> stdDev;
 
-  // Transfer starts
+  // Create a round-robin schedule for all-to-all communication
+  std::vector<std::vector<std::pair<int, int>>> schedule;
+  std::vector<std::vector<std::pair<int, int>>> nicSchedule;
+
   if (rr) {
-    // Pre-allocate result vectors for all transfer combinations
-    int totalTransfers = numRanks * numNicsPerRank * numRanks * numNicsPerRank;
-    avgBandwidth.resize(totalTransfers);
-    srcExes.resize(totalTransfers);
-    dstExes.resize(totalTransfers);
-    srcMems.resize(totalTransfers);
-    dstMems.resize(totalTransfers);
-    for (auto const& roundPairs : schedule) {
-      for (int srcNicIdx = 0; srcNicIdx < numNicsPerRank; srcNicIdx++) {
-        for (int dstNicIdx = 0; dstNicIdx < numNicsPerRank; dstNicIdx++) {
-          std::vector<Transfer> transfers;
-          for (auto const& pair : roundPairs) {
-            Transfer transfer;
-            int srcRank = pair.first;
-            int dstRank = pair.second;
-
-            int srcNic = nicIndices[srcNicIdx];
-            int dstNic = nicIndices[dstNicIdx];
-
-            // Determine which GPU memory/CPU NUMA to use based on NIC proximity and its info
-            int srcMemIndex = GetClosestDeviceToNic(srcTypeActual, srcNic, srcRank);
-            int dstMemIndex = GetClosestDeviceToNic(dstTypeActual, dstNic, dstRank);
-
-            // TODO: error msg
-            if (srcMemIndex == -1 || dstMemIndex == -1) ;
-            transfer.numBytes = numBytesPerTransfer;
-            transfer.srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
-            transfer.dsts.push_back({dstTypeActual, dstMemIndex, dstRank});
-            transfer.exeDevice = {EXE_NIC, (useRemoteRead ? dstMemIndex : srcMemIndex), (useRemoteRead ? dstRank : srcRank)};
-            transfer.exeSubIndex = (useRemoteRead ? srcMemIndex : dstMemIndex);
-            transfer.numSubExecs = numQueuePairs;
-
-            transfers.push_back(transfer);
-          }
-
-          if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-            for (auto const& err : results.errResults)
-              Utils::Print("%s\n", err.errMsg.c_str());
-            return 1;
-          }
-
-          for (size_t i = 0; i < results.tfrResults.size(); i++) {
-            int srcRank = transfers[i].srcs[0].memRank;
-            int dstRank = transfers[i].dsts[0].memRank;
-
-            // Calculate index in table-rendering order: srcRank x srcNicIdx x dstRank x dstNicIdx
-            int idx = srcRank * (numNicsPerRank * numRanks * numNicsPerRank)
-                    + srcNicIdx * (numRanks * numNicsPerRank)
-                    + dstRank * numNicsPerRank
-                    + dstNicIdx;
-
-            avgBandwidth[idx] = results.tfrResults[i].avgBandwidthGbPerSec;
-            srcExes[idx] = TransferBench::GetExecutorName(results.tfrResults[i].exeDevice);
-            dstExes[idx] = TransferBench::GetExecutorName(results.tfrResults[i].exeDstDevice);
-            // TODO: add mem device info in transfer result?
-            srcMems[idx] = transfers[i].srcs[0].memIndex;
-            dstMems[idx] = transfers[i].dsts[0].memIndex;
-
-          }
-        }
-      }
-    }
+    roundRobinGen(schedule, numRanks);
+    roundRobinGen(nicSchedule, numNicsPerRank, rr);
   } else {
-    // Loop over all possible src+NIC/dst+NIC pairs across all ranks and collect P2P results
-    for (int srcRank = 0; srcRank < numRanks; srcRank++) {
-      for (int srcNicIdx = 0; srcNicIdx < numNicsPerRank; srcNicIdx++) {
-        for (int dstRank = 0; dstRank < numRanks; dstRank++) {
-          for (int dstNicIdx = 0; dstNicIdx < numNicsPerRank; dstNicIdx++) {
-            std::vector<Transfer> transfers(1);
+    roundRobinGen(schedule, numRanks, 1);
+    roundRobinGen(nicSchedule, numNicsPerRank, 1);
+  }
 
-            int srcNic = nicIndices[srcNicIdx];
-            int dstNic = nicIndices[dstNicIdx];
+  int totalTransfers = numRanks * numNicsPerRank * numRanks * numNicsPerRank;
+  int transfersPerIt = totalTransfers / (schedule.size() * nicSchedule.size());
+  int counter = 0;
+  double durationSec = 0;
+  avgBandwidth.resize(totalTransfers);
+  srcExes.resize(totalTransfers);
+  dstExes.resize(totalTransfers);
+  srcMems.resize(totalTransfers);
+  dstMems.resize(totalTransfers);
 
-            // Determine which GPU memory/CPU NUMA to use based on NIC proximity and its info
-            int srcMemIndex = GetClosestDeviceToNic(srcTypeActual, srcNic, srcRank);
-            int dstMemIndex = GetClosestDeviceToNic(dstTypeActual, dstNic, dstRank);
+  // Execute transfers: node-level rounds -> NIC-level rounds -> node pairs
+  for (auto const& roundPairs : schedule) {
+    for (auto const& nicRoundPairs : nicSchedule) {
+      std::vector<Transfer> transfers;
+      auto cpuStart = std::chrono::high_resolution_clock::now();
 
-            // TODO: error msg
-            if (srcMemIndex == -1 || dstMemIndex == -1) ;
-            transfers[0].numBytes = numBytesPerTransfer;
-            transfers[0].srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
-            transfers[0].dsts.push_back({dstTypeActual, dstMemIndex, dstRank});
-            transfers[0].exeDevice = {EXE_NIC, (useRemoteRead ? dstMemIndex : srcMemIndex), (useRemoteRead ? dstRank : srcRank)};
-            transfers[0].exeSubIndex = (useRemoteRead ? srcMemIndex : dstMemIndex);
-            transfers[0].numSubExecs = numQueuePairs;
+      for (auto const& nodePair : roundPairs) {
+        int srcRank = nodePair.first;
+        int dstRank = nodePair.second;
 
-            if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-              for (auto const& err : results.errResults)
-                Utils::Print("%s\n", err.errMsg.c_str());
-              return 1;
-            }
-            avgBandwidth.push_back(results.tfrResults[0].avgBandwidthGbPerSec);
-            srcExes.push_back(TransferBench::GetExecutorName(results.tfrResults[0].exeDevice));
-            dstExes.push_back(TransferBench::GetExecutorName(results.tfrResults[0].exeDstDevice));
+        for (auto const& nicPair : nicRoundPairs) {
+          int srcNicIdx = nicPair.first;
+          int dstNicIdx = nicPair.second;
 
-            srcMems.push_back(srcMemIndex);
-            dstMems.push_back(dstMemIndex);
-          }
+          Transfer transfer;
+
+          // Determine which GPU memory/CPU NUMA to use based on NIC proximity and its info
+          int srcMemIndex = GetClosestDeviceToNic(srcTypeActual, srcNicIdx, srcRank);
+          int dstMemIndex = GetClosestDeviceToNic(dstTypeActual, dstNicIdx, dstRank);
+
+          // TODO: error msg
+          if (srcMemIndex == -1 || dstMemIndex == -1) ;
+          transfer.numBytes = numBytesPerTransfer;
+          transfer.srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
+          transfer.dsts.push_back({dstTypeActual, dstMemIndex, dstRank});
+          transfer.exeDevice = {EXE_NIC, (useRemoteRead ? dstNicIdx : srcNicIdx), (useRemoteRead ? dstRank : srcRank)};
+          transfer.exeSubIndex = (useRemoteRead ? srcNicIdx : dstNicIdx);
+          transfer.numSubExecs = numQueuePairs;
+
+          transfers.push_back(transfer);
         }
       }
+
+      if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+        for (auto const& err : results.errResults)
+          Utils::Print("%s\n", err.errMsg.c_str());
+        return 1;
+      }
+
+      counter++;
+
+      // Store results with correct indexing
+      for (size_t i = 0; i < results.tfrResults.size(); i++) {
+        int srcRank = transfers[i].srcs[0].memRank;
+        int dstRank = transfers[i].dsts[0].memRank;
+
+        auto srcExe = useRemoteRead ? results.tfrResults[i].exeDstDevice : results.tfrResults[i].exeDevice;
+        auto dstExe = useRemoteRead ? results.tfrResults[i].exeDevice : results.tfrResults[i].exeDstDevice;
+        int srcNicIdx = srcExe.exeIndex;
+        int dstNicIdx = dstExe.exeIndex;
+
+        // Calculate index in table-rendering order: srcRank x srcNicIdx x dstRank x dstNicIdx
+        int idx = srcRank * (numNicsPerRank * numRanks * numNicsPerRank)
+                + srcNicIdx * (numRanks * numNicsPerRank)
+                + dstRank * numNicsPerRank
+                + dstNicIdx;
+        avgBandwidth[idx] = results.tfrResults[i].avgBandwidthGbPerSec;
+        srcExes[idx] = TransferBench::GetExecutorName(srcExe);
+        dstExes[idx] = TransferBench::GetExecutorName(dstExe);
+        // TODO: add mem device info in transfer result?
+        srcMems[idx] = transfers[i].srcs[0].memIndex;
+        dstMems[idx] = transfers[i].dsts[0].memIndex;
+      }
+
+      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+      durationSec += std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
+      fprintf(stderr, "Completed %d/%d pairs in %6.3fs, estimated remaining time %6.3fs.\n",
+              counter * transfersPerIt, totalTransfers, durationSec,
+              durationSec * (nicSchedule.size() * schedule.size() - counter) / counter );
     }
   }
 
@@ -442,5 +410,3 @@ int NicPeerToPeerPreset(EnvVars&           ev,
 
   return 0;
 }
-
-
