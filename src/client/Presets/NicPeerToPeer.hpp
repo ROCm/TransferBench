@@ -22,7 +22,7 @@ THE SOFTWARE.
 
 // Helper functions
 
-// Returns a schedule of round robin pairing of N elements,
+// Returns a schedule of round robin pairing of N elements, using Circle Method
 // if parallel, each round contains N/2 pairs, otherwise serial
 void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
                         int N, int parallel = 0) {
