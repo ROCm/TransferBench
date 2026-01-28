@@ -23,64 +23,83 @@ THE SOFTWARE.
 // Helper functions
 
 // Returns a schedule of round robin pairing of N elements,
-// each round containing n pairs, where n is between 1 to N/2
-void roundRobinGen(std::vector<std::vector<std::pair<int, int>>>& schedule,
-                   int N, int n = 0) {
-  if (n <= 0) n = N/2;
-  if (N <= 0 || n > N/2 || (N/2) % n != 0) // Assuming balanced load for each round
-  {
-        //...
-    printf("cannot create round robin schedule, falling back to serial");
-  }
+// if parallel, each round contains N/2 pairs, otherwise serial
+void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                        int N, int parallel = 0) {
 
-  // Step 1: Generate standard round-robin tournament (maximum parallelism)
+  // Generate standard round-robin tournament (maximum parallelism)
   std::vector<std::vector<std::pair<int, int>>> fullSchedule;
 
-  if (N % 2 == 0) {
-    // Even number of items: use round-robin tournament scheduling
-    for (int round = 0; round < N - 1; round++) {
-      std::vector<std::pair<int, int>> roundPairs;
-      std::vector<std::pair<int, int>> roundPairsReversed;
-      for (int i = 0; i < N / 2; i++) {
-        int item1 = i;
-        int item2 = N - 1 - i;
-        if (round > 0) {
-          // Rotate all except the first item
-          if (item1 > 0) item1 = ((item1 - 1 + round) % (N - 1)) + 1;
-          if (item2 > 0) item2 = ((item2 - 1 + round) % (N - 1)) + 1;
-        }
-        if (item1 != item2) {
+  // Pad odd number of ranks with a dummy round (N+1)
+  int paddedN = N + (N % 2 == 1);
+  // Round-robin tournament scheduling
+  for (int round = 0; round < paddedN - 1; round++) {
+    std::vector<std::pair<int, int>> roundPairs;
+    std::vector<std::pair<int, int>> roundPairsReversed;
+    for (int i = 0; i < paddedN / 2; i++) {
+      int item1 = i;
+      int item2 = paddedN - 1 - i;
+      if (round > 0) {
+        // Rotate all except the first item
+        if (item1 > 0) item1 = ((item1 - 1 + round) % (paddedN - 1)) + 1;
+        if (item2 > 0) item2 = ((item2 - 1 + round) % (paddedN - 1)) + 1;
+      }
+      if (item1 != item2) {
+        // Ignore dummy round, its partner sits out this ronud
+        if (paddedN == N || (item1 != paddedN-1 && item2 != paddedN-1)){
           roundPairs.push_back({item1, item2});
           roundPairsReversed.push_back({item2, item1});
         }
       }
-      fullSchedule.push_back(roundPairs);
-      fullSchedule.push_back(roundPairsReversed);
     }
-  } else {
-    // Odd number of items: one item sits out each round
-    for (int round = 0; round < N; round++) {
-      std::vector<std::pair<int, int>> roundPairs;
-      std::vector<std::pair<int, int>> roundPairsReversed;
-      for (int i = 0; i < N / 2; i++) {
-        int item1 = (round + i) % N;
-        int item2 = (round + N - 1 - i) % N;
-        if (item1 != item2) {
-          roundPairs.push_back({item1, item2});
-          roundPairsReversed.push_back({item2, item1});
-        }
-      }
-      fullSchedule.push_back(roundPairs);
-      fullSchedule.push_back(roundPairsReversed);
-    }
+    fullSchedule.push_back(roundPairs);
+    fullSchedule.push_back(roundPairsReversed);
   }
 
-  // A loopback round
+  // A loopback round where all run in parallel
   std::vector<std::pair<int, int>> selfRound;
   for (int i = 0; i < N; i++) {
     selfRound.push_back({i, i});
   }
   fullSchedule.push_back(selfRound);
+
+  if (parallel) {
+    schedule = std::move(fullSchedule);
+  } else {
+    // Serialize each round if needed
+    for (auto const& fullRound : fullSchedule) {
+      for (auto const& match : fullRound) {
+        std::vector<std::pair<int, int>> subRound;
+        subRound.push_back({match.first, match.second});
+        schedule.push_back(subRound);
+      }
+    }
+  }
+}
+
+// Returns a schedule for ordered 2-combination of N elements 
+// by pairing the list with its rotating self,
+// each round contains n pairs, where 1 <= n <= N and N is divisible by n
+// and an element cannot appear more than twice in a round,
+void CombinationSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                           int N, int n = 0) {
+  std::vector<std::vector<std::pair<int, int>>> fullSchedule;
+
+  if (n <= 0) n = N;
+  if (N <= 0 || n > N || N % n != 0) // Assuming balanced load for each round
+  {
+    n = 1;
+    Utils::Print("[WARN] cannot create round robin schedule, falling back to serial");
+  }
+
+  // Generate rounds of combination based on incrementing distance
+  for (int i = 1; i < N; i++) {
+    std::vector<std::pair<int, int>> round;
+    for (int j = 0; j < N; j++) {
+      round.push_back({j, (j+i)%N});
+    }
+    fullSchedule.push_back(round);
+  }
 
   // Step 2: Split each full round into sub-rounds with at most n pairs
   for (auto const& fullRound : fullSchedule) {
@@ -96,33 +115,6 @@ void roundRobinGen(std::vector<std::vector<std::pair<int, int>>>& schedule,
   }
 }
 
-MemType parseMemType(std::string const memTypeIdx) {
-  bool isCpu = false;
-  int  memType = 2;
-  if (memTypeIdx.length() >= 1) {
-    char firstChar = std::toupper(memTypeIdx[0]);
-    if (firstChar == 'G' && firstChar == 'C') {
-      Utils::Print("WARNING: Invalid MEM_POLICY first character '%c', using default 'G'\n", memTypeIdx[0]);
-    }
-    isCpu = firstChar == 'C';
-  }
-  
-  if (memTypeIdx.length() >= 2) {
-    if (std::isdigit(memTypeIdx[1])) {
-      int level = memTypeIdx[1] - '0';
-      if (level >= 0 && level <= 3) {
-        memType = level;
-      } else {
-        Utils::Print("WARNING: Invalid MEM_POLICY level '%c', must be 0-3, using default 2\n", memTypeIdx[1]);
-      }
-    } else {
-      Utils::Print("WARNING: Invalid MEM_POLICY second character '%c', using default 2\n", memTypeIdx[1]);
-    }
-  }
-
-  return Utils::GetMemType(memType, isCpu);
-}
-
 int GetClosestDeviceToNic(MemType memType, int nicIdx, int rank) {
   return TransferBench::IsCpuMemType(memType) ?
          TransferBench::GetClosestCpuNumaToNic(nicIdx, rank) :
@@ -133,22 +125,34 @@ int NicPeerToPeerPreset(EnvVars&           ev,
                         size_t      const  numBytesPerTransfer,
                         std::string const  presetName)
 {
+  if (Utils::GetNumRankGroups() > 1) {
+    Utils::Print("[ERROR] NIC p2p preset can only be run across ranks that are homogenous\n");
+    Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
+    Utils::Print("[ERROR] NIC_FILTER may also be used to limit NIC visibility\n");
+    return 1;
+  }
+
   int numRanks = TransferBench::GetNumRanks();
   int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
 
   // Collect env vars for this preset
   //int numCpuDevices  = EnvVars::GetEnvVar("NUM_CPU_DEVICES", numDetectedCpus);
   //int numGpuDevices  = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
-  int numQueuePairs  = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
-  int useRemoteRead  = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
+  int numQueuePairs     = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
+  int useRemoteRead     = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int showFullMatrix    = EnvVars::GetEnvVar("OUTPUT_FORMAT", 1);
-  std::string srcMemIdx = EnvVars::GetEnvVar("SRC_MEM", "G2");
-  std::string dstMemIdx = EnvVars::GetEnvVar("DST_MEM", "G2");
-  int rr = EnvVars::GetEnvVar("FAST_EXE", 0);
+  int srcCpu            = EnvVars::GetEnvVar("USE_CPU_SRC_MEM", 0);
+  int dstCpu            = EnvVars::GetEnvVar("USE_CPU_DST_MEM", 0);
+  int srcMemType        = EnvVars::GetEnvVar("SRC_MEM_TYPE", 2);
+  int dstMemType        = EnvVars::GetEnvVar("DST_MEM_TYPE", 2);
+  int nodeParallel      = EnvVars::GetEnvVar("PARALLEL_NODE", 1);
+  int nicParLevel       = EnvVars::GetEnvVar("NIC_PARALLEL_LEVEL", numNicsPerRank);
 
   // Parse Memtype for src/dst
-  MemType srcTypeActual = parseMemType(srcMemIdx);
-  MemType dstTypeActual = parseMemType(dstMemIdx);
+  MemType srcTypeActual = Utils::GetMemType(srcMemType, srcCpu);
+  MemType dstTypeActual = Utils::GetMemType(dstMemType, dstCpu);
+  std::string srcTypeStr = Utils::GetMemTypeStr(srcMemType, srcCpu);
+  std::string dstTypeStr = Utils::GetMemTypeStr(dstMemType, dstCpu);
 
   // Display EnvVars
   if (Utils::RankDoesOutput()) {
@@ -158,28 +162,26 @@ int NicPeerToPeerPreset(EnvVars&           ev,
       ev.Print("NUM_NIC_SE",      numQueuePairs,  "Using %d queue pairs per Transfer", numQueuePairs);
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("OUTPUT_FORMAT",   showFullMatrix, "Printing results in %s format", showFullMatrix ? "full matrix" : "column");
-      // TODO: Display filtered NICs?
-      // TODO: More detailed info about mem type?
-      ev.Print("SRC_MEM",         srcMemIdx,      "Source memory type");
-      ev.Print("DST_MEM",         dstMemIdx,      "Destination memory type");
-      ev.Print("FAST_EXE",        rr,             "Executing p2p node pairs in parallel");
+      ev.Print("USE_CPU_SRC_MEM", srcCpu,         "Source memory is %s", srcCpu ? "CPU" : "GPU");
+      ev.Print("USE_CPU_DST_MEM", dstCpu,         "Destination memory is %s", dstCpu ? "CPU" : "GPU");
+      ev.Print("SRC_MEM_TYPE",    srcMemType,     "Using %s memory (%s)", srcTypeStr.c_str(), Utils::GetAllMemTypeStr(srcCpu).c_str());
+      ev.Print("DST_MEM_TYPE",    dstMemType,     "Using %s memory (%s)", dstTypeStr.c_str(), Utils::GetAllMemTypeStr(dstCpu).c_str());
+      ev.Print("PARALLEL_NODE",   nodeParallel,   "Executing p2p node pairs in parallel: %s", nodeParallel ? "yes" : "no");
+      ev.Print("NIC_PARALLEL_LEVEL", nicParLevel, "Between a pair of nodes, %d pairs of NIC-NIC transfers executed in parallel", nicParLevel);
       printf("\n");
     }
   }
 
   // TODO: validate env vars
-  // TODO: assert same RR schedule
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
 
-  // Calculate total IB devices per rank
-  // TODO: assert same # of NIC all ranks
-  int const numTotalNics = numNicsPerRank * numRanks;
 
   // Initialize output table
   Utils::Print("Unidirectional copy peak bandwidth GB/s (NIC RDMA Using Nearest Device)\n");
 
+  int const numTotalNics = numNicsPerRank * numRanks;
   int numRows = showFullMatrix ? 3 + numTotalNics : 1 + numTotalNics * numTotalNics;
   int numCols = showFullMatrix ? numRows : 7;
   int precision = 2;
@@ -197,13 +199,8 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   std::vector<std::vector<std::pair<int, int>>> schedule;
   std::vector<std::vector<std::pair<int, int>>> nicSchedule;
 
-  if (rr) {
-    roundRobinGen(schedule, numRanks);
-    roundRobinGen(nicSchedule, numNicsPerRank, rr);
-  } else {
-    roundRobinGen(schedule, numRanks, 1);
-    roundRobinGen(nicSchedule, numNicsPerRank, 1);
-  }
+  RoundRobinSchedule(schedule, numRanks, nodeParallel);
+  CombinationSchedule(nicSchedule, numNicsPerRank, nicParLevel);
 
   int totalTransfers = numRanks * numNicsPerRank * numRanks * numNicsPerRank;
   int transfersPerIt = totalTransfers / (schedule.size() * nicSchedule.size());
@@ -235,8 +232,11 @@ int NicPeerToPeerPreset(EnvVars&           ev,
           int srcMemIndex = GetClosestDeviceToNic(srcTypeActual, srcNicIdx, srcRank);
           int dstMemIndex = GetClosestDeviceToNic(dstTypeActual, dstNicIdx, dstRank);
 
-          // TODO: error msg
-          if (srcMemIndex == -1 || dstMemIndex == -1) ;
+          if (srcMemIndex == -1 || dstMemIndex == -1) {
+            Utils::Print("[ERROR] No proper GPU device can be found for transfer R%dN%d - R%dN%d\n",
+                         srcRank, srcNicIdx, dstRank, dstNicIdx);
+            return 1;
+          }
           transfer.numBytes = numBytesPerTransfer;
           transfer.srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
           transfer.dsts.push_back({dstTypeActual, dstMemIndex, dstRank});
