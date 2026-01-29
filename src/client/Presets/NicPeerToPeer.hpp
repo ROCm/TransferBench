@@ -93,7 +93,7 @@ void CombinationSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule
   }
 
   // Generate rounds of combination based on incrementing distance
-  for (int i = 1; i < N; i++) {
+  for (int i = 0; i < N; i++) {
     std::vector<std::pair<int, int>> round;
     for (int j = 0; j < N; j++) {
       round.push_back({j, (j+i)%N});
@@ -254,7 +254,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
         return 1;
       }
 
-      counter++;
+      counter += transfers.size();
 
       // Store results with correct indexing
       for (size_t i = 0; i < results.tfrResults.size(); i++) {
@@ -282,8 +282,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       durationSec += std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
       fprintf(stderr, "Completed %d/%d pairs in %6.3fs, estimated remaining time %6.3fs.\n",
-              counter * transfersPerIt, totalTransfers, durationSec,
-              durationSec * (nicSchedule.size() * schedule.size() - counter) / counter );
+              counter, totalTransfers, durationSec, durationSec * (totalTransfers - counter) / counter);
     }
   }
 
