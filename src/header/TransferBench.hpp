@@ -503,6 +503,28 @@ namespace TransferBench
    */
   void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
 
+
+  /**
+   * Returns the index of a GPU closest to the given NIC
+   *
+   * @param[in] nicIndex        Index of the NIC to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns GPU index closest to IB Verbs capable NIC index nicIndex, or -1 if unable to detect
+   */
+  int GetClosestGpuToNic(int nicIndex, int targetRank);
+
+  /**
+   * Returns the indices of the GPUs closest to the given NIC
+   *
+   * @param[out] gpuIndices     Vector that will contain GPU indices closest to given NIC
+   * @param[in]  nicIndex        Index of the NIC to query
+   * @param[in]  targetRank      Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
+   */
+  void GetClosestGpusToNic(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+
   /**
    * @returns 0-indexed rank for this process
    */
@@ -915,6 +937,17 @@ namespace {
      */
     void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1) const;
 
+    /**
+     * Returns the indices of the GPUs closest to the given NIC
+     *
+     * @param[out] gpuIndices     Vector that will contain GPU indices closest to given NIC
+     * @param[in] nicIndex        Index of the NIC to query
+     * @param[in] targetRank      Rank to query (-1 for local rank)
+     * @note This function is applicable when the IBV/RDMA executor is available
+     * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
+     */
+    void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1) const;
+
     std::string GetHostname(int targetRank) const;
     std::string GetPpodId(int targetRank) const;
     int GetVpodId(int targetRank) const;
@@ -977,6 +1010,7 @@ namespace {
       std::map<int,                int>         closestCpuNumaToNic;
       std::map<int,                int>         nicIsActive;
       std::map<int,                vector<int>> closestNicsToGpu;
+      std::map<int,                vector<int>> closestGpusToNic;
       std::map<pair<ExeType, int>, std::string> executorName;
     };
 
@@ -5462,6 +5496,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.closestCpuNumaToGpu.clear();
     topo.closestCpuNumaToNic.clear();
     topo.closestNicsToGpu.clear();
+    topo.closestGpusToNic.clear();
 
     memset(topo.hostname, 0, sizeof(topo.hostname));
     gethostname(topo.hostname, 32);
@@ -5645,6 +5680,54 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         assignedCount[closestIdx]++;
       }
     }
+
+    // Compute the reverse mapping: closest GPU(s) for each NIC
+    // Build list of GPU bus addresses
+    std::vector<std::string> gpuAddressList;
+    for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+      char hipPciBusId[64];
+      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIdx);
+      if (err == hipSuccess) {
+        gpuAddressList.push_back(std::string(hipPciBusId));
+      } else {
+        gpuAddressList.push_back("");
+      }
+    }
+
+    // Loop over each NIC to find the closest GPU(s) based on PCIe address
+    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+      if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
+        continue;
+      }
+
+      // Find closest GPUs using LCA algorithm
+      std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
+
+      if (closestGpuIdxs.empty()) {
+        // Fallback: use bus ID distance
+        int minDistance = std::numeric_limits<int>::max();
+        int closestIdx = -1;
+
+        for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+          if (gpuAddressList[gpuIdx].empty()) continue;
+
+          int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
+          if (distance >= 0 && distance < minDistance) {
+            minDistance = distance;
+            closestIdx = gpuIdx;
+          }
+        }
+
+        if (closestIdx != -1) {
+          topo.closestGpusToNic[nicIndex].push_back(closestIdx);
+        }
+      } else {
+        // Store all GPUs that are equally close
+        for (int idx : closestGpuIdxs) {
+          topo.closestGpusToNic[nicIndex].push_back(idx);
+        }
+      }
+    }
 #endif
 
     if (verbose) {
@@ -5662,6 +5745,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           printf("\n");
         }
       }
+#ifdef NIC_EXEC_ENABLED
+      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+        printf("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
+               ibvDeviceList[nicIndex].name.c_str());
+        if (topo.closestGpusToNic[nicIndex].size() == 0) {
+          printf(" none");
+        } else {
+          for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
+            printf(" %d", gpuIndex);
+          }
+        }
+        printf("\n");
+      }
+#endif
     }
   }
 
@@ -5771,6 +5868,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     SendMap(peerRank, topo.closestCpuNumaToNic);
     SendMap(peerRank, topo.nicIsActive);
     SendMap(peerRank, topo.closestNicsToGpu);
+    SendMap(peerRank, topo.closestGpusToNic);
     SendMap(peerRank, topo.executorName);
   };
 
@@ -5786,6 +5884,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     RecvMap(peerRank, topo.closestCpuNumaToNic);
     RecvMap(peerRank, topo.nicIsActive);
     RecvMap(peerRank, topo.closestNicsToGpu);
+    RecvMap(peerRank, topo.closestGpusToNic);
     RecvMap(peerRank, topo.executorName);
   }
 
@@ -6054,6 +6153,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     nicIndices = rankInfo[targetRank].closestNicsToGpu.at(gpuIndex);
   }
 
+  void System::GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank) const
+  {
+    gpuIndices.clear();
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (nicIndex < 0 || nicIndex >= GetNumExecutors(EXE_NIC, targetRank)) return;
+    if (rankInfo[targetRank].closestGpusToNic.count(nicIndex) > 0) {
+      gpuIndices = rankInfo[targetRank].closestGpusToNic.at(nicIndex);
+    }
+  }
+
   std::string System::GetHostname(int targetRank) const
   {
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
@@ -6132,6 +6241,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank)
   {
     System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+  }
+
+  int GetClosestGpuToNic(int nicIndex, int targetRank)
+  {
+    std::vector<int> gpuIndices;
+    System::Get().GetClosestGpusToNic(gpuIndices, nicIndex, targetRank);
+    if (gpuIndices.size() == 0) return -1;
+    return gpuIndices[0];
+  }
+
+  void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank)
+  {
+    System::Get().GetClosestGpusToNic(gpuIndices, nicIndex, targetRank);
   }
 
   void GetClosestNicsToCpu(std::vector<int>& nicIndices, int cpuIndex, int targetRank)
