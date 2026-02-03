@@ -34,7 +34,7 @@ void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
   std::vector<std::vector<std::pair<int, int>>> fullSchedule;
 
   // Pad odd number of ranks with a dummy round (N+1)
-  int paddedN = N + (N % 2 == 1);
+  int paddedN = N + N%2;
   // Round-robin tournament scheduling
   for (int round = 0; round < paddedN - 1; round++) {
     std::vector<std::pair<int, int>> roundPairs;
@@ -47,12 +47,10 @@ void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
         if (item1 > 0) item1 = ((item1 - 1 + round) % (paddedN - 1)) + 1;
         if (item2 > 0) item2 = ((item2 - 1 + round) % (paddedN - 1)) + 1;
       }
-      if (item1 != item2) {
-        // Ignore dummy round, its partner sits out this ronud
-        if (paddedN == N || (item1 != paddedN-1 && item2 != paddedN-1)){
-          roundPairs.push_back({item1, item2});
-          roundPairsReversed.push_back({item2, item1});
-        }
+      // Ignore dummy round, its partner sits out this ronud
+      if (paddedN == N || (item1 != paddedN-1 && item2 != paddedN-1)){
+        roundPairs.push_back({item1, item2});
+        roundPairsReversed.push_back({item2, item1});
       }
     }
     fullSchedule.push_back(roundPairs);
@@ -137,10 +135,12 @@ int NicPeerToPeerPreset(EnvVars&           ev,
 
   int numRanks = TransferBench::GetNumRanks();
   int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
+  if (numNicsPerRank == 0) {
+    Utils::Print("No NIC detected, NICs are required to run this preset\n");
+    return 1;
+  }
 
   // Collect env vars for this preset
-  //int numCpuDevices  = EnvVars::GetEnvVar("NUM_CPU_DEVICES", numDetectedCpus);
-  //int numGpuDevices  = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs     = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
   int useRemoteRead     = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int showFullMatrix    = EnvVars::GetEnvVar("OUTPUT_FORMAT", 1);
@@ -206,7 +206,6 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   CombinationSchedule(nicSchedule, numNicsPerRank, nicParLevel);
 
   int totalTransfers = numRanks * numNicsPerRank * numRanks * numNicsPerRank;
-  int transfersPerIt = totalTransfers / (schedule.size() * nicSchedule.size());
   int counter = 0;
   double durationSec = 0;
   avgBandwidth.resize(totalTransfers);
@@ -369,7 +368,6 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   summaryTable.Set(0, 4, " Src ");
   summaryTable.Set(0, 5, " Dst ");
 
-  for (int i = 0; i <= 11; i++) summaryTable.DrawRowBorder(i);
   for (int i = 0; i <= 6; i++) summaryTable.DrawColBorder(i);
 
   std::vector<size_t> idx(avgBandwidth.size());
@@ -377,13 +375,11 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   std::sort(idx.begin(), idx.end(), [&](size_t i1, size_t i2) {return avgBandwidth[i1] > avgBandwidth[i2];});
   for (int i = 0; i < 10; i++) {
     int index = idx[i];
-    int dstNicIdx = index % numNicsPerRank;
     index /= numNicsPerRank;
 
     int dstRank = index % numRanks;
     index /= numRanks;
 
-    int srcNicIdx = index % numNicsPerRank;
     index /= numNicsPerRank;
 
     int srcRank = index;
@@ -393,13 +389,10 @@ int NicPeerToPeerPreset(EnvVars&           ev,
     summaryTable.Set(1 + i, 0, " %.2f ", avgBandwidth[idx[i]]);
 
     index = idx[idx.size() - 1 - i];
-    dstNicIdx = index % numNicsPerRank;
     index /= numNicsPerRank;
 
-    dstRank = index % numRanks;
     index /= numRanks;
 
-    srcNicIdx = index % numNicsPerRank;
     index /= numNicsPerRank;
 
     srcRank = index;
