@@ -319,9 +319,9 @@ int NicPeerToPeerPreset(EnvVars&           ev,
         int colIdx = 3;
         for (int dstRank = 0; dstRank < numRanks; dstRank++) {
           for (int dstNic = 0; dstNic < numNicsPerRank; dstNic++) {
-	    table.Set(rowIdx, colIdx++ , " %.2f ", avgBandwidth[entryIdx++]);
-	  }
-	}
+            table.Set(rowIdx, colIdx++ , " %.2f ", avgBandwidth[entryIdx++]);
+          }
+        }
         rowIdx++;
       }
     }
@@ -370,6 +370,9 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   summaryTable.Set(0, 4, " Src ");
   summaryTable.Set(0, 5, " Dst ");
 
+  summaryTable.DrawRowBorder(0);
+  summaryTable.DrawRowBorder(1);
+  summaryTable.DrawRowBorder(11);
   for (int i = 0; i <= 6; i++) summaryTable.DrawColBorder(i);
 
   std::vector<size_t> idx(avgBandwidth.size());
