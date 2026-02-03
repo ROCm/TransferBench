@@ -48,7 +48,7 @@ void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
         if (item2 > 0) item2 = ((item2 - 1 + round) % (paddedN - 1)) + 1;
       }
       // Ignore dummy round, its partner sits out this ronud
-      if (paddedN == N || (item1 != paddedN-1 && item2 != paddedN-1)){
+      if (item1 < N && item2 < N){
         roundPairs.push_back({item1, item2});
         roundPairsReversed.push_back({item2, item1});
       }
