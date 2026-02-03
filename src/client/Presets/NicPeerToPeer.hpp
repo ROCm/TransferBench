@@ -26,7 +26,10 @@ THE SOFTWARE.
 // if parallel, each round contains N/2 pairs, otherwise serial
 void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
                         int N, int parallel = 0) {
-
+  if (N == 1) {
+    schedule.push_back({{0,0}});
+    return;
+  }
   // Generate standard round-robin tournament (maximum parallelism)
   std::vector<std::vector<std::pair<int, int>>> fullSchedule;
 
