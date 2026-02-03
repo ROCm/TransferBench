@@ -283,8 +283,10 @@ int NicPeerToPeerPreset(EnvVars&           ev,
 
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       durationSec += std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
-      fprintf(stderr, "Completed %d/%d pairs in %6.3fs, estimated remaining time %6.3fs.\n",
-              counter, totalTransfers, durationSec, durationSec * (totalTransfers - counter) / counter);
+      if (Utils::RankDoesOutput()) {
+        fprintf(stderr, "Completed %d/%d pairs in %6.3fs, estimated remaining time %6.3fs.\n",
+                counter, totalTransfers, durationSec, durationSec * (totalTransfers - counter) / counter);
+      }
     }
   }
 

@@ -50,7 +50,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
   {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
-  {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer bandwidth test using Nearest NIC RDMA transfers"}},
+  {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
