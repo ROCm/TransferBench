@@ -69,6 +69,9 @@ THE SOFTWARE.
 #include <hip/hip_runtime.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
+#ifdef POD_COMM_ENABLED
+#include <amd_smi.h>
+#endif
 #endif
 /// @endcond
 
@@ -319,6 +322,9 @@ namespace TransferBench
 #else
     ErrResult(hipError_t   err);
     ErrResult(hsa_status_t err);
+#ifdef POD_COMM_ENABLED
+    ErrResult(amdsmi_status_t err);
+#endif
 #endif
     ErrResult(ErrType      err);
     ErrResult(ErrType      errType, const char* format, ...);
@@ -551,13 +557,13 @@ namespace TransferBench
    * @param[in] targetRank  Rank to query (-1 for local rank)
    * @returns Gets the physical pod identifier for the target rank
    **/
-  std::string GetPpodId(int targetRank = -1);
+  uint64_t GetPpodId(int targetRank = -1);
 
   /**
    * @param[in] targetRank  Rank to query (-1 for local rank)
    * @returns Gets the virtual pod identifier for the target rank
    **/
-  int GetVpodId(int targetRank = -1);
+  int64_t GetVpodId(int targetRank = -1);
 
   /**
    * @param[in] exeDevice       The specific Executor to query
@@ -950,8 +956,8 @@ namespace {
     void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1) const;
 
     std::string GetHostname(int targetRank) const;
-    std::string GetPpodId(int targetRank) const;
-    int GetVpodId(int targetRank) const;
+    uint64_t GetPpodId(int targetRank) const;
+    int64_t  GetVpodId(int targetRank) const;
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
 
@@ -1001,8 +1007,8 @@ namespace {
     struct RankTopology
     {
       char hostname[33];
-      char ppodId[256];
-      int  vpodId;
+      uint64_t ppodId;
+      int64_t  vpodId;
 
       std::map<ExeType,            int>         numExecutors;
       std::map<pair<ExeType, int>, int>         numExecutorSubIndices;
@@ -1019,6 +1025,7 @@ namespace {
 
     void SetupSocketCommunicator();
     void SetupMpiCommunicator();
+    void CollectPodMembership(uint64_t& ppodId, int64_t& vpodId);
     void GetRankTopology(RankTopology& topo);
     void CollectTopology();
     std::string GetCpuName() const;
@@ -4664,6 +4671,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       this->errMsg  = std::string("HSA Error: ") + errString;
     }
   }
+
+#ifdef POD_COMM_ENABLED
+  ErrResult::ErrResult(amdsmi_status_t err)
+  {
+    if (err == AMDSMI_STATUS_SUCCESS) {
+      this->errType = ERR_NONE;
+      this->errMsg  = "";
+    } else {
+      const char *errString = NULL;
+      amdsmi_status_code_to_string(err, &errString);
+      this->errType = ERR_FATAL;
+      this->errMsg  = std::string("AMDSMI Error: ") + errString;
+    }
+  }
+#endif
 #endif
 
   ErrResult::ErrResult(ErrType errType, const char* format, ...)
@@ -5379,6 +5401,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (pause);
     }
 
+#ifdef POD_COMM_ENABLED
+
+#if defined(__NVCC__)
+
+#else
+    if (verbose) {
+      printf("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
+    }
+    amdsmi_init(AMDSMI_INIT_AMD_APUS);
+#endif
+#endif
+
     // Priority 1: Socket communicator
     SetupSocketCommunicator();
 
@@ -5418,6 +5452,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         listenSocket = -1;
       }
     }
+
+#ifdef POD_COMM_ENABLED
+#if defined(__NVCC__)
+    // TODO: MNNVL topology support currently unimplemented
+#else
+    amdsmi_shut_down();
+#endif
+#endif
   }
 
   void System::SetupSocketCommunicator()
@@ -5717,6 +5759,62 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return "Unknown CPU";
   }
 
+  void System::CollectPodMembership(uint64_t& ppodId, int64_t& vpodId)
+  {
+    ppodId = 0;
+    vpodId = -1;
+
+    // FORCE_SINGLE_POID skips any required queries to AMDSMI
+    char* forceSinglePod = getenv("FORCE_SINGLE_POD");
+    if (forceSinglePod) {
+      ppodId = 0;
+      vpodId = 0;
+      return;
+    }
+
+#ifdef POD_COMM_ENABLED
+
+#if defined(__NVCC__)
+    // MNNVL support unimplemented at this time
+
+    printf("[ERROR] MNNVL support is currently unimplemented\n");
+    exit(1);
+#else
+      int numGpus;
+      hipGetDeviceCount(&numGpus);
+      if (numGpus > 0) {
+        // Get a AMD SMI processor handle to the first GPU (if it exists) based on PCI bus ID
+        char pciBusId[256] = "";
+        hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
+
+        amdsmi_processor_handle gpuHandle;
+        amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(pciBusId, &gpuHandle);
+        if (err != AMDSMI_STATUS_SUCCESS) {
+          if (verbose) {
+            const char *errString = NULL;
+            amdsmi_status_code_to_string(err, &errString);
+            printf("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
+                   pciBusId, errString);
+          }
+        } else {
+          amdsmi_fabric_info_t fabricInfo;
+          err = amdsmi_get_gpu_fabric_info(gpuHandle, &fabricInfo);
+          if (err == AMDSMI_STATUS_SUCCESS) {
+            // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
+            //       vpodId == -1 to represent no pod present
+            ppodId = fabricInfo.info.v1.ppod_id;
+            vpodId = fabricInfo.info.v1.vpod_id;
+          } else if (verbose) {
+            const char *errString = NULL;
+            amdsmi_status_code_to_string(err, &errString);
+            printf("[WARN] Unable to get fabric info from AMD SMI [%s]\n", errString);
+          }
+        }
+      }
+#endif
+#endif
+  }
+
   void System::GetRankTopology(RankTopology& topo)
   {
     // Clear topology structure first
@@ -5733,9 +5831,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     char* firstDotPtr = std::strchr(topo.hostname, '.');
     if (firstDotPtr) *firstDotPtr = 0;
 
-    // NOTE: Placeholder values
-    strcpy(topo.ppodId, "N/A");
-    topo.vpodId = -1;
+    // Collect Pod membership
+    CollectPodMembership(topo.ppodId, topo.vpodId);
 
     // CPU Executor
     int numCpus = numa_num_configured_nodes();
@@ -6399,13 +6496,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return rankInfo[targetRank].hostname;
   }
 
-  std::string System::GetPpodId(int targetRank) const
+  uint64_t System::GetPpodId(int targetRank) const
   {
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
     return rankInfo[targetRank].ppodId;
   }
 
-  int System::GetVpodId(int targetRank) const
+  int64_t System::GetVpodId(int targetRank) const
   {
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
     return rankInfo[targetRank].vpodId;
@@ -6517,12 +6614,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return System::Get().GetHostname(targetRank);
   }
 
-  std::string GetPpodId(int targetRank)
+  uint64_t GetPpodId(int targetRank)
   {
     return System::Get().GetPpodId(targetRank);
   }
 
-  int GetVpodId(int targetRank)
+  int64_t GetVpodId(int targetRank)
   {
     return System::Get().GetVpodId(targetRank);
   }

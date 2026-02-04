@@ -37,6 +37,7 @@ DEBUG ?= 0
 # Only perform this check if 'make clean' is not the target
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
   ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+    $(info Building TransferBenchCuda)
     # Check for nvcc
     ifneq ($(shell test -e $(NVCC) && echo found), found)
       $(error "Could not find $(NVCC).  Please set CUDA_PATH appropriately")
@@ -146,12 +147,109 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       $(info Building with MPI communicator support.  Can set DISABLE_MPI_COMM=1 to disable)
    endif
   endif
-endif
 
+  POD_ENABLED = 0
+  # Compile with pod support if
+  # 1) DISABLE_POD_COMM is not set to 1
+  # 2) For HIP: HIP Runtime version >= 8 and AMD SMI version >= 26.2.1
+  #    For CUDA: CUDA Version >= 12.8.1
+  DISABLE_POD_COMM ?= 0
+  ifneq ($(DISABLE_POD_COMM), 1)
+    ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+      $(info Compiling TransferBenchCuda)
+      # Check for appropriate CUDA support for MNNVL
+      CUDA_MIN_MAJOR := 12
+      CUDA_MIN_MINOR := 2
+
+      CUDA_VERSION_STR := $(shell $(NVCC) --version | grep release | sed -E 's/.*release ([0-9]+)\.([0-9]+).*/\1 \2/')
+      CUDA_MAJOR := $(word 1,$(CUDA_VERSION_STR))
+      CUDA_MINOR := $(word 2,$(CUDA_VERSION_STR))
+
+      CUDA_VERSION_OK := $(shell \
+        if [ $(CUDA_MAJOR) -gt $(CUDA_MIN_MAJOR) ] || \
+           [ $(CUDA_MAJOR) -eq $(CUDA_MIN_MAJOR) -a $(CUDA_MINOR) -ge $(CUDA_MIN_MINOR) ]; then \
+          echo yes; \
+        else \
+          echo no; \
+        fi)
+
+      ifeq ($(CUDA_VERSION_OK),yes)
+        $(info Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which has MNNVL support)
+        COMMON_FLAGS += -DPOD_COMM_ENABLED
+        POD_ENABLED = 1
+      else
+        $(warning Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which does not have MNNVL support)
+        $(warning Pod support will require CUDA version of at least $(CUDA_MIN_MAJOR).$(CUDA_MIN_MINOR))
+      endif
+    else
+      # Check for appropriate AMD SMI version (for querying pod membership)
+      $(info Compiling TransferBench)
+      AMD_SMI_MIN_MAJOR := 26
+      AMD_SMI_MIN_MINOR := 4
+
+      AMD_SMI ?= amd-smi
+      AMD_SMI_EXISTS := $(shell command -v $(AMD_SMI) >/dev/null 2>&1 && echo yes || echo no)
+      ifeq ($(AMD_SMI_EXISTS),no)
+        $(warning $(AMD_SMI) not found.  Disabling pod communication support)
+      else
+        AMD_SMI_VERSION_STR := $(shell $(AMD_SMI) version | sed -n 's/.*Library version: \([0-9]\+\)\.\([0-9]\+\).*/\1 \2/p')
+        AMD_SMI_MAJOR := $(word 1,$(AMD_SMI_VERSION_STR))
+        AMD_SMI_MINOR := $(word 2,$(AMD_SMI_VERSION_STR))
+
+        AMD_SMI_VERSION_OK := $(shell \
+          if [ $(AMD_SMI_MAJOR) -gt $(AMD_SMI_MIN_MAJOR) ] || \
+             [ $(AMD_SMI_MAJOR) -eq $(AMD_SMI_MIN_MAJOR) -a $(AMD_SMI_MINOR) -ge $(AMD_SMI_MIN_MINOR) ]; then \
+            echo yes; \
+          else \
+            echo no; \
+          fi)
+
+        ifeq ($(AMD_SMI_VERSION_OK),yes)
+          $(info Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which has pod support)
+
+          # Check for appropriate HIP version (for exchanging pod memory handles)
+          HIP_MIN_MAJOR := 8
+          HIP_MIN_MINOR := 0
+
+          # Check for hipconfig
+          HIPCONFIG ?= hipconfig
+          HIP_EXISTS := $(shell command -v $(HIPCONFIG) >/dev/null 2>&1 && echo yes || echo no)
+          ifeq ($(HIP_EXISTS),yes)
+            HIP_VERSION_STR := $(shell $(HIPCONFIG) --version | sed -E 's/([0-9]+)\.([0-9]+).*/\1 \2/')
+            HIP_MAJOR := $(word 1,$(HIP_VERSION_STR))
+            HIP_MINOR := $(word 2,$(HIP_VERSION_STR))
+
+            HIP_VERSION_OK := $(shell \
+              if [ $(HIP_MAJOR) -gt $(HIP_MIN_MAJOR) ] || \
+                 [ $(HIP_MAJOR) -eq $(HIP_MIN_MAJOR) -a $(HIP_MINOR) -ge $(HIP_MIN_MINOR) ]; then \
+                echo yes; \
+              else \
+                echo no; \
+              fi)
+
+            ifeq ($(HIP_VERSION_OK),yes)
+              $(info Detected HIP version $(HIP_MAJOR).$(HIP_MINOR) which has pod support)
+              COMMON_FLAGS += -DPOD_COMM_ENABLED
+            else
+             $(warning Detected HIP version $(HIP_MAJOR).$(HIP_MINOR) which does not have pod support)
+             $(warning Pod support requires HIP version of at least $(HIP_MIN_MAJOR).$(HIP_MIN_MINOR))
+            endif
+          else
+             $(warning Unable to determine HIP version via $(HIPCONFIG).  Try specifying path to hipconfig in HIPCONFIG)
+             $(warning Disabling pod communication support)
+          endif
+        else
+          $(warning Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which does not have pod support)
+          $(warning Pod support requires amd-smi version of at least $(AMD_SMI_MIN_MAJOR).$(AMD_SMI_MIN_MINOR))
+        endif
+      endif
+    endif
+  endif
+endif
 
 .PHONY : all clean
 
-all: $(EXE)
+all: TransferBench
 
 TransferBench: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
 	$(CXX) $(CXXFLAGS) $(HIPFLAGS) $(COMMON_FLAGS) $< -o $@ $(HIPLDFLAGS) $(LDFLAGS)
