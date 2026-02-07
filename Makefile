@@ -10,7 +10,7 @@ MPI_PATH  ?= /usr/local/openmpi
 # Optional features (set to 0 to disable, 1 to enable)
 # DISABLE_NIC_EXEC: Disable RDMA/NIC executor support
 # DISABLE_MPI_COMM: Disable MPI communicator support
-# USE_DMABUF: Enable DMA-BUF support for GPU Direct RDMA (default: 1)
+# USE_DMABUF: Enable DMA-BUF support for GPU Direct RDMA (default: 0)
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -93,23 +93,22 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       LDFLAGS += -libverbs
       NIC_ENABLED = 1
 
-      # Enable DMA-BUF support by default (set USE_DMABUF=0 to disable)
-      USE_DMABUF ?= 1
+      # Disable DMA-BUF support by default (set USE_DMABUF=1 to enable)
+      USE_DMABUF ?= 0
       ifneq ($(USE_DMABUF), 0)
-        # Check for ibv_reg_dmabuf_mr support
-        ifeq ("$(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'ibv_reg_dmabuf_mr')", "0")
-          $(info Building without ibv_reg_dmabuf_mr support)
-        else
-          COMMON_FLAGS += -DHAVE_REG_DMABUF_MR
-          $(info Building with ibv_reg_dmabuf_mr support)
-        endif
+        # Check for both ibv_reg_dmabuf_mr and ROCm DMA-BUF export support
+        HAVE_IBV_DMABUF := $(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'ibv_reg_dmabuf_mr')
+        HAVE_ROCM_DMABUF := $(shell echo '#include <hsa/hsa_ext_amd.h>' | $(CXX) -I$(ROCM_PATH)/include -E - 2>/dev/null | grep -c 'hsa_amd_portable_export_dmabuf')
 
-        # Check for ROCm DMA-BUF export support (hsa_amd_portable_export_dmabuf)
-        ifeq ("$(shell echo '#include <hsa/hsa_ext_amd.h>' | $(CXX) -I$(ROCM_PATH)/include -E - 2>/dev/null | grep -c 'hsa_amd_portable_export_dmabuf')", "0")
-          $(info Building without ROCm DMA-BUF export support)
+        ifeq ($(HAVE_IBV_DMABUF):$(HAVE_ROCM_DMABUF), 0:0)
+          $(info Building without DMA-BUF support: missing both ibv_reg_dmabuf_mr and ROCm DMA-BUF export)
+        else ifeq ($(HAVE_IBV_DMABUF), 0)
+          $(info Building without DMA-BUF support: missing ibv_reg_dmabuf_mr)
+        else ifeq ($(HAVE_ROCM_DMABUF), 0)
+          $(info Building without DMA-BUF support: missing ROCm DMA-BUF export)
         else
-          COMMON_FLAGS += -DHAVE_ROCM_DMABUF
-          $(info Building with ROCm DMA-BUF export support)
+          COMMON_FLAGS += -DHAVE_DMABUF_SUPPORT
+          $(info Building with DMA-BUF support)
         endif
       else
         $(info Building with DMA-BUF support disabled (USE_DMABUF=0))

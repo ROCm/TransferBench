@@ -1431,7 +1431,7 @@ namespace {
     return ERR_NONE;
   }
 
-#if defined(NIC_EXEC_ENABLED) && defined(HAVE_ROCM_DMABUF) && !defined(__NVCC__)
+#if defined(NIC_EXEC_ENABLED) && defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
   // Export GPU memory as DMA-BUF for RDMA operations
   static ErrResult ExportDmabuf(void* gpuPtr, size_t numBytes, int& dmabufFd, uint64_t& dmabufOffset)
   {
@@ -2831,10 +2831,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (!dmabufStatusPrinted) {
         dmabufStatusPrinted = true;
         printf("[INFO] Rank %d DMA-BUF support: ", GetRank());
-#if defined(HAVE_REG_DMABUF_MR) && defined(HAVE_ROCM_DMABUF) && !defined(__NVCC__)
-        printf("ENABLED (ibv_reg_dmabuf_mr + ROCm export)\n");
-#elif defined(HAVE_REG_DMABUF_MR)
-        printf("PARTIAL (ibv_reg_dmabuf_mr only, no ROCm export)\n");
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+        printf("ENABLED\n");
 #else
         printf("DISABLED (using standard ibv_reg_mr)\n");
 #endif
@@ -2866,7 +2864,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
 
       // Export DMA-BUF for SRC memory if it's GPU memory
-#if defined(HAVE_ROCM_DMABUF) && !defined(__NVCC__)
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
       if (!t.srcs.empty() && IsGpuMemType(t.srcs[0].memType)) {
         ERR_CHECK(ExportDmabuf(rss.srcMem[0], rss.numBytes, rss.srcDmabufFd, rss.srcDmabufOffset));
         if (System::Get().IsVerbose()) {
@@ -2877,7 +2875,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
 
       // Register SRC memory region
-#ifdef HAVE_REG_DMABUF_MR
+#ifdef HAVE_DMABUF_SUPPORT
       if (rss.srcDmabufFd >= 0) {
         IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_dmabuf_mr, rss.srcProtect, rss.srcDmabufOffset,
                      rss.numBytes, (uint64_t)rss.srcMem[0], rss.srcDmabufFd, rdmaMemRegFlags);
@@ -2930,7 +2928,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
 
       // Export DMA-BUF for DST memory if it's GPU memory
-#if defined(HAVE_ROCM_DMABUF) && !defined(__NVCC__)
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
       if (!t.dsts.empty() && IsGpuMemType(t.dsts[0].memType)) {
         ERR_CHECK(ExportDmabuf(rss.dstMem[0], rss.numBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
         if (System::Get().IsVerbose()) {
@@ -2941,7 +2939,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
 
       // Register DST memory region
-#ifdef HAVE_REG_DMABUF_MR
+#ifdef HAVE_DMABUF_SUPPORT
       if (rss.dstDmabufFd >= 0) {
         IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_dmabuf_mr, rss.dstProtect, rss.dstDmabufOffset,
                      rss.numBytes, (uint64_t)rss.dstMem[0], rss.dstDmabufFd, rdmaMemRegFlags);
@@ -3095,7 +3093,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (isDstRank) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
     // Close DMA-BUF file descriptors
-#if defined(HAVE_ROCM_DMABUF) && !defined(__NVCC__)
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
     if (isSrcRank && rss.srcDmabufFd >= 0) {
       close(rss.srcDmabufFd);
       rss.srcDmabufFd = -1;
