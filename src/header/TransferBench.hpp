@@ -48,6 +48,7 @@ THE SOFTWARE.
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/utsname.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -1432,6 +1433,55 @@ namespace {
   }
 
 #if defined(NIC_EXEC_ENABLED) && defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+  // Check kernel configuration for required DMA-BUF support
+  // Returns true if kernel supports CONFIG_DMABUF_MOVE_NOTIFY and CONFIG_PCI_P2PDMA
+  static bool CheckKernelDmabufSupport()
+  {
+    static int cachedResult = -1;  // -1: not checked, 0: disabled, 1: enabled
+
+    if (cachedResult != -1) {
+      return cachedResult == 1;
+    }
+
+    bool hasMoveNotify = false;
+    bool hasP2pDma = false;
+
+    // Read kernel config from /boot/config-$(uname -r)
+    struct utsname utsname;
+    if (uname(&utsname) == 0) {
+      char kernel_conf_file[128];
+      snprintf(kernel_conf_file, sizeof(kernel_conf_file), "/boot/config-%s", utsname.release);
+
+      FILE* fp = fopen(kernel_conf_file, "r");
+      if (fp) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), fp)) {
+          if (strstr(buf, "CONFIG_DMABUF_MOVE_NOTIFY=y")) hasMoveNotify = true;
+          if (strstr(buf, "CONFIG_PCI_P2PDMA=y")) hasP2pDma = true;
+        }
+        fclose(fp);
+      }
+    }
+
+    cachedResult = (hasMoveNotify && hasP2pDma) ? 1 : 0;
+
+    if (cachedResult == 0) {
+      if (System::Get().IsVerbose()) {
+        printf("[WARN] Kernel DMA-BUF support incomplete: ");
+        if (!hasMoveNotify && !hasP2pDma) {
+          printf("missing CONFIG_DMABUF_MOVE_NOTIFY=y and CONFIG_PCI_P2PDMA=y\n");
+        } else if (!hasMoveNotify) {
+          printf("missing CONFIG_DMABUF_MOVE_NOTIFY=y\n");
+        } else {
+          printf("missing CONFIG_PCI_P2PDMA=y\n");
+        }
+        printf("[WARN] Falling back to standard ibv_reg_mr\n");
+      }
+    }
+
+    return cachedResult == 1;
+  }
+
   // Export GPU memory as DMA-BUF for RDMA operations
   static ErrResult ExportDmabuf(void* gpuPtr, size_t numBytes, int& dmabufFd, uint64_t& dmabufOffset)
   {
@@ -2832,7 +2882,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         dmabufStatusPrinted = true;
         printf("[INFO] Rank %d DMA-BUF support: ", GetRank());
 #if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-        printf("ENABLED\n");
+        bool kernelSupport = CheckKernelDmabufSupport();
+        if (kernelSupport) {
+          printf("ENABLED\n");
+        } else {
+          printf("DISABLED (kernel config missing, using standard ibv_reg_mr)\n");
+        }
 #else
         printf("DISABLED (using standard ibv_reg_mr)\n");
 #endif
@@ -2865,7 +2920,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Export DMA-BUF for SRC memory if it's GPU memory
 #if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-      if (!t.srcs.empty() && IsGpuMemType(t.srcs[0].memType)) {
+      if (!t.srcs.empty() && IsGpuMemType(t.srcs[0].memType) && CheckKernelDmabufSupport()) {
         ERR_CHECK(ExportDmabuf(rss.srcMem[0], rss.numBytes, rss.srcDmabufFd, rss.srcDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported SRC GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
@@ -2929,7 +2984,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Export DMA-BUF for DST memory if it's GPU memory
 #if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-      if (!t.dsts.empty() && IsGpuMemType(t.dsts[0].memType)) {
+      if (!t.dsts.empty() && IsGpuMemType(t.dsts[0].memType) && CheckKernelDmabufSupport()) {
         ERR_CHECK(ExportDmabuf(rss.dstMem[0], rss.numBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported DST GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
