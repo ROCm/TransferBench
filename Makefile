@@ -8,9 +8,9 @@ CUDA_PATH ?= /usr/local/cuda
 MPI_PATH  ?= /usr/local/openmpi
 
 # Optional features (set to 0 to disable, 1 to enable)
-# DISABLE_NIC_EXEC: Disable RDMA/NIC executor support
-# DISABLE_MPI_COMM: Disable MPI communicator support
-# USE_DMABUF: Enable DMA-BUF support for GPU Direct RDMA (default: 0)
+# DISABLE_NIC_EXEC: Disable RDMA/NIC executor support (default: 0)
+# DISABLE_MPI_COMM: Disable MPI communicator support (default: 0)
+# DISABLE_DMABUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -93,9 +93,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       LDFLAGS += -libverbs
       NIC_ENABLED = 1
 
-      # Disable DMA-BUF support by default (set USE_DMABUF=1 to enable)
-      USE_DMABUF ?= 0
-      ifneq ($(USE_DMABUF), 0)
+      # Disable DMA-BUF support by default (set DISABLE_DMABUF=0 to enable)
+      DISABLE_DMABUF ?= 1
+      ifeq ($(DISABLE_DMABUF), 0)
         # Check for both ibv_reg_dmabuf_mr and ROCm DMA-BUF export support
         HAVE_IBV_DMABUF := $(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'ibv_reg_dmabuf_mr')
         HAVE_ROCM_DMABUF := $(shell echo '#include <hsa/hsa_ext_amd.h>' | $(CXX) -I$(ROCM_PATH)/include -E - 2>/dev/null | grep -c 'hsa_amd_portable_export_dmabuf')
@@ -111,7 +111,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
           $(info Building with DMA-BUF support)
         endif
       else
-        $(info Building with DMA-BUF support disabled (USE_DMABUF=0))
+        $(info Building with DMA-BUF support disabled (DISABLE_DMABUF=1))
       endif
     endif
     ifeq ($(NIC_ENABLED), 0)
