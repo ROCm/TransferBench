@@ -1437,49 +1437,108 @@ namespace {
   // Returns true if kernel supports CONFIG_DMABUF_MOVE_NOTIFY and CONFIG_PCI_P2PDMA
   static bool CheckKernelDmabufSupport()
   {
-    static int cachedResult = -1;  // -1: not checked, 0: disabled, 1: enabled
+    static int support = -1;  // -1: not checked, 0: disabled, 1: enabled
 
-    if (cachedResult != -1) {
-      return cachedResult == 1;
+    if (support != -1) {
+      return support;
     }
 
-    bool hasMoveNotify = false;
-    bool hasP2pDma = false;
-
-    // Read kernel config from /boot/config-$(uname -r)
     struct utsname utsname;
-    if (uname(&utsname) == 0) {
-      char kernel_conf_file[128];
-      snprintf(kernel_conf_file, sizeof(kernel_conf_file), "/boot/config-%s", utsname.release);
+    FILE* fp = NULL;
+    char kernel_opt1[28] = "CONFIG_DMABUF_MOVE_NOTIFY=y";
+    char kernel_opt2[20] = "CONFIG_PCI_P2PDMA=y";
+    char kernel_conf_file[128];
+    char buf[256];
+    int found_opt1 = 0;
+    int found_opt2 = 0;
+    int dmaBufSupport = 0;  // Start as disabled, enable only when both options found
 
-      FILE* fp = fopen(kernel_conf_file, "r");
-      if (fp) {
-        char buf[256];
-        while (fgets(buf, sizeof(buf), fp)) {
-          if (strstr(buf, "CONFIG_DMABUF_MOVE_NOTIFY=y")) hasMoveNotify = true;
-          if (strstr(buf, "CONFIG_PCI_P2PDMA=y")) hasP2pDma = true;
+    // Check for kernel name exists
+    if (uname(&utsname) == -1) {
+      if (System::Get().IsVerbose()) {
+        printf("[WARN] Could not get kernel name\n");
+      }
+      support = 0;
+      return 0;
+    }
+
+    // Format and check kernel conf file location
+    const char* possiblePaths[] = {
+      "/proc/config.gz",
+      "/boot/config-%s",
+      "/usr/src/linux-%s/.config",
+      "/usr/src/linux/.config",
+      "/usr/lib/modules/%s/config",
+      "/usr/lib/ostree-boot/config-%s",
+      "/usr/lib/kernel/config-%s",
+      "/usr/src/linux-headers-%s/.config",
+      "/lib/modules/%s/build/.config",
+    };
+
+    for (const auto& path : possiblePaths) {
+      // Reset flags for each file
+      found_opt1 = 0;
+      found_opt2 = 0;
+
+      snprintf(kernel_conf_file, sizeof(kernel_conf_file), path, utsname.release);
+
+      // Special handling for /proc/config.gz
+      if (strstr(path, "/proc/config.gz") != NULL) {
+        fp = popen("zcat /proc/config.gz 2>/dev/null", "r");
+      } else {
+        fp = fopen(kernel_conf_file, "r");
+      }
+
+      if (fp != NULL) {
+        // Look for kernel_opt1 and kernel_opt2 in the conf file
+        while (fgets(buf, sizeof(buf), fp) != NULL) {
+          if (strstr(buf, kernel_opt1) != NULL) {
+            found_opt1 = 1;
+            if (System::Get().IsVerbose()) {
+              printf("[INFO] %s in %s\n", kernel_opt1, kernel_conf_file);
+            }
+          }
+          if (strstr(buf, kernel_opt2) != NULL) {
+            found_opt2 = 1;
+            if (System::Get().IsVerbose()) {
+              printf("[INFO] %s in %s\n", kernel_opt2, kernel_conf_file);
+            }
+          }
         }
-        fclose(fp);
+
+        // Close file handle
+        if (strstr(path, "/proc/config.gz") != NULL) {
+          pclose(fp);
+        } else {
+          fclose(fp);
+        }
+
+        // Check if both options were found
+        if (found_opt1 && found_opt2) {
+          dmaBufSupport = 1;
+          if (System::Get().IsVerbose()) {
+            printf("[INFO] DMA_BUF Support Enabled\n");
+          }
+          break;  // Found both options, exit loop
+        } else {
+          // File found but missing required options, continue to next file
+          if (System::Get().IsVerbose()) {
+            printf("[WARN] CONFIG_DMABUF_MOVE_NOTIFY and/or CONFIG_PCI_P2PDMA not found in %s, trying next location\n", kernel_conf_file);
+          }
+        }
       }
     }
 
-    cachedResult = (hasMoveNotify && hasP2pDma) ? 1 : 0;
-
-    if (cachedResult == 0) {
+    // If DMA-BUF support not enabled, log warning
+    if (!dmaBufSupport) {
       if (System::Get().IsVerbose()) {
-        printf("[WARN] Kernel DMA-BUF support incomplete: ");
-        if (!hasMoveNotify && !hasP2pDma) {
-          printf("missing CONFIG_DMABUF_MOVE_NOTIFY=y and CONFIG_PCI_P2PDMA=y\n");
-        } else if (!hasMoveNotify) {
-          printf("missing CONFIG_DMABUF_MOVE_NOTIFY=y\n");
-        } else {
-          printf("missing CONFIG_PCI_P2PDMA=y\n");
-        }
+        printf("[WARN] DMA_BUF_SUPPORT Failed: kernel config not found or missing required options\n");
         printf("[WARN] Falling back to standard ibv_reg_mr\n");
       }
     }
 
-    return cachedResult == 1;
+    support = dmaBufSupport;
+    return support;
   }
 
   // Export GPU memory as DMA-BUF for RDMA operations
