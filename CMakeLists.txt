@@ -164,7 +164,7 @@ if(IBVERBS_FOUND AND NOT DISABLE_DMABUF)
   # Check for hsa_amd_portable_export_dmabuf
   set(CMAKE_REQUIRED_INCLUDES ${HSA_INCLUDE_DIR})
   set(CMAKE_REQUIRED_LIBRARIES ${HSA_LIBRARY})
-  check_symbol_exists(hsa_amd_portable_export_dmabuf "hsa/hsa_ext_amd.h" HAVE_ROCM_DMABUF)
+  check_symbol_exists(hsa_amd_portable_export_dmabuf "hsa_ext_amd.h" HAVE_ROCM_DMABUF)
 
   # Enable DMA-BUF only if both APIs are available
   if(HAVE_IBV_DMABUF AND HAVE_ROCM_DMABUF)
