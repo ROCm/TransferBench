@@ -595,7 +595,7 @@ namespace TransferBench::Utils
     table.Set(rowIdx, 3, "%12lu bytes "     , results.totalBytesTransferred);
     table.Set(rowIdx, 4, " Overhead %.3f ms", results.overheadMsec);
     table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
-    table.DrawRowBorder(rowIdx);
+    table.DrawRowBorder(rowIdx + 1);
 
     table.PrintTable(ev.outputToCsv, ev.showBorders);
   }

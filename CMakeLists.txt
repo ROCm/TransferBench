@@ -9,7 +9,7 @@ if (NOT CMAKE_TOOLCHAIN_FILE)
   message(STATUS "CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
 
-set(VERSION_STRING "1.66.01")
+set(VERSION_STRING "1.66.02")
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
 ## Load CMake modules
@@ -25,6 +25,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(BUILD_LOCAL_GPU_TARGET_ONLY "Build only for GPUs detected on this machine" OFF)
 option(ENABLE_NIC_EXEC             "Enable RDMA NIC Executor in TransferBench"    OFF)
 option(ENABLE_MPI_COMM             "Enable MPI Communicator support"              OFF)
+option(DISABLE_DMABUF              "Disable DMA-BUF support for GPU Direct RDMA"  ON)
 
 # Default GPU architectures to build
 #==================================================================================================
@@ -150,6 +151,38 @@ else()
   endif()
 endif()
 
+## Check for DMA-BUF support (requires IBVERBS_FOUND)
+if(IBVERBS_FOUND AND NOT DISABLE_DMABUF)
+  message(STATUS "Checking for DMA-BUF support...")
+
+  # Check for ibv_reg_dmabuf_mr
+  include(CheckSymbolExists)
+  set(CMAKE_REQUIRED_INCLUDES ${IBVERBS_INCLUDE_DIR})
+  set(CMAKE_REQUIRED_LIBRARIES ${IBVERBS_LIBRARY})
+  check_symbol_exists(ibv_reg_dmabuf_mr "infiniband/verbs.h" HAVE_IBV_DMABUF)
+
+  # Check for hsa_amd_portable_export_dmabuf
+  set(CMAKE_REQUIRED_INCLUDES ${HSA_INCLUDE_DIR})
+  set(CMAKE_REQUIRED_LIBRARIES ${HSA_LIBRARY})
+  check_symbol_exists(hsa_amd_portable_export_dmabuf "hsa_ext_amd.h" HAVE_ROCM_DMABUF)
+
+  # Enable DMA-BUF only if both APIs are available
+  if(HAVE_IBV_DMABUF AND HAVE_ROCM_DMABUF)
+    set(DMABUF_SUPPORT_FOUND 1)
+    message(STATUS "Building with DMA-BUF support")
+  else()
+    if(NOT HAVE_IBV_DMABUF AND NOT HAVE_ROCM_DMABUF)
+      message(WARNING "Building without DMA-BUF support: missing both ibv_reg_dmabuf_mr and ROCm DMA-BUF export")
+    elseif(NOT HAVE_IBV_DMABUF)
+      message(WARNING "Building without DMA-BUF support: missing ibv_reg_dmabuf_mr")
+    else()
+      message(WARNING "Building without DMA-BUF support: missing ROCm DMA-BUF export")
+    endif()
+  endif()
+elseif(NOT DISABLE_DMABUF)
+  message(WARNING "DMA-BUF support requires ENABLE_NIC_EXEC=ON")
+endif()
+
 ## Check for MPI support
 set(MPI_PATH "" CACHE PATH "Path to MPI installation (takes priority over system MPI)")
 if(NOT ENABLE_MPI_COMM)
@@ -209,6 +242,9 @@ if(MPI_COMM_FOUND)
     target_link_libraries(TransferBench PRIVATE ${MPI_LIBRARY})
   endif()
   target_compile_definitions(TransferBench PRIVATE MPI_COMM_ENABLED)
+endif()
+if(DMABUF_SUPPORT_FOUND)
+  target_compile_definitions(TransferBench PRIVATE HAVE_DMABUF_SUPPORT)
 endif()
 if (HAVE_PARALLEL_JOBS)
   target_compile_options(TransferBench PRIVATE -parallel-jobs=12)

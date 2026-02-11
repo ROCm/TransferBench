@@ -40,7 +40,7 @@ THE SOFTWARE.
 #include <random>
 #include <time.h>
 
-#define CLIENT_VERSION "01"
+#define CLIENT_VERSION "02"
 
 #include "TransferBench.hpp"
 using namespace TransferBench;

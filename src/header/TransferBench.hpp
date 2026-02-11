@@ -48,6 +48,7 @@ THE SOFTWARE.
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/utsname.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -503,6 +504,28 @@ namespace TransferBench
    */
   void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
 
+
+  /**
+   * Returns the index of a GPU closest to the given NIC
+   *
+   * @param[in] nicIndex        Index of the NIC to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns GPU index closest to IB Verbs capable NIC index nicIndex, or -1 if unable to detect
+   */
+  int GetClosestGpuToNic(int nicIndex, int targetRank);
+
+  /**
+   * Returns the indices of the GPUs closest to the given NIC
+   *
+   * @param[out] gpuIndices     Vector that will contain GPU indices closest to given NIC
+   * @param[in]  nicIndex        Index of the NIC to query
+   * @param[in]  targetRank      Rank to query (-1 for local rank)
+   * @note This function is applicable when the IBV/RDMA executor is available
+   * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
+   */
+  void GetClosestGpusToNic(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+
   /**
    * @returns 0-indexed rank for this process
    */
@@ -915,6 +938,17 @@ namespace {
      */
     void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1) const;
 
+    /**
+     * Returns the indices of the GPUs closest to the given NIC
+     *
+     * @param[out] gpuIndices     Vector that will contain GPU indices closest to given NIC
+     * @param[in] nicIndex        Index of the NIC to query
+     * @param[in] targetRank      Rank to query (-1 for local rank)
+     * @note This function is applicable when the IBV/RDMA executor is available
+     * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
+     */
+    void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1) const;
+
     std::string GetHostname(int targetRank) const;
     std::string GetPpodId(int targetRank) const;
     int GetVpodId(int targetRank) const;
@@ -977,6 +1011,7 @@ namespace {
       std::map<int,                int>         closestCpuNumaToNic;
       std::map<int,                int>         nicIsActive;
       std::map<int,                vector<int>> closestNicsToGpu;
+      std::map<int,                vector<int>> closestGpusToNic;
       std::map<pair<ExeType, int>, std::string> executorName;
     };
 
@@ -1430,6 +1465,142 @@ namespace {
     }
     return ERR_NONE;
   }
+
+#if defined(NIC_EXEC_ENABLED) && defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+  // Check kernel configuration for required DMA-BUF support
+  // Returns true if kernel supports CONFIG_DMABUF_MOVE_NOTIFY and CONFIG_PCI_P2PDMA
+  static bool CheckKernelDmabufSupport()
+  {
+    static int support = -1;  // -1: not checked, 0: disabled, 1: enabled
+
+    if (support != -1) {
+      return support;
+    }
+
+    struct utsname utsname;
+    FILE* fp = NULL;
+    char kernel_opt1[28] = "CONFIG_DMABUF_MOVE_NOTIFY=y";
+    char kernel_opt2[20] = "CONFIG_PCI_P2PDMA=y";
+    char kernel_conf_file[128];
+    char buf[256];
+    int found_opt1 = 0;
+    int found_opt2 = 0;
+    int dmaBufSupport = 0;  // Start as disabled, enable only when both options found
+
+    // Check for kernel name exists
+    if (uname(&utsname) == -1) {
+      if (System::Get().IsVerbose()) {
+        printf("[WARN] Could not get kernel name\n");
+      }
+      support = 0;
+      return 0;
+    }
+
+    // Format and check kernel conf file location
+    const char* possiblePaths[] = {
+      "/proc/config.gz",
+      "/boot/config-%s",
+      "/usr/src/linux-%s/.config",
+      "/usr/src/linux/.config",
+      "/usr/lib/modules/%s/config",
+      "/usr/lib/ostree-boot/config-%s",
+      "/usr/lib/kernel/config-%s",
+      "/usr/src/linux-headers-%s/.config",
+      "/lib/modules/%s/build/.config",
+    };
+
+    for (const auto& path : possiblePaths) {
+      // Reset flags for each file
+      found_opt1 = 0;
+      found_opt2 = 0;
+
+      snprintf(kernel_conf_file, sizeof(kernel_conf_file), path, utsname.release);
+
+      // Special handling for /proc/config.gz
+      if (strstr(path, "/proc/config.gz") != NULL) {
+        fp = popen("zcat /proc/config.gz 2>/dev/null", "r");
+      } else {
+        fp = fopen(kernel_conf_file, "r");
+      }
+
+      if (fp != NULL) {
+        // Look for kernel_opt1 and kernel_opt2 in the conf file
+        while (fgets(buf, sizeof(buf), fp) != NULL) {
+          if (strstr(buf, kernel_opt1) != NULL) {
+            found_opt1 = 1;
+            if (System::Get().IsVerbose()) {
+              printf("[INFO] %s in %s\n", kernel_opt1, kernel_conf_file);
+            }
+          }
+          if (strstr(buf, kernel_opt2) != NULL) {
+            found_opt2 = 1;
+            if (System::Get().IsVerbose()) {
+              printf("[INFO] %s in %s\n", kernel_opt2, kernel_conf_file);
+            }
+          }
+        }
+
+        // Close file handle
+        if (strstr(path, "/proc/config.gz") != NULL) {
+          pclose(fp);
+        } else {
+          fclose(fp);
+        }
+
+        // Check if both options were found
+        if (found_opt1 && found_opt2) {
+          dmaBufSupport = 1;
+          if (System::Get().IsVerbose()) {
+            printf("[INFO] DMA_BUF Support Enabled\n");
+          }
+          break;  // Found both options, exit loop
+        } else {
+          // File found but missing required options, continue to next file
+          if (System::Get().IsVerbose()) {
+            printf("[WARN] CONFIG_DMABUF_MOVE_NOTIFY and/or CONFIG_PCI_P2PDMA not found in %s, trying next location\n", kernel_conf_file);
+          }
+        }
+      }
+    }
+
+    // If DMA-BUF support not enabled, log warning
+    if (!dmaBufSupport) {
+      if (System::Get().IsVerbose()) {
+        printf("[WARN] DMA_BUF_SUPPORT Failed: kernel config not found or missing required options\n");
+        printf("[WARN] Falling back to standard ibv_reg_mr\n");
+      }
+    }
+
+    support = dmaBufSupport;
+    return support;
+  }
+
+  // Export GPU memory as DMA-BUF for RDMA operations
+  static ErrResult ExportDmabuf(void* gpuPtr, size_t numBytes, int& dmabufFd, uint64_t& dmabufOffset)
+  {
+    // Round down to host page alignment (4KB typically)
+    const uint64_t HOST_PAGE_SIZE = 1ULL << 12;
+    void* alignedPtr = (void*)((uint64_t)gpuPtr & ~(HOST_PAGE_SIZE - 1));
+    uint64_t offset = (uint64_t)gpuPtr - (uint64_t)alignedPtr;
+
+    // Adjust size to account for alignment
+    size_t alignedSize = numBytes + offset;
+    alignedSize = (alignedSize + HOST_PAGE_SIZE - 1) & ~(HOST_PAGE_SIZE - 1);
+
+    // Export the aligned GPU buffer as DMA-BUF
+    uint64_t exportOffset = 0;
+    hsa_status_t status = hsa_amd_portable_export_dmabuf(alignedPtr, alignedSize, &dmabufFd, &exportOffset);
+
+    if (status != HSA_STATUS_SUCCESS) {
+      return {ERR_FATAL, "Failed to export DMA-BUF: hsa_amd_portable_export_dmabuf returned %d", status};
+    }
+
+    // The offset is the sum of export offset and alignment offset
+    dmabufOffset = exportOffset + offset;
+
+    return ERR_NONE;
+  }
+#endif
 
 // Setup validation-related functions
 //========================================================================================
@@ -2173,6 +2344,10 @@ namespace {
     vector<ibv_qp*>            dstQueuePairs;     ///< Queue pairs for DST NIC
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
+    int                        srcDmabufFd;       ///< DMA-BUF file descriptor for SRC (if using dmabuf)
+    int                        dstDmabufFd;       ///< DMA-BUF file descriptor for DST (if using dmabuf)
+    uint64_t                   srcDmabufOffset;   ///< Offset within SRC DMA-BUF
+    uint64_t                   dstDmabufOffset;   ///< Offset within DST DMA-BUF
     uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
@@ -2787,6 +2962,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     rss.dstNicIndex = (nicExeRank == srcMemRank ? nonExeDevice.exeIndex : nicExeDevice.exeIndex);
     rss.qpCount     = t.numSubExecs;
 
+    // Initialize DMA-BUF fields
+    rss.srcDmabufFd = -1;
+    rss.dstDmabufFd = -1;
+    rss.srcDmabufOffset = 0;
+    rss.dstDmabufOffset = 0;
+
+    // Print DMA-BUF support status (only once per rank)
+    if (System::Get().IsVerbose()) {
+      static bool dmabufStatusPrinted = false;
+      if (!dmabufStatusPrinted) {
+        dmabufStatusPrinted = true;
+        printf("[INFO] Rank %d DMA-BUF support: ", GetRank());
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+        bool kernelSupport = CheckKernelDmabufSupport();
+        if (kernelSupport) {
+          printf("ENABLED\n");
+        } else {
+          printf("DISABLED (kernel config missing, using standard ibv_reg_mr)\n");
+        }
+#else
+        printf("DISABLED (using standard ibv_reg_mr)\n");
+#endif
+      }
+    }
+
     // Establish memory access flags
     unsigned int rdmaAccessFlags = (IBV_ACCESS_LOCAL_WRITE    |
                                     IBV_ACCESS_REMOTE_READ    |
@@ -2810,8 +3010,34 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.srcContext, ibv_open_device, GetIbvDeviceList()[rss.srcNicIndex].devicePtr);
       // Open SRC protection domain
       IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
+
+      // Export DMA-BUF for SRC memory if it's GPU memory
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+      if (!t.srcs.empty() && IsGpuMemType(t.srcs[0].memType) && CheckKernelDmabufSupport()) {
+        ERR_CHECK(ExportDmabuf(rss.srcMem[0], rss.numBytes, rss.srcDmabufFd, rss.srcDmabufOffset));
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Rank %d exported SRC GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
+                 GetRank(), rss.srcDmabufFd, rss.srcDmabufOffset);
+        }
+      }
+#endif
+
       // Register SRC memory region
-      IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+#ifdef HAVE_DMABUF_SUPPORT
+      if (rss.srcDmabufFd >= 0) {
+        IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_dmabuf_mr, rss.srcProtect, rss.srcDmabufOffset,
+                     rss.numBytes, (uint64_t)rss.srcMem[0], rss.srcDmabufFd, rdmaMemRegFlags);
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Rank %d registered SRC memory using ibv_reg_dmabuf_mr\n", GetRank());
+        }
+      } else
+#endif
+      {
+        IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Rank %d registered SRC memory using ibv_reg_mr (standard path)\n", GetRank());
+        }
+      }
       // Create SRC completion queues
       IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
       // Get SRC port attributes
@@ -2848,8 +3074,34 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.dstContext, ibv_open_device, GetIbvDeviceList()[rss.dstNicIndex].devicePtr);
       // Open DST protection domain
       IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
+
+      // Export DMA-BUF for DST memory if it's GPU memory
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+      if (!t.dsts.empty() && IsGpuMemType(t.dsts[0].memType) && CheckKernelDmabufSupport()) {
+        ERR_CHECK(ExportDmabuf(rss.dstMem[0], rss.numBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Rank %d exported DST GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
+                 GetRank(), rss.dstDmabufFd, rss.dstDmabufOffset);
+        }
+      }
+#endif
+
       // Register DST memory region
-      IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+#ifdef HAVE_DMABUF_SUPPORT
+      if (rss.dstDmabufFd >= 0) {
+        IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_dmabuf_mr, rss.dstProtect, rss.dstDmabufOffset,
+                     rss.numBytes, (uint64_t)rss.dstMem[0], rss.dstDmabufFd, rdmaMemRegFlags);
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Rank %d registered DST memory using ibv_reg_dmabuf_mr\n", GetRank());
+        }
+      } else
+#endif
+      {
+        IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+        if (System::Get().IsVerbose()) {
+          printf("[INFO] Rank %d registered DST memory using ibv_reg_mr (standard path)\n", GetRank());
+        }
+      }
       // Create DST completion queues
       IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
       // Get DST port attributes
@@ -2987,6 +3239,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Deregister memory regions
     if (isSrcRank) IBV_CALL(ibv_dereg_mr, rss.srcMemRegion);
     if (isDstRank) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
+
+    // Close DMA-BUF file descriptors
+#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+    if (isSrcRank && rss.srcDmabufFd >= 0) {
+      close(rss.srcDmabufFd);
+      rss.srcDmabufFd = -1;
+    }
+    if (isDstRank && rss.dstDmabufFd >= 0) {
+      close(rss.dstDmabufFd);
+      rss.dstDmabufFd = -1;
+    }
+#endif
 
     // Destroy queue pairs
     if (isSrcRank) {
@@ -5462,6 +5726,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.closestCpuNumaToGpu.clear();
     topo.closestCpuNumaToNic.clear();
     topo.closestNicsToGpu.clear();
+    topo.closestGpusToNic.clear();
 
     memset(topo.hostname, 0, sizeof(topo.hostname));
     gethostname(topo.hostname, 32);
@@ -5645,16 +5910,64 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         assignedCount[closestIdx]++;
       }
     }
+
+    // Compute the reverse mapping: closest GPU(s) for each NIC
+    // Build list of GPU bus addresses
+    std::vector<std::string> gpuAddressList;
+    for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+      char hipPciBusId[64];
+      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIdx);
+      if (err == hipSuccess) {
+        gpuAddressList.push_back(std::string(hipPciBusId));
+      } else {
+        gpuAddressList.push_back("");
+      }
+    }
+
+    // Loop over each NIC to find the closest GPU(s) based on PCIe address
+    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+      if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
+        continue;
+      }
+
+      // Find closest GPUs using LCA algorithm
+      std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
+
+      if (closestGpuIdxs.empty()) {
+        // Fallback: use bus ID distance
+        int minDistance = std::numeric_limits<int>::max();
+        int closestIdx = -1;
+
+        for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+          if (gpuAddressList[gpuIdx].empty()) continue;
+
+          int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
+          if (distance >= 0 && distance < minDistance) {
+            minDistance = distance;
+            closestIdx = gpuIdx;
+          }
+        }
+
+        if (closestIdx != -1) {
+          topo.closestGpusToNic[nicIndex].push_back(closestIdx);
+        }
+      } else {
+        // Store all GPUs that are equally close
+        for (int idx : closestGpuIdxs) {
+          topo.closestGpusToNic[nicIndex].push_back(idx);
+        }
+      }
+    }
 #endif
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
+        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closest NICs:", rank, exeIndex, numGpus,
                topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
                topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
                topo.closestCpuNumaToGpu[exeIndex]);
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
-          printf(" none");
+          printf(" none\n");
         } else {
           for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
             printf(" %d", nicIndex);
@@ -5662,6 +5975,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           printf("\n");
         }
       }
+#ifdef NIC_EXEC_ENABLED
+      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+        printf("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
+               ibvDeviceList[nicIndex].name.c_str());
+        if (topo.closestGpusToNic[nicIndex].size() == 0) {
+          printf(" none");
+        } else {
+          for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
+            printf(" %d", gpuIndex);
+          }
+        }
+        printf("\n");
+      }
+#endif
     }
   }
 
@@ -5771,6 +6098,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     SendMap(peerRank, topo.closestCpuNumaToNic);
     SendMap(peerRank, topo.nicIsActive);
     SendMap(peerRank, topo.closestNicsToGpu);
+    SendMap(peerRank, topo.closestGpusToNic);
     SendMap(peerRank, topo.executorName);
   };
 
@@ -5786,6 +6114,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     RecvMap(peerRank, topo.closestCpuNumaToNic);
     RecvMap(peerRank, topo.nicIsActive);
     RecvMap(peerRank, topo.closestNicsToGpu);
+    RecvMap(peerRank, topo.closestGpusToNic);
     RecvMap(peerRank, topo.executorName);
   }
 
@@ -6054,6 +6383,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     nicIndices = rankInfo[targetRank].closestNicsToGpu.at(gpuIndex);
   }
 
+  void System::GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank) const
+  {
+    gpuIndices.clear();
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (nicIndex < 0 || nicIndex >= GetNumExecutors(EXE_NIC, targetRank)) return;
+    if (rankInfo[targetRank].closestGpusToNic.count(nicIndex) > 0) {
+      gpuIndices = rankInfo[targetRank].closestGpusToNic.at(nicIndex);
+    }
+  }
+
   std::string System::GetHostname(int targetRank) const
   {
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
@@ -6132,6 +6471,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void GetClosestNicsToGpu(std::vector<int>& nicIndices, int gpuIndex, int targetRank)
   {
     System::Get().GetClosestNicsToGpu(nicIndices, gpuIndex, targetRank);
+  }
+
+  int GetClosestGpuToNic(int nicIndex, int targetRank)
+  {
+    std::vector<int> gpuIndices;
+    System::Get().GetClosestGpusToNic(gpuIndices, nicIndex, targetRank);
+    if (gpuIndices.size() == 0) return -1;
+    return gpuIndices[0];
+  }
+
+  void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank)
+  {
+    System::Get().GetClosestGpusToNic(gpuIndices, nicIndex, targetRank);
   }
 
   void GetClosestNicsToCpu(std::vector<int>& nicIndices, int cpuIndex, int targetRank)
