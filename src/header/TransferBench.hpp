@@ -5962,12 +5962,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
+        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closest NICs:", rank, exeIndex, numGpus,
                topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
                topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
                topo.closestCpuNumaToGpu[exeIndex]);
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
-          printf(" none");
+          printf(" none\n");
         } else {
           for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
             printf(" %d", nicIndex);
