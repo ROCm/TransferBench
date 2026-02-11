@@ -3,12 +3,31 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.66.02
+### Added
+- Adding DMA-BUF support
+  - TransferBench now supports GPU memory registration via DMA-BUF handle
+    - Disabled by default in build time
+    - To enable, `DISABLE_DMABUF` must be explicitly turned off for both CMake and Make process
+  - DMA-BUF registration relies on both IB verbs registration and HSA dmabuf export functionality
+    - Support for both are checked in compile time as well as runtime
+- New preset: nicp2p
+  - A point to point performance sweep for all paris of NIC on all nodes
+  - The preset requires all participating nodes have identical topology
+  - All NICs on every node will bind to closest device of user specified memtype, and communicate with all
+    other NICs in the potentially multi-node world
+  - Execution of node pairs, as well as NIC pairs under the same node pair, are parallelized by default
+- Adding GPU affinity check for NIC devices
+
+### Fixed
+- Fixing some typo in result table and NIC verbose output
+
 ## v1.66.01
-## Fixed
+### Fixed
 - Adding support for TheRock
 - Fixing parsing issue when using NULL memory type
 - Fixing CUAD compilation flags when enabling NIC/MPI
-## Modified
+### Modified
 - TransferBenchCuda must now be explicitly built with via 'make TransferBenchCuda'
 
 ## v1.66.00
