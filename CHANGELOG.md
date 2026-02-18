@@ -3,6 +3,11 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.67.00
+### Added
+- Initial support for pod communication.  Requires compatible hardware / ROCm version and subject to further testing
+  - This potentially enables GFX/DMA executors to access SRC/DST memory locations on GPUs within the same pod
+
 ## v1.66.02
 ### Added
 - Adding DMA-BUF support

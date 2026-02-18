@@ -69,8 +69,8 @@ THE SOFTWARE.
 #include <hip/hip_runtime.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
-#ifdef POD_COMM_ENABLED
-#include <amd_smi.h>
+#ifdef AMD_SMI_ENABLED
+#include <amd_smi/amdsmi.h>
 #endif
 #endif
 /// @endcond
@@ -82,7 +82,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.66";
+  constexpr char VERSION[] = "1.67";
 
   /**
    * Enumeration of supported Executor types
@@ -322,9 +322,6 @@ namespace TransferBench
 #else
     ErrResult(hipError_t   err);
     ErrResult(hsa_status_t err);
-#ifdef POD_COMM_ENABLED
-    ErrResult(amdsmi_status_t err);
-#endif
 #endif
     ErrResult(ErrType      err);
     ErrResult(ErrType      errType, const char* format, ...);
@@ -833,6 +830,13 @@ namespace {
 
     bool& IsVerbose() { return verbose; }
 
+    /**
+     * Helper logging function that logs only on output ranks
+     * - In MPI mode - Rank 0 only
+     * - In socket mode - All ranks unless TB_SINGLE_LOG=1
+     */
+    void Log(const char* format, ...);
+
     // Communication functions
     /**
      * Barrier that all ranks must arrive at before proceeding
@@ -984,6 +988,7 @@ namespace {
     int rank;
     int numRanks;
     bool verbose = false;
+    bool rankDoesOutput = true;
 
 #if !defined(__NVCC__)
     std::vector<hsa_agent_t> cpuAgents;
@@ -1351,8 +1356,46 @@ namespace {
     return ERR_NONE;
   }
 
+  static ErrResult GetMemLocation(MemDevice const& memDevice, hipMemLocation& location)
+  {
+    if (IsCpuMemType(memDevice.memType)) {
+      location.type = hipMemLocationTypeHostNuma;
+    } else if (IsGpuMemType(memDevice.memType) && memDevice.memType != MEM_MANAGED) {
+      location.type = hipMemLocationTypeDevice;
+    } else {
+      return {ERR_FATAL, "Unsupported memory location"};
+    }
+
+    // Determine location id
+    if (memDevice.memType == MEM_CPU_CLOSEST) {
+      location.id = GetClosestCpuNumaToGpu(memDevice.memIndex);
+    } else {
+      location.id = memDevice.memIndex;
+    }
+    return ERR_NONE;
+  }
+
+  static ErrResult GetMemAllocationProp(MemDevice const& memDevice, hipMemAllocationProp& prop)
+  {
+    switch (memDevice.memType) {
+    case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_GPU:
+      prop.type = hipMemAllocationTypePinned; break;
+    case MEM_CPU_UNCACHED: case MEM_GPU_UNCACHED:
+      prop.type = hipMemAllocationTypeUncached; break;
+    default:
+      return {ERR_FATAL, "Unsupported memory type for pod communication"};
+    }
+
+    prop.requestedHandleTypes = hipMemHandleTypeFabric;
+    ERR_CHECK(GetMemLocation(memDevice, prop.location));
+
+    return ERR_NONE;
+  }
+
   // Allocate memory
-  static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr, bool isShareable = false)
+  static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr,
+                                  size_t* actualBytes = NULL,
+                                  hipMemGenericAllocationHandle_t* memHandle = NULL)
   {
     if (numBytes == 0) {
       return {ERR_FATAL, "Unable to allocate 0 bytes"};
@@ -1360,16 +1403,63 @@ namespace {
     *memPtr = nullptr;
 
     MemType const& memType = memDevice.memType;
+    int deviceIdx = memDevice.memIndex;
+    if (memType == MEM_CPU_CLOSEST) {
+      deviceIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
+    }
+
+    // If memHandle is provided, allocate sharable memory
+    if (memHandle != NULL) {
+#ifdef POD_COMM_ENABLED
+      // Prepare HIP memory allocation properties structure
+      hipMemAllocationProp prop;
+      ERR_CHECK(GetMemAllocationProp(memDevice, prop));
+
+      // Determine recommended allocation granularity
+      size_t granularity;
+      ERR_CHECK(hipMemGetAllocationGranularity(&granularity, &prop,
+                                               hipMemAllocationGranularityRecommended));
+      size_t roundedUpBytes = (numBytes + granularity - 1) / granularity * granularity;
+      if (actualBytes != NULL) *actualBytes = roundedUpBytes;
+
+      // Create memory allocation described by properties and size
+      ERR_CHECK(hipMemCreate(memHandle, roundedUpBytes, &prop, 0));
+
+      // Reserve a virtual address range for the memory allocation
+      ERR_CHECK(hipMemAddressReserve((void**)memPtr, roundedUpBytes, 0, 0, 0));
+
+      // Map the allocation handle to the reserved address range
+      ERR_CHECK(hipMemMap(*memPtr, roundedUpBytes, 0, *memHandle, 0));
+
+      // Specify memory access descriptor to enable local read/write
+      hipMemAccessDesc desc;
+      ERR_CHECK(GetMemLocation(memDevice, desc.location));
+      desc.flags = hipMemAccessFlagsProtReadWrite;
+
+      // Set access flags for virtual address range
+      ERR_CHECK(hipMemSetAccess(*memPtr, roundedUpBytes, &desc, 1));
+
+      // Clear the memory
+      if (IsCpuMemType(memType)) {
+        memset(*memPtr, 0, roundedUpBytes);
+        // Check that the allocated pages are actually on the correct NUMA node
+        ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
+      } else if (IsGpuMemType(memType)) {
+        ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
+        ERR_CHECK(hipDeviceSynchronize());
+      }
+      return ERR_NONE;
+#else
+      return {ERR_FATAL, "Unable to allocate sharable memory if not compiled with pod communication support"};
+#endif
+    } else {
+      if (actualBytes != NULL) *actualBytes = numBytes;
+    }
 
     if (IsCpuMemType(memType)) {
-      // Determine which NUMA device to use
-      int numaIdx = memDevice.memIndex;
-      if (memType == MEM_CPU_CLOSEST) {
-        numaIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
-      }
 
       // Set NUMA policy prior to call to hipHostMalloc
-      numa_set_preferred(numaIdx);
+      numa_set_preferred(deviceIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       int flags = 0;
@@ -1401,12 +1491,12 @@ namespace {
 #endif
 #endif
       } else if (memType == MEM_CPU_UNPINNED) {
-        *memPtr = numa_alloc_onnode(numBytes, numaIdx);
+        *memPtr = numa_alloc_onnode(numBytes, deviceIdx);
       }
 
       // Check that the allocated pages are actually on the correct NUMA node
       memset(*memPtr, 0, numBytes);
-      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, numaIdx));
+      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, deviceIdx));
 
       // Reset to default numa mem policy
       numa_set_preferred(-1);
@@ -1445,30 +1535,44 @@ namespace {
   }
 
   // Deallocate memory
-  static ErrResult DeallocateMemory(MemType memType, void *memPtr, size_t const bytes)
+  static ErrResult DeallocateMemory(MemType memType, void *memPtr, size_t const bytes,
+                                    hipMemGenericAllocationHandle_t* memHandle = NULL)
   {
     // Avoid deallocating nullptr
     if (memPtr == nullptr)
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
-    switch (memType) {
-    case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
-    {
-      ERR_CHECK(hipHostFree(memPtr));
-      break;
-    }
-    case MEM_CPU_UNPINNED:
-    {
-      numa_free(memPtr, bytes);
-      break;
-    }
-    case MEM_GPU : case MEM_GPU_FINE: case MEM_GPU_UNCACHED: case MEM_MANAGED:
-    {
-      ERR_CHECK(hipFree(memPtr));
-      break;
-    }
-    default:
-      return {ERR_FATAL, "Attempting to deallocate unrecognized memory type (%d)", memType};
+    if (memHandle == NULL) {
+      switch (memType) {
+      case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
+      {
+        ERR_CHECK(hipHostFree(memPtr));
+        break;
+      }
+      case MEM_CPU_UNPINNED:
+      {
+        numa_free(memPtr, bytes);
+        break;
+      }
+      case MEM_GPU : case MEM_GPU_FINE: case MEM_GPU_UNCACHED: case MEM_MANAGED:
+      {
+        ERR_CHECK(hipFree(memPtr));
+        break;
+      }
+      default:
+        return {ERR_FATAL, "Attempting to deallocate unrecognized memory type (%d)", memType};
+      }
+    } else {
+#ifdef POD_COMM_ENABLED
+      // Unmap the backing memory of the given virtual address
+      ERR_CHECK(hipMemUnmap(memPtr, bytes));
+      // Release the backing memory via its handle
+      ERR_CHECK(hipMemRelease(*memHandle));
+      // Free virtual address range reservation
+      ERR_CHECK(hipMemAddressFree(memPtr, bytes));
+#else
+      return {ERR_FATAL, "Unable to deallocate sharable memory if not compiled with pod communication support"};
+#endif
     }
     return ERR_NONE;
   }
@@ -1679,7 +1783,7 @@ namespace {
   {
     if (GetCommMode() == COMM_NONE) return;
     if (System::Get().IsVerbose()) {
-      printf("[INFO] Rank %d checking config consistency\n", GetRank());
+      System::Get().Log("[INFO] Rank %d checking config consistency\n", GetRank());
     }
 
     // To check consistency, compare against rank 0
@@ -1917,7 +2021,7 @@ namespace {
     if (GetCommMode() == COMM_NONE) return;
 
     if (System::Get().IsVerbose()) {
-      printf("[INFO] Rank %d checking transfers consistency\n", GetRank());
+      System::Get().Log("[INFO] Rank %d checking transfers consistency\n", GetRank());
     }
 
     // To check consistency, compare against rank 0
@@ -1963,6 +2067,18 @@ namespace {
     }
 
     #undef ADD_ERROR
+  }
+
+  // Returns true if the given Transfer requires pod communication
+  static bool IsPodTransfer(Transfer const& t)
+  {
+    if (IsCpuExeType(t.exeDevice.exeType) || IsGpuExeType(t.exeDevice.exeType)) {
+      for (auto const& src : t.srcs)
+        if (src.memRank != t.exeDevice.exeRank) return true;
+      for (auto const& dst : t.dsts)
+        if (dst.memRank != t.exeDevice.exeRank) return true;
+    }
+    return false;
   }
 
   // Validate Transfers to execute - returns true if and only if fatal error detected
@@ -2183,16 +2299,33 @@ namespace {
       }
 
       // Check for multi-node support
-      // Currently this is not supported for CPU/GPU executors
-      if (IsCpuExeType(t.exeDevice.exeType) || IsGpuExeType(t.exeDevice.exeType)) {
-        bool crossRank = false;
-        for (auto const& src : t.srcs) {
-          crossRank |= (src.memRank != t.exeDevice.exeRank);
+      if (IsPodTransfer(t)) {
+        // In order to support pod communication, the participanting ranks need to be members of the same pod
+        std::pair<uint64_t, int64_t> podId = std::make_pair(GetPpodId(t.exeDevice.exeRank),
+                                                            GetVpodId(t.exeDevice.exeRank));
+
+        bool samePod = (podId.second != -1); // vpodId == -1 indicates not part of pod
+        if (samePod) {
+          for (auto const& src : t.srcs) {
+            std::pair<uint64_t, int64_t> srcPodId = std::make_pair(GetPpodId(src.memRank),
+                                                                   GetVpodId(src.memRank));
+            if (srcPodId != podId) {
+              samePod = false;
+              break;
+            }
+          }
         }
-        for (auto const& dst : t.dsts) {
-          crossRank |= (dst.memRank != t.exeDevice.exeRank);
+        if (samePod) {
+          for (auto const& dst : t.dsts) {
+            std::pair<uint64_t, int64_t> dstPodId = std::make_pair(GetPpodId(dst.memRank),
+                                                                   GetVpodId(dst.memRank));
+            if (dstPodId != podId) {
+              samePod = false;
+              break;
+            }
+          }
         }
-        if (crossRank) {
+        if (!samePod) {
           errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
               i, t.exeDevice.exeRank});
         }
@@ -2312,12 +2445,17 @@ namespace {
   };
 
   // Internal resources allocated per Transfer
+  typedef hipMemGenericAllocationHandle_t memHandle_t;
   struct TransferResources
   {
     int                        transferIdx;       ///< The associated Transfer
     size_t                     numBytes;          ///< Number of bytes to Transfer
     vector<float*>             srcMem;            ///< Source memory
     vector<float*>             dstMem;            ///< Destination memory
+    vector<size_t>             srcActualBytes;    ///< Actual amount of src memory allocated (after padding)
+    vector<size_t>             dstActualBytes;    ///< Actual amount of dst memory allocated (after padding)
+    vector<memHandle_t>        srcMemHandle;      ///< Memory handles for source memory
+    vector<memHandle_t>        dstMemHandle;      ///< Memory handles for destination memory
     vector<SubExecParam>       subExecParamCpu;   ///< Defines subarrays for each subexecutor
     vector<int>                subExecIdx;        ///< Indices into subExecParamGpu
     int                        numaNode;          ///< NUMA node to use for this Transfer
@@ -2638,11 +2776,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                    bool               isLast = true)
   {
     if (!node.address.empty()) {
-      printf("%s%s%s", prefix.c_str(), (isLast ? "└── " : "├── "), node.address.c_str());
+      System::Get().Log("%s%s%s", prefix.c_str(), (isLast ? "└── " : "├── "), node.address.c_str());
       if (!node.description.empty()) {
-        printf("(%s)", node.description.c_str());
+        System::Get().Log("(%s)", node.description.c_str());
       }
-      printf("\n");
+      System::Get().Log("\n");
     }
     auto const& children = node.children;
     for (auto it = children.begin(); it != children.end(); ++it) {
@@ -2762,7 +2900,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     iss >> std::hex >> domain >> delimiter >> bus >> delimiter >> device >> delimiter >> function;
     if (iss.fail()) {
 #ifdef VERBS_DEBUG
-      printf("Invalid PCIe address format: %s\n", pcieAddress.c_str());
+      System::Get().Log("Invalid PCIe address format: %s\n", pcieAddress.c_str());
 #endif
       return -1;
     }
@@ -3142,7 +3280,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
     System::Get().Broadcast(dstMemRank, sizeof(rss.dstPortAttr.link_layer), &rss.dstPortAttr.link_layer);
     if (rss.srcPortAttr.link_layer != rss.dstPortAttr.link_layer) {
-      printf("[ERROR] Link layer do not match (%d vs %d)\n", rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer);
       return {ERR_FATAL, "SRC NIC (%d) [Rank %d] and DST NIC (%d) [Rank %d] do not have the same link layer [%d vs %d]",
         rss.srcNicIndex, srcMemRank, rss.dstNicIndex, dstMemRank, rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer};
     }
@@ -3195,10 +3332,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         auto const   lkey      = (nicExeRank == srcMemRank ? rss.srcMemRegion->lkey        : rss.dstMemRegion->lkey);
         auto const   rkey      = (nicExeRank == srcMemRank ? dstConnInfo.rkey              : srcConnInfo.rkey);
         if (System::Get().IsVerbose()) {
-          printf("[INFO] Transfer %d SubExec %d executed by rank %d NIC %d is %s with %lu chunks\n",
-                 rss.transferIdx, i, nicExeRank, nicExeDevice.exeIndex,
-                 (opcode == IBV_WR_RDMA_WRITE ? "remote write" : "remote read"),
-                 numChunks);
+          System::Get().Log("[INFO] Transfer %d SubExec %d executed by rank %d NIC %d is %s with %lu chunks\n",
+                            rss.transferIdx, i, nicExeRank, nicExeDevice.exeIndex,
+                            (opcode == IBV_WR_RDMA_WRITE ? "remote write" : "remote read"),
+                            numChunks);
         }
         rss.sgePerQueuePair[i].resize(numChunks, {});
         rss.sendWorkRequests[i].resize(numChunks, {});
@@ -3224,8 +3361,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           wr.wr.rdma.rkey        = rkey;
 
           if (System::Get().IsVerbose()) {
-            printf("[INFO] Transfer %d SubExec %d chunk %lu local %p remote %p of size %lu\n",
-                   rss.transferIdx, i, chunkIdx, (void*)local, (void*)remote, currChunkBytes);
+            System::Get().Log("[INFO] Transfer %d SubExec %d chunk %lu local %p remote %p of size %lu\n",
+                              rss.transferIdx, i, chunkIdx, (void*)local, (void*)remote, currChunkBytes);
           }
 
           // Increment locations
@@ -3353,13 +3490,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int dumpLines = getenv("DUMP_LINES") ? atoi(getenv("DUMP_LINES")) : 0;
 
       if (dumpLines) {
-        printf("Input pattern 64B line statistics for bufferIdx %d:\n", bufferIdx);
-        printf("Total lines: %lu\n", numLines);
-        printf("- 0: Random : %8lu (%8.3f%%)\n", lineCounts[0], 100.0 * lineCounts[0] / (1.0 * numLines));
-        printf("- 1: 1B0    : %8lu (%8.3f%%)\n", lineCounts[1], 100.0 * lineCounts[1] / (1.0 * numLines));
-        printf("- 2: 2B0    : %8lu (%8.3f%%)\n", lineCounts[2], 100.0 * lineCounts[2] / (1.0 * numLines));
-        printf("- 3: 4B0    : %8lu (%8.3f%%)\n", lineCounts[3], 100.0 * lineCounts[3] / (1.0 * numLines));
-        printf("- 4: 32B0   : %8lu (%8.3f%%)\n", lineCounts[4], 100.0 * lineCounts[4] / (1.0 * numLines));
+        System::Get().Log("Input pattern 64B line statistics for bufferIdx %d:\n", bufferIdx);
+        System::Get().Log("Total lines: %lu\n", numLines);
+        System::Get().Log("- 0: Random : %8lu (%8.3f%%)\n", lineCounts[0], 100.0 * lineCounts[0] / (1.0 * numLines));
+        System::Get().Log("- 1: 1B0    : %8lu (%8.3f%%)\n", lineCounts[1], 100.0 * lineCounts[1] / (1.0 * numLines));
+        System::Get().Log("- 2: 2B0    : %8lu (%8.3f%%)\n", lineCounts[2], 100.0 * lineCounts[2] / (1.0 * numLines));
+        System::Get().Log("- 3: 4B0    : %8lu (%8.3f%%)\n", lineCounts[3], 100.0 * lineCounts[3] / (1.0 * numLines));
+        System::Get().Log("- 4: 32B0   : %8lu (%8.3f%%)\n", lineCounts[4], 100.0 * lineCounts[4] / (1.0 * numLines));
       }
 
       for (int line = 0; line < numLines; line++) {
@@ -3391,12 +3528,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         if (line < dumpLines) {
-          printf("Line %02d [%d]: ", line, lineTypes[line]);
+          System::Get().Log("Line %02d [%d]: ", line, lineTypes[line]);
           for (int j = 63; j >= 0; j--){
-            printf("%02x ", linePtr[j]);
-            if (j % 16 == 0) printf(" ");
+            System::Get().Log("%02x ", linePtr[j]);
+            if (j % 16 == 0) System::Get().Log(" ");
           }
-          printf("\n");
+          System::Get().Log("\n");
         }
       }
     } else {
@@ -3541,6 +3678,45 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t const actualBytes,
+                                  float** memPtr, hipMemGenericAllocationHandle_t* memHandle)
+  {
+    // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
+    // NOTE: This will be overwritten on executor rank if pod communication is required
+    System::Get().Broadcast(memDevice.memRank, sizeof(*memPtr), memPtr);
+
+    // If pod communication is required, export/import fabric handle
+    if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
+#ifdef POD_COMM_ENABLED
+      int const localRank = GetRank();
+
+      // mem rank exports to sharable fabric handle
+      hipMemFabricHandle_t fabricHandle;
+      if (memDevice.memRank == localRank) {
+        ERR_CHECK(hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0));
+      }
+
+      System::Get().Broadcast(memDevice.memRank, sizeof(hipMemFabricHandle_t), &fabricHandle);
+
+      // exe rank imports the fabric handle
+      if (exeDevice.exeRank == localRank) {
+        ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
+        ERR_CHECK(hipMemAddressReserve((void**)memPtr, actualBytes, 0, 0, 0));
+        ERR_CHECK(hipMemMap(*memPtr, actualBytes, 0, *memHandle, 0));
+
+        // Specify memory access descriptor to enable local read/write
+        hipMemAccessDesc desc;
+        desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
+        desc.flags = hipMemAccessFlagsProtReadWrite;
+        ERR_CHECK(hipMemSetAccess(*memPtr, actualBytes, &desc, 1));
+      }
+#else
+      return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
+#endif
+    }
+    return ERR_NONE;
+  }
+
   // Prepare each executor
   // Allocates memory for src/dst, prepares subexecutors, executor-specific data structures
   static ErrResult PrepareExecutor(ConfigOptions    const& cfg,
@@ -3551,8 +3727,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     exeInfo.totalDurationMsec = 0.0;
     int const localRank = GetRank();
     if (System::Get().IsVerbose()) {
-      printf("[INFO] Rank %d preparing executor (%c%d on Rank %d)\n",
-             localRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank);
+      System::Get().Log("[INFO] Rank %d preparing executor (%c%d on Rank %d)\n",
+                        localRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank);
     }
 
     // Loop over each transfer this executor is involved in
@@ -3561,12 +3737,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rss.numBytes = t.numBytes;
 
       if (System::Get().IsVerbose()) {
-        printf("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST)\n",
-               localRank, rss.transferIdx, t.srcs.size(), t.dsts.size());
+        System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST)\n",
+                          localRank, rss.transferIdx, t.srcs.size(), t.dsts.size());
       }
 
       // Allocate source memory
       rss.srcMem.resize(t.srcs.size());
+      rss.srcActualBytes.resize(t.srcs.size());
+      rss.srcMemHandle.resize(t.srcs.size(), NULL);
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         MemDevice const& srcMemDevice = t.srcs[iSrc];
 
@@ -3581,16 +3759,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate source memory (on the correct rank)
+        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank);
         if (srcMemDevice.memRank == localRank) {
-          ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc]));
+          ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
+                                   &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : NULL));
         }
 
-        // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
-        System::Get().Broadcast(srcMemDevice.memRank, sizeof(rss.srcMem[iSrc]), &rss.srcMem[iSrc]);
+        // Exchange memory pointer across ranks
+        ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, rss.srcActualBytes[iSrc],
+                                 &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
       }
 
       // Allocate destination memory
       rss.dstMem.resize(t.dsts.size());
+      rss.dstActualBytes.resize(t.dsts.size());
+      rss.dstMemHandle.resize(t.dsts.size(), NULL);
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         MemDevice const& dstMemDevice = t.dsts[iDst];
 
@@ -3604,11 +3787,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate destination memory (on the correct rank)
+        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank);
         if (dstMemDevice.memRank == localRank) {
-          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst]));
+          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
+                                   &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
         }
-        // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
-        System::Get().Broadcast(dstMemDevice.memRank, sizeof(rss.dstMem[iDst]), &rss.dstMem[iDst]);
+
+        // Exchange memory pointer across ranks
+        ERR_CHECK(ExchangeMemory(dstMemDevice, exeDevice, t.numBytes + cfg.data.byteOffset,
+                                 &rss.dstMem[iDst], &rss.dstMemHandle[iDst]));
       }
 
       // Prepare HSA DMA copy specific resources
@@ -3775,14 +3962,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         if (t.srcs[iSrc].memRank == localRank) {
-          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc], t.numBytes + cfg.data.byteOffset));
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
+                                     rss.srcActualBytes[iSrc],
+                                     &rss.srcMemHandle[iSrc]));
         }
       }
 
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         if (t.dsts[iDst].memRank == localRank) {
-          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst], t.numBytes + cfg.data.byteOffset));
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
+                                     rss.dstActualBytes[iDst],
+                                     &rss.dstMemHandle[iDst]));
         }
       }
 
@@ -3852,7 +4043,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
           // Add a dummy check to ensure the read is not optimized out
           if (sum != sum) {
-            printf("[ERROR] Nan detected\n");
+            System::Get().Log("[ERROR] Nan detected\n");
           }
         } else {
           for (int i = 0; i < numDsts; ++i)
@@ -4671,21 +4862,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       this->errMsg  = std::string("HSA Error: ") + errString;
     }
   }
-
-#ifdef POD_COMM_ENABLED
-  ErrResult::ErrResult(amdsmi_status_t err)
-  {
-    if (err == AMDSMI_STATUS_SUCCESS) {
-      this->errType = ERR_NONE;
-      this->errMsg  = "";
-    } else {
-      const char *errString = NULL;
-      amdsmi_status_code_to_string(err, &errString);
-      this->errType = ERR_FATAL;
-      this->errMsg  = std::string("AMDSMI Error: ") + errString;
-    }
-  }
-#endif
 #endif
 
   ErrResult::ErrResult(ErrType errType, const char* format, ...)
@@ -4804,22 +4980,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Pause before starting when running in iteractive mode
     if (cfg.general.useInteractive) {
       if (localRank == 0) {
-        printf("Memory prepared:\n");
+        System::Get().Log("Memory prepared:\n");
 
         for (int i = 0; i < transfers.size(); i++) {
-          printf("Transfer %03d:\n", i);
+          System::Get().Log("Transfer %03d:\n", i);
           for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
-            printf("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
+            System::Get().Log("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
           for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
-            printf("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+            System::Get().Log("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
         }
-        printf("Hit <Enter> to continue: ");
+        System::Get().Log("Hit <Enter> to continue: ");
         fflush(stdout);
         if (scanf("%*c") != 0) {
-          printf("[ERROR] Unexpected input\n");
+          System::Get().Log("[ERROR] Unexpected input\n");
           exit(1);
         }
-        printf("\n");
+        System::Get().Log("\n");
       }
       System::Get().Barrier();
     }
@@ -4878,12 +5054,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Pause for interactive mode
     if (cfg.general.useInteractive) {
       if (localRank == 0) {
-        printf("Transfers complete. Hit <Enter> to continue: ");
+        System::Get().Log("Transfers complete. Hit <Enter> to continue: ");
         if (scanf("%*c") != 0)  {
-          printf("[ERROR] Unexpected input\n");
+          System::Get().Log("[ERROR] Unexpected input\n");
           exit(1);
         }
-        printf("\n");
+        System::Get().Log("\n");
         fflush(stdout);
       }
       System::Get().Barrier();
@@ -5025,14 +5201,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
         // At this point, there should be only 1 (valid) rank assigned to this SRC
         if (wc.mem[isDst][iMem].memRanks.size() != 1 || wc.mem[isDst][iMem].memRanks[0] < 0) {
-          printf("[ERROR] Unexpected number of ranks / invalid number of ranks for %s %d\n", isDst ? "DST" : "SRC", iMem);
+          System::Get().Log("[ERROR] Unexpected number of ranks / invalid number of ranks for %s %d\n", isDst ? "DST" : "SRC", iMem);
           exit(1);
         }
 
         // Resolve mem index wildcards
         // Mem devices should have at least one index
         if (wc.mem[isDst][iMem].memIndices.size() == 0) {
-          printf("[ERROR] MemIndex for %s %d cannot be empty\n", isDst ? "DST" : "SRC", iMem);
+          System::Get().Log("[ERROR] MemIndex for %s %d cannot be empty\n", isDst ? "DST" : "SRC", iMem);
           exit(1);
         }
 
@@ -5121,13 +5297,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       wc.exe.exeRanks.swap(exeRanks);
       return result;
     } else if (wc.exe.exeRanks[0] == -1) {
-      printf("[ERROR] Exe rank should not be -1\n");
+      System::Get().Log("[ERROR] Exe rank should not be -1\n");
       exit(1);
     }
 
     // Resolve EXE indices
     if (wc.exe.exeIndices.size() == 0) {
-      printf("[ERROR] Exe index should never be empty\n");
+      System::Get().Log("[ERROR] Exe index should never be empty\n");
       exit(1);
     } else if (wc.exe.exeIndices.size() > 1) {
       // Loop over user provided indices
@@ -5191,7 +5367,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         wc.exe.exeSubIndices.clear();
         return result;
       } else if (wc.exe.exeType == EXE_NIC) {
-        printf("[ERROR] NIC executor requires a subindex be specified\n");
+        System::Get().Log("[ERROR] NIC executor requires a subindex be specified\n");
         exit(1);
       } else if (wc.exe.exeType == EXE_NIC_NEAREST) {
         // Assign NIC closest to DST mem
@@ -5393,24 +5569,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   System::System() :
     rank(0), numRanks(1), commMode(COMM_NONE)
   {
+    // Collect env vars
     verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
+    bool singleLog = getenv("TB_SINGLE_LOG") ? atoi(getenv("TB_SINGLE_LOG")) : 0;
 
     if (getenv("TB_PAUSE")) {
-      printf("Pausing for debug attachment\n");
+      System::Get().Log("Pausing for debug attachment\n");
       volatile bool pause = true;
       while (pause);
     }
 
-#ifdef POD_COMM_ENABLED
-
-#if defined(__NVCC__)
-
-#else
+#if AMD_SMI_ENABLED
     if (verbose) {
-      printf("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
+      System::Get().Log("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
     }
     amdsmi_init(AMDSMI_INIT_AMD_APUS);
-#endif
 #endif
 
     // Priority 1: Socket communicator
@@ -5421,8 +5594,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       SetupMpiCommunicator();
     }
 
+    // Establish which ranks will output when logging
+    if (rank > 0 && (commMode == COMM_MPI || singleLog))
+      rankDoesOutput = false;
+
     if (verbose && commMode == COMM_NONE) {
-      printf("[INFO] Running in single node mode\n");
+      Log("[INFO] Running in single node mode\n");
     }
 
     // Collect topology and distribute across all ranks
@@ -5453,12 +5630,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-#ifdef POD_COMM_ENABLED
-#if defined(__NVCC__)
-    // TODO: MNNVL topology support currently unimplemented
-#else
+#ifdef AMD_SMI_ENABLED
     amdsmi_shut_down();
-#endif
 #endif
   }
 
@@ -5472,7 +5645,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Socket communicator requires rank / numRanks / masterAddr
     if (!rankStr || !numRanksStr || !masterAddrStr) {
       if (verbose) {
-        printf("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
+        System::Get().Log("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
       }
       return;
     }
@@ -5483,7 +5656,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     masterPort = masterPortStr ? atoi(masterPortStr) : 29500;
 
     if (rank < 0 || rank >= numRanks) {
-      printf("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
+      System::Get().Log("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
       exit(1);
     }
 
@@ -5495,7 +5668,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Create listening socket
       listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
       if (listenSocket == -1) {
-        printf("[ERROR] Unable to create listener socket\n");
+        System::Get().Log("[ERROR] Unable to create listener socket\n");
         exit(1);
       }
 
@@ -5510,17 +5683,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       serverAddr.sin_port        = htons(masterPort);
 
       if (bind(listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
-        printf("[ERROR] Failed to bind listen socket\n");
+        System::Get().Log("[ERROR] Failed to bind listen socket\n");
         exit(1);
       }
 
       if (listen(listenSocket, numRanks) == -1) {
-        printf("[ERROR] Failed to listen on socket\n");
+        System::Get().Log("[ERROR] Failed to listen on socket\n");
         exit(1);
       }
       // Accept connections from other ranks
-      printf("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
-             numRanks-1, masterAddr.c_str(), masterPort);
+      System::Get().Log("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
+                        numRanks-1, masterAddr.c_str(), masterPort);
 
       for (int i = 1; i < numRanks; i++) {
         sockaddr_in clientAddr;
@@ -5528,7 +5701,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         auto clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
         if (clientSocket == -1) {
-          printf("[ERROR] Failed to accept connection from rank %d\n", i);
+          System::Get().Log("[ERROR] Failed to accept connection from rank %d\n", i);
           exit(1);
         }
 
@@ -5538,11 +5711,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         if (clientRank < 0 || clientRank >= numRanks) {
           close(clientSocket);
-          printf("[ERROR] Invalid rank received: %d\n", clientRank);
+          System::Get().Log("[ERROR] Invalid rank received: %d\n", clientRank);
           exit(1);
         }
         if (verbose) {
-          printf("[INFO] Rank 0 accepted connection from rank %d\n", clientRank);
+          System::Get().Log("[INFO] Rank 0 accepted connection from rank %d\n", clientRank);
         }
         sockets[clientRank] = clientSocket;
       }
@@ -5550,7 +5723,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // All other ranks connect to rank 0
       int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
       if (sock == -1) {
-        printf("[ERROR] Failed to create socket\n");
+        System::Get().Log("[ERROR] Failed to create socket\n");
         exit(1);
       }
 
@@ -5559,20 +5732,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       serverAddr.sin_family = AF_INET;
       serverAddr.sin_port = htons(masterPort);
       if (inet_pton(AF_INET, masterAddr.c_str(), &serverAddr.sin_addr) <= 0) {
-        printf("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
+        System::Get().Log("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
         exit(1);
       }
 
       // Retry connection with backoff
       if (verbose)
-        printf("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
+        System::Get().Log("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
       int maxRetries = 50;
       for (int retry = 0; retry < maxRetries; retry++) {
         if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
           break;
         }
         if (retry == maxRetries - 1) {
-          printf("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
+          System::Get().Log("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
         }
         sleep(1);
       }
@@ -5600,7 +5773,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     MPI_Comm_size(comm, &numRanks);
     if (numRanks > 1) {
       if (verbose) {
-        printf("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
+        System::Get().Log("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
       }
       commMode = COMM_MPI;
     } else if (mpiInit) {
@@ -5608,6 +5781,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       MPI_Finalize();
     }
 #endif
+  }
+
+  void System::Log(const char* format, ...) {
+    if (rankDoesOutput) {
+      va_list args;
+      va_start(args, format);
+      vprintf(format, args);
+      va_end(args);
+    }
   }
 
   void System::Barrier()
@@ -5650,7 +5832,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
     if (commMode == COMM_SOCKET) {
       if (rank != 0 && dstRank != 0) {
-        printf("[ERROR] Socket communicator is limited to sending from/to rank 0\n");
+        System::Get().Log("[ERROR] Socket communicator is limited to sending from/to rank 0\n");
         exit(1);
       }
       auto sock = sockets[dstRank];
@@ -5660,7 +5842,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (totalSent < numBytes) {
         auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, 0);
         if (sent == -1) {
-          printf("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
+          System::Get().Log("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
           exit(1);
         }
         totalSent += sent;
@@ -5679,7 +5861,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
     if (commMode == COMM_SOCKET) {
       if (rank != 0 && srcRank != 0) {
-        printf("[ERROR] Socket communicator is limited to receiving from/at rank 0\n");
+        System::Get().Log("[ERROR] Socket communicator is limited to receiving from/at rank 0\n");
         exit(1);
       }
 
@@ -5688,7 +5870,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (totalRecv < numBytes) {
         auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);
         if (recvd == -1 || recvd == 0) {
-          printf("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
+          System::Get().Log("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
           perror("recv");
           exit(1);
         }
@@ -5705,7 +5887,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (commMode == COMM_MPI) {
       int err = MPI_Bcast(data, numBytes, MPI_CHAR, root, comm);
       if (err != MPI_SUCCESS) {
-        printf("[ERROR] MPI_Bcast failed with error code %d\n", err);
+        System::Get().Log("[ERROR] MPI_Bcast failed with error code %d\n", err);
       }
       return;
     }
@@ -5772,45 +5954,43 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       return;
     }
 
-#ifdef POD_COMM_ENABLED
-
 #if defined(__NVCC__)
     // MNNVL support unimplemented at this time
 
-    printf("[ERROR] MNNVL support is currently unimplemented\n");
+    System::Get().Log("[ERROR] MNNVL support is currently unimplemented\n");
     exit(1);
 #else
-      int numGpus;
-      hipGetDeviceCount(&numGpus);
-      if (numGpus > 0) {
-        // Get a AMD SMI processor handle to the first GPU (if it exists) based on PCI bus ID
-        char pciBusId[256] = "";
-        hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
+#ifdef AMD_SMI_ENABLED
+    int numGpus = 0;
+    if (hipGetDeviceCount(&numGpus) == hipSuccess && numGpus > 0) {
+      // Get a AMD SMI processor handle to the first GPU (if it exists) based on PCI bus ID
+      char pciBusId[256] = "";
+      hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
 
-        amdsmi_processor_handle gpuHandle;
-        amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(pciBusId, &gpuHandle);
-        if (err != AMDSMI_STATUS_SUCCESS) {
-          if (verbose) {
-            const char *errString = NULL;
-            amdsmi_status_code_to_string(err, &errString);
-            printf("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
-                   pciBusId, errString);
-          }
-        } else {
-          amdsmi_fabric_info_t fabricInfo;
-          err = amdsmi_get_gpu_fabric_info(gpuHandle, &fabricInfo);
-          if (err == AMDSMI_STATUS_SUCCESS) {
-            // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
-            //       vpodId == -1 to represent no pod present
-            ppodId = fabricInfo.info.v1.ppod_id;
-            vpodId = fabricInfo.info.v1.vpod_id;
-          } else if (verbose) {
-            const char *errString = NULL;
-            amdsmi_status_code_to_string(err, &errString);
-            printf("[WARN] Unable to get fabric info from AMD SMI [%s]\n", errString);
-          }
+      amdsmi_processor_handle gpuHandle;
+      amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(pciBusId, &gpuHandle);
+      if (err != AMDSMI_STATUS_SUCCESS) {
+        if (verbose) {
+          const char *errString = NULL;
+          amdsmi_status_code_to_string(err, &errString);
+          System::Get().Log("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
+                            pciBusId, errString);
+        }
+      } else {
+        amdsmi_fabric_info_t fabricInfo;
+        err = amdsmi_get_gpu_fabric_info(gpuHandle, &fabricInfo);
+        if (err == AMDSMI_STATUS_SUCCESS) {
+          // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
+          //       vpodId == -1 to represent no pod present
+          ppodId = fabricInfo.info.v1.ppod_id;
+          vpodId = fabricInfo.info.v1.vpod_id;
+        } else if (verbose) {
+          const char *errString = NULL;
+          amdsmi_status_code_to_string(err, &errString);
+          System::Get().Log("[WARN] Unable to get fabric info from AMD SMI [%s]\n", errString);
         }
       }
+    }
 #endif
 #endif
   }
@@ -5851,9 +6031,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
-        printf("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores (%s)\n", rank, exeIndex, numCpus,
-               topo.numSubExecutors[{EXE_CPU, exeIndex}],
-               topo.executorName[{EXE_CPU, exeIndex}].c_str());
+        System::Get().Log("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores (%s)\n", rank, exeIndex, numCpus,
+                          topo.numSubExecutors[{EXE_CPU, exeIndex}],
+                          topo.executorName[{EXE_CPU, exeIndex}].c_str());
       }
     }
 
@@ -5924,7 +6104,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
       topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
       if (verbose) {
-        printf("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
+        System::Get().Log("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
       }
     }
 #endif
@@ -5970,7 +6150,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIndex);
       if (err != hipSuccess) {
 #ifdef VERBS_DEBUG
-        printf("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
+        System::Get().Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
 #endif
         continue;
       }
@@ -5989,7 +6169,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // to determine the closest NIC to GPU if the PCIe tree approach fails
       if (closestIdx < 0) {
 #ifdef VERBS_DEBUG
-        printf("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+        System::Get().Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
 #endif
         int minDistance = std::numeric_limits<int>::max();
         for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
@@ -6059,31 +6239,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        printf("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closest NICs:", rank, exeIndex, numGpus,
-               topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
-               topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
-               topo.closestCpuNumaToGpu[exeIndex]);
+        System::Get().Log("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
+                          topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
+                          topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
+                          topo.closestCpuNumaToGpu[exeIndex]);
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
-          printf(" none\n");
+          System::Get().Log(" none");
         } else {
           for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
-            printf(" %d", nicIndex);
+            System::Get().Log(" %d", nicIndex);
           }
-          printf("\n");
+          System::Get().Log("\n");
         }
       }
 #ifdef NIC_EXEC_ENABLED
       for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-        printf("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
-               ibvDeviceList[nicIndex].name.c_str());
+        System::Get().Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
+                          ibvDeviceList[nicIndex].name.c_str());
         if (topo.closestGpusToNic[nicIndex].size() == 0) {
-          printf(" none");
+          System::Get().Log(" none");
         } else {
           for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
-            printf(" %d", gpuIndex);
+            System::Get().Log(" %d", gpuIndex);
           }
         }
-        printf("\n");
+        System::Get().Log("\n");
       }
 #endif
     }
@@ -6403,7 +6583,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rankInfo[0] = localTopo;
       for (int peerRank = 1; peerRank < numRanks; peerRank++) {
         if (verbose) {
-          printf("[INFO] Rank 0 receives topology from Rank %d\n", peerRank);
+          System::Get().Log("[INFO] Rank 0 receives topology from Rank %d\n", peerRank);
         }
         RecvRankTopo(peerRank, rankInfo[peerRank]);
       }
@@ -6412,7 +6592,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (int peerRank = 1; peerRank < numRanks; peerRank++) {
         for (int i = 0; i < numRanks; i++) {
           if (verbose) {
-            printf("[INFO] Rank 0 sends topology %d to Rank %d\n", i, peerRank);
+            System::Get().Log("[INFO] Rank 0 sends topology %d to Rank %d\n", i, peerRank);
           }
           SendRankTopo(peerRank, rankInfo[i]);
         }
@@ -6420,14 +6600,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     } else {
       // Send local topology info back to root
       if (verbose) {
-        printf("[INF0] Rank %d sends topology from Rank 0\n", rank);
+        System::Get().Log("[INF0] Rank %d sends topology from Rank 0\n", rank);
       }
       SendRankTopo(0, localTopo);
 
       for (int i = 0; i < numRanks; i++) {
         RecvRankTopo(0, rankInfo[i]);
         if (verbose) {
-          printf("[INF0] Rank %d receives topology %d from Rank 0\n", rank, i);
+          System::Get().Log("[INF0] Rank %d receives topology %d from Rank 0\n", rank, i);
         }
       }
     }
