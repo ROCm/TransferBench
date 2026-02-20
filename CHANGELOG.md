@@ -3,6 +3,15 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.67.00
+### Added
+- Initial support for pod communication.  Requires compatible hardware / ROCm version and subject to further testing
+  - This potentially enables GFX/DMA executors to access SRC/DST memory locations on GPUs within the same pod
+  - Pod membership requires amd-smi however can be skipped by setting FORCE_SINGLE_POD=1
+### Modified
+  - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
+  - Adding extra information to CMake and make build methods to indicate enabled / disabled features
+
 ## v1.66.02
 ### Added
 - Adding DMA-BUF support

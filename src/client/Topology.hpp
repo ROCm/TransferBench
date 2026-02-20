@@ -215,8 +215,8 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     Utils::GroupKey const& key    = group.first;
     std::vector<int> const& hosts = group.second;
 
-    std::string              ppodId        = std::get<0>(key);
-    int                      vpodId        = std::get<1>(key);
+    uint64_t                 ppodId        = std::get<0>(key);
+    int64_t                  vpodId        = std::get<1>(key);
     std::vector<std::string> cpuNames      = std::get<2>(key);
     std::vector<int>         cpuSubExecs   = std::get<3>(key);
     std::vector<std::string> gpuNames      = std::get<4>(key);
@@ -270,8 +270,8 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     }
 
     // Fill in PPOD and VPOD
-    table.Set(1, 2, " %s ", ppodId.c_str());
-    table.Set(1, 3, " %d ", vpodId);
+    table.Set(1, 2, " %lu ", ppodId);
+    table.Set(1, 3, " %ld ", vpodId);
 
     // Fill in Executor information
     int rowIdx = 1;

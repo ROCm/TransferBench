@@ -10,7 +10,8 @@ MPI_PATH  ?= /usr/local/openmpi
 # Optional features (set to 0 to disable, 1 to enable)
 # DISABLE_NIC_EXEC: Disable RDMA/NIC executor support (default: 0)
 # DISABLE_MPI_COMM: Disable MPI communicator support (default: 0)
-# DISABLE_DMABUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
+# DISABLE_DMA_BUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
+# DISABLE_AMD_SMI: Disable AMD-SMI pod membership checking support (default: 0)
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -37,6 +38,7 @@ DEBUG ?= 0
 # Only perform this check if 'make clean' is not the target
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
   ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+    $(info Building TransferBenchCuda)
     # Check for nvcc
     ifneq ($(shell test -e $(NVCC) && echo found), found)
       $(error "Could not find $(NVCC).  Please set CUDA_PATH appropriately")
@@ -50,13 +52,13 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       CXX=$(HIPCC)
     else ifeq ("$(shell test -e $(ROCM_PATH)/bin/hipcc && echo found)", "found")
       CXX=$(ROCM_PATH)/bin/hipcc
-      $(warning "Could not find $(HIPCC). Using fallback to $(CXX)")
+      $(info "Could not find $(HIPCC). Using fallback to $(CXX)")
     else
       $(error "Could not find $(HIPCC) or $(ROCM_PATH)/bin/hipcc. Check if the path is correct if you want to build $(EXE)")
     endif
     GPU_TARGETS_FLAGS = $(foreach target,$(GPU_TARGETS),"--offload-arch=$(target)")
-
-    CXXFLAGS = -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
+    $(info Compiling for $(GPU_TARGETS) architecture(s). Can modify this by setting GPU_TARGETS)
+    CXXFLAGS = -I. -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
     HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
     HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
     ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
@@ -84,18 +86,19 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   # 3) infiniband/verbs.h is found in the default include path
   DISABLE_NIC_EXEC ?= 0
   ifneq ($(DISABLE_NIC_EXEC),1)
+    $(info Attempting to build with NIC executor support)
     ifeq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
-      $(info lib IBVerbs not found)
+      $(info - ibverbs library not found)
     else ifeq ("$(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'infiniband/verbs.h')", "0")
-      $(info infiniband/verbs.h not found)
+      $(info - infiniband/verbs.h not found)
     else
       COMMON_FLAGS += -DNIC_EXEC_ENABLED
       LDFLAGS += -libverbs
       NIC_ENABLED = 1
 
-      # Disable DMA-BUF support by default (set DISABLE_DMABUF=0 to enable)
-      DISABLE_DMABUF ?= 1
-      ifeq ($(DISABLE_DMABUF), 0)
+      # Disable DMA-BUF support by default (set DISABLE_DMA_BUF=0 to enable)
+      DISABLE_DMA_BUF ?= 1
+      ifeq ($(DISABLE_DMA_BUF), 0)
         # Check for both ibv_reg_dmabuf_mr and ROCm DMA-BUF export support
         HAVE_IBV_DMABUF := $(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'ibv_reg_dmabuf_mr')
         HAVE_ROCM_DMABUF := $(shell echo '#include <hsa/hsa_ext_amd.h>' | $(CXX) -I$(ROCM_PATH)/include -E - 2>/dev/null | grep -c 'hsa_amd_portable_export_dmabuf')
@@ -111,14 +114,14 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
           $(info Building with DMA-BUF support)
         endif
       else
-        $(info Building with DMA-BUF support disabled (DISABLE_DMABUF=1))
+        $(info Building with DMA-BUF support disabled (DISABLE_DMA_BUF=1))
       endif
     endif
     ifeq ($(NIC_ENABLED), 0)
-      $(info Building without NIC executor support)
-      $(info To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
+      $(info - Building without NIC executor support)
+      $(info - To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
     else
-      $(info Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable)
+      $(info - Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable)
     endif
   endif
 
@@ -128,8 +131,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   # 2) mpi.h is found in the MPI_PATH
   DISABLE_MPI_COMM ?= 0
   ifneq ($(DISABLE_MPI_COMM), 1)
+    $(info Attempting to build with MPI communicator support)
     ifeq ($(wildcard $(MPI_PATH)/include/mpi.h),)
-      $(info Unable to find mpi.h at $(MPI_PATH)/include.  Please specify appropriate MPI_PATH)
+      $(info - Unable to find mpi.h at $(MPI_PATH)/include.  Please specify appropriate MPI_PATH)
     else
       MPI_ENABLED = 1
       COMMON_FLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
@@ -140,18 +144,128 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     endif
 
     ifeq ($(MPI_ENABLED), 0)
-      $(info Building without MPI communicator support)
-      $(info To use TransferBench with MPI support, install MPI libraries and specify appropriate MPI_PATH)
+      $(info - Building without MPI communicator support)
+      $(info - To use TransferBench with MPI support, install MPI libraries and specify appropriate MPI_PATH)
     else
-      $(info Building with MPI communicator support.  Can set DISABLE_MPI_COMM=1 to disable)
+      $(info - Building with MPI communicator support.  Can set DISABLE_MPI_COMM=1 to disable)
    endif
+  endif
+
+  AMD_SMI_ENABLED = 0
+  # Enable AMD-SMI support for pod membership detection
+  # Compile with AMD-SMI support if
+  # 1) DISABLE_AMD_SMI is not set to 1
+  # 2) AMD-SMI version >= 26.4.1
+  DISABLE_AMD_SMI ?= 0
+  ifneq ($(DISABLE_AMD_SMI), 1)
+    ifneq ($(MAKECMDGOALS),TransferBenchCuda)
+      $(info Attempting to build with amd-smi support)
+      # Check for appropriate AMD SMI version (for querying pod membership)
+      AMD_SMI_MIN_MAJOR := 26
+      AMD_SMI_MIN_MINOR := 4
+
+      AMD_SMI ?= amd-smi
+      AMD_SMI_EXISTS := $(shell command -v $(AMD_SMI) >/dev/null 2>&1 && echo yes || echo no)
+      ifeq ($(AMD_SMI_EXISTS),no)
+        $(info - $(AMD_SMI) not found.  Disabling pod communication support)
+      else
+        AMD_SMI_VERSION_STR := $(shell $(AMD_SMI) version | sed -n 's/.*Library version: \([0-9]\+\)\.\([0-9]\+\).*/\1 \2/p')
+        AMD_SMI_MAJOR := $(word 1,$(AMD_SMI_VERSION_STR))
+        AMD_SMI_MINOR := $(word 2,$(AMD_SMI_VERSION_STR))
+
+        AMD_SMI_VERSION_OK := $(shell \
+          if [ $(AMD_SMI_MAJOR) -gt $(AMD_SMI_MIN_MAJOR) ] || \
+             [ $(AMD_SMI_MAJOR) -eq $(AMD_SMI_MIN_MAJOR) -a $(AMD_SMI_MINOR) -ge $(AMD_SMI_MIN_MINOR) ]; then \
+            echo yes; \
+          else \
+            echo no; \
+          fi)
+
+        ifeq ($(AMD_SMI_VERSION_OK),yes)
+          $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which has pod support)
+          COMMON_FLAGS += -DAMD_SMI_ENABLED
+          AMD_SMI_ENABLED = 1
+        else
+          $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which does not have pod support)
+          $(info - Pod membership querying requires amd-smi version of at least $(AMD_SMI_MIN_MAJOR).$(AMD_SMI_MIN_MINOR))
+          $(info - Pod membership may be forced in TransferBench by setting FORCE_SINGLE_POD=1)
+        endif
+      endif
+    endif
+  endif
+
+  POD_ENABLED = 0
+  # Compile with pod support if
+  # 1) DISABLE_POD_COMM is not set to 1
+  # 2) For HIP: HIP Runtime version >= 8
+  #    For CUDA: CUDA Version >= 12.8.1
+  DISABLE_POD_COMM ?= 0
+  ifneq ($(DISABLE_POD_COMM), 1)
+    $(info Attempting to build with pod communication support)
+    ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+      # Check for appropriate CUDA support for MNNVL
+      CUDA_MIN_MAJOR := 12
+      CUDA_MIN_MINOR := 2
+
+      CUDA_VERSION_STR := $(shell $(NVCC) --version | grep release | sed -E 's/.*release ([0-9]+)\.([0-9]+).*/\1 \2/')
+      CUDA_MAJOR := $(word 1,$(CUDA_VERSION_STR))
+      CUDA_MINOR := $(word 2,$(CUDA_VERSION_STR))
+
+      CUDA_VERSION_OK := $(shell \
+        if [ $(CUDA_MAJOR) -gt $(CUDA_MIN_MAJOR) ] || \
+           [ $(CUDA_MAJOR) -eq $(CUDA_MIN_MAJOR) -a $(CUDA_MINOR) -ge $(CUDA_MIN_MINOR) ]; then \
+          echo yes; \
+        else \
+          echo no; \
+        fi)
+
+      ifeq ($(CUDA_VERSION_OK),yes)
+        $(info - Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which has MNNVL support)
+        COMMON_FLAGS += -DPOD_COMM_ENABLED
+        POD_ENABLED = 1
+      else
+        $(info - Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which does not have MNNVL support)
+        $(info - Pod support will require CUDA version of at least $(CUDA_MIN_MAJOR).$(CUDA_MIN_MINOR))
+      endif
+    else
+      # Check for appropriate HIP version (for exchanging pod memory handles)
+      HIP_MIN_MAJOR := 7
+      HIP_MIN_MINOR := 2
+
+      # Check for hipconfig
+      HIPCONFIG ?= hipconfig
+      HIP_EXISTS := $(shell command -v $(HIPCONFIG) >/dev/null 2>&1 && echo yes || echo no)
+      ifeq ($(HIP_EXISTS),yes)
+        HIP_VERSION_STR := $(shell $(HIPCONFIG) --version | sed -E 's/([0-9]+)\.([0-9]+).*/\1 \2/')
+        HIP_MAJOR := $(word 1,$(HIP_VERSION_STR))
+        HIP_MINOR := $(word 2,$(HIP_VERSION_STR))
+
+        HIP_VERSION_OK := $(shell \
+          if [ $(HIP_MAJOR) -gt $(HIP_MIN_MAJOR) ] || \
+             [ $(HIP_MAJOR) -eq $(HIP_MIN_MAJOR) -a $(HIP_MINOR) -ge $(HIP_MIN_MINOR) ]; then \
+             echo yes; \
+          else \
+            echo no; \
+          fi)
+
+        ifeq ($(HIP_VERSION_OK),yes)
+          $(info - Detected HIP version $(HIP_MAJOR).$(HIP_MINOR) which has pod support)
+          COMMON_FLAGS += -DPOD_COMM_ENABLED
+        else
+          $(info - Detected HIP version $(HIP_MAJOR).$(HIP_MINOR) which does not have pod support)
+          $(info - Pod support requires HIP version of at least $(HIP_MIN_MAJOR).$(HIP_MIN_MINOR))
+        endif
+      else
+        $(info - Unable to determine HIP version via $(HIPCONFIG).  Try specifying path to hipconfig in HIPCONFIG)
+        $(info - Disabling pod communication support)
+      endif
+    endif
   endif
 endif
 
-
 .PHONY : all clean
 
-all: $(EXE)
+all: TransferBench
 
 TransferBench: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
 	$(CXX) $(CXXFLAGS) $(HIPFLAGS) $(COMMON_FLAGS) $< -o $@ $(HIPLDFLAGS) $(LDFLAGS)

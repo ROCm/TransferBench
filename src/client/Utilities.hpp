@@ -84,8 +84,8 @@ namespace TransferBench::Utils
 
   // Group information
   typedef std::tuple<
-    std::string,                   // RackId
-    int,                           // VPod
+    uint64_t,                      // Physical Pod ID
+    int64_t,                       // Virtual Pod ID
     std::vector<std::string>,      // CPU Names
     std::vector<int>,              // CPU #Subexecutors
     std::vector<std::string>,      // GPU Names
@@ -302,8 +302,8 @@ namespace TransferBench::Utils
       // Build GroupKey for each rank
       for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
 
-        std::string ppodId = TransferBench::GetPpodId(rank);
-        int         vpodId = TransferBench::GetVpodId(rank);
+        uint64_t ppodId = TransferBench::GetPpodId(rank);
+        int64_t  vpodId = TransferBench::GetVpodId(rank);
 
         // CPU information
         int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
