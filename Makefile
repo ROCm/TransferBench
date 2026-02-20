@@ -229,8 +229,8 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       endif
     else
       # Check for appropriate HIP version (for exchanging pod memory handles)
-      HIP_MIN_MAJOR := 7
-      HIP_MIN_MINOR := 2
+      HIP_MIN_MAJOR := 8
+      HIP_MIN_MINOR := 0
 
       # Check for hipconfig
       HIPCONFIG ?= hipconfig
