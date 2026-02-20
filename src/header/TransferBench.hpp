@@ -1356,6 +1356,7 @@ namespace {
     return ERR_NONE;
   }
 
+#ifdef POD_COMM_ENABLED
   static ErrResult GetMemLocation(MemDevice const& memDevice, hipMemLocation& location)
   {
     if (IsCpuMemType(memDevice.memType)) {
@@ -1377,6 +1378,7 @@ namespace {
 
   static ErrResult GetMemAllocationProp(MemDevice const& memDevice, hipMemAllocationProp& prop)
   {
+
     switch (memDevice.memType) {
     case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_GPU:
       prop.type = hipMemAllocationTypePinned; break;
@@ -1388,9 +1390,9 @@ namespace {
 
     prop.requestedHandleTypes = hipMemHandleTypeFabric;
     ERR_CHECK(GetMemLocation(memDevice, prop.location));
-
     return ERR_NONE;
   }
+#endif
 
   // Allocate memory
   static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr,
@@ -2095,11 +2097,14 @@ namespace {
     CheckMultiNodeTransferConsistency(transfers, errors);
 
     // Per-Transfer checks
+    bool hasFatalError = false;
     for (size_t i = 0; i < transfers.size(); i++) {
       Transfer const& t = transfers[i];
 
-      if (t.numBytes == 0)
+      if (t.numBytes == 0) {
         errors.push_back({ERR_FATAL, "Transfer %d: Cannot perform 0-byte transfers", i});
+        break;
+      }
 
       // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
       // mean that some subexecutors might not have any work assigned to them if the amount to
@@ -2117,25 +2122,36 @@ namespace {
       }
 
       // Check sources and destinations
-      if (t.srcs.empty() && t.dsts.empty())
+      if (t.srcs.empty() && t.dsts.empty()) {
         errors.push_back({ERR_FATAL, "Transfer %d: Must have at least one source or destination", i});
+        break;
+      }
 
       for (int j = 0; j < t.srcs.size(); j++) {
         ErrResult err = CheckMemDevice(t.srcs[j]);
-        if (err.errType != ERR_NONE)
+        if (err.errType != ERR_NONE) {
           errors.push_back({ERR_FATAL, "Transfer %d: SRC %d: %s", i, j, err.errMsg.c_str()});
+          hasFatalError = true;
+          break;
+        }
       }
+      if (hasFatalError) break;
+
       for (int j = 0; j < t.dsts.size(); j++) {
         ErrResult err = CheckMemDevice(t.dsts[j]);
-        if (err.errType != ERR_NONE)
+        if (err.errType != ERR_NONE) {
           errors.push_back({ERR_FATAL, "Transfer %d: DST %d: %s", i, j, err.errMsg.c_str()});
+          hasFatalError = true;
+          break;
+        }
       }
+      if (hasFatalError) break;
 
       // Check executor rank
       if (t.exeDevice.exeRank < 0 || t.exeDevice.exeRank >= GetNumRanks()) {
         errors.push_back({ERR_FATAL,
             "Rank index for executor must be between 0 and %d (instead of %d)", GetNumRanks() - 1, t.exeDevice.exeRank});
-        continue;
+        break;
       }
 
       executors.insert(t.exeDevice);
@@ -2144,27 +2160,35 @@ namespace {
 
       switch (t.exeDevice.exeType) {
       case EXE_CPU:
-        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors)
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: CPU index must be between 0 and %d (instead of %d) for rank %d",
                             i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+        }
         break;
       case EXE_GPU_GFX:
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: GFX index must be between 0 and %d (instead of %d) for rank %d",
                             i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
         } else {
           if (t.exeSubIndex != -1) {
 #if defined(__NVCC__)
             errors.push_back({ERR_FATAL,
                               "Transfer %d: GFX executor subindex not supported on NVIDIA hardware", i});
+            hasFatalError = true;
 #else
             useSubIndexCount[t.exeDevice]++;
             int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
-            if (t.exeSubIndex >= numSubIndices)
+            if (t.exeSubIndex >= numSubIndices) {
               errors.push_back({ERR_FATAL,
                   "Transfer %d: GFX subIndex (XCC) must be between 0 and %d for rank %d", i, numSubIndices - 1, t.exeDevice.exeRank});
+              hasFatalError = true;
+              break;
+            }
 #endif
           }
         }
@@ -2173,27 +2197,34 @@ namespace {
         if (t.srcs.size() != 1 || t.dsts.size() != 1) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: DMA executor must have exactly 1 source and 1 destination", i});
+          hasFatalError = true;
+          break;
         }
 
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: DMA index must be between 0 and %d (instead of %d) for rank %d",
                             i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
-          // Cannot proceed with any further checks
-          continue;
+          hasFatalError = true;
+          break;
         }
 
         if (t.exeSubIndex != -1) {
 #if defined(__NVCC__)
           errors.push_back({ERR_FATAL,
                             "Transfer %d: DMA executor subindex not supported on NVIDIA hardware", i});
+          hasFatalError = true;
+          break;
 #else
           useSubIndexCount[t.exeDevice]++;
           int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
-          if (t.exeSubIndex >= numSubIndices)
+          if (t.exeSubIndex >= numSubIndices) {
             errors.push_back({ERR_FATAL,
                               "Transfer %d: DMA subIndex (engine) must be between 0 and %d",
                               i, numSubIndices - 1});
+            hasFatalError = true;
+            break;
+          }
 
           // Check that engine Id exists between agents
           hsa_agent_t srcAgent, dstAgent;
@@ -2201,12 +2232,19 @@ namespace {
           err = System::Get().GetHsaAgent(t.srcs[0], srcAgent);
           if (err.errType != ERR_NONE) {
             errors.push_back(err);
-            if (err.errType == ERR_FATAL) break;
+            if (err.errType == ERR_FATAL) {
+              hasFatalError = true;
+              break;
+            }
+
           }
           err = System::Get().GetHsaAgent(t.dsts[0], dstAgent);
           if (err.errType != ERR_NONE) {
             errors.push_back(err);
-            if (err.errType == ERR_FATAL) break;
+            if (err.errType == ERR_FATAL) {
+              hasFatalError = true;
+              break;
+            }
           }
 
           // Skip check of engine Id mask for self copies
@@ -2215,13 +2253,18 @@ namespace {
             err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
             if (err.errType != ERR_NONE) {
               errors.push_back(err);
-              if (err.errType == ERR_FATAL) break;
+              if (err.errType == ERR_FATAL) {
+                hasFatalError = true;
+                break;
+              }
             }
             hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
             if (!(sdmaEngineId & engineIdMask)) {
               errors.push_back({ERR_FATAL,
                   "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
                   i, t.exeDevice.exeIndex, t.exeSubIndex});
+              hasFatalError = true;
+              break;
             }
           }
 #endif
@@ -2252,6 +2295,7 @@ namespace {
         // NIC Executors can only execute a copy operation
         if (t.srcs.size() != 1 || t.dsts.size() != 1) {
           errors.push_back({ERR_FATAL, "Transfer %d: NIC executor requires single SRC and single DST", i});
+          hasFatalError = true;
           break;
         }
 
@@ -2263,6 +2307,7 @@ namespace {
         if (srcMemRank != srcExeRank && dstMemRank != srcExeRank) {
           errors.push_back({ERR_FATAL,
               "Transfer %d: NIC executor rank (%d) must be same as SRC memory rank (%d) or DST memory rank (%d)", i, srcExeRank, srcMemRank, dstMemRank});
+          hasFatalError = true;
           break;
         }
 
@@ -2275,8 +2320,12 @@ namespace {
         if (srcExeDevice.exeIndex < 0 || srcExeDevice.exeIndex >= GetNumExecutors(EXE_NIC, srcExeRank)) {
           errors.push_back({ERR_FATAL, "Transfer %d: Rank %d SRC NIC executor indexes an out-of-range NIC (%d).  Detected %d NICs",
               i, srcExeRank, srcExeDevice.exeIndex, GetNumExecutors(EXE_NIC, srcExeRank)});
+          hasFatalError = true;
+          break;
         } else if (!NicIsActive(srcExeDevice.exeIndex, srcExeDevice.exeRank)) {
           errors.push_back({ERR_FATAL, "Transfer %d: Rank %d SRC NIC executor %d is not active", i, srcExeDevice.exeRank, srcExeDevice.exeIndex});
+          hasFatalError = true;
+          break;
         }
 
         // The DST NIC executor facilitates the copy but issues no commands
@@ -2288,15 +2337,23 @@ namespace {
         if (dstExeDevice.exeIndex < 0 || dstExeDevice.exeIndex >= GetNumExecutors(EXE_NIC, dstExeRank)) {
           errors.push_back({ERR_FATAL, "Transfer %d: Rank %d DST NIC executor indexes an out-of-range NIC (%d).  Detected %d NICs",
               i, dstExeRank, dstExeDevice.exeIndex, GetNumExecutors(EXE_NIC, dstExeRank)});
+          hasFatalError = true;
+          break;
         } else if (!NicIsActive(dstExeDevice.exeIndex, dstExeDevice.exeRank)) {
           errors.push_back({ERR_FATAL, "Transfer %d: Rank %d DST NIC executor %d is not active", i, dstExeDevice.exeRank, dstExeDevice.exeIndex});
+          hasFatalError = true;
+          break;
         }
       }
 #else
       errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
+      hasFatalError = true;
 #endif
       break;
       }
+
+      // Skip further tests if fatal error detected
+      if (hasFatalError) break;
 
       // Check for multi-node support
       if (IsPodTransfer(t)) {
@@ -2328,6 +2385,7 @@ namespace {
         if (!samePod) {
           errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
               i, t.exeDevice.exeRank});
+          break;
         }
       }
 
@@ -2336,6 +2394,7 @@ namespace {
         errors.push_back({ERR_FATAL, "Transfer %d: # of subexecutors must be positive", i});
       else
         totalSubExecs[t.exeDevice] += t.numSubExecs;
+
     }
 
     int gpuMaxHwQueues = 4;
@@ -2377,6 +2436,7 @@ namespace {
                             "GPU %d specifies XCC on only %d of %d Transfers. "
                             "Must either specific none or all",
                             exeDevice.exeIndex, useSubIndexCount[exeDevice], transferCount[exeDevice]});
+          break;
         }
 
         if (cfg.gfx.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
@@ -2394,6 +2454,7 @@ namespace {
                             "DMA %d specifies engine on only %d of %d Transfers. "
                             "Must either specific none or all",
                             exeDevice.exeIndex, useSubIndexCount[exeDevice], transferCount[exeDevice]});
+          break;
         }
         if (transferCount[exeDevice] > gpuMaxHwQueues) {
           errors.push_back({ERR_WARN,
@@ -5946,7 +6007,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     ppodId = 0;
     vpodId = -1;
 
-    // FORCE_SINGLE_POID skips any required queries to AMDSMI
+    // FORCE_SINGLE_POD skips any required queries to AMDSMI
     char* forceSinglePod = getenv("FORCE_SINGLE_POD");
     if (forceSinglePod) {
       ppodId = 0;

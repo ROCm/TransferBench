@@ -10,7 +10,8 @@ MPI_PATH  ?= /usr/local/openmpi
 # Optional features (set to 0 to disable, 1 to enable)
 # DISABLE_NIC_EXEC: Disable RDMA/NIC executor support (default: 0)
 # DISABLE_MPI_COMM: Disable MPI communicator support (default: 0)
-# DISABLE_DMABUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
+# DISABLE_DMA_BUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
+# DISABLE_AMD_SMI: Disable AMD-SMI pod membership checking support (default: 0)
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -56,7 +57,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       $(error "Could not find $(HIPCC) or $(ROCM_PATH)/bin/hipcc. Check if the path is correct if you want to build $(EXE)")
     endif
     GPU_TARGETS_FLAGS = $(foreach target,$(GPU_TARGETS),"--offload-arch=$(target)")
-
+    $(info Compiling for $(GPU_TARGETS) architecture(s). Can modify this by setting GPU_TARGETS)
     CXXFLAGS = -I. -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
     HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
     HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
@@ -95,9 +96,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       LDFLAGS += -libverbs
       NIC_ENABLED = 1
 
-      # Disable DMA-BUF support by default (set DISABLE_DMABUF=0 to enable)
-      DISABLE_DMABUF ?= 1
-      ifeq ($(DISABLE_DMABUF), 0)
+      # Disable DMA-BUF support by default (set DISABLE_DMA_BUF=0 to enable)
+      DISABLE_DMA_BUF ?= 1
+      ifeq ($(DISABLE_DMA_BUF), 0)
         # Check for both ibv_reg_dmabuf_mr and ROCm DMA-BUF export support
         HAVE_IBV_DMABUF := $(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'ibv_reg_dmabuf_mr')
         HAVE_ROCM_DMABUF := $(shell echo '#include <hsa/hsa_ext_amd.h>' | $(CXX) -I$(ROCM_PATH)/include -E - 2>/dev/null | grep -c 'hsa_amd_portable_export_dmabuf')
@@ -113,7 +114,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
           $(info Building with DMA-BUF support)
         endif
       else
-        $(info Building with DMA-BUF support disabled (DISABLE_DMABUF=1))
+        $(info Building with DMA-BUF support disabled (DISABLE_DMA_BUF=1))
       endif
     endif
     ifeq ($(NIC_ENABLED), 0)
@@ -228,8 +229,8 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       endif
     else
       # Check for appropriate HIP version (for exchanging pod memory handles)
-      HIP_MIN_MAJOR := 8
-      HIP_MIN_MINOR := 0
+      HIP_MIN_MAJOR := 7
+      HIP_MIN_MINOR := 2
 
       # Check for hipconfig
       HIPCONFIG ?= hipconfig
