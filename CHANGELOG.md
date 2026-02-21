@@ -8,6 +8,9 @@ Documentation for TransferBench is available at
 - Initial support for pod communication.  Requires compatible hardware / ROCm version and subject to further testing
   - This potentially enables GFX/DMA executors to access SRC/DST memory locations on GPUs within the same pod
   - Pod membership requires amd-smi however can be skipped by setting FORCE_SINGLE_POD=1
+- Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
+  - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
+
 ### Modified
   - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
   - Adding extra information to CMake and make build methods to indicate enabled / disabled features

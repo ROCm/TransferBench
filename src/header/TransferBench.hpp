@@ -837,6 +837,11 @@ namespace {
      */
     void Log(const char* format, ...);
 
+    /**
+     * Helper function that logs Transfers being executed to a config file
+     */
+    void LogTransfers(std::vector<Transfer> const& transfers);
+
     // Communication functions
     /**
      * Barrier that all ranks must arrive at before proceeding
@@ -989,6 +994,7 @@ namespace {
     int numRanks;
     bool verbose = false;
     bool rankDoesOutput = true;
+    FILE* dumpCfgFile = nullptr;
 
 #if !defined(__NVCC__)
     std::vector<hsa_agent_t> cpuAgents;
@@ -1544,7 +1550,7 @@ namespace {
     if (memPtr == nullptr)
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
-    if (memHandle == NULL) {
+    if (memHandle == NULL || *memHandle == NULL) {
       switch (memType) {
       case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
       {
@@ -4964,6 +4970,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       return false;
     }
 
+    // Log transfers (if requested)
+    System::Get().LogTransfers(transfers);
+
     // Collect up transfers by executor
     int minNumSrcs = MAX_SRCS + 1;
     int maxNumSrcs = 0;
@@ -5631,8 +5640,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     rank(0), numRanks(1), commMode(COMM_NONE)
   {
     // Collect env vars
+    // TB_VERBOSE       = enables extra logging
+    // TB_SINGLE_LOG    = Only rank 0 will produce output (useful if spawning multi-node socket)
+    // TB_DUMP_CFG_FILE = Config file to dump executed Transfers
+    // TB_PAUSE         = Insert a pause for debug attachment
+
     verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
     bool singleLog = getenv("TB_SINGLE_LOG") ? atoi(getenv("TB_SINGLE_LOG")) : 0;
+
+    char* dumpCfgFilename = getenv("TB_DUMP_CFG_FILE");
+    if (dumpCfgFilename) {
+      dumpCfgFile = fopen(dumpCfgFilename, "w");
+    }
 
     if (getenv("TB_PAUSE")) {
       System::Get().Log("Pausing for debug attachment\n");
@@ -5689,6 +5708,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         close(listenSocket);
         listenSocket = -1;
       }
+    }
+
+    if (dumpCfgFile) {
+      fclose(dumpCfgFile);
     }
 
 #ifdef AMD_SMI_ENABLED
@@ -5851,6 +5874,48 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       vprintf(format, args);
       va_end(args);
     }
+  }
+
+  void System::LogTransfers(std::vector<Transfer> const& transfers)
+  {
+    if (!dumpCfgFile || !rankDoesOutput) return;
+
+    fprintf(dumpCfgFile, "-%lu ", transfers.size());
+    for (auto const& t : transfers) {
+      fprintf(dumpCfgFile, "(");
+
+      // Print SRCs
+      for (auto const& src : t.srcs) {
+        fprintf(dumpCfgFile, "R%d%c%d", src.memRank, MemTypeStr[src.memType], src.memIndex);
+      }
+      if (t.srcs.empty())
+        fprintf(dumpCfgFile, "N");
+
+      fprintf(dumpCfgFile, "->");
+
+      // Print Executor
+      fprintf(dumpCfgFile, "R%d%c%d", t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
+      if (t.exeDevice.exeSlot != 0)
+        fprintf(dumpCfgFile, "%c", 'A' + t.exeDevice.exeSlot);
+      if (t.exeSubIndex != -1) {
+        fprintf(dumpCfgFile, ".%d", t.exeSubIndex);
+      }
+      if (t.exeSubSlot != 0) {
+        fprintf(dumpCfgFile, "%c", 'A' + t.exeSubSlot);
+      }
+
+      fprintf(dumpCfgFile, "->");
+
+      // Print DSTs
+      for (auto const& dst : t.dsts) {
+        fprintf(dumpCfgFile, "R%d%c%d", dst.memRank, MemTypeStr[dst.memType], dst.memIndex);
+      }
+      if (t.dsts.empty())
+        fprintf(dumpCfgFile, "N");
+
+      fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
+    }
+    fprintf(dumpCfgFile, "\n");
   }
 
   void System::Barrier()
