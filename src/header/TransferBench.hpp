@@ -666,17 +666,19 @@ namespace TransferBench
 //==========================================================================================
 
 // Macro for collecting CU/SM GFX kernel is running on
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__)
-#define GetHwId(hwId) hwId = 0
+#if defined(__GFX9__)
+  #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId))
+#elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
+  #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)" : "=s" (hwId))
 #elif defined(__NVCC__)
-#define GetHwId(hwId) asm("mov.u32 %0, %smid;" : "=r"(hwId))
+  #define GetHwId(hwId) asm("mov.u32 %0, %smid;" : "=r"(hwId))
 #else
-#define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId));
+  #define GetHwId(hwId) hwId = 0
 #endif
 
 // Macro for collecting XCC GFX kernel is running on
 #if defined(__gfx942__) || defined(__gfx950__)
-#define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val));
+#define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val))
 #else
 #define GetXccId(val) val = 0
 #endif
@@ -5914,6 +5916,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         fprintf(dumpCfgFile, "N");
 
       fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
+      fflush(dumpCfgFile);
     }
     fprintf(dumpCfgFile, "\n");
   }
