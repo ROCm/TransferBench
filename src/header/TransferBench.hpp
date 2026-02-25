@@ -65,12 +65,12 @@ THE SOFTWARE.
 #include <cuda_runtime.h>
 #include <nvml.h>
 #else
-#include <hip/hip_ext.h>
-#include <hip/hip_runtime.h>
-#include <hsa/hsa.h>
-#include <hsa/hsa_ext_amd.h>
+#include "hip/hip_ext.h"
+#include "hip/hip_runtime.h"
+#include "hsa/hsa.h"
+#include "hsa/hsa_ext_amd.h"
 #ifdef AMD_SMI_ENABLED
-#include <amd_smi/amdsmi.h>
+#include "amd_smi/amdsmi.h"
 #endif
 #endif
 /// @endcond
