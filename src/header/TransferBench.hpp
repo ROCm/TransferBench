@@ -2348,7 +2348,7 @@ namespace {
     int                        dstDmabufFd;       ///< DMA-BUF file descriptor for DST (if using dmabuf)
     uint64_t                   srcDmabufOffset;   ///< Offset within SRC DMA-BUF
     uint64_t                   dstDmabufOffset;   ///< Offset within DST DMA-BUF
-    uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
+    uint32_t                   qpCount;           ///< Number of QPs to be used for transferring data
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
@@ -3959,7 +3959,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
     do {
-      std::vector<uint8_t> receivedQPs(transferCount, 0);
+      std::vector<uint32_t> receivedQPs(transferCount, 0);
       // post the sends
       for (auto i = 0; i < transferCount; i++) {
         transferTimers[i] = std::chrono::high_resolution_clock::now();
