@@ -3917,24 +3917,75 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
 #ifdef NIC_EXEC_ENABLED
+  static ErrResult PollNicCompletions(ibv_cq* cq, size_t numCompletions, int transferIdx)
+  {
+    constexpr int MaxPollBatch = 32;
+    ibv_wc wc[MaxPollBatch];
+    size_t completed = 0;
+
+    while (completed < numCompletions) {
+      int pollCount = (int)std::min(numCompletions - completed, (size_t)MaxPollBatch);
+      int nc = ibv_poll_cq(cq, pollCount, wc);
+      if (nc < 0)
+        return {ERR_FATAL, "Transfer %d: Received negative work completion", transferIdx};
+      if (nc == 0)
+        continue;
+
+      for (int idx = 0; idx < nc; idx++) {
+        if (wc[idx].status != IBV_WC_SUCCESS)
+          return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", transferIdx, wc[idx].status};
+      }
+      completed += nc;
+    }
+
+    return ERR_NONE;
+  }
+
   // Execution of a single NIC Transfer
   static ErrResult ExecuteNicTransfer(int           const  iteration,
                                       ConfigOptions const& cfg,
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
-    // Loop over each of the queue pairs and post work request
-    ibv_send_wr* badWorkReq;
+    auto* completionQueue = rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue;
+    auto& queuePairs = rss.srcIsExeNic ? rss.srcQueuePairs : rss.dstQueuePairs;
+
+    size_t const signalInterval = std::max((size_t)1, (size_t)cfg.nic.maxSendWorkReq - 1);
+    size_t const maxOutstandingCompletions = std::max((size_t)1, (size_t)cfg.nic.queueSize / 2);
+
+    // Loop over each queue pair and post/poll in bounded batches to avoid SQ/CQ overflow
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-      size_t numChunks = rss.sendWorkRequests[qpIndex].size();
+      ibv_send_wr* badWorkReq = nullptr;
+      size_t const numChunks = rss.sendWorkRequests[qpIndex].size();
+      size_t chunksSinceSignal = 0;
+      size_t outstandingCompletions = 0;
+
       for (size_t chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
-        int error = ibv_post_send(rss.srcIsExeNic ? rss.srcQueuePairs[qpIndex] : rss.dstQueuePairs[qpIndex],
-                                  &rss.sendWorkRequests[qpIndex][chunkIdx], &badWorkReq);
+        bool const isLastChunk = (chunkIdx + 1 == numChunks);
+        bool const signalChunk = isLastChunk || (chunksSinceSignal + 1 >= signalInterval);
+
+        ibv_send_wr& wr = rss.sendWorkRequests[qpIndex][chunkIdx];
+        wr.send_flags = signalChunk ? IBV_SEND_SIGNALED : 0;
+
+        int error = ibv_post_send(queuePairs[qpIndex], &wr, &badWorkReq);
         if (error)
           return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d chunk %lu of %lu (Error code %d = %s)\n",
             rss.transferIdx, qpIndex, chunkIdx, numChunks, error, strerror(error)};
+
+        chunksSinceSignal = signalChunk ? 0 : (chunksSinceSignal + 1);
+        if (signalChunk)
+          outstandingCompletions++;
+
+        if (outstandingCompletions >= maxOutstandingCompletions) {
+          ERR_CHECK(PollNicCompletions(completionQueue, 1, rss.transferIdx));
+          outstandingCompletions--;
+        }
       }
+
+      if (outstandingCompletions)
+        ERR_CHECK(PollNicCompletions(completionQueue, outstandingCompletions, rss.transferIdx));
     }
+
     return ERR_NONE;
   }
 
@@ -3956,42 +4007,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     int subIterations = 0;
     auto cpuStart = std::chrono::high_resolution_clock::now();
-    std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
     do {
-      std::vector<uint32_t> receivedQPs(transferCount, 0);
-      // post the sends
+      // Execute transfers with bounded post/poll in each transfer
       for (auto i = 0; i < transferCount; i++) {
-        transferTimers[i] = std::chrono::high_resolution_clock::now();
+        auto transferStart = std::chrono::high_resolution_clock::now();
         ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
-      }
-      // poll for completions
-      size_t completedTransfers = 0;
-      while (completedTransfers < transferCount) {
-        for (auto i = 0; i < transferCount; i++) {
-          if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
-            auto& rss = exeInfo.resources[i];
-            // Poll the completion queue until all queue pairs are complete
-            // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-            ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, 1, &wc);
-            if (nc > 0) {
-              receivedQPs[i]++;
-              if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc.status};
-              }
-            } else if (nc < 0) {
-              return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
-            }
-            if(receivedQPs[i] == rss.qpCount) {
-              auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
-              double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-              if (iteration >= 0) {
-                totalTimeMsec[i] += deltaMsec;
-              }
-              completedTransfers++;
-            }
-          }
+        if (iteration >= 0) {
+          auto cpuDelta = std::chrono::high_resolution_clock::now() - transferStart;
+          double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+          totalTimeMsec[i] += deltaMsec;
         }
       }
     } while(++subIterations < cfg.general.numSubIterations);
