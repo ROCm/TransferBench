@@ -2366,6 +2366,12 @@ namespace {
 
       // Check for multi-node support
       if (IsPodTransfer(t)) {
+#ifndef POD_COMM_ENABLED
+        errors.push_back({ERR_FATAL,
+            "Transfer %d: Cross-rank GPU memory access requires pod communication support (HIP 8.0+)", i});
+        hasFatalError = true;
+        break;
+#endif
         // In order to support pod communication, the participanting ranks need to be members of the same pod
         int exeRank = t.exeDevice.exeRank;
         bool samePod = true;
@@ -3819,7 +3825,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate source memory (on the correct rank)
-        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank);
+        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (srcMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
                                    &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : NULL));
@@ -3847,7 +3853,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate destination memory (on the correct rank)
-        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank);
+        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
