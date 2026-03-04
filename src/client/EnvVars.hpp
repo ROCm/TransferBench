@@ -111,6 +111,7 @@ public:
   int ibGidIndex;                    // GID Index for RoCE NICs
   uint8_t ibPort;                    // NIC port number to be used
   int ipAddressFamily;               // IP Address Famliy
+  int nicCqPollMaxEvent;             // Maximum CQ entries polled per call
   int nicChunkBytes;                 // Number of bytes to send per chunk for RDMA operations
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
   int roceVersion;                   // RoCE version number
@@ -173,6 +174,7 @@ public:
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
     roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
     ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
+    nicCqPollMaxEvent = GetEnvVar("NIC_CQ_POLL_MAX_EVENT", 4);
     nicChunkBytes     = GetEnvVar("NIC_CHUNK_BYTES"     , 1073741824);
     nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
 
@@ -339,6 +341,7 @@ public:
     printf(" MIN_VAR_SUBEXEC   - Minumum # of subexecutors to use for variable subExec Transfers\n");
     printf(" MAX_VAR_SUBEXEC   - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
 #if NIC_EXEC_ENABLED
+  printf(" NIC_CQ_POLL_MAX_EVENT - Max CQ entries polled per call while draining NIC completions (default=4)\n");
     printf(" NIC_CHUNK_BYTES   - Number of bytes to send at a time using NIC (default = 1GB)\n");
     printf(" NIC_RELAX_ORDER   - Set to non-zero to use relaxed ordering");
 #endif
@@ -450,6 +453,8 @@ public:
           "Using up to %s subexecutors for variable subExec transfers",
           maxNumVarSubExec ? std::to_string(maxNumVarSubExec).c_str() : "all available");
 #if NIC_EXEC_ENABLED
+    Print("NIC_CQ_POLL_MAX_EVENT", nicCqPollMaxEvent,
+      "Polling up to %d NIC completion(s) per CQ poll call", nicCqPollMaxEvent);
     Print("NIC_CHUNK_BYTES", nicChunkBytes,
           "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
     Print("NIC_RELAX_ORDER", nicRelaxedOrder,
@@ -644,6 +649,7 @@ public:
     cfg.gfx.wordSize               = gfxWordSize;
 
     cfg.nic.chunkBytes             = nicChunkBytes;
+    cfg.nic.cqMaxPollEvent         = nicCqPollMaxEvent;
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
     cfg.nic.ipAddressFamily        = ipAddressFamily;

@@ -235,6 +235,7 @@ namespace TransferBench
   struct NicOptions
   {
     size_t      chunkBytes      = 1<<30;        ///< How much bytes to transfer at a time
+    int         cqMaxPollEvent  = 4;            ///< Maximum CQ entries polled per call
     int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
     uint8_t     ibPort          = 1;            ///< NIC port number to be used
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
@@ -1766,6 +1767,7 @@ namespace {
       NicOptions nic = cfg.nic;
       System::Get().Broadcast(root, sizeof(nic), &nic);
       if (nic.chunkBytes      != cfg.nic.chunkBytes)      ADD_ERROR("cfg.nic.chunkBytes");
+      if (nic.cqMaxPollEvent  != cfg.nic.cqMaxPollEvent)  ADD_ERROR("cfg.nic.cqMaxPollEvent");
       // nic.ibGidIndex  is permitted to be different across ranks
       // nic.ibPort      is permitted to be different across ranks
       if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
@@ -1875,6 +1877,9 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
     if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
       errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    }
+    if (cfg.nic.cqMaxPollEvent <= 0) {
+      errors.push_back({ERR_FATAL, "[nic.cqMaxPollEvent] must be positive"});
     }
 #endif
 
@@ -3917,15 +3922,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
 #ifdef NIC_EXEC_ENABLED
-  static ErrResult PollNicCompletions(ibv_cq* cq, size_t numCompletions, int transferIdx)
+  static ErrResult PollNicCompletions(ibv_cq* cq, size_t numCompletions, int transferIdx, int cqMaxPollEvent)
   {
-    constexpr int MaxPollBatch = 32;
-    ibv_wc wc[MaxPollBatch];
+    int pollBatch = std::max(1, cqMaxPollEvent);
+    std::vector<ibv_wc> wc((size_t)pollBatch);
     size_t completed = 0;
 
     while (completed < numCompletions) {
-      int pollCount = (int)std::min(numCompletions - completed, (size_t)MaxPollBatch);
-      int nc = ibv_poll_cq(cq, pollCount, wc);
+      int pollCount = (int)std::min(numCompletions - completed, (size_t)pollBatch);
+      int nc = ibv_poll_cq(cq, pollCount, wc.data());
       if (nc < 0)
         return {ERR_FATAL, "Transfer %d: Received negative work completion", transferIdx};
       if (nc == 0)
@@ -3977,13 +3982,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           outstandingCompletions++;
 
         if (outstandingCompletions >= maxOutstandingCompletions) {
-          ERR_CHECK(PollNicCompletions(completionQueue, 1, rss.transferIdx));
+          ERR_CHECK(PollNicCompletions(completionQueue, 1, rss.transferIdx, cfg.nic.cqMaxPollEvent));
           outstandingCompletions--;
         }
       }
 
       if (outstandingCompletions)
-        ERR_CHECK(PollNicCompletions(completionQueue, outstandingCompletions, rss.transferIdx));
+        ERR_CHECK(PollNicCompletions(completionQueue, outstandingCompletions, rss.transferIdx, cfg.nic.cqMaxPollEvent));
     }
 
     return ERR_NONE;
