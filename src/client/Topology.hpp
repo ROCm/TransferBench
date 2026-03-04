@@ -215,17 +215,16 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     Utils::GroupKey const& key    = group.first;
     std::vector<int> const& hosts = group.second;
 
-    uint64_t                 ppodId        = std::get<0>(key);
-    int64_t                  vpodId        = std::get<1>(key);
-    std::vector<std::string> cpuNames      = std::get<2>(key);
-    std::vector<int>         cpuSubExecs   = std::get<3>(key);
-    std::vector<std::string> gpuNames      = std::get<4>(key);
-    std::vector<int>         gpuSubExecs   = std::get<5>(key);
-    std::vector<int>         gpuClosestCpu = std::get<6>(key);
-    std::vector<std::string> nicNames      = std::get<7>(key);
-    std::vector<int>         nicClosestCpu = std::get<8>(key);
-    std::vector<int>         nicClosestGpu = std::get<9>(key);
-    std::vector<int>         nicIsActive   = std::get<10>(key);
+    int64_t                  podId         = std::get<0>(key);
+    std::vector<std::string> cpuNames      = std::get<1>(key);
+    std::vector<int>         cpuSubExecs   = std::get<2>(key);
+    std::vector<std::string> gpuNames      = std::get<3>(key);
+    std::vector<int>         gpuSubExecs   = std::get<4>(key);
+    std::vector<int>         gpuClosestCpu = std::get<5>(key);
+    std::vector<std::string> nicNames      = std::get<6>(key);
+    std::vector<int>         nicClosestCpu = std::get<7>(key);
+    std::vector<int>         nicClosestGpu = std::get<8>(key);
+    std::vector<int>         nicIsActive   = std::get<9>(key);
 
     int numRanks = hosts.size();
     int numCpus  = cpuNames.size();
@@ -270,8 +269,8 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     }
 
     // Fill in PPOD and VPOD
-    table.Set(1, 2, " %lu ", ppodId);
-    table.Set(1, 3, " %ld ", vpodId);
+    table.Set(1, 2, " %ld ", podId);
+    table.Set(1, 3, " %ld ", podId);
 
     // Fill in Executor information
     int rowIdx = 1;

@@ -551,16 +551,17 @@ namespace TransferBench
   std::string GetHostname(int targetRank = -1);
 
   /**
-   * @param[in] targetRank  Rank to query (-1 for local rank)
-   * @returns Gets the physical pod identifier for the target rank
+   * @param[in] targetRank Rank to query (-1 for local rank)
+   * @returns Gets the unique pod identifier for the target rank based on its physical and virtual pod
    **/
-  uint64_t GetPpodId(int targetRank = -1);
+  int64_t GetPodIdx(int targetRank = -1);
 
   /**
-   * @param[in] targetRank  Rank to query (-1 for local rank)
-   * @returns Gets the virtual pod identifier for the target rank
+   * @param[in] targetRank  Remote rank to query
+   * @param[in] sourceRank  Base rank to query (-1 for local rank)
+   * @returns Whether source and target ranks belong to the same pod
    **/
-  int64_t GetVpodId(int targetRank = -1);
+  bool IsSamePod(int targetRank, int sourceRank = -1);
 
   /**
    * @param[in] exeDevice       The specific Executor to query
@@ -967,8 +968,8 @@ namespace {
     void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1) const;
 
     std::string GetHostname(int targetRank) const;
-    uint64_t GetPpodId(int targetRank) const;
-    int64_t  GetVpodId(int targetRank) const;
+    int64_t  GetPodIdx(int targetRank) const;
+    bool IsSamePod(int targetRank, int sourceRank) const;
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
 
@@ -1020,8 +1021,8 @@ namespace {
     struct RankTopology
     {
       char hostname[33];
-      uint64_t ppodId;
-      int64_t  vpodId;
+      char    ppodId[16];
+      int64_t vpodId;
 
       std::map<ExeType,            int>         numExecutors;
       std::map<pair<ExeType, int>, int>         numExecutorSubIndices;
@@ -1038,7 +1039,7 @@ namespace {
 
     void SetupSocketCommunicator();
     void SetupMpiCommunicator();
-    void CollectPodMembership(uint64_t& ppodId, int64_t& vpodId);
+    void CollectPodMembership(char* ppodId, int64_t& vpodId);
     void GetRankTopology(RankTopology& topo);
     void CollectTopology();
     std::string GetCpuName() const;
@@ -2366,31 +2367,21 @@ namespace {
       // Check for multi-node support
       if (IsPodTransfer(t)) {
         // In order to support pod communication, the participanting ranks need to be members of the same pod
-        std::pair<uint64_t, int64_t> podId = std::make_pair(GetPpodId(t.exeDevice.exeRank),
-                                                            GetVpodId(t.exeDevice.exeRank));
+        int exeRank = t.exeDevice.exeRank;
+        bool samePod = true;
 
-        bool samePod = (podId.second != -1); // vpodId == -1 indicates not part of pod
-        if (samePod) {
-          for (auto const& src : t.srcs) {
-            std::pair<uint64_t, int64_t> srcPodId = std::make_pair(GetPpodId(src.memRank),
-                                                                   GetVpodId(src.memRank));
-            if (srcPodId != podId) {
-              samePod = false;
-              break;
-            }
-          }
+        for (auto const& src : t.srcs) {
+          if (!(samePod = IsSamePod(src.memRank, exeRank)))
+            break;
         }
         if (samePod) {
           for (auto const& dst : t.dsts) {
-            std::pair<uint64_t, int64_t> dstPodId = std::make_pair(GetPpodId(dst.memRank),
-                                                                   GetVpodId(dst.memRank));
-            if (dstPodId != podId) {
-              samePod = false;
+            if (!(samePod = IsSamePod(dst.memRank, exeRank)))
               break;
-            }
           }
         }
-        if (!samePod) {
+
+        if (!samePod || IsCpuExeType(t.exeDevice.exeType)) {
           errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
               i, t.exeDevice.exeRank});
           break;
@@ -6070,15 +6061,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return "Unknown CPU";
   }
 
-  void System::CollectPodMembership(uint64_t& ppodId, int64_t& vpodId)
+  void System::CollectPodMembership(char* ppodId, int64_t& vpodId)
   {
-    ppodId = 0;
+    memset(ppodId, 0, 16);
     vpodId = -1;
 
     // FORCE_SINGLE_POD skips any required queries to AMDSMI
     char* forceSinglePod = getenv("FORCE_SINGLE_POD");
     if (forceSinglePod) {
-      ppodId = 0;
       vpodId = 0;
       return;
     }
@@ -6111,7 +6101,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (err == AMDSMI_STATUS_SUCCESS) {
           // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
           //       vpodId == -1 to represent no pod present
-          ppodId = fabricInfo.info.v1.ppod_id;
+          // TODO: adjust pointer when the struct changes
+          memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
           vpodId = fabricInfo.info.v1.vpod_id;
         } else if (verbose) {
           const char *errString = NULL;
@@ -6495,7 +6486,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::SendRankTopo(int peerRank, RankTopology const& topo) const
   {
     SendData(peerRank, sizeof(topo.hostname), topo.hostname);
-    SendData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
+    SendData(peerRank, sizeof(topo.ppodId), topo.ppodId);
     SendData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     SendMap(peerRank, topo.numExecutors);
     SendMap(peerRank, topo.numExecutorSubIndices);
@@ -6511,7 +6502,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::RecvRankTopo(int peerRank, RankTopology& topo) const
   {
     RecvData(peerRank, sizeof(topo.hostname), topo.hostname);
-    RecvData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
+    RecvData(peerRank, sizeof(topo.ppodId), topo.ppodId);
     RecvData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     RecvMap(peerRank, topo.numExecutors);
     RecvMap(peerRank, topo.numExecutorSubIndices);
@@ -6805,16 +6796,47 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return rankInfo[targetRank].hostname;
   }
 
-  uint64_t System::GetPpodId(int targetRank) const
+  int64_t System::GetPodIdx(int targetRank) const
   {
+    using PodKey = std::pair<std::array<char, 16>, int64_t>;
+
+    static std::map<PodKey, int64_t> podIdxMap;
+    static bool initialized = false;
+
+    if (!initialized) {
+      int64_t nextIdx = 0;
+      for (int r = 0; r < numRanks; r++) {
+        PodKey key;
+        memcpy(key.first.data(), rankInfo[r].ppodId, 16);
+        key.second = rankInfo[r].vpodId;
+
+        // vpodIdx == -1 means not part of any pod; assign -1 directly
+        if (key.second == -1) continue;
+
+        if (podIdxMap.find(key) == podIdxMap.end()) {
+          podIdxMap[key] = nextIdx++;
+        }
+      }
+      initialized = true;
+    }
+
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
-    return rankInfo[targetRank].ppodId;
+
+    PodKey key;
+    memcpy(key.first.data(), rankInfo[targetRank].ppodId, 16);
+    key.second = rankInfo[targetRank].vpodId;
+
+    if (key.second == -1) return -1;
+
+    return podIdxMap[key];
   }
 
-  int64_t System::GetVpodId(int targetRank) const
+  bool System::IsSamePod(int targetRank, int sourceRank) const
   {
-    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
-    return rankInfo[targetRank].vpodId;
+    if (sourceRank < 0 || sourceRank >= numRanks) sourceRank = rank;
+    if (GetPodIdx(sourceRank) == -1 || GetPodIdx(targetRank) == -1)
+      return false;
+    return GetPodIdx(sourceRank) == GetPodIdx(targetRank);
   }
 
   std::string System::GetExecutorName(ExeDevice exeDevice) const
@@ -6923,14 +6945,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return System::Get().GetHostname(targetRank);
   }
 
-  uint64_t GetPpodId(int targetRank)
+  int64_t GetPodIdx(int targetRank)
   {
-    return System::Get().GetPpodId(targetRank);
+    return System::Get().GetPodIdx(targetRank);
   }
 
-  int64_t GetVpodId(int targetRank)
+  bool IsSamePod(int targetRank, int sourceRank)
   {
-    return System::Get().GetVpodId(targetRank);
+    return System::Get().IsSamePod(targetRank, sourceRank);
   }
 
   std::string GetExecutorName(ExeDevice exeDevice)
