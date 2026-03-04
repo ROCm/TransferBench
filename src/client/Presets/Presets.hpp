@@ -35,6 +35,8 @@ THE SOFTWARE.
 #include "NicPeerToPeer.hpp"
 #include "OneToAll.hpp"
 #include "PeerToPeer.hpp"
+#include "PodAllToAll.hpp"
+#include "PodPeerToPeer.hpp"
 #include "Scaling.hpp"
 #include "Schmoo.hpp"
 #include "Sweep.hpp"
@@ -53,6 +55,8 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
+  {"poda2a",      {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},
+  {"podp2p",      {PodPeerToPeerPreset, "Peer-to-peer transfers test among ranks within a pod"}},
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
   {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
