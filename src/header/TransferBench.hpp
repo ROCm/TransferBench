@@ -524,7 +524,7 @@ namespace TransferBench
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
    */
-  void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1);
+  void GetClosestGpusToNic(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
 
   /**
    * @returns 0-indexed rank for this process
@@ -3039,7 +3039,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
       // Create SRC completion queues
-      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
+      int srcCQSize = std::max(cfg.nic.queueSize, static_cast<int>(rss.qpCount));
+      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, srcCQSize, NULL, NULL, 0);
       // Get SRC port attributes
       IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
@@ -3103,7 +3105,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
       // Create DST completion queues
-      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
+      int dstCQSize = std::max(cfg.nic.queueSize,static_cast<int>(rss.qpCount));
+      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, dstCQSize, NULL, NULL, 0);
       // Get DST port attributes
       IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
@@ -3973,12 +3977,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             auto& rss = exeInfo.resources[i];
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-            ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, 1, &wc);
+            // Use batch polling to drain multiple completions at once for better efficiency
+            constexpr int POLL_BATCH_SIZE = 32;
+            ibv_wc wc_array[POLL_BATCH_SIZE];
+            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, POLL_BATCH_SIZE, wc_array);
             if (nc > 0) {
-              receivedQPs[i]++;
-              if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc.status};
+              // Process all completions in the batch
+              for (int j = 0; j < nc; j++) {
+                if (wc_array[j].status != IBV_WC_SUCCESS) {
+                  return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
+                }
+                receivedQPs[i]++;
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
