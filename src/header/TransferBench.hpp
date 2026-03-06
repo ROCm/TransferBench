@@ -62,8 +62,11 @@ THE SOFTWARE.
 #endif
 
 #if defined(__NVCC__)
+#include <cuda.h>
 #include <cuda_runtime.h>
+#ifdef NVML_ENABLED
 #include <nvml.h>
+#endif
 #else
 #include "hip/hip_ext.h"
 #include "hip/hip_runtime.h"
@@ -319,6 +322,7 @@ namespace TransferBench
     ErrResult() = default;
 #if defined(__NVCC__)
     ErrResult(cudaError_t  err);
+    ErrResult(CUresult     err);
 #else
     ErrResult(hipError_t   err);
     ErrResult(hsa_status_t err);
@@ -586,13 +590,14 @@ namespace TransferBench
    */
   ErrResult ParseTransfers(std::string str,
                            std::vector<Transfer>& transfers);
-};
+}
 //==========================================================================================
 // End of TransferBench API
 //==========================================================================================
 
 // Redefinitions for CUDA compatibility
 //==========================================================================================
+//TODO: guard
 #if defined(__NVCC__)
 
   // ROCm specific
@@ -604,6 +609,10 @@ namespace TransferBench
   #define hipError_t                                         cudaError_t
   #define hipEvent_t                                         cudaEvent_t
   #define hipStream_t                                        cudaStream_t
+  #define hipMemAllocationProp                               CUmemAllocationProp
+  #define hipMemGenericAllocationHandle_t                    CUmemGenericAllocationHandle
+  #define hipMemAccessDesc                                   CUmemAccessDesc
+  #define hipMemFabricHandle_t                               CUmemFabricHandle
 
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
@@ -615,6 +624,13 @@ namespace TransferBench
   #define hipMemcpyDeviceToHost                              cudaMemcpyDeviceToHost
   #define hipMemcpyHostToDevice                              cudaMemcpyHostToDevice
   #define hipSuccess                                         cudaSuccess
+  #define hipMemLocationTypeDevice                           CU_MEM_LOCATION_TYPE_DEVICE
+  #define hipMemAllocationTypePinned                         CU_MEM_ALLOCATION_TYPE_PINNED
+// Are these two equivalent? Also MANAGED is not supported in 12.8
+  #define hipMemAllocationTypeUncached                       CU_MEM_ALLOCATION_TYPE_MANAGED
+  #define hipMemHandleTypeFabric                             CU_MEM_HANDLE_TYPE_FABRIC
+  #define hipMemAllocationGranularityRecommended             CU_MEM_ALLOC_GRANULARITY_RECOMMENDED
+  #define hipMemAccessFlagsProtReadWrite                     CU_MEM_ACCESS_FLAGS_PROT_READWRITE
 
   // Functions
   #define hipDeviceCanAccessPeer                             cudaDeviceCanAccessPeer
@@ -643,6 +659,18 @@ namespace TransferBench
   #define hipStreamCreate                                    cudaStreamCreate
   #define hipStreamDestroy                                   cudaStreamDestroy
   #define hipStreamSynchronize                               cudaStreamSynchronize
+  #define hipMemGetAllocationGranularity                     cuMemGetAllocationGranularity
+  #define hipMemCreate                                       cuMemCreate
+  #define hipMemAddressReserve                               cuMemAddressReserve
+  #define hipMemMap                                          cuMemMap
+  #define hipMemSetAccess                                    cuMemSetAccess
+  #define hipMemUnmap                                        cuMemUnmap
+  #define hipMemRelease                                      cuMemRelease
+  #define hipMemAddressFree                                  cuMemAddressFree
+  #define hipMemExportToShareableHandle                      cuMemExportToShareableHandle
+  #define hipMemImportFromShareableHandle                    cuMemImportFromShareableHandle
+
+  using gpu_device_ptr = CUdeviceptr;
 
   // Define float2 addition operator for NVIDIA platform
   __device__ inline float2& operator +=(float2& a, const float2& b)
@@ -661,6 +689,8 @@ namespace TransferBench
     a.w += b.w;
     return a;
   }
+#else
+  using gpu_device_ptr = void*;
 #endif
 
 // Helper macro functions
@@ -1017,6 +1047,9 @@ namespace {
     std::vector<int> sockets;                 ///< Master list of sockets
     int              listenSocket;            ///< Master listener socket
 
+    // UALoE related
+    bool             fabricSupport = false;   ///< Whether Pod Communication is supported
+
     // Topology related
     struct RankTopology
     {
@@ -1366,25 +1399,6 @@ namespace {
   }
 
 #ifdef POD_COMM_ENABLED
-  static ErrResult GetMemLocation(MemDevice const& memDevice, hipMemLocation& location)
-  {
-    if (IsCpuMemType(memDevice.memType)) {
-      location.type = hipMemLocationTypeHostNuma;
-    } else if (IsGpuMemType(memDevice.memType) && memDevice.memType != MEM_MANAGED) {
-      location.type = hipMemLocationTypeDevice;
-    } else {
-      return {ERR_FATAL, "Unsupported memory location"};
-    }
-
-    // Determine location id
-    if (memDevice.memType == MEM_CPU_CLOSEST) {
-      location.id = GetClosestCpuNumaToGpu(memDevice.memIndex);
-    } else {
-      location.id = memDevice.memIndex;
-    }
-    return ERR_NONE;
-  }
-
   static ErrResult GetMemAllocationProp(MemDevice const& memDevice, hipMemAllocationProp& prop)
   {
 
@@ -1398,7 +1412,10 @@ namespace {
     }
 
     prop.requestedHandleTypes = hipMemHandleTypeFabric;
-    ERR_CHECK(GetMemLocation(memDevice, prop.location));
+//  at this point shouldn't have any memtype other than device
+//    ERR_CHECK(GetMemLocation(memDevice, prop.location));
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = memDevice.memIndex;
     return ERR_NONE;
   }
 #endif
@@ -1423,7 +1440,7 @@ namespace {
     if (memHandle != NULL) {
 #ifdef POD_COMM_ENABLED
       // Prepare HIP memory allocation properties structure
-      hipMemAllocationProp prop;
+      hipMemAllocationProp prop = {};
       ERR_CHECK(GetMemAllocationProp(memDevice, prop));
 
       // Determine recommended allocation granularity
@@ -1437,18 +1454,20 @@ namespace {
       ERR_CHECK(hipMemCreate(memHandle, roundedUpBytes, &prop, 0));
 
       // Reserve a virtual address range for the memory allocation
-      ERR_CHECK(hipMemAddressReserve((void**)memPtr, roundedUpBytes, 0, 0, 0));
+      ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, roundedUpBytes, 0, 0, 0));
 
       // Map the allocation handle to the reserved address range
-      ERR_CHECK(hipMemMap(*memPtr, roundedUpBytes, 0, *memHandle, 0));
+      ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, roundedUpBytes, 0, *memHandle, 0));
 
       // Specify memory access descriptor to enable local read/write
       hipMemAccessDesc desc;
-      ERR_CHECK(GetMemLocation(memDevice, desc.location));
+//      ERR_CHECK(GetMemLocation(memDevice, desc.location));
+      desc.location.type = hipMemLocationTypeDevice;
+      desc.location.id = memDevice.memIndex;
       desc.flags = hipMemAccessFlagsProtReadWrite;
 
       // Set access flags for virtual address range
-      ERR_CHECK(hipMemSetAccess(*memPtr, roundedUpBytes, &desc, 1));
+      ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, roundedUpBytes, &desc, 1));
 
       // Clear the memory
       if (IsCpuMemType(memType)) {
@@ -1576,11 +1595,11 @@ namespace {
     } else {
 #ifdef POD_COMM_ENABLED
       // Unmap the backing memory of the given virtual address
-      ERR_CHECK(hipMemUnmap(memPtr, bytes));
+      ERR_CHECK(hipMemUnmap((gpu_device_ptr)memPtr, bytes));
       // Release the backing memory via its handle
       ERR_CHECK(hipMemRelease(*memHandle));
       // Free virtual address range reservation
-      ERR_CHECK(hipMemAddressFree(memPtr, bytes));
+      ERR_CHECK(hipMemAddressFree((gpu_device_ptr)memPtr, bytes));
 #else
       return {ERR_FATAL, "Unable to deallocate sharable memory if not compiled with pod communication support"};
 #endif
@@ -2859,7 +2878,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         std::string const& description,
                                         PCIeNode&          root)
   {
-    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
+    std::string lowerAddress = pcieAddress;
+    std::transform(lowerAddress.begin(), lowerAddress.end(), lowerAddress.begin(), ::tolower);
+
+    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + lowerAddress;
     std::string canonicalPath = std::filesystem::canonical(devicePath).string();
 
     if (!std::filesystem::exists(devicePath)) {
@@ -3767,14 +3789,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // exe rank imports the fabric handle
       if (exeDevice.exeRank == localRank) {
         ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
-        ERR_CHECK(hipMemAddressReserve((void**)memPtr, actualBytes, 0, 0, 0));
-        ERR_CHECK(hipMemMap(*memPtr, actualBytes, 0, *memHandle, 0));
+        ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, actualBytes, 0, 0, 0));
+        ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, actualBytes, 0, *memHandle, 0));
 
         // Specify memory access descriptor to enable local read/write
         hipMemAccessDesc desc;
         desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
         desc.flags = hipMemAccessFlagsProtReadWrite;
-        ERR_CHECK(hipMemSetAccess(*memPtr, actualBytes, &desc, 1));
+        ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, actualBytes, &desc, 1));
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
@@ -4031,6 +4053,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
+        } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
+#ifdef POD_COMM_ENABLED
+          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
+          ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
+          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
+#endif
         }
       }
 
@@ -4040,6 +4068,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
+        } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
+#ifdef POD_COMM_ENABLED
+          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
+          ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
+          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
+#endif
         }
       }
 
@@ -4612,7 +4646,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
-  #undef GPU_KERNEL_SE_TYPE_DECL
 
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
@@ -4898,6 +4931,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+#if defined(__NVCC__)
+  static bool MnnvlCheck() {
+    int flag = 0;
+#ifdef POD_COMM_ENABLED
+    CUresult err = cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, 0);
+    if (err || !flag) return false;
+    err = cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, 0);
+#endif
+    if (!flag) return false;
+    return true;
+  }
+#endif
+
 } // End of anonymous namespace
 //========================================================================================
 /// @endcond
@@ -4915,7 +4961,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#if !defined(__NVCC__)
+#if defined(__NVCC__)
+  ErrResult::ErrResult(CUresult err)
+  {
+    if (err == CUDA_SUCCESS) {
+      this->errType = ERR_NONE;
+      this->errMsg  = "";
+    } else {
+      const char *errString = NULL, *errName = NULL;
+      cuGetErrorName(err, &errName);
+      cuGetErrorString(err, &errString);
+      this->errType = ERR_FATAL;
+      this->errMsg  = std::string("CUDA Driver Error: ") + errName
+                      + " (" + errString + ")";
+    }
+  }
+#else
   ErrResult::ErrResult(hsa_status_t err)
   {
     if (err == HSA_STATUS_SUCCESS) {
@@ -5658,11 +5719,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (pause);
     }
 
-#if AMD_SMI_ENABLED
+// TODO: Add checks here
+#ifdef AMD_SMI_ENABLED
     if (verbose) {
       System::Get().Log("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
     }
     amdsmi_init(AMDSMI_INIT_AMD_APUS);
+#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+    if (verbose) {
+      System::Get().Log("[INFO] Initializing NVIDIA Management Library (NVML)\n");
+    }
+    nvmlInit_v2();
 #endif
 
     // Priority 1: Socket communicator
@@ -5715,6 +5782,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 #ifdef AMD_SMI_ENABLED
     amdsmi_shut_down();
+#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+    nvmlShutdown();
 #endif
   }
 
@@ -6079,11 +6148,36 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       return;
     }
 
+    // Check fabric support
 #if defined(__NVCC__)
-    // MNNVL support unimplemented at this time
+#ifdef NVML_ENABLED
+    int flag;
+    char busId[] = "00000000:00:00.0";
+    if (cudaDeviceGetPCIBusId(busId, sizeof(busId), 0)) return;
 
-    System::Get().Log("[ERROR] MNNVL support is currently unimplemented\n");
-    exit(1);
+    nvmlGpuFabricInfoV_t fabricInfo;
+    fabricInfo.state = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED;
+    nvmlDevice_t nvmlDev;
+    nvmlReturn_t err = nvmlDeviceGetHandleByPciBusId_v2(busId, &nvmlDev);
+    if (err != NVML_SUCCESS) {
+      if (verbose) {
+        System::Get().Log("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
+                           busId, nvmlErrorString(err));
+      }
+      return;
+    }
+    fabricInfo.version = nvmlGpuFabricInfo_v2;
+
+    err = nvmlDeviceGetGpuFabricInfoV(nvmlDev, &fabricInfo);
+    if (err != NVML_SUCCESS || fabricInfo.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
+      System::Get().Log("[WARN] MNNVL not supported\n");
+    } else {
+      if (fabricSupport = MnnvlCheck()) {
+        vpodId = fabricInfo.cliqueId;
+        memcpy(&ppodId, fabricInfo.clusterUuid, sizeof(ppodId));
+      }
+    }
+#endif
 #else
 #ifdef AMD_SMI_ENABLED
     int numGpus = 0;
@@ -6110,6 +6204,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           // TODO: adjust pointer when the struct changes
           memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
           vpodId = fabricInfo.info.v1.vpod_id;
+          fabricSupport = true;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
@@ -6983,10 +7078,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipError_t
 #undef hipEvent_t
 #undef hipStream_t
+#undef hipMemAllocationProp
+#undef hipMemGenericAllocationHandle_t
+#undef hipMemAccessDesc
+#undef hipMemFabricHandle_t
 
 // Enumerations
 #undef hipDeviceAttributeClockRate
-#undef hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #undef hipDeviceAttributeMultiprocessorCount
 #undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
@@ -6995,6 +7093,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipMemcpyDeviceToHost
 #undef hipMemcpyHostToDevice
 #undef hipSuccess
+#undef hipMemLocationTypeDevice
+#undef hipMemAllocationTypePinned
+#undef hipMemAllocationTypeUncached
+#undef hipMemHandleTypeFabric
+#undef hipMemAllocationGranularityRecommended
+#undef hipMemAccessFlagsProtReadWrite
 
 // Functions
 #undef hipDeviceCanAccessPeer
@@ -7023,6 +7127,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipStreamCreate
 #undef hipStreamDestroy
 #undef hipStreamSynchronize
+#undef hipMemGetAllocationGranularity
+#undef hipMemCreate
+#undef hipMemAddressReserve
+#undef hipMemMap
+#undef hipMemSetAccess
+#undef hipMemUnmap
+#undef hipMemRelease
+#undef hipMemAddressFree
+#undef hipMemExportToShareableHandle
+#undef hipMemImportFromShareableHandle
 #endif
 
 // Kernel macros
