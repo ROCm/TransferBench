@@ -1475,6 +1475,7 @@ namespace {
         // Check that the allocated pages are actually on the correct NUMA node
         ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
       } else if (IsGpuMemType(memType)) {
+        ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
         ERR_CHECK(hipDeviceSynchronize());
       }
@@ -3766,37 +3767,39 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
-  static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t const actualBytes,
+                                                                                          // const?
+  static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t* pActualBytes,
                                   float** memPtr, hipMemGenericAllocationHandle_t* memHandle)
   {
     // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
     // NOTE: This will be overwritten on executor rank if pod communication is required
     System::Get().Broadcast(memDevice.memRank, sizeof(*memPtr), memPtr);
 
+    // Broadcast actualBytes from owning rank so importing rank gets the correct (rounded-up) size
+    System::Get().Broadcast(memDevice.memRank, sizeof(*pActualBytes), pActualBytes);
+
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
-      int const localRank = GetRank();
-
       // mem rank exports to sharable fabric handle
       hipMemFabricHandle_t fabricHandle;
-      if (memDevice.memRank == localRank) {
+      if (memDevice.memRank == GetRank()) {
         ERR_CHECK(hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0));
       }
 
       System::Get().Broadcast(memDevice.memRank, sizeof(hipMemFabricHandle_t), &fabricHandle);
 
       // exe rank imports the fabric handle
-      if (exeDevice.exeRank == localRank) {
+      if (exeDevice.exeRank == GetRank()) {
         ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
-        ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, actualBytes, 0, 0, 0));
-        ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, actualBytes, 0, *memHandle, 0));
+        ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0));
+        ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0));
 
         // Specify memory access descriptor to enable local read/write
         hipMemAccessDesc desc;
         desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
         desc.flags = hipMemAccessFlagsProtReadWrite;
-        ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, actualBytes, &desc, 1));
+        ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1));
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
@@ -3854,7 +3857,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Exchange memory pointer across ranks
-        ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, rss.srcActualBytes[iSrc],
+        ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, &rss.srcActualBytes[iSrc],
                                  &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
       }
 
@@ -3882,7 +3885,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Exchange memory pointer across ranks
-        ERR_CHECK(ExchangeMemory(dstMemDevice, exeDevice, t.numBytes + cfg.data.byteOffset,
+        ERR_CHECK(ExchangeMemory(dstMemDevice, exeDevice, &rss.dstActualBytes[iDst],
                                  &rss.dstMem[iDst], &rss.dstMemHandle[iDst]));
       }
 
