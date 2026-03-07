@@ -3970,7 +3970,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         bool const signalChunk = isLastChunk || (chunksSinceSignal + 1 >= signalInterval);
 
         ibv_send_wr& wr = rss.sendWorkRequests[qpIndex][chunkIdx];
-        wr.send_flags = signalChunk ? IBV_SEND_SIGNALED : 0;
+        wr.send_flags &= ~IBV_SEND_SIGNALED;
+        if (signalChunk) wr.send_flags |= IBV_SEND_SIGNALED;
 
         int error = ibv_post_send(queuePairs[qpIndex], &wr, &badWorkReq);
         if (error)
