@@ -837,7 +837,7 @@ namespace {
      * - In MPI mode - Rank 0 only
      * - In socket mode - All ranks unless TB_SINGLE_LOG=1
      */
-    void Log(const char* format, ...);
+    void Log(const char* format, ...) const;
 
     /**
      * Helper function that logs Transfers being executed to a config file
@@ -5731,7 +5731,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Socket communicator requires rank / numRanks / masterAddr
     if (!rankStr || !numRanksStr || !masterAddrStr) {
       if (verbose) {
-        System::Get().Log("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
+        Log("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
       }
       return;
     }
@@ -5742,7 +5742,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     masterPort = masterPortStr ? atoi(masterPortStr) : 29500;
 
     if (rank < 0 || rank >= numRanks) {
-      System::Get().Log("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
+      Log("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
       exit(1);
     }
 
@@ -5754,7 +5754,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Create listening socket
       listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
       if (listenSocket == -1) {
-        System::Get().Log("[ERROR] Unable to create listener socket\n");
+        Log("[ERROR] Unable to create listener socket\n");
         exit(1);
       }
 
@@ -5769,16 +5769,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       serverAddr.sin_port        = htons(masterPort);
 
       if (bind(listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
-        System::Get().Log("[ERROR] Failed to bind listen socket\n");
+        Log("[ERROR] Failed to bind listen socket\n");
         exit(1);
       }
 
       if (listen(listenSocket, numRanks) == -1) {
-        System::Get().Log("[ERROR] Failed to listen on socket\n");
+        Log("[ERROR] Failed to listen on socket\n");
         exit(1);
       }
       // Accept connections from other ranks
-      System::Get().Log("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
+      Log("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
                         numRanks-1, masterAddr.c_str(), masterPort);
 
       for (int i = 1; i < numRanks; i++) {
@@ -5787,7 +5787,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         auto clientSocket = accept(listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
         if (clientSocket == -1) {
-          System::Get().Log("[ERROR] Failed to accept connection from rank %d\n", i);
+          Log("[ERROR] Failed to accept connection from rank %d\n", i);
           exit(1);
         }
 
@@ -5797,11 +5797,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         if (clientRank < 0 || clientRank >= numRanks) {
           close(clientSocket);
-          System::Get().Log("[ERROR] Invalid rank received: %d\n", clientRank);
+          Log("[ERROR] Invalid rank received: %d\n", clientRank);
           exit(1);
         }
         if (verbose) {
-          System::Get().Log("[INFO] Rank 0 accepted connection from rank %d\n", clientRank);
+          Log("[INFO] Rank 0 accepted connection from rank %d\n", clientRank);
         }
         sockets[clientRank] = clientSocket;
       }
@@ -5809,7 +5809,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // All other ranks connect to rank 0
       int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
       if (sock == -1) {
-        System::Get().Log("[ERROR] Failed to create socket\n");
+        Log("[ERROR] Failed to create socket\n");
         exit(1);
       }
 
@@ -5818,20 +5818,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       serverAddr.sin_family = AF_INET;
       serverAddr.sin_port = htons(masterPort);
       if (inet_pton(AF_INET, masterAddr.c_str(), &serverAddr.sin_addr) <= 0) {
-        System::Get().Log("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
+        Log("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
         exit(1);
       }
 
       // Retry connection with backoff
       if (verbose)
-        System::Get().Log("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
+        Log("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
       int maxRetries = 50;
       for (int retry = 0; retry < maxRetries; retry++) {
         if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
           break;
         }
         if (retry == maxRetries - 1) {
-          System::Get().Log("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
+          Log("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
         }
         sleep(1);
       }
@@ -5859,7 +5859,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     MPI_Comm_size(comm, &numRanks);
     if (numRanks > 1) {
       if (verbose) {
-        System::Get().Log("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
+        Log("[INFO] Enabling MPI communicator (%d ranks found)\n", numRanks);
       }
       commMode = COMM_MPI;
     } else if (mpiInit) {
@@ -5869,7 +5869,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
   }
 
-  void System::Log(const char* format, ...) {
+  void System::Log(const char* format, ...) const
+  {
     if (rankDoesOutput) {
       va_list args;
       va_start(args, format);
@@ -5961,7 +5962,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
     if (commMode == COMM_SOCKET) {
       if (rank != 0 && dstRank != 0) {
-        System::Get().Log("[ERROR] Socket communicator is limited to sending from/to rank 0\n");
+        Log("[ERROR] Socket communicator is limited to sending from/to rank 0\n");
         exit(1);
       }
       auto sock = sockets[dstRank];
@@ -5971,7 +5972,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (totalSent < numBytes) {
         auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, 0);
         if (sent == -1) {
-          System::Get().Log("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
+          Log("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
           exit(1);
         }
         totalSent += sent;
@@ -5990,7 +5991,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
     if (commMode == COMM_SOCKET) {
       if (rank != 0 && srcRank != 0) {
-        System::Get().Log("[ERROR] Socket communicator is limited to receiving from/at rank 0\n");
+        Log("[ERROR] Socket communicator is limited to receiving from/at rank 0\n");
         exit(1);
       }
 
@@ -5999,7 +6000,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (totalRecv < numBytes) {
         auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);
         if (recvd == -1 || recvd == 0) {
-          System::Get().Log("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
+          Log("[ERROR] Recv failed (rank %d from rank %d)\n", rank, srcRank);
           perror("recv");
           exit(1);
         }
@@ -6016,7 +6017,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (commMode == COMM_MPI) {
       int err = MPI_Bcast(data, numBytes, MPI_CHAR, root, comm);
       if (err != MPI_SUCCESS) {
-        System::Get().Log("[ERROR] MPI_Bcast failed with error code %d\n", err);
+        Log("[ERROR] MPI_Bcast failed with error code %d\n", err);
       }
       return;
     }
@@ -6086,7 +6087,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #if defined(__NVCC__)
     // MNNVL support unimplemented at this time
 
-    System::Get().Log("[ERROR] MNNVL support is currently unimplemented\n");
+    Log("[ERROR] MNNVL support is currently unimplemented\n");
     exit(1);
 #else
 #ifdef AMD_SMI_ENABLED
@@ -6102,7 +6103,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
-          System::Get().Log("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
+          Log("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
                             pciBusId, errString);
         }
       } else {
@@ -6116,7 +6117,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
-          System::Get().Log("[WARN] Unable to get fabric info from AMD SMI [%s]\n", errString);
+          Log("[WARN] Unable to get fabric info from AMD SMI [%s]\n", errString);
         }
       }
     }
@@ -6160,9 +6161,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
-        System::Get().Log("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores (%s)\n", rank, exeIndex, numCpus,
-                          topo.numSubExecutors[{EXE_CPU, exeIndex}],
-                          topo.executorName[{EXE_CPU, exeIndex}].c_str());
+        Log("[INFO] Rank %03d: CPU [%02d/%02d] %03d cores (%s)\n", rank, exeIndex, numCpus,
+            topo.numSubExecutors[{EXE_CPU, exeIndex}],
+            topo.executorName[{EXE_CPU, exeIndex}].c_str());
       }
     }
 
@@ -6233,7 +6234,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
       topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
       if (verbose) {
-        System::Get().Log("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
+        Log("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
       }
     }
 #endif
@@ -6279,7 +6280,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIndex);
       if (err != hipSuccess) {
 #ifdef VERBS_DEBUG
-        System::Get().Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
+        Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
 #endif
         continue;
       }
@@ -6298,7 +6299,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // to determine the closest NIC to GPU if the PCIe tree approach fails
       if (closestIdx < 0) {
 #ifdef VERBS_DEBUG
-        System::Get().Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+        Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
 #endif
         int minDistance = std::numeric_limits<int>::max();
         for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
@@ -6368,31 +6369,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        System::Get().Log("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
-                          topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
-                          topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
-                          topo.closestCpuNumaToGpu[exeIndex]);
+        Log("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
+            topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
+            topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
+            topo.closestCpuNumaToGpu[exeIndex]);
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
-          System::Get().Log(" none");
+          Log(" none");
         } else {
           for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
-            System::Get().Log(" %d", nicIndex);
+            Log(" %d", nicIndex);
           }
-          System::Get().Log("\n");
+          Log("\n");
         }
       }
 #ifdef NIC_EXEC_ENABLED
       for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-        System::Get().Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
+        Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
                           ibvDeviceList[nicIndex].name.c_str());
         if (topo.closestGpusToNic[nicIndex].size() == 0) {
-          System::Get().Log(" none");
+          Log(" none");
         } else {
           for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
-            System::Get().Log(" %d", gpuIndex);
+            Log(" %d", gpuIndex);
           }
         }
-        System::Get().Log("\n");
+        Log("\n");
       }
 #endif
     }
@@ -6712,7 +6713,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rankInfo[0] = localTopo;
       for (int peerRank = 1; peerRank < numRanks; peerRank++) {
         if (verbose) {
-          System::Get().Log("[INFO] Rank 0 receives topology from Rank %d\n", peerRank);
+          Log("[INFO] Rank 0 receives topology from Rank %d\n", peerRank);
         }
         RecvRankTopo(peerRank, rankInfo[peerRank]);
       }
@@ -6721,7 +6722,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (int peerRank = 1; peerRank < numRanks; peerRank++) {
         for (int i = 0; i < numRanks; i++) {
           if (verbose) {
-            System::Get().Log("[INFO] Rank 0 sends topology %d to Rank %d\n", i, peerRank);
+            Log("[INFO] Rank 0 sends topology %d to Rank %d\n", i, peerRank);
           }
           SendRankTopo(peerRank, rankInfo[i]);
         }
@@ -6729,14 +6730,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     } else {
       // Send local topology info back to root
       if (verbose) {
-        System::Get().Log("[INF0] Rank %d sends topology from Rank 0\n", rank);
+        Log("[INF0] Rank %d sends topology from Rank 0\n", rank);
       }
       SendRankTopo(0, localTopo);
 
       for (int i = 0; i < numRanks; i++) {
         RecvRankTopo(0, rankInfo[i]);
         if (verbose) {
-          System::Get().Log("[INF0] Rank %d receives topology %d from Rank 0\n", rank, i);
+          Log("[INF0] Rank %d receives topology %d from Rank 0\n", rank, i);
         }
       }
     }
