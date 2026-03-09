@@ -4832,10 +4832,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
 
-      // Use hipMemcpy
+      // Use DMA copy engine
       do {
+#if defined(__NVCC__)
+        ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[0],
+                                (CUdeviceptr)resources.srcMem[0],
+                                resources.numBytes, stream));
+#else
         ERR_CHECK(hipMemcpyAsync(resources.dstMem[0], resources.srcMem[0], resources.numBytes,
                                  hipMemcpyDefault, stream));
+#endif
       } while (++subIterations != cfg.general.numSubIterations);
 
       if (cfg.dma.useHipEvents)

@@ -130,6 +130,12 @@ int PodPeerToPeerPreset(EnvVars&           ev,
         rounds.push_back(std::move(pairs));
     }
 
+    // Build reverse map: (memRank, memIndex) -> device index
+    std::map<std::pair<int,int>, int> deviceLookup;
+    for (int i = 0; i < n; i++)
+      deviceLookup[{devices[i].memRank, devices[i].memIndex}] = i;
+    std::vector<double> avgBandwidth(n * n, 0.0);
+
     ExeType const gpuExeType = useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
     for (auto const& round : rounds) {
       std::vector<TransferBench::Transfer> transfers;
@@ -150,11 +156,15 @@ int PodPeerToPeerPreset(EnvVars&           ev,
           Utils::Print("%s\n", err.errMsg.c_str());
         return 1;
       }
+
+      // Collect per-transfer bandwidth into avgBandwidth
+      for (size_t k = 0; k < round.size(); k++) {
+        auto const& [src, dst] = round[k];
+        int i = deviceLookup[{src.memRank, src.memIndex}];
+        int j = deviceLookup[{dst.memRank, dst.memIndex}];
+        avgBandwidth[i * n + j] = results.tfrResults[k].avgBandwidthGbPerSec;
+      }
     }
-
-
-    // After pod loop: collect results into avgBandwidth indexed by srcIdx * n + dstIdx
-    // (TODO: fill avgBandwidth when processing results)
 
     int const podNumRanks = ranks.size();
     int const numRows = showFullMatrix ? 2 + n : 1 + n * n;
@@ -198,8 +208,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
         }
         table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
         for (int j = 0; j < n; j++) {
-          //table.Set(rowIdx, 2 + j, " %.2f ", avgBandwidth[i * n + j]);
-          table.Set(rowIdx, 2 + j, " N/A ");
+          table.Set(rowIdx, 2 + j, " %.2f ", avgBandwidth[i * n + j]);
         }
       }
     } else {
@@ -218,8 +227,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
           table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
           table.Set(rowIdx, 2, " Rank %02d ", devices[j].memRank);
           table.Set(rowIdx, 3, " GPU %02d ", devices[j].memIndex);
-          //table.Set(rowIdx, 4, " %.2f ", avgBandwidth[i * n + j]);
-          table.Set(rowIdx, 4, " N/A ");
+          table.Set(rowIdx, 4, " %.2f ", avgBandwidth[i * n + j]);
           rowIdx++;
         }
       }
