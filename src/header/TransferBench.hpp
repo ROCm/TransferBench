@@ -3828,7 +3828,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate source memory (on the correct rank)
-        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank);
+        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType));
         if (srcMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
                                    &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : NULL));
@@ -3856,7 +3856,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate destination memory (on the correct rank)
-        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank);
+        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType));
         if (dstMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
