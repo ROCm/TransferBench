@@ -62,7 +62,7 @@ int PodAllToAllPreset(EnvVars&           ev,
 
   // Collect env vars for this preset
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
-  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
 //int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
@@ -72,7 +72,7 @@ int PodAllToAllPreset(EnvVars&           ev,
   int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
-  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numDetectedGpus);
+  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numDetectedGpus);
 
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
@@ -149,8 +149,8 @@ int PodAllToAllPreset(EnvVars&           ev,
 //    return 1;
 //  }
 
-  if (groupSize % numGpus) {
-    Utils::Print("[ERROR] Group size %d cannot evenly divide %d GPUs.\n", groupSize, numGpus);
+  if (numRanks * numDetectedGpus % groupSize) {
+    Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n", groupSize, numRanks * numDetectedGpus, numRanks);
     return 1;
   }
 
@@ -307,282 +307,6 @@ int PodAllToAllPreset(EnvVars&           ev,
 
   // Only ranks that actually do output will compile results
   if (!Utils::RankDoesOutput()) return 0;
-/*
-{
-  // Prepare table of results
-  int numRows   = 2 + (numGpus + 1) * (1 + 2*numResults);
-  int numCols   = 1 + (numGpus + (numQueuePairs > 1 ? 1 : 0) + 2) * (numResults > 0 ? 2 : 1);
-  int precision = 2;
-  Utils::TableHelper table(numRows, numCols, precision);
-
-  // Header row
-  int rowIdx = 0, colIdx = 0;
-  table.DrawRowBorder(rowIdx);
-  table.DrawColBorder(colIdx);
-  table.Set(rowIdx, colIdx++, " SRC\\DST ");
-  for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-    if (numResults > 0 || gpuIdx == 0) {
-      table.DrawColBorder(colIdx);
-    }
-    table.Set(rowIdx, colIdx++, " GPU %02d ", gpuIdx);
-    if (numResults > 0) {
-      table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
-      table.Set(rowIdx, colIdx++, "(Rnk)");
-    }
-  }
-  table.DrawColBorder(colIdx);
-
-  if (numQueuePairs > 0) {
-    table.Set(rowIdx, colIdx++, " NIC ", numQueuePairs);
-    if (numResults > 0) {
-      table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
-      table.Set(rowIdx, colIdx++, "(Rnk)");
-    }
-    table.DrawColBorder(colIdx);
-  }
-
-  table.Set(rowIdx, colIdx++, " STotal ");
-  if (numResults > 0) {
-    table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
-    table.Set(rowIdx, colIdx++, "(Rnk)");
-  }
-  table.DrawColBorder(colIdx);
-
-  table.Set(rowIdx, colIdx++, " Actual ");
-  if (numResults > 0) {
-    table.SetColAlignment(colIdx, Utils::TableHelper::ALIGN_CENTER);
-    table.Set(rowIdx, colIdx++, "(Rnk)");
-  }
-  table.DrawColBorder(colIdx);
-  rowIdx++;
-  table.DrawRowBorder(rowIdx);
-
-  // Header column
-  for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-    // MAX results
-    for (int i = 0; i < numResults; i++) {
-      if (i == 0) table.Set(rowIdx, 0, " GPU %02d MAX ", gpuIdx);
-      rowIdx++;
-    }
-    // Avg result
-    table.Set(rowIdx++, 0, " GPU %02d%s ", gpuIdx, numResults > 0 ? " AVG" : "");
-    // MIN results
-    for (int i = numResults-1; i >= 0; i--) {
-      if (i == 0) table.Set(rowIdx, 0, " GPU %02d MIN ", gpuIdx);
-      rowIdx++;
-    }
-    if (numResults > 0 || gpuIdx == numGpus - 1) table.DrawRowBorder(rowIdx);
-  }
-
-  // RTotal
-  for (int i = 0; i < numResults; i++) {
-    if (i == 0) table.Set(rowIdx, 0, " RTotal MAX ");
-    rowIdx++;
-  }
-  // Avg result
-  table.Set(rowIdx++, 0, " RTotal%s ", numResults > 0 ? " AVG" : "");
-  // MIN results
-  for (int i = numResults-1; i >= 0; i--) {
-    if (i == 0) table.Set(rowIdx, 0, " RTotal MIN ");
-    rowIdx++;
-  }
-  table.DrawRowBorder(rowIdx);
-
-  // Data cells
-  std::vector<std::vector<double>> rowTotalBandwidth(numRanks, std::vector<double>(numGpus, 0.0));
-  std::vector<std::vector<double>> colTotalBandwidth(numRanks, std::vector<double>(numGpus+3, 0.0));
-  double totalBandwidthGpu = 0.0;
-
-  for (int src = 0; src < numGpus; src++) {
-    int rowBase = 1 + src * (2*numResults+1);
-
-    std::vector<double> minBw(numRanks, std::numeric_limits<double>::max());
-    int rowTransferCount = 0;
-
-    for (int dst = 0; dst < numGpus; dst++) {
-      int colBase = 1 + dst * (numResults ? 2 : 1);
-
-      // Collect results for all ranks
-      std::vector<std::pair<double, int>> bws;
-      double average = 0.0;
-      for (int rank = 0; rank < numRanks; rank++) {
-        if (reIndex[rank].count(std::make_pair(src, dst))) {
-          int const transferIdx = reIndex[rank][std::make_pair(src,dst)];
-          double avgBw = results.tfrResults[transferIdx].avgBandwidthGbPerSec;
-          average                      += avgBw;
-          totalBandwidthGpu            += avgBw;
-          rowTotalBandwidth[rank][src] += avgBw;
-          colTotalBandwidth[rank][dst] += avgBw;
-          minBw[rank] = std::min(minBw[rank], avgBw);
-          bws.push_back(std::make_pair(avgBw, rank));
-        }
-      }
-      if (bws.size() == 0) {
-        table.Set(rowBase + numResults, colBase, " N/A ");
-      } else {
-        std::sort(bws.begin(), bws.end());
-        average /= bws.size();
-        rowTransferCount++;
-
-        // MAX results
-        for (int i = 0; i < numResults; i++) {
-          table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
-          table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
-        }
-
-        // AVG results
-        table.Set(rowBase + numResults, colBase, " %.2f ", average);
-
-        // MIN results
-        for (int i = 0; i < numResults; i++) {
-          table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
-          table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
-        }
-      }
-    }
-
-    // NIC results
-    int colTotIdx = numGpus;
-    if (numQueuePairs > 0) {
-      int colBase = 1 + numGpus * (numResults ? 2 : 1);
-      std::vector<std::pair<double, int>> bws;
-      double average = 0.0;
-
-      for (int rank = 0; rank < numRanks; rank++) {
-        double avgBw = results.tfrResults[nicTransferIdx[rank][src]].avgBandwidthGbPerSec;
-        average                            += avgBw;
-        totalBandwidthGpu                  += avgBw;
-        rowTotalBandwidth[rank][src]       += avgBw;
-        colTotalBandwidth[rank][colTotIdx] += avgBw;
-        minBw[rank] = std::min(minBw[rank], avgBw);
-        bws.push_back(std::make_pair(avgBw, rank));
-      }
-      colTotIdx++;
-      std::sort(bws.begin(), bws.end());
-      average /= bws.size();
-      rowTransferCount++;
-
-      // MAX results
-      for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
-        table.Set(rowBase + i, colBase+1,  "%d ", bws[bws.size()-1-i].second);
-      }
-
-      // AVG results
-      table.Set(rowBase + numResults, colBase, " %.2f ", average);
-
-      // MIN results
-      for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
-        table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
-      }
-    }
-
-    // STotal
-    {
-      int colBase = 1 + (numGpus + (numQueuePairs ? 1 : 0)) * (numResults ? 2 : 1);
-      std::vector<std::pair<double, int>> bws;
-      double average = 0.0;
-      for (int rank = 0; rank < numRanks; rank++) {
-        double avgBw = rowTotalBandwidth[rank][src];
-        bws.push_back(std::make_pair(avgBw, rank));
-        colTotalBandwidth[rank][colTotIdx] += avgBw;
-        average += avgBw;
-      }
-      colTotIdx++;
-      std::sort(bws.begin(), bws.end());
-      average /= bws.size();
-
-      // MAX results
-      for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
-        table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
-      }
-
-      // AVG results
-      table.Set(rowBase + numResults, colBase, " %.2f ", average);
-
-      // MIN results
-      for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
-        table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
-      }
-    }
-
-    // Actual
-    {
-      int colBase = 1 + (numGpus + (numQueuePairs ? 1 : 0) + 1) * (numResults ? 2 : 1);
-      std::vector<std::pair<double, int>> bws;
-      double average = 0.0;
-      for (int rank = 0; rank < numRanks; rank++) {
-        double avgBw = rowTransferCount * minBw[rank];
-        bws.push_back(std::make_pair(avgBw, rank));
-        average += avgBw;
-        colTotalBandwidth[rank][colTotIdx] += avgBw;
-      }
-      colTotIdx++;
-      std::sort(bws.begin(), bws.end());
-      average /= bws.size();
-
-      // MAX results
-      for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
-        table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
-      }
-
-      // AVG results
-      table.Set(rowBase + numResults, colBase, " %.2f ", average);
-
-      // MIN results
-      for (int i = 0; i < numResults; i++) {
-        table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
-        table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
-      }
-    }
-  }
-
-  // RTotal
-  int rowBase = 1 + (numGpus * (1 + 2 * numResults));
-  for (int col = 0; col < (numGpus + (numQueuePairs ? 1 : 0) + 2); col++) {
-    int colBase = 1 + col * (numResults ? 2 : 1);
-    std::vector<std::pair<double, int>> bws;
-    double average = 0.0;
-    for (int rank = 0; rank < numRanks; rank++) {
-      double avgBw = colTotalBandwidth[rank][col];
-      bws.push_back(std::make_pair(avgBw, rank));
-      average += avgBw;
-    }
-    std::sort(bws.begin(), bws.end());
-    average /= bws.size();
-
-    // MAX results
-    for (int i = 0; i < numResults; i++) {
-      table.Set(rowBase + i, colBase  , " %.2f ", bws[bws.size()-1-i].first);
-      table.Set(rowBase + i, colBase+1, "%d ", bws[bws.size()-1-i].second);
-    }
-
-    // AVG results
-    table.Set(rowBase + numResults, colBase, " %.2f ", average);
-
-    // MIN results
-    for (int i = 0; i < numResults; i++) {
-      table.Set(rowBase + numResults + 1 + i, colBase   , " %.2f ", bws[numResults-1-i].first);
-      table.Set(rowBase + numResults + 1 + i, colBase+1 , "%d ", bws[numResults-1-i].second);
-    }
-  }
-
-  // Add CPU results
-  table.Set(numRows - 1, numCols - 2, " CPU Timed: ");
-  table.Set(numRows - 1, numCols - 1, " %.2f ", results.avgTotalBandwidthGbPerSec);
-  for (int col = 0; col < numCols - 2; col++)
-    table.SetCellBorder(numRows - 1, col, Utils::TableHelper::BORDER_TOP);
-  table.SetCellBorder(numRows - 1, numCols - 2, Utils::TableHelper::BORDER_ALL);
-  table.SetCellBorder(numRows - 1, numCols - 1, Utils::TableHelper::BORDER_ALL);
-
-  table.PrintTable(ev.outputToCsv, ev.showBorders);
-}
-*/
-
 /*
   Utils::Print("\n");
   Utils::Print("Average   bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());

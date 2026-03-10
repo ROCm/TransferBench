@@ -3668,6 +3668,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
           output = (rss->dstMem[dstIdx]) + initOffset;
         } else {
+          ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
           ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
           ERR_CHECK(hipDeviceSynchronize());
           output = outputBuffer.data();
