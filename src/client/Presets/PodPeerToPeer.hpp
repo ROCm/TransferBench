@@ -24,6 +24,12 @@ int PodPeerToPeerPreset(EnvVars&           ev,
                         size_t      const  numBytesPerTransfer,
                         std::string const  presetName)
 {
+  if (Utils::GetNumRankGroups() > 1) {
+    Utils::Print("[ERROR] Pod p2p preset can only be run across ranks that are homogenous\n");
+    Utils::Print("[ERROR] All ranks currently have to be under the same physical and virtual pod\n");
+    Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
+    return 1;
+  }
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
@@ -52,7 +58,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
       ev.Print("P2P_MODE",        p2pMode,        "Running %s transfers", p2pMode == 0 ? "Uni + Bi" :
                                                                           p2pMode == 1 ? "Unidirectional"
                                                                                        : "Bidirectional");
-      ev.Print("PARALLEL_LVL",    parallelLevel,  "Executing p2p in parallel level %d (0: no parallel, 1: node pairs, 2: node pairs in parallel)", parallelLevel);
+      ev.Print("PARALLEL_LVL",    parallelLevel,  "Executing p2p in parallel level %d (0: no parallel, 1: node pairs in parallel)", parallelLevel);
       ev.Print("USE_GPU_DMA",     useDmaCopy,     "Using GPU-%s as GPU executor", useDmaCopy ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
@@ -66,7 +72,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
   }
 
   char const separator = ev.outputToCsv ? ',' : ' ';
-  printf("Bytes Per Direction%c%lu\n", separator, numBytesPerTransfer);
+  Utils::Print("Bytes Per Direction%c%lu\n", separator, numBytesPerTransfer);
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
@@ -88,151 +94,159 @@ int PodPeerToPeerPreset(EnvVars&           ev,
       }
     }
 
-    // rounds of transfers, all transfers in a round run in parallel
-    std::vector<std::vector<std::pair<MemDevice, MemDevice>>> rounds;
-
-    if (parallelLevel == 0) {
-      // Serial: one round per (i,j) pair
-      for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-          rounds.push_back({{devices[i], devices[j]}});
-        }
-      }
-    } else if (parallelLevel == 1) {
-      // Rounds of node pairs via RoundRobinSchedule; within each round, all node pairs run concurrently
-      std::vector<std::vector<std::pair<int, int>>> nodePairSchedule;
-      RoundRobinSchedule(nodePairSchedule, (int)ranks.size(), 1);
-      for (auto const& roundNodePairs : nodePairSchedule) {
-        std::vector<std::pair<MemDevice, MemDevice>> pairs;
-        for (auto const& [rankIdxA, rankIdxB] : roundNodePairs) {
-          int const rA = ranks[rankIdxA];
-          int const rB = ranks[rankIdxB];
-          for (int i = 0; i < n; i++) {
-            if (devices[i].memRank != rA) continue;
-            for (int j = 0; j < n; j++) {
-              if (devices[j].memRank != rB) continue;  // omit self; use "if (i == j && !a2aLocal) continue;" to allow self when a2aLocal
-              pairs.push_back({devices[i], devices[j]});
-            }
-          }
-        }
-        if (!pairs.empty())
-          rounds.push_back(std::move(pairs));
-      }
-    } else {
-      // parallelLevel == 2: one round, all (i,j) pairs from all nodes run concurrently
-      std::vector<std::pair<MemDevice, MemDevice>> pairs;
-      for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {// omit self; add a2aLocal check if desired
-          pairs.push_back({devices[i], devices[j]});
-        }
-      }
-      if (!pairs.empty())
-        rounds.push_back(std::move(pairs));
-    }
-
     // Build reverse map: (memRank, memIndex) -> device index
     std::map<std::pair<int,int>, int> deviceLookup;
     for (int i = 0; i < n; i++)
       deviceLookup[{devices[i].memRank, devices[i].memIndex}] = i;
-    std::vector<double> avgBandwidth(n * n, 0.0);
 
     ExeType const gpuExeType = useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
-    for (auto const& round : rounds) {
-      std::vector<TransferBench::Transfer> transfers;
-      for (auto const& [src, dst] : round) {
-        TransferBench::Transfer transfer;
-        transfer.numBytes = numBytesPerTransfer;
-        transfer.srcs.push_back(src);
-        transfer.dsts.push_back(dst);
-        transfer.exeDevice = { gpuExeType,
-                              useRemoteRead ? (int32_t)dst.memIndex : (int32_t)src.memIndex,
-                              useRemoteRead ? (int32_t)dst.memRank  : (int32_t)src.memRank };
-        transfer.exeSubIndex = -1;
-        transfer.numSubExecs = numGpuSubExecs;
-        transfers.push_back(transfer);
-      }
-      if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-        for (auto const& err : results.errResults)
-          Utils::Print("%s\n", err.errMsg.c_str());
-        return 1;
-      }
 
-      // Collect per-transfer bandwidth into avgBandwidth
-      for (size_t k = 0; k < round.size(); k++) {
-        auto const& [src, dst] = round[k];
-        int i = deviceLookup[{src.memRank, src.memIndex}];
-        int j = deviceLookup[{dst.memRank, dst.memIndex}];
-        avgBandwidth[i * n + j] = results.tfrResults[k].avgBandwidthGbPerSec;
-      }
-    }
+    for (int isBidirectional = 0; isBidirectional <= 1; isBidirectional++) {
+      if ((p2pMode == 1 && isBidirectional == 1) ||
+          (p2pMode == 2 && isBidirectional == 0)) continue;
 
-    int const podNumRanks = ranks.size();
-    int const numRows = showFullMatrix ? 2 + n : 1 + n * n;
-    int const numCols = showFullMatrix ? 2 + n : 5;
-    int const precision = 2;
-    Utils::TableHelper table(numRows, numCols, precision);
+      Utils::Print("%sdirectional copy peak bandwidth GB/s [%s read / %s write] (GPU-Executor: %s)\n",
+                   isBidirectional ? "Bi" : "Uni",
+                   useRemoteRead ? "Remote" : "Local",
+                   useRemoteRead ? "Local" : "Remote",
+                   useDmaCopy    ? "DMA"   : "GFX");
 
-    table.DrawRowBorder(0);
-    table.DrawColBorder(0);
-    table.DrawColBorder(numCols);
-    table.DrawRowBorder(numRows);
+      std::vector<double> avgBandwidth(n * n, 0.0);
 
-    if (showFullMatrix) {
-      table.Set(0, 0, useRemoteRead ? " SRC\\DST+EXE " : " SRC+EXE\\DST ");
-      table.DrawRowBorder(1);
-      table.DrawColBorder(1);
-      table.Set(1, 1, " Mem Device ");
+      // Build rounds of transfers; all transfers in a round run in parallel
+      std::vector<std::vector<std::pair<MemDevice, MemDevice>>> rounds;
 
-      // Column headers
-      int colPrevRank = -1;
-      for (int j = 0; j < n; j++) {
-        int colIdx = 2 + j;
-        int r = devices[j].memRank;
-        if (r != colPrevRank) {
-          table.DrawColBorder(colIdx);
-          table.Set(0, colIdx, " Rank %02d ", r);
-          colPrevRank = r;
+      if (parallelLevel == 0) {
+        for (int i = 0; i < n; i++) {
+          for (int j = 0; j < n; j++) {
+            if (isBidirectional && i == j) continue;
+            std::vector<std::pair<MemDevice, MemDevice>> pairs;
+            pairs.push_back({devices[i], devices[j]});
+            if (isBidirectional)
+              pairs.push_back({devices[j], devices[i]});
+            rounds.push_back(std::move(pairs));
+          }
         }
-        table.Set(1, colIdx, " GPU %02d ", devices[j].memIndex);
+      } else {
+        // parallelLevel == 1: node pairs run concurrently, one device pair at a time per node pair
+        std::vector<std::vector<std::pair<int, int>>> nodePairSchedule;
+        RoundRobinSchedule(nodePairSchedule, (int)ranks.size(), 1);
+
+        for (auto const& roundNodePairs : nodePairSchedule) {
+          for (int srcDev = 0; srcDev < numGpuDevices; srcDev++) {
+            for (int dstDev = 0; dstDev < numGpuDevices; dstDev++) {
+              std::vector<std::pair<MemDevice, MemDevice>> pairs;
+              for (auto const& [rankIdxA, rankIdxB] : roundNodePairs) {
+                int const rA = ranks[rankIdxA];
+                int const rB = ranks[rankIdxB];
+                if (isBidirectional && rA == rB && srcDev == dstDev) continue;
+                pairs.push_back({{gpuMemType, srcDev, rA}, {gpuMemType, dstDev, rB}});
+                if (isBidirectional)
+                  pairs.push_back({{gpuMemType, dstDev, rB}, {gpuMemType, srcDev, rA}});
+              }
+              if (!pairs.empty())
+                rounds.push_back(std::move(pairs));
+            }
+          }
+        }
       }
 
-      // Row headers and data
-      int rowPrevRank = -1;
-      for (int i = 0; i < n; i++) {
-        int rowIdx = 2 + i;
-        int r = devices[i].memRank;
-        if (r != rowPrevRank) {
-          table.DrawRowBorder(rowIdx);
-          table.Set(rowIdx, 0, " Rank %02d ", r);
-          rowPrevRank = r;
+      // Execute rounds and collect results
+      for (auto const& round : rounds) {
+        std::vector<TransferBench::Transfer> transfers;
+        for (auto const& [src, dst] : round) {
+          TransferBench::Transfer transfer;
+          transfer.numBytes = numBytesPerTransfer;
+          transfer.srcs.push_back(src);
+          transfer.dsts.push_back(dst);
+          transfer.exeDevice = { gpuExeType,
+                                useRemoteRead ? (int32_t)dst.memIndex : (int32_t)src.memIndex,
+                                useRemoteRead ? (int32_t)dst.memRank  : (int32_t)src.memRank };
+          transfer.exeSubIndex = -1;
+          transfer.numSubExecs = numGpuSubExecs;
+          transfers.push_back(transfer);
         }
-        table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
+        if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+          for (auto const& err : results.errResults)
+            Utils::Print("%s\n", err.errMsg.c_str());
+          return 1;
+        }
+
+        for (size_t k = 0; k < round.size(); k++) {
+          auto const& [src, dst] = round[k];
+          int i = deviceLookup[{src.memRank, src.memIndex}];
+          int j = deviceLookup[{dst.memRank, dst.memIndex}];
+          avgBandwidth[i * n + j] = results.tfrResults[k].avgBandwidthGbPerSec;
+        }
+      }
+
+      // Output results
+      int const podNumRanks = ranks.size();
+      int const numRows = showFullMatrix ? 2 + n : 1 + n * n;
+      int const numCols = showFullMatrix ? 2 + n : 5;
+      int const precision = 2;
+      Utils::TableHelper table(numRows, numCols, precision);
+
+      table.DrawRowBorder(0);
+      table.DrawColBorder(0);
+      table.DrawColBorder(numCols);
+      table.DrawRowBorder(numRows);
+
+      if (showFullMatrix) {
+        table.Set(0, 0, useRemoteRead ? " SRC\\DST+EXE " : " SRC+EXE\\DST ");
+        table.DrawRowBorder(1);
+        table.DrawColBorder(1);
+        table.Set(1, 1, " Mem Device ");
+
+        int colPrevRank = -1;
         for (int j = 0; j < n; j++) {
-          table.Set(rowIdx, 2 + j, " %.2f ", avgBandwidth[i * n + j]);
+          int colIdx = 2 + j;
+          int r = devices[j].memRank;
+          if (r != colPrevRank) {
+            table.DrawColBorder(colIdx);
+            table.Set(0, colIdx, " Rank %02d ", r);
+            colPrevRank = r;
+          }
+          table.Set(1, colIdx, " GPU %02d ", devices[j].memIndex);
         }
-      }
-    } else {
-      table.Set(0, 0, " SRC Rank ");
-      table.Set(0, 1, " SRC MEM ");
-      table.Set(0, 2, " DST Rank ");
-      table.Set(0, 3, " DST MEM ");
-      table.Set(0, 4, " bw (GB/s) ");
-      table.DrawColBorder(2);
-      table.DrawColBorder(4);
-      int rowIdx = 1;
-      for (int i = 0; i < n; i++) {
-        table.DrawRowBorder(rowIdx);
-        for (int j = 0; j < n; j++) {
-          table.Set(rowIdx, 0, " Rank %02d ", devices[i].memRank);
+
+        int rowPrevRank = -1;
+        for (int i = 0; i < n; i++) {
+          int rowIdx = 2 + i;
+          int r = devices[i].memRank;
+          if (r != rowPrevRank) {
+            table.DrawRowBorder(rowIdx);
+            table.Set(rowIdx, 0, " Rank %02d ", r);
+            rowPrevRank = r;
+          }
           table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
-          table.Set(rowIdx, 2, " Rank %02d ", devices[j].memRank);
-          table.Set(rowIdx, 3, " GPU %02d ", devices[j].memIndex);
-          table.Set(rowIdx, 4, " %.2f ", avgBandwidth[i * n + j]);
-          rowIdx++;
+          for (int j = 0; j < n; j++) {
+            table.Set(rowIdx, 2 + j, " %.2f ", avgBandwidth[i * n + j]);
+          }
+        }
+      } else {
+        table.Set(0, 0, " SRC Rank ");
+        table.Set(0, 1, " SRC MEM ");
+        table.Set(0, 2, " DST Rank ");
+        table.Set(0, 3, " DST MEM ");
+        table.Set(0, 4, " bw (GB/s) ");
+        table.DrawColBorder(2);
+        table.DrawColBorder(4);
+        int rowIdx = 1;
+        for (int i = 0; i < n; i++) {
+          table.DrawRowBorder(rowIdx);
+          for (int j = 0; j < n; j++) {
+            table.Set(rowIdx, 0, " Rank %02d ", devices[i].memRank);
+            table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
+            table.Set(rowIdx, 2, " Rank %02d ", devices[j].memRank);
+            table.Set(rowIdx, 3, " GPU %02d ", devices[j].memIndex);
+            table.Set(rowIdx, 4, " %.2f ", avgBandwidth[i * n + j]);
+            rowIdx++;
+          }
         }
       }
+      table.PrintTable(ev.outputToCsv, ev.showBorders);
     }
-    table.PrintTable(ev.outputToCsv, ev.showBorders);
 
   }
   return 0;
