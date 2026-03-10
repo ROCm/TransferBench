@@ -48,7 +48,6 @@ int PodAllToAllPreset(EnvVars&           ev,
     A2A_WRITE_ONLY = 2,
     A2A_CUSTOM     = 3,
   };
-  // Do we want custom
   char a2aModeStr[4][20] = {"Copy", "Read-Only", "Write-Only", "Custom"};
 
   // Force single-stream mode for all-to-all benchmark
@@ -65,11 +64,9 @@ int PodAllToAllPreset(EnvVars&           ev,
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
-//int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
   int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numDetectedGpus);
@@ -104,11 +101,6 @@ int PodAllToAllPreset(EnvVars&           ev,
     numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
   }
 
-  // Deprecated env var check
-  if (useFineGrain != -999) {
-    memTypeIdx = useFineGrain ? 2 : 0;
-  }
-
   MemType memType = Utils::GetGpuMemType(memTypeIdx);
   std::string devMemTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
 
@@ -124,10 +116,7 @@ int PodAllToAllPreset(EnvVars&           ev,
       ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
-//      if (numRanks > 1)
-//        ev.Print("NUM_RESULTS"  , numResults   , "Showing top/bottom %d results", numResults);
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
-//      ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
@@ -144,10 +133,6 @@ int PodAllToAllPreset(EnvVars&           ev,
     Utils::Print("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
     return 1;
   }
-//  if (numResults * 2 > numRanks) {
-//    Utils::Print("[ERROR] Number of extrema results requested exceeds number of ranks.  NUM_RESULTS should be at most half the number of ranks\n");
-//    return 1;
-//  }
 
   if (numRanks * numDetectedGpus % groupSize) {
     Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n", groupSize, numRanks * numDetectedGpus, numRanks);
@@ -161,22 +146,14 @@ int PodAllToAllPreset(EnvVars&           ev,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
-  // Collect the number of GPU devices to use
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
-  std::vector<std::map<std::pair<int, int>, int>> reIndex(numRanks);
-  //std::vector<Transfer> transfers;
-
-/////////////  
-  // ?? should i launch all pods per test
-  // ?? should i launch all a2a group at once?
   Utils::RankPodMap& rankToPod = Utils::GetRankPodMap();
   if (rankToPod.empty()) {
     Utils::Print("[ERROR] No pods detected. Set FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
     return 1;
   }
   for (auto const& [pod, ranks] : rankToPod) {
-    // Add all devices in a pod
     int n = ranks.size() * numGpus;
     int numGroups = n / groupSize;
     std::vector<MemDevice> devices(n);
@@ -189,8 +166,7 @@ int PodAllToAllPreset(EnvVars&           ev,
         devices[indices[idx++]] = {memType, devIdx, rank};
       }
     }
-    // Evenly divide devices into numGroups
-    // reuse i ok here?
+
     for (int group = 0; group < numGroups; group++) {
       std::vector<std::vector<int>> groupReIndex(groupSize, std::vector<int>(groupSize, -1));
       std::vector<Transfer> transfers;
@@ -214,18 +190,14 @@ int PodAllToAllPreset(EnvVars&           ev,
           transfers.push_back(transfer);
         }
 
-        // Create rings using NICs
-        // should this ring be conform to reorder of group? And should it center on NIC?
         if (numQueuePairs > 0) {
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;
           transfer.srcs.push_back(devices[i]);
           int next = group * groupSize + (i - group * groupSize + 1) % groupSize;
           transfer.dsts.push_back(devices[next]);
-          // double check this
           transfer.exeDevice = {TransferBench::EXE_NIC_NEAREST,
                                (int32_t)devices[i].memIndex, (int32_t)devices[i].memRank};
-          // to be fixed
           transfer.exeSubIndex = devices[next].memIndex;
           transfer.numSubExecs = numQueuePairs;
           transfers.push_back(transfer);
@@ -242,7 +214,7 @@ int PodAllToAllPreset(EnvVars&           ev,
         Utils::Print("\n");
       }
 
-      // Per-group table (PodPeerToPeer-style: devices in this group, ranks in group)
+      // Per-group bandwidth table
       std::vector<std::vector<double>> groupBw(groupSize, std::vector<double>(groupSize, -1.0));
       for (int localI = 0; localI < groupSize; localI++) {
         for (int localJ = 0; localJ < groupSize; localJ++) {
@@ -301,27 +273,12 @@ int PodAllToAllPreset(EnvVars&           ev,
         table.PrintTable(ev.outputToCsv, ev.showBorders);
       }
     }
-
   }
-/////////////  
 
-  // Only ranks that actually do output will compile results
   if (!Utils::RankDoesOutput()) return 0;
-/*
-  Utils::Print("\n");
-  Utils::Print("Average   bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu / transfers.size());
-  Utils::Print("Aggregate bandwidth (GPU Timed): %8.3f GB/s\n", totalBandwidthGpu);
-  Utils::Print("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
-  Utils::PrintErrors(results.errResults);
-*/
 
   if (Utils::HasDuplicateHostname()) {
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
-  }
-
-  if (useFineGrain != -999) {
-    Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
-    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", memTypeIdx, useFineGrain);
   }
 
   return 0;
