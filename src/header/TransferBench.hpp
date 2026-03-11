@@ -525,7 +525,7 @@ namespace TransferBench
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
    */
-  void GetClosestGpusToNic(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+  void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1);
 
   /**
    * @returns 0-indexed rank for this process
