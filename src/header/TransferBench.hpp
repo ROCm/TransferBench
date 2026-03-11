@@ -715,20 +715,26 @@ namespace TransferBench
 #endif
 
 // Error check macro (NOTE: This will return even for ERR_WARN)
-#define ERR_CHECK(cmd)            \
-  do {                            \
-    ErrResult err = (cmd);        \
-    if (err.errType != ERR_NONE)  \
-      return err;                 \
+#define ERR_CHECK(cmd)                                                       \
+  do {                                                                       \
+    ErrResult err = (cmd);                                                   \
+    if (err.errType != ERR_NONE) {                                           \
+      err.errMsg += std::string(" [") + __FILE__ + ":" +                     \
+                    std::to_string(__LINE__) + " in " + __func__ + "]";      \
+      return err;                                                            \
+    }                                                                        \
   } while (0)
 
 // Appends warn/fatal errors to a list, return false if fatal
-#define ERR_APPEND(cmd, list)     \
-  do {                            \
-    ErrResult err = (cmd);        \
-    if (err.errType != ERR_NONE)  \
-      list.push_back(err);        \
-    if (err.errType == ERR_FATAL) \
+#define ERR_APPEND(cmd, list)                                                \
+  do {                                                                       \
+    ErrResult err = (cmd);                                                   \
+    if (err.errType != ERR_NONE) {                                           \
+      err.errMsg += std::string(" [") + __FILE__ + ":" +                     \
+                    std::to_string(__LINE__) + " in " + __func__ + "]";      \
+      list.push_back(err);                                                   \
+    }                                                                        \
+    if (err.errType == ERR_FATAL)                                            \
       return false;               \
   } while (0)
 
@@ -1439,6 +1445,7 @@ namespace {
     // If memHandle is provided, allocate sharable memory
     if (memHandle != NULL) {
 #ifdef POD_COMM_ENABLED
+      ERR_CHECK(hipSetDevice(deviceIdx));
       // Prepare HIP memory allocation properties structure
       hipMemAllocationProp prop = {};
       ERR_CHECK(GetMemAllocationProp(memDevice, prop));
@@ -3785,6 +3792,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // mem rank exports to sharable fabric handle
       hipMemFabricHandle_t fabricHandle;
       if (memDevice.memRank == GetRank()) {
+        ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0));
       }
 
@@ -3792,6 +3800,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // exe rank imports the fabric handle
       if (exeDevice.exeRank == GetRank()) {
+        ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
         ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
         ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0));
         ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0));
@@ -4054,11 +4063,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         if (t.srcs[iSrc].memRank == localRank) {
+          ERR_CHECK(hipSetDevice(t.srcs[iSrc].memIndex));
           ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
         } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
 #ifdef POD_COMM_ENABLED
+          ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
           ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
           ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
@@ -4069,11 +4080,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         if (t.dsts[iDst].memRank == localRank) {
+          ERR_CHECK(hipSetDevice(t.dsts[iDst].memIndex));
           ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
         } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
 #ifdef POD_COMM_ENABLED
+          ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
           ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
           ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
@@ -4820,6 +4833,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   // Execute a single DMA Transfer
   static ErrResult ExecuteDmaTransfer(int           const  iteration,
                                       bool          const  useSubIndices,
+                                      int           const  exeIndex,
                                       hipStream_t   const  stream,
                                       hipEvent_t    const  startEvent,
                                       hipEvent_t    const  stopEvent,
@@ -4828,6 +4842,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
+    ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.dma.useHipEvents)
@@ -4906,6 +4921,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                              ExecuteDmaTransfer,
                                              iteration,
                                              exeInfo.useSubIndices,
+                                             exeIndex,
                                              exeInfo.streams[i],
                                              cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
                                              cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
@@ -5110,6 +5126,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
+            ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
           }
