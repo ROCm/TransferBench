@@ -597,7 +597,6 @@ namespace TransferBench
 
 // Redefinitions for CUDA compatibility
 //==========================================================================================
-//TODO: guard
 #if defined(__NVCC__)
 
   // ROCm specific
@@ -626,8 +625,6 @@ namespace TransferBench
   #define hipSuccess                                         cudaSuccess
   #define hipMemLocationTypeDevice                           CU_MEM_LOCATION_TYPE_DEVICE
   #define hipMemAllocationTypePinned                         CU_MEM_ALLOCATION_TYPE_PINNED
-// Are these two equivalent? Also MANAGED is not supported in 12.8
-// #define hipMemAllocationTypeUncached                       CU_MEM_ALLOCATION_TYPE_MANAGED
   #define hipMemHandleTypeFabric                             CU_MEM_HANDLE_TYPE_FABRIC
   #define hipMemAllocationGranularityRecommended             CU_MEM_ALLOC_GRANULARITY_RECOMMENDED
   #define hipMemAccessFlagsProtReadWrite                     CU_MEM_ACCESS_FLAGS_PROT_READWRITE
@@ -3779,7 +3776,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
-                                                                                          // const?
   static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t* pActualBytes,
                                   float** memPtr, hipMemGenericAllocationHandle_t* memHandle)
   {
@@ -5750,13 +5746,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (pause);
     }
 
-// TODO: Add checks here
 #ifdef AMD_SMI_ENABLED
     if (verbose) {
       System::Get().Log("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
     }
     amdsmi_init(AMDSMI_INIT_AMD_APUS);
-#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+#elif defined (NVML_ENABLED)
     if (verbose) {
       System::Get().Log("[INFO] Initializing NVIDIA Management Library (NVML)\n");
     }
@@ -6206,7 +6201,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     } else {
       if (fabricSupport = MnnvlCheck()) {
         vpodId = fabricInfo.cliqueId;
-        memcpy(&ppodId, fabricInfo.clusterUuid, sizeof(ppodId));
+        memcpy(ppodId, fabricInfo.clusterUuid, 16);
       }
     }
 #endif
@@ -6233,7 +6228,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (err == AMDSMI_STATUS_SUCCESS) {
           // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
           //       vpodId == -1 to represent no pod present
-          // TODO: adjust pointer when the struct changes
           memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
           vpodId = fabricInfo.info.v1.vpod_id;
           fabricSupport = true;
