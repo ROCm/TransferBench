@@ -182,8 +182,11 @@ int PodPeerToPeerPreset(EnvVars&           ev,
 
       // Output results
       int const podNumRanks = ranks.size();
-      int const numRows = showFullMatrix ? 2 + n : 1 + n * n;
-      int const numCols = showFullMatrix ? 2 + n : 5;
+      int const rowsPerSrc = isBidirectional ? 3 : 1;
+      int const rowStride = isBidirectional ? rowsPerSrc + 1 : rowsPerSrc;
+      int const numRows = showFullMatrix ? 2 + n * rowStride - (isBidirectional ? 1 : 0)
+                                         : 1 + n * n * rowsPerSrc;
+      int const numCols = showFullMatrix ? 2 + n : (isBidirectional ? 6 : 5);
       int const precision = 2;
       Utils::TableHelper table(numRows, numCols, precision);
 
@@ -193,7 +196,10 @@ int PodPeerToPeerPreset(EnvVars&           ev,
       table.DrawRowBorder(numRows);
 
       if (showFullMatrix) {
-        table.Set(0, 0, useRemoteRead ? " SRC\\DST+EXE " : " SRC+EXE\\DST ");
+        if (isBidirectional)
+          table.Set(0, 0, " SRC\\DST ");
+        else
+          table.Set(0, 0, useRemoteRead ? " SRC\\DST+EXE " : " SRC+EXE\\DST ");
         table.DrawRowBorder(1);
         table.DrawColBorder(1);
         table.Set(1, 1, " Mem Device ");
@@ -212,36 +218,82 @@ int PodPeerToPeerPreset(EnvVars&           ev,
 
         int rowPrevRank = -1;
         for (int i = 0; i < n; i++) {
-          int rowIdx = 2 + i;
           int r = devices[i].memRank;
+          int baseRow = 2 + i * rowStride;
           if (r != rowPrevRank) {
-            table.DrawRowBorder(rowIdx);
-            table.Set(rowIdx, 0, " Rank %02d ", r);
+            table.DrawRowBorder(baseRow);
+            table.Set(baseRow, 0, " Rank %02d ", r);
             rowPrevRank = r;
           }
-          table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
-          for (int j = 0; j < n; j++) {
-            table.Set(rowIdx, 2 + j, " %.2f ", avgBandwidth[i * n + j]);
+
+          for (int dir = 0; dir < rowsPerSrc; dir++) {
+            int rowIdx = baseRow + dir;
+            if (isBidirectional) {
+              char const* arrow = (dir == 0) ? " ->" : (dir == 1) ? "<- " : "<->";
+              table.Set(rowIdx, 1, " GPU %02d %s ", devices[i].memIndex, arrow);
+            } else {
+              table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
+            }
+
+            for (int j = 0; j < n; j++) {
+              double fwd = avgBandwidth[i * n + j];
+              double rev = avgBandwidth[j * n + i];
+              double val = (dir == 0) ? fwd : (dir == 1) ? rev : fwd + rev;
+              if (val == 0.0)
+                table.Set(rowIdx, 2 + j, " N/A ");
+              else
+                table.Set(rowIdx, 2 + j, " %.2f ", val);
+            }
           }
         }
       } else {
         table.Set(0, 0, " SRC Rank ");
         table.Set(0, 1, " SRC MEM ");
-        table.Set(0, 2, " DST Rank ");
-        table.Set(0, 3, " DST MEM ");
-        table.Set(0, 4, " bw (GB/s) ");
-        table.DrawColBorder(2);
-        table.DrawColBorder(4);
+        if (isBidirectional) {
+          table.Set(0, 2, " Dir ");
+          table.Set(0, 3, " DST Rank ");
+          table.Set(0, 4, " DST MEM ");
+          table.Set(0, 5, " bw (GB/s) ");
+          table.DrawColBorder(3);
+          table.DrawColBorder(5);
+        } else {
+          table.Set(0, 2, " DST Rank ");
+          table.Set(0, 3, " DST MEM ");
+          table.Set(0, 4, " bw (GB/s) ");
+          table.DrawColBorder(2);
+          table.DrawColBorder(4);
+        }
         int rowIdx = 1;
         for (int i = 0; i < n; i++) {
           table.DrawRowBorder(rowIdx);
           for (int j = 0; j < n; j++) {
-            table.Set(rowIdx, 0, " Rank %02d ", devices[i].memRank);
-            table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
-            table.Set(rowIdx, 2, " Rank %02d ", devices[j].memRank);
-            table.Set(rowIdx, 3, " GPU %02d ", devices[j].memIndex);
-            table.Set(rowIdx, 4, " %.2f ", avgBandwidth[i * n + j]);
-            rowIdx++;
+            for (int dir = 0; dir < rowsPerSrc; dir++) {
+              double fwd = avgBandwidth[i * n + j];
+              double rev = avgBandwidth[j * n + i];
+              double val = (dir == 0) ? fwd : (dir == 1) ? rev : fwd + rev;
+              if (isBidirectional) {
+                char const* arrow = (dir == 0) ? " -> " : (dir == 1) ? " <- " : " <-> ";
+                table.Set(rowIdx, 0, " Rank %02d ", devices[i].memRank);
+                table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
+                table.Set(rowIdx, 2, arrow);
+                table.Set(rowIdx, 3, " Rank %02d ", devices[j].memRank);
+                table.Set(rowIdx, 4, " GPU %02d ", devices[j].memIndex);
+                if (val == 0.0)
+                  table.Set(rowIdx, 5, " N/A ");
+                else
+                  table.Set(rowIdx, 5, " %.2f ", val);
+              } else {
+                table.Set(rowIdx, 0, " Rank %02d ", devices[i].memRank);
+                table.Set(rowIdx, 1, " GPU %02d ", devices[i].memIndex);
+                table.Set(rowIdx, 2, " Rank %02d ", devices[j].memRank);
+                table.Set(rowIdx, 3, " GPU %02d ", devices[j].memIndex);
+                if (val == 0.0)
+                  table.Set(rowIdx, 4, " N/A ");
+                else
+                  table.Set(rowIdx, 4, " %.2f ", val);
+              }
+              rowIdx++;
+            }
           }
         }
       }

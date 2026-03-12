@@ -177,8 +177,9 @@ int PodAllToAllPreset(EnvVars&           ev,
           }
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;
-          transfer.srcs.push_back(devices[i]);
-          transfer.dsts.push_back(devices[j]);
+          for (int x = 0; x < numSrcs; x++) transfer.srcs.push_back(devices[i]);
+          if (numDsts) transfer.dsts.push_back(devices[j]);
+          for (int x = 1; x < numDsts; x++) transfer.dsts.push_back(devices[i]);
           transfer.exeDevice = {exeType,
                                (int32_t)(useRemoteRead ? devices[j].memIndex : devices[i].memIndex),
                                (int32_t)(useRemoteRead ? devices[j].memRank : devices[i].memRank)};

@@ -627,7 +627,7 @@ namespace TransferBench
   #define hipMemLocationTypeDevice                           CU_MEM_LOCATION_TYPE_DEVICE
   #define hipMemAllocationTypePinned                         CU_MEM_ALLOCATION_TYPE_PINNED
 // Are these two equivalent? Also MANAGED is not supported in 12.8
-  #define hipMemAllocationTypeUncached                       CU_MEM_ALLOCATION_TYPE_MANAGED
+// #define hipMemAllocationTypeUncached                       CU_MEM_ALLOCATION_TYPE_MANAGED
   #define hipMemHandleTypeFabric                             CU_MEM_HANDLE_TYPE_FABRIC
   #define hipMemAllocationGranularityRecommended             CU_MEM_ALLOC_GRANULARITY_RECOMMENDED
   #define hipMemAccessFlagsProtReadWrite                     CU_MEM_ACCESS_FLAGS_PROT_READWRITE
@@ -1412,7 +1412,11 @@ namespace {
     case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_GPU:
       prop.type = hipMemAllocationTypePinned; break;
     case MEM_CPU_UNCACHED: case MEM_GPU_UNCACHED:
+#if defined (__NVCC__)
+      return {ERR_FATAL, "Uncached memory type unsupported in CUDA"};
+#else
       prop.type = hipMemAllocationTypeUncached; break;
+#endif
     default:
       return {ERR_FATAL, "Unsupported memory type for pod communication"};
     }
@@ -1501,7 +1505,7 @@ namespace {
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       int flags = 0;
-#if !defined(__NVCC__)
+#if !defined (__NVCC__)
       flags |= hipHostMallocNumaUser;
 #endif
       if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
@@ -7122,7 +7126,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipSuccess
 #undef hipMemLocationTypeDevice
 #undef hipMemAllocationTypePinned
-#undef hipMemAllocationTypeUncached
+//#undef hipMemAllocationTypeUncached
 #undef hipMemHandleTypeFabric
 #undef hipMemAllocationGranularityRecommended
 #undef hipMemAccessFlagsProtReadWrite
