@@ -250,9 +250,9 @@ namespace TransferBench::Utils
 
     std::string borders[16] =
       {" ", "│", "│", "│",
-       "─", "┘", "┐", "┤",
-       "─", "└", "┌", "├",
-       "─", "┴", "┬", "┼"};
+       "-", "┘", "┐", "┤",
+       "-", "└", "┌", "├",
+       "-", "┴", "┬", "┼"};
 
     int mask;
     for (int rowIdx = 0; rowIdx <= numRows; rowIdx++) {
@@ -266,7 +266,7 @@ namespace TransferBench::Utils
           if (rowBorders[rowIdx].count(colIdx  )) mask |= BORDER_RIGHT;
           Print("%s", borders[mask].c_str());
           if (colIdx < numCols) {
-            std::string ch = rowBorders[rowIdx].count(colIdx) ? "─" : " ";
+            std::string ch = rowBorders[rowIdx].count(colIdx) ? "-" : " ";
             for (int i = 0; i < colWidth[colIdx]; i++) Print("%s", ch.c_str());
           }
         }

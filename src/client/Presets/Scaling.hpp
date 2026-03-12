@@ -33,27 +33,42 @@ int ScalingPreset(EnvVars&           ev,
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
+  int cpuMemTypeIdx = EnvVars::GetEnvVar("CPU_MEM_TYPE",    0);
+  int gpuMemTypeIdx = EnvVars::GetEnvVar("GPU_MEM_TYPE",    0);
   int localIdx      = EnvVars::GetEnvVar("LOCAL_IDX",       0);
   int numCpuDevices = EnvVars::GetEnvVar("NUM_CPU_DEVICES", numDetectedCpus);
   int numGpuDevices = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int sweepMax      = EnvVars::GetEnvVar("SWEEP_MAX",       32);
   int sweepMin      = EnvVars::GetEnvVar("SWEEP_MIN",       1);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN",  0);
+  int useFineGrain   = EnvVars::GetEnvVar("USE_FINE_GRAIN",  -999); // Deprecated
 
   // Display environment variables
+  MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
+  MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
+
   ev.DisplayEnvVars();
   if (!ev.hideEnv) {
     int outputToCsv = ev.outputToCsv;
-    if (!outputToCsv) printf("[Schmoo Related]\n");
-    ev.Print("LOCAL_IDX",      localIdx,     "Local GPU index");
-    ev.Print("SWEEP_MAX",      sweepMax,     "Max number of subExecutors to use");
-    ev.Print("SWEEP_MIN",      sweepMin,     "Min number of subExecutors to use");
+    if (!outputToCsv) printf("[Scaling Related]\n");
+    ev.Print("CPU_MEM_TYPE"   , cpuMemTypeIdx, "Using %s (%s)", Utils::GetCpuMemTypeStr(cpuMemTypeIdx).c_str(), Utils::GetAllCpuMemTypeStr().c_str());
+    ev.Print("GPU_MEM_TYPE"   , gpuMemTypeIdx, "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
+    ev.Print("LOCAL_IDX"      , localIdx     , "Local GPU index");
+    ev.Print("NUM_CPU_DEVICES", numCpuDevices, "Using %d CPUs", numCpuDevices);
+    ev.Print("NUM_GPU_DEVICES", numGpuDevices, "Using %d GPUs", numGpuDevices);
+    ev.Print("SWEEP_MAX"      , sweepMax     , "Max number of subExecutors to use");
+    ev.Print("SWEEP_MIN"      , sweepMin     , "Min number of subExecutors to use");
     printf("\n");
   }
 
   // Validate env vars
   if (localIdx >= numDetectedGpus) {
     printf("[ERROR] Cannot execute scaling test with local GPU device %d\n", localIdx);
+    return 1;
+  }
+
+  // Check for deprecated env vars
+  if (useFineGrain != -999) {
+    Utils::Print("[ERROR] USE_FINE_GRAIN has been deprecated and replaced by CPU_MEM_TYPE and GPU_MEM_TYPE\n");
     return 1;
   }
 
@@ -74,21 +89,19 @@ int ScalingPreset(EnvVars&           ev,
 
   std::vector<std::pair<double, int>> bestResult(numDevices);
 
-  MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
-
   std::vector<Transfer> transfers(1);
   Transfer& t   = transfers[0];
   t.exeDevice   = {EXE_GPU_GFX, localIdx};
   t.exeSubIndex = -1;
   t.numBytes    = numBytesPerTransfer;
-  t.srcs        = {{memType, localIdx}};
+  t.srcs        = {{gpuMemType, localIdx}};
 
   for (int numSubExec = sweepMin; numSubExec <= sweepMax; numSubExec++) {
     t.numSubExecs = numSubExec;
     printf("%4d  ", numSubExec);
 
     for (int i = 0; i < numDevices; i++) {
-      t.dsts = {{i < numCpuDevices ? MEM_CPU : MEM_GPU,
+      t.dsts = {{i < numCpuDevices ? cpuMemType : gpuMemType,
                  i < numCpuDevices ? i : i - numCpuDevices}};
       if (!RunTransfers(cfg, transfers, results)) {
         Utils::PrintErrors(results.errResults);
@@ -109,5 +122,6 @@ int ScalingPreset(EnvVars&           ev,
   for (int i = 0; i < numDevices; i++)
     printf("%c%7.2f(%3d)", separator, bestResult[i].first, bestResult[i].second);
   printf("\n");
+
   return 0;
 }
