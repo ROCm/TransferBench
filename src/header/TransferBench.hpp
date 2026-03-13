@@ -716,22 +716,22 @@ namespace TransferBench
     }                                                                      \
   } while (0)
 #else
-#define IBV_CALL(__func__, ...)                                         \
-  do {                                                                  \
-    int error = __func__(__VA_ARGS__);                                  \
-    if (error != 0) {                                                   \
-      return {ERR_FATAL, "Encountered IbVerbs error (%d) in func (%s) " \
-              , error, #__func__};                                      \
-    }                                                                   \
+#define IBV_CALL(__func__, ...)                                           \
+  do {                                                                    \
+    int error = __func__(__VA_ARGS__);                                    \
+    if (error != 0) {                                                     \
+      return {ERR_FATAL, "Encountered IbVerbs error (%d=%s) in func (%s)" \
+              , error, strerror(errno), #__func__};                       \
+    }                                                                     \
   } while (0)
 
-#define IBV_PTR_CALL(__ptr__, __func__, ...)                               \
-  do {                                                                     \
-    __ptr__ = __func__(__VA_ARGS__);                                       \
-    if (__ptr__ == nullptr) {                                              \
-      return {ERR_FATAL, "Encountered IbVerbs nullptr error in func (%s) " \
-              , #__func__};                                                \
-    }                                                                      \
+#define IBV_PTR_CALL(__ptr__, __func__, ...)                                    \
+  do {                                                                          \
+    __ptr__ = __func__(__VA_ARGS__);                                            \
+    if (__ptr__ == nullptr) {                                                   \
+      return {ERR_FATAL, "Encountered IbVerbs nullptr error (%s) in func (%s) " \
+              , strerror(errno), #__func__};                                    \
+    }                                                                           \
   } while (0)
 #endif
 
