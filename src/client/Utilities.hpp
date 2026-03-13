@@ -84,7 +84,7 @@ namespace TransferBench::Utils
 
   // Group information
   typedef std::tuple<
-    int64_t,                       // Pod ID
+    int64_t,                       // Pod Index
     std::vector<std::string>,      // CPU Names
     std::vector<int>,              // CPU #Subexecutors
     std::vector<std::string>,      // GPU Names
@@ -97,7 +97,7 @@ namespace TransferBench::Utils
     > GroupKey;
 
   typedef std::map<GroupKey, std::vector<int>> RankGroupMap;
-  typedef std::map<int64_t, std::vector<int>> RankPodMap;
+  typedef std::map<int64_t, std::vector<int>> RankPerPodMap;
 
   // Get information about how ranks can be organized into homogenous groups
   RankGroupMap& GetRankGroupMap();
@@ -106,7 +106,7 @@ namespace TransferBench::Utils
   int GetNumRankGroups();
 
   // Helper function for pod membership
-  RankPodMap& GetRankPodMap();
+  RankPodMap& GetRankPerPodMap();
 
   // Helper function to convert an ExeType to a string
   std::string ExeTypeToStr(ExeType exeType);

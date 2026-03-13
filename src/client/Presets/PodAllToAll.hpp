@@ -20,6 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+// Reorder elements of list by stepping through with stride k, wrapping around.
+// When gcd(k, n) > 1 the single cycle breaks into gcd(k, n) orbits which are
+// concatenated, so every element appears exactly once in the output.
+// The reordered list will be further separated into different groups.
 void StrideGenerate(std::vector<int>& list, int k) {
   int n = list.size();
   k = ((k % n) + n) % n;  // normalize to 0..n-1

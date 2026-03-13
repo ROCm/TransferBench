@@ -30,6 +30,13 @@ int PodPeerToPeerPreset(EnvVars&           ev,
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     return 1;
   }
+
+  Utils::RankPodMap& rankToPod = Utils::GetRankPodMap();
+  if (rankToPod.empty()) {
+    Utils::Print("[ERROR] No pods detected. Set FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return 1;
+  }
+
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
@@ -39,7 +46,6 @@ int PodPeerToPeerPreset(EnvVars&           ev,
   int numGpuSubExecs = EnvVars::GetEnvVar("NUM_GPU_SE",      useDmaCopy ? 1 : TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0}));
   int p2pMode        = EnvVars::GetEnvVar("P2P_MODE",        0);
   int parallelLevel  = EnvVars::GetEnvVar("PARALLEL_LVL",    0);
-  int useFineGrain   = EnvVars::GetEnvVar("USE_FINE_GRAIN",  -999); // Deprecated
   int useRemoteRead  = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int showFullMatrix = EnvVars::GetEnvVar("OUTPUT_FORMAT", 1);
 
@@ -53,7 +59,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
       int outputToCsv = ev.outputToCsv;
       if (!outputToCsv) printf("[P2P Related]\n");
       ev.Print("GPU_MEM_TYPE"   , gpuMemTypeIdx,  "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
-      ev.Print("NUM_GPU_DEVICES", numGpuDevices,  "Using %d GPUs", numGpuDevices);
+      ev.Print("NUM_GPU_DEVICES", numGpuDevices,  "Using %d GPUs per rank", numGpuDevices);
       ev.Print("NUM_GPU_SE",      numGpuSubExecs, "Using %d GPU subexecutors/CUs per Transfer", numGpuSubExecs);
       ev.Print("P2P_MODE",        p2pMode,        "Running %s transfers", p2pMode == 0 ? "Uni + Bi" :
                                                                           p2pMode == 1 ? "Unidirectional"
@@ -65,23 +71,12 @@ int PodPeerToPeerPreset(EnvVars&           ev,
     }
   }
 
-  // Check for deprecated env vars
-  if (useFineGrain != -999) {
-    Utils::Print("[ERROR] USE_FINE_GRAIN has been deprecated and replaced by CPU_MEM_TYPE and GPU_MEM_TYPE\n");
-    return 1;
-  }
-
   char const separator = ev.outputToCsv ? ',' : ' ';
   Utils::Print("Bytes Per Direction%c%lu\n", separator, numBytesPerTransfer);
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
 
-  Utils::RankPodMap& rankToPod = Utils::GetRankPodMap();
-  if (rankToPod.empty()) {
-    Utils::Print("[ERROR] No pods detected. Set FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return 1;
-  }
   for (auto const& [pod, ranks] : rankToPod) {
     // Add all devices in a pod
     int n = ranks.size() * numGpuDevices;
