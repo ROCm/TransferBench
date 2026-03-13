@@ -10,6 +10,7 @@ Documentation for TransferBench is available at
   - Pod membership requires amd-smi however can be skipped by setting FORCE_SINGLE_POD=1
 - Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
   - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
+- Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
 
 ### Modified
   - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options

@@ -471,7 +471,9 @@ namespace TransferBench::Utils
       }
     }
 
-    TableHelper table(numRows, numCols);
+    int showNumIterations = (ev.numIterations < 0) ? 1 : 0;
+
+    TableHelper table(numRows+showNumIterations, numCols);
     for (int col = 1; col < numCols; col++)
       table.DrawColBorder(col);
 
@@ -505,9 +507,9 @@ namespace TransferBench::Utils
         TransferResult const& r = results.tfrResults[idx];
 
         table.Set(rowIdx, 0, "Transfer %-4d ", idx);
-        table.Set(rowIdx, 1, "%8.3f GB/s "       , r.avgBandwidthGbPerSec);
-        table.Set(rowIdx, 2, "%8.3f ms "         , r.avgDurationMsec);
-        table.Set(rowIdx, 3, "%12lu bytes "      , r.numBytes);
+        table.Set(rowIdx, 1, "%8.3f GB/s "   , r.avgBandwidthGbPerSec);
+        table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
+        table.Set(rowIdx, 3, "%12lu bytes "  , r.numBytes);
 
         char exeSubIndexStr[32] = "";
         if (t.exeSubIndex != -1)
@@ -595,8 +597,21 @@ namespace TransferBench::Utils
     table.Set(rowIdx, 3, "%12lu bytes "     , results.totalBytesTransferred);
     table.Set(rowIdx, 4, " Overhead %.3f ms", results.overheadMsec);
     table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
-    table.DrawRowBorder(rowIdx + 1);
+    table.DrawRowBorder(rowIdx+1);
 
+    if (showNumIterations) {
+      rowIdx++;
+      table.Set(rowIdx, 0, "# Iters Run:");
+      table.Set(rowIdx, 1, "%lu ", numTimedIterations);
+      table.SetCellAlignment(rowIdx, 1, TableHelper::ALIGN_LEFT);
+      table.SetCellBorder(rowIdx, 0, 0);
+      table.SetCellBorder(rowIdx, 1, 0);
+      table.SetCellBorder(rowIdx, 2, 0);
+      table.SetCellBorder(rowIdx, 3, 0);
+      table.SetCellBorder(rowIdx, 4, 0);
+      table.DrawRowBorder(rowIdx);
+      table.DrawRowBorder(rowIdx+1);
+    }
     table.PrintTable(ev.outputToCsv, ev.showBorders);
   }
 
