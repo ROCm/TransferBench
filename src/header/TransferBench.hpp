@@ -3988,6 +3988,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       size_t completedTransfers = 0;
       int pollBatch = std::max(1, cfg.nic.cqPollBatch);
       std::vector<ibv_wc> wc((size_t)pollBatch);
+      ibv_wc* wc_array = wc.data();
       while (completedTransfers < transferCount) {
         for (auto i = 0; i < transferCount; i++) {
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
@@ -3995,7 +3996,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
             // Use batch polling to drain multiple completions at once for better efficiency
-            ibv_wc* wc_array = wc.data();
             int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, pollBatch, wc_array);
             if (nc > 0) {
               // Process all completions in the batch
