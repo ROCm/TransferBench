@@ -215,17 +215,16 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     Utils::GroupKey const& key    = group.first;
     std::vector<int> const& hosts = group.second;
 
-    uint64_t                 ppodId        = std::get<0>(key);
-    int64_t                  vpodId        = std::get<1>(key);
-    std::vector<std::string> cpuNames      = std::get<2>(key);
-    std::vector<int>         cpuSubExecs   = std::get<3>(key);
-    std::vector<std::string> gpuNames      = std::get<4>(key);
-    std::vector<int>         gpuSubExecs   = std::get<5>(key);
-    std::vector<int>         gpuClosestCpu = std::get<6>(key);
-    std::vector<std::string> nicNames      = std::get<7>(key);
-    std::vector<int>         nicClosestCpu = std::get<8>(key);
-    std::vector<int>         nicClosestGpu = std::get<9>(key);
-    std::vector<int>         nicIsActive   = std::get<10>(key);
+    int64_t                  podId         = std::get<0>(key);
+    std::vector<std::string> cpuNames      = std::get<1>(key);
+    std::vector<int>         cpuSubExecs   = std::get<2>(key);
+    std::vector<std::string> gpuNames      = std::get<3>(key);
+    std::vector<int>         gpuSubExecs   = std::get<4>(key);
+    std::vector<int>         gpuClosestCpu = std::get<5>(key);
+    std::vector<std::string> nicNames      = std::get<6>(key);
+    std::vector<int>         nicClosestCpu = std::get<7>(key);
+    std::vector<int>         nicClosestGpu = std::get<8>(key);
+    std::vector<int>         nicIsActive   = std::get<9>(key);
 
     int numRanks = hosts.size();
     int numCpus  = cpuNames.size();
@@ -240,7 +239,7 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
            groupNum++, numRanks, numCpus, numGpus, numNics, numActiveNics);
 
     // Determine size of table
-    int numCols = 7;
+    int numCols = 6;
     int numRows = 1 + std::max(numRanks, numExecutors);
     TransferBench::Utils::TableHelper table(numRows, numCols);
 
@@ -257,10 +256,9 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     table.Set(0, 0, " Rank ");
     table.Set(0, 1, " Hostname ");
     table.Set(0, 2, " POD ");
-    table.Set(0, 3, " VID ");
-    table.Set(0, 4, " Executor ");
-    table.Set(0, 5, " Executor Name ");
-    table.Set(0, 6, " #SE ");
+    table.Set(0, 3, " Executor ");
+    table.Set(0, 4, " Executor Name ");
+    table.Set(0, 5, " #SE ");
 
     // Fill in ranks / hosts
     for (int i = 0; i < numRanks; i++) {
@@ -270,31 +268,30 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     }
 
     // Fill in PPOD and VPOD
-    table.Set(1, 2, " %lu ", ppodId);
-    table.Set(1, 3, " %ld ", vpodId);
+    table.Set(1, 2, " %ld ", podId);
 
     // Fill in Executor information
     int rowIdx = 1;
     for (int cpuIndex = 0; cpuIndex < numCpus; cpuIndex++) {
-      table.Set(rowIdx, 4, " CPU %02d ", cpuIndex);
-      table.Set(rowIdx, 5, " %s ",       cpuNames[cpuIndex].c_str());
-      table.Set(rowIdx, 6, " %d ",       cpuSubExecs[cpuIndex]);
+      table.Set(rowIdx, 3, " CPU %02d ", cpuIndex);
+      table.Set(rowIdx, 4, " %s ",       cpuNames[cpuIndex].c_str());
+      table.Set(rowIdx, 5, " %d ",       cpuSubExecs[cpuIndex]);
       rowIdx++;
 
       // Loop over each GPU closest to this CPU executor
       for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
         if (gpuClosestCpu[gpuIndex] != cpuIndex) continue;
-        table.Set(rowIdx, 4, " - GPU %02d ", gpuIndex);
-        table.Set(rowIdx, 5, " - %s ",         gpuNames[gpuIndex].c_str());
-        table.Set(rowIdx, 6, " %d ",         gpuSubExecs[gpuIndex]);
+        table.Set(rowIdx, 3, " - GPU %02d ", gpuIndex);
+        table.Set(rowIdx, 4, " - %s ",         gpuNames[gpuIndex].c_str());
+        table.Set(rowIdx, 5, " %d ",         gpuSubExecs[gpuIndex]);
         rowIdx++;
 
         //  Loop over each NIC closest to this GPU
         for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
           if (nicClosestGpu[nicIndex] != gpuIndex) continue;
-          table.Set(rowIdx, 4, "   - NIC %02d ", nicIndex);
-          table.Set(rowIdx, 5, "   - %s", nicNames[nicIndex].c_str());
-          table.Set(rowIdx, 6, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
+          table.Set(rowIdx, 3, "   - NIC %02d ", nicIndex);
+          table.Set(rowIdx, 4, "   - %s", nicNames[nicIndex].c_str());
+          table.Set(rowIdx, 5, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
           rowIdx++;
         }
       }

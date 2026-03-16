@@ -62,8 +62,11 @@ THE SOFTWARE.
 #endif
 
 #if defined(__NVCC__)
+#include <cuda.h>
 #include <cuda_runtime.h>
+#ifdef NVML_ENABLED
 #include <nvml.h>
+#endif
 #else
 #include "hip/hip_ext.h"
 #include "hip/hip_runtime.h"
@@ -319,6 +322,7 @@ namespace TransferBench
     ErrResult() = default;
 #if defined(__NVCC__)
     ErrResult(cudaError_t  err);
+    ErrResult(CUresult     err);
 #else
     ErrResult(hipError_t   err);
     ErrResult(hsa_status_t err);
@@ -551,16 +555,17 @@ namespace TransferBench
   std::string GetHostname(int targetRank = -1);
 
   /**
-   * @param[in] targetRank  Rank to query (-1 for local rank)
-   * @returns Gets the physical pod identifier for the target rank
+   * @param[in] targetRank Rank to query (-1 for local rank)
+   * @returns Gets the unique pod identifier for the target rank based on its physical and virtual pod
    **/
-  uint64_t GetPpodId(int targetRank = -1);
+  int64_t GetPodIdx(int targetRank = -1);
 
   /**
-   * @param[in] targetRank  Rank to query (-1 for local rank)
-   * @returns Gets the virtual pod identifier for the target rank
+   * @param[in] targetRank  Remote rank to query
+   * @param[in] sourceRank  Base rank to query (-1 for local rank)
+   * @returns Whether source and target ranks belong to the same pod
    **/
-  int64_t GetVpodId(int targetRank = -1);
+  bool IsSamePod(int targetRank, int sourceRank = -1);
 
   /**
    * @param[in] exeDevice       The specific Executor to query
@@ -585,7 +590,7 @@ namespace TransferBench
    */
   ErrResult ParseTransfers(std::string str,
                            std::vector<Transfer>& transfers);
-};
+}
 //==========================================================================================
 // End of TransferBench API
 //==========================================================================================
@@ -603,6 +608,10 @@ namespace TransferBench
   #define hipError_t                                         cudaError_t
   #define hipEvent_t                                         cudaEvent_t
   #define hipStream_t                                        cudaStream_t
+  #define hipMemAllocationProp                               CUmemAllocationProp
+  #define hipMemGenericAllocationHandle_t                    CUmemGenericAllocationHandle
+  #define hipMemAccessDesc                                   CUmemAccessDesc
+  #define hipMemFabricHandle_t                               CUmemFabricHandle
 
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
@@ -614,6 +623,11 @@ namespace TransferBench
   #define hipMemcpyDeviceToHost                              cudaMemcpyDeviceToHost
   #define hipMemcpyHostToDevice                              cudaMemcpyHostToDevice
   #define hipSuccess                                         cudaSuccess
+  #define hipMemLocationTypeDevice                           CU_MEM_LOCATION_TYPE_DEVICE
+  #define hipMemAllocationTypePinned                         CU_MEM_ALLOCATION_TYPE_PINNED
+  #define hipMemHandleTypeFabric                             CU_MEM_HANDLE_TYPE_FABRIC
+  #define hipMemAllocationGranularityRecommended             CU_MEM_ALLOC_GRANULARITY_RECOMMENDED
+  #define hipMemAccessFlagsProtReadWrite                     CU_MEM_ACCESS_FLAGS_PROT_READWRITE
 
   // Functions
   #define hipDeviceCanAccessPeer                             cudaDeviceCanAccessPeer
@@ -642,6 +656,18 @@ namespace TransferBench
   #define hipStreamCreate                                    cudaStreamCreate
   #define hipStreamDestroy                                   cudaStreamDestroy
   #define hipStreamSynchronize                               cudaStreamSynchronize
+  #define hipMemGetAllocationGranularity                     cuMemGetAllocationGranularity
+  #define hipMemCreate                                       cuMemCreate
+  #define hipMemAddressReserve                               cuMemAddressReserve
+  #define hipMemMap                                          cuMemMap
+  #define hipMemSetAccess                                    cuMemSetAccess
+  #define hipMemUnmap                                        cuMemUnmap
+  #define hipMemRelease                                      cuMemRelease
+  #define hipMemAddressFree                                  cuMemAddressFree
+  #define hipMemExportToShareableHandle                      cuMemExportToShareableHandle
+  #define hipMemImportFromShareableHandle                    cuMemImportFromShareableHandle
+
+  using gpu_device_ptr = CUdeviceptr;
 
   // Define float2 addition operator for NVIDIA platform
   __device__ inline float2& operator +=(float2& a, const float2& b)
@@ -660,6 +686,8 @@ namespace TransferBench
     a.w += b.w;
     return a;
   }
+#else
+  using gpu_device_ptr = void*;
 #endif
 
 // Helper macro functions
@@ -684,20 +712,26 @@ namespace TransferBench
 #endif
 
 // Error check macro (NOTE: This will return even for ERR_WARN)
-#define ERR_CHECK(cmd)            \
-  do {                            \
-    ErrResult err = (cmd);        \
-    if (err.errType != ERR_NONE)  \
-      return err;                 \
+#define ERR_CHECK(cmd)                                                       \
+  do {                                                                       \
+    ErrResult err = (cmd);                                                   \
+    if (err.errType != ERR_NONE) {                                           \
+      err.errMsg += std::string(" [") + __FILE__ + ":" +                     \
+                    std::to_string(__LINE__) + " in " + __func__ + "]";      \
+      return err;                                                            \
+    }                                                                        \
   } while (0)
 
 // Appends warn/fatal errors to a list, return false if fatal
-#define ERR_APPEND(cmd, list)     \
-  do {                            \
-    ErrResult err = (cmd);        \
-    if (err.errType != ERR_NONE)  \
-      list.push_back(err);        \
-    if (err.errType == ERR_FATAL) \
+#define ERR_APPEND(cmd, list)                                                \
+  do {                                                                       \
+    ErrResult err = (cmd);                                                   \
+    if (err.errType != ERR_NONE) {                                           \
+      err.errMsg += std::string(" [") + __FILE__ + ":" +                     \
+                    std::to_string(__LINE__) + " in " + __func__ + "]";      \
+      list.push_back(err);                                                   \
+    }                                                                        \
+    if (err.errType == ERR_FATAL)                                            \
       return false;               \
   } while (0)
 
@@ -967,8 +1001,8 @@ namespace {
     void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1) const;
 
     std::string GetHostname(int targetRank) const;
-    uint64_t GetPpodId(int targetRank) const;
-    int64_t  GetVpodId(int targetRank) const;
+    int64_t  GetPodIdx(int targetRank) const;
+    bool IsSamePod(int targetRank, int sourceRank) const;
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
 
@@ -1016,12 +1050,15 @@ namespace {
     std::vector<int> sockets;                 ///< Master list of sockets
     int              listenSocket;            ///< Master listener socket
 
+    // UALoE related
+    bool             fabricSupport = false;   ///< Whether Pod Communication is supported
+
     // Topology related
     struct RankTopology
     {
       char hostname[33];
-      uint64_t ppodId;
-      int64_t  vpodId;
+      char    ppodId[16];
+      int64_t vpodId;
 
       std::map<ExeType,            int>         numExecutors;
       std::map<pair<ExeType, int>, int>         numExecutorSubIndices;
@@ -1038,7 +1075,7 @@ namespace {
 
     void SetupSocketCommunicator();
     void SetupMpiCommunicator();
-    void CollectPodMembership(uint64_t& ppodId, int64_t& vpodId);
+    void CollectPodMembership(char* ppodId, int64_t& vpodId);
     void GetRankTopology(RankTopology& topo);
     void CollectTopology();
     std::string GetCpuName() const;
@@ -1365,25 +1402,6 @@ namespace {
   }
 
 #ifdef POD_COMM_ENABLED
-  static ErrResult GetMemLocation(MemDevice const& memDevice, hipMemLocation& location)
-  {
-    if (IsCpuMemType(memDevice.memType)) {
-      location.type = hipMemLocationTypeHostNuma;
-    } else if (IsGpuMemType(memDevice.memType) && memDevice.memType != MEM_MANAGED) {
-      location.type = hipMemLocationTypeDevice;
-    } else {
-      return {ERR_FATAL, "Unsupported memory location"};
-    }
-
-    // Determine location id
-    if (memDevice.memType == MEM_CPU_CLOSEST) {
-      location.id = GetClosestCpuNumaToGpu(memDevice.memIndex);
-    } else {
-      location.id = memDevice.memIndex;
-    }
-    return ERR_NONE;
-  }
-
   static ErrResult GetMemAllocationProp(MemDevice const& memDevice, hipMemAllocationProp& prop)
   {
 
@@ -1391,13 +1409,20 @@ namespace {
     case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_GPU:
       prop.type = hipMemAllocationTypePinned; break;
     case MEM_CPU_UNCACHED: case MEM_GPU_UNCACHED:
+#if defined (__NVCC__)
+      return {ERR_FATAL, "Uncached memory type unsupported in CUDA"};
+#else
       prop.type = hipMemAllocationTypeUncached; break;
+#endif
     default:
       return {ERR_FATAL, "Unsupported memory type for pod communication"};
     }
 
     prop.requestedHandleTypes = hipMemHandleTypeFabric;
-    ERR_CHECK(GetMemLocation(memDevice, prop.location));
+//  at this point shouldn't have any memtype other than device
+//    ERR_CHECK(GetMemLocation(memDevice, prop.location));
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = memDevice.memIndex;
     return ERR_NONE;
   }
 #endif
@@ -1421,8 +1446,9 @@ namespace {
     // If memHandle is provided, allocate sharable memory
     if (memHandle != NULL) {
 #ifdef POD_COMM_ENABLED
+      ERR_CHECK(hipSetDevice(deviceIdx));
       // Prepare HIP memory allocation properties structure
-      hipMemAllocationProp prop;
+      hipMemAllocationProp prop = {};
       ERR_CHECK(GetMemAllocationProp(memDevice, prop));
 
       // Determine recommended allocation granularity
@@ -1436,18 +1462,20 @@ namespace {
       ERR_CHECK(hipMemCreate(memHandle, roundedUpBytes, &prop, 0));
 
       // Reserve a virtual address range for the memory allocation
-      ERR_CHECK(hipMemAddressReserve((void**)memPtr, roundedUpBytes, 0, 0, 0));
+      ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, roundedUpBytes, 0, 0, 0));
 
       // Map the allocation handle to the reserved address range
-      ERR_CHECK(hipMemMap(*memPtr, roundedUpBytes, 0, *memHandle, 0));
+      ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, roundedUpBytes, 0, *memHandle, 0));
 
       // Specify memory access descriptor to enable local read/write
       hipMemAccessDesc desc;
-      ERR_CHECK(GetMemLocation(memDevice, desc.location));
+//      ERR_CHECK(GetMemLocation(memDevice, desc.location));
+      desc.location.type = hipMemLocationTypeDevice;
+      desc.location.id = memDevice.memIndex;
       desc.flags = hipMemAccessFlagsProtReadWrite;
 
       // Set access flags for virtual address range
-      ERR_CHECK(hipMemSetAccess(*memPtr, roundedUpBytes, &desc, 1));
+      ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, roundedUpBytes, &desc, 1));
 
       // Clear the memory
       if (IsCpuMemType(memType)) {
@@ -1455,6 +1483,7 @@ namespace {
         // Check that the allocated pages are actually on the correct NUMA node
         ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
       } else if (IsGpuMemType(memType)) {
+        ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
         ERR_CHECK(hipDeviceSynchronize());
       }
@@ -1473,7 +1502,7 @@ namespace {
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       int flags = 0;
-#if !defined(__NVCC__)
+#if !defined (__NVCC__)
       flags |= hipHostMallocNumaUser;
 #endif
       if (memType == MEM_CPU || memType == MEM_CPU_CLOSEST) {
@@ -1575,11 +1604,11 @@ namespace {
     } else {
 #ifdef POD_COMM_ENABLED
       // Unmap the backing memory of the given virtual address
-      ERR_CHECK(hipMemUnmap(memPtr, bytes));
+      ERR_CHECK(hipMemUnmap((gpu_device_ptr)memPtr, bytes));
       // Release the backing memory via its handle
       ERR_CHECK(hipMemRelease(*memHandle));
       // Free virtual address range reservation
-      ERR_CHECK(hipMemAddressFree(memPtr, bytes));
+      ERR_CHECK(hipMemAddressFree((gpu_device_ptr)memPtr, bytes));
 #else
       return {ERR_FATAL, "Unable to deallocate sharable memory if not compiled with pod communication support"};
 #endif
@@ -2365,32 +2394,28 @@ namespace {
 
       // Check for multi-node support
       if (IsPodTransfer(t)) {
+#ifndef POD_COMM_ENABLED
+        errors.push_back({ERR_FATAL,
+            "Transfer %d: Cross-rank GPU memory access requires pod communication support (HIP 8.0+)", i});
+        hasFatalError = true;
+        break;
+#endif
         // In order to support pod communication, the participanting ranks need to be members of the same pod
-        std::pair<uint64_t, int64_t> podId = std::make_pair(GetPpodId(t.exeDevice.exeRank),
-                                                            GetVpodId(t.exeDevice.exeRank));
+        int exeRank = t.exeDevice.exeRank;
+        bool samePod = true;
 
-        bool samePod = (podId.second != -1); // vpodId == -1 indicates not part of pod
-        if (samePod) {
-          for (auto const& src : t.srcs) {
-            std::pair<uint64_t, int64_t> srcPodId = std::make_pair(GetPpodId(src.memRank),
-                                                                   GetVpodId(src.memRank));
-            if (srcPodId != podId) {
-              samePod = false;
-              break;
-            }
-          }
+        for (auto const& src : t.srcs) {
+          if (!(samePod = IsSamePod(src.memRank, exeRank)))
+            break;
         }
         if (samePod) {
           for (auto const& dst : t.dsts) {
-            std::pair<uint64_t, int64_t> dstPodId = std::make_pair(GetPpodId(dst.memRank),
-                                                                   GetVpodId(dst.memRank));
-            if (dstPodId != podId) {
-              samePod = false;
+            if (!(samePod = IsSamePod(dst.memRank, exeRank)))
               break;
-            }
           }
         }
-        if (!samePod) {
+
+        if (!samePod || IsCpuExeType(t.exeDevice.exeType)) {
           errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
               i, t.exeDevice.exeRank});
           break;
@@ -2862,7 +2887,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         std::string const& description,
                                         PCIeNode&          root)
   {
-    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
+    std::string lowerAddress = pcieAddress;
+    std::transform(lowerAddress.begin(), lowerAddress.end(), lowerAddress.begin(), ::tolower);
+
+    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + lowerAddress;
     std::string canonicalPath = std::filesystem::canonical(devicePath).string();
 
     if (!std::filesystem::exists(devicePath)) {
@@ -3648,6 +3676,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
           output = (rss->dstMem[dstIdx]) + initOffset;
         } else {
+          ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
           ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
           ERR_CHECK(hipDeviceSynchronize());
           output = outputBuffer.data();
@@ -3747,37 +3776,40 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
-  static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t const actualBytes,
+  static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t* pActualBytes,
                                   float** memPtr, hipMemGenericAllocationHandle_t* memHandle)
   {
     // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
     // NOTE: This will be overwritten on executor rank if pod communication is required
     System::Get().Broadcast(memDevice.memRank, sizeof(*memPtr), memPtr);
 
+    // Broadcast actualBytes from owning rank so importing rank gets the correct (rounded-up) size
+    System::Get().Broadcast(memDevice.memRank, sizeof(*pActualBytes), pActualBytes);
+
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
-      int const localRank = GetRank();
-
       // mem rank exports to sharable fabric handle
       hipMemFabricHandle_t fabricHandle;
-      if (memDevice.memRank == localRank) {
+      if (memDevice.memRank == GetRank()) {
+        ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0));
       }
 
       System::Get().Broadcast(memDevice.memRank, sizeof(hipMemFabricHandle_t), &fabricHandle);
 
       // exe rank imports the fabric handle
-      if (exeDevice.exeRank == localRank) {
+      if (exeDevice.exeRank == GetRank()) {
+        ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
         ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
-        ERR_CHECK(hipMemAddressReserve((void**)memPtr, actualBytes, 0, 0, 0));
-        ERR_CHECK(hipMemMap(*memPtr, actualBytes, 0, *memHandle, 0));
+        ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0));
+        ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0));
 
         // Specify memory access descriptor to enable local read/write
         hipMemAccessDesc desc;
         desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
         desc.flags = hipMemAccessFlagsProtReadWrite;
-        ERR_CHECK(hipMemSetAccess(*memPtr, actualBytes, &desc, 1));
+        ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1));
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
@@ -3828,14 +3860,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate source memory (on the correct rank)
-        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType));
+        bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (srcMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
                                    &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : NULL));
         }
 
         // Exchange memory pointer across ranks
-        ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, rss.srcActualBytes[iSrc],
+        ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, &rss.srcActualBytes[iSrc],
                                  &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
       }
 
@@ -3856,14 +3888,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate destination memory (on the correct rank)
-        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType));
+        bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
         }
 
         // Exchange memory pointer across ranks
-        ERR_CHECK(ExchangeMemory(dstMemDevice, exeDevice, t.numBytes + cfg.data.byteOffset,
+        ERR_CHECK(ExchangeMemory(dstMemDevice, exeDevice, &rss.dstActualBytes[iDst],
                                  &rss.dstMem[iDst], &rss.dstMemHandle[iDst]));
       }
 
@@ -4031,18 +4063,34 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         if (t.srcs[iSrc].memRank == localRank) {
+          ERR_CHECK(hipSetDevice(t.srcs[iSrc].memIndex));
           ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
+        } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
+#ifdef POD_COMM_ENABLED
+          ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
+          ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
+          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
+#endif
         }
       }
 
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         if (t.dsts[iDst].memRank == localRank) {
+          ERR_CHECK(hipSetDevice(t.dsts[iDst].memIndex));
           ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
+        } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
+#ifdef POD_COMM_ENABLED
+          ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
+          ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
+          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
+#endif
         }
       }
 
@@ -4615,7 +4663,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
-  #undef GPU_KERNEL_SE_TYPE_DECL
 
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
@@ -4786,6 +4833,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   // Execute a single DMA Transfer
   static ErrResult ExecuteDmaTransfer(int           const  iteration,
                                       bool          const  useSubIndices,
+                                      int           const  exeIndex,
                                       hipStream_t   const  stream,
                                       hipEvent_t    const  startEvent,
                                       hipEvent_t    const  stopEvent,
@@ -4794,15 +4842,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
+    ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
 
-      // Use hipMemcpy
+      // Use DMA copy engine
       do {
+#if defined(__NVCC__)
+        ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[0],
+                                (CUdeviceptr)resources.srcMem[0],
+                                resources.numBytes, stream));
+#else
         ERR_CHECK(hipMemcpyAsync(resources.dstMem[0], resources.srcMem[0], resources.numBytes,
                                  hipMemcpyDefault, stream));
+#endif
       } while (++subIterations != cfg.general.numSubIterations);
 
       if (cfg.dma.useHipEvents)
@@ -4866,6 +4921,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                              ExecuteDmaTransfer,
                                              iteration,
                                              exeInfo.useSubIndices,
+                                             exeIndex,
                                              exeInfo.streams[i],
                                              cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
                                              cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
@@ -4901,6 +4957,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+#if defined(__NVCC__)
+  static bool MnnvlCheck() {
+    int flag = 0;
+#ifdef POD_COMM_ENABLED
+    CUresult err = cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, 0);
+    if (err || !flag) return false;
+    err = cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, 0);
+#endif
+    if (!flag) return false;
+    return true;
+  }
+#endif
+
 } // End of anonymous namespace
 //========================================================================================
 /// @endcond
@@ -4918,7 +4987,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#if !defined(__NVCC__)
+#if defined(__NVCC__)
+  ErrResult::ErrResult(CUresult err)
+  {
+    if (err == CUDA_SUCCESS) {
+      this->errType = ERR_NONE;
+      this->errMsg  = "";
+    } else {
+      const char *errString = NULL, *errName = NULL;
+      cuGetErrorName(err, &errName);
+      cuGetErrorString(err, &errString);
+      this->errType = ERR_FATAL;
+      this->errMsg  = std::string("CUDA Driver Error: ") + errName
+                      + " (" + errString + ")";
+    }
+  }
+#else
   ErrResult::ErrResult(hsa_status_t err)
   {
     if (err == HSA_STATUS_SUCCESS) {
@@ -5042,6 +5126,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
+            ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
           }
@@ -5661,11 +5746,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       while (pause);
     }
 
-#if AMD_SMI_ENABLED
+#ifdef AMD_SMI_ENABLED
     if (verbose) {
       System::Get().Log("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
     }
     amdsmi_init(AMDSMI_INIT_AMD_APUS);
+#elif defined (NVML_ENABLED)
+    if (verbose) {
+      System::Get().Log("[INFO] Initializing NVIDIA Management Library (NVML)\n");
+    }
+    nvmlInit_v2();
 #endif
 
     // Priority 1: Socket communicator
@@ -5718,6 +5808,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 #ifdef AMD_SMI_ENABLED
     amdsmi_shut_down();
+#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+    nvmlShutdown();
 #endif
   }
 
@@ -6071,24 +6163,48 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return "Unknown CPU";
   }
 
-  void System::CollectPodMembership(uint64_t& ppodId, int64_t& vpodId)
+  void System::CollectPodMembership(char* ppodId, int64_t& vpodId)
   {
-    ppodId = 0;
+    memset(ppodId, 0, 16);
     vpodId = -1;
 
     // FORCE_SINGLE_POD skips any required queries to AMDSMI
     char* forceSinglePod = getenv("FORCE_SINGLE_POD");
     if (forceSinglePod) {
-      ppodId = 0;
       vpodId = 0;
       return;
     }
 
+    // Check fabric support
 #if defined(__NVCC__)
-    // MNNVL support unimplemented at this time
+#ifdef NVML_ENABLED
+    int flag;
+    char busId[] = "00000000:00:00.0";
+    if (cudaDeviceGetPCIBusId(busId, sizeof(busId), 0)) return;
 
-    Log("[ERROR] MNNVL support is currently unimplemented\n");
-    exit(1);
+    nvmlGpuFabricInfoV_t fabricInfo;
+    fabricInfo.state = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED;
+    nvmlDevice_t nvmlDev;
+    nvmlReturn_t err = nvmlDeviceGetHandleByPciBusId_v2(busId, &nvmlDev);
+    if (err != NVML_SUCCESS) {
+      if (verbose) {
+        System::Get().Log("[WARN] Unable to get processor handle for GPU 0 at %s [%s]\n",
+                           busId, nvmlErrorString(err));
+      }
+      return;
+    }
+    fabricInfo.version = nvmlGpuFabricInfo_v2;
+
+    err = nvmlDeviceGetGpuFabricInfoV(nvmlDev, &fabricInfo);
+    if (err != NVML_SUCCESS || fabricInfo.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
+      System::Get().Log("[WARN] MNNVL not supported\n");
+    } else {
+      if (fabricSupport = MnnvlCheck()) {
+        vpodId = fabricInfo.cliqueId;
+        memcpy(ppodId, fabricInfo.clusterUuid, 16);
+      }
+    }
+#endif
 #else
 #ifdef AMD_SMI_ENABLED
     int numGpus = 0;
@@ -6112,8 +6228,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (err == AMDSMI_STATUS_SUCCESS) {
           // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
           //       vpodId == -1 to represent no pod present
-          ppodId = fabricInfo.info.v1.ppod_id;
+          memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
           vpodId = fabricInfo.info.v1.vpod_id;
+          fabricSupport = true;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
@@ -6496,7 +6613,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::SendRankTopo(int peerRank, RankTopology const& topo) const
   {
     SendData(peerRank, sizeof(topo.hostname), topo.hostname);
-    SendData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
+    SendData(peerRank, sizeof(topo.ppodId), topo.ppodId);
     SendData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     SendMap(peerRank, topo.numExecutors);
     SendMap(peerRank, topo.numExecutorSubIndices);
@@ -6512,7 +6629,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   void System::RecvRankTopo(int peerRank, RankTopology& topo) const
   {
     RecvData(peerRank, sizeof(topo.hostname), topo.hostname);
-    RecvData(peerRank, sizeof(topo.ppodId), &topo.ppodId);
+    RecvData(peerRank, sizeof(topo.ppodId), topo.ppodId);
     RecvData(peerRank, sizeof(topo.vpodId), &topo.vpodId);
     RecvMap(peerRank, topo.numExecutors);
     RecvMap(peerRank, topo.numExecutorSubIndices);
@@ -6806,16 +6923,47 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return rankInfo[targetRank].hostname;
   }
 
-  uint64_t System::GetPpodId(int targetRank) const
+  int64_t System::GetPodIdx(int targetRank) const
   {
+    using PodKey = std::pair<std::array<char, 16>, int64_t>;
+
+    static std::map<PodKey, int64_t> podIdxMap;
+    static bool initialized = false;
+
+    if (!initialized) {
+      int64_t nextIdx = 0;
+      for (int r = 0; r < numRanks; r++) {
+        PodKey key;
+        memcpy(key.first.data(), rankInfo[r].ppodId, 16);
+        key.second = rankInfo[r].vpodId;
+
+        // vpodIdx == -1 means not part of any pod; assign -1 directly
+        if (key.second == -1) continue;
+
+        if (podIdxMap.find(key) == podIdxMap.end()) {
+          podIdxMap[key] = nextIdx++;
+        }
+      }
+      initialized = true;
+    }
+
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
-    return rankInfo[targetRank].ppodId;
+
+    PodKey key;
+    memcpy(key.first.data(), rankInfo[targetRank].ppodId, 16);
+    key.second = rankInfo[targetRank].vpodId;
+
+    if (key.second == -1) return -1;
+
+    return podIdxMap[key];
   }
 
-  int64_t System::GetVpodId(int targetRank) const
+  bool System::IsSamePod(int targetRank, int sourceRank) const
   {
-    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
-    return rankInfo[targetRank].vpodId;
+    if (sourceRank < 0 || sourceRank >= numRanks) sourceRank = rank;
+    if (GetPodIdx(sourceRank) == -1 || GetPodIdx(targetRank) == -1)
+      return false;
+    return GetPodIdx(sourceRank) == GetPodIdx(targetRank);
   }
 
   std::string System::GetExecutorName(ExeDevice exeDevice) const
@@ -6924,14 +7072,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return System::Get().GetHostname(targetRank);
   }
 
-  uint64_t GetPpodId(int targetRank)
+  int64_t GetPodIdx(int targetRank)
   {
-    return System::Get().GetPpodId(targetRank);
+    return System::Get().GetPodIdx(targetRank);
   }
 
-  int64_t GetVpodId(int targetRank)
+  bool IsSamePod(int targetRank, int sourceRank)
   {
-    return System::Get().GetVpodId(targetRank);
+    return System::Get().IsSamePod(targetRank, sourceRank);
   }
 
   std::string GetExecutorName(ExeDevice exeDevice)
@@ -6956,10 +7104,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipError_t
 #undef hipEvent_t
 #undef hipStream_t
+#undef hipMemAllocationProp
+#undef hipMemGenericAllocationHandle_t
+#undef hipMemAccessDesc
+#undef hipMemFabricHandle_t
 
 // Enumerations
 #undef hipDeviceAttributeClockRate
-#undef hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #undef hipDeviceAttributeMultiprocessorCount
 #undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
@@ -6968,6 +7119,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipMemcpyDeviceToHost
 #undef hipMemcpyHostToDevice
 #undef hipSuccess
+#undef hipMemLocationTypeDevice
+#undef hipMemAllocationTypePinned
+//#undef hipMemAllocationTypeUncached
+#undef hipMemHandleTypeFabric
+#undef hipMemAllocationGranularityRecommended
+#undef hipMemAccessFlagsProtReadWrite
 
 // Functions
 #undef hipDeviceCanAccessPeer
@@ -6996,6 +7153,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipStreamCreate
 #undef hipStreamDestroy
 #undef hipStreamSynchronize
+#undef hipMemGetAllocationGranularity
+#undef hipMemCreate
+#undef hipMemAddressReserve
+#undef hipMemMap
+#undef hipMemSetAccess
+#undef hipMemUnmap
+#undef hipMemRelease
+#undef hipMemAddressFree
+#undef hipMemExportToShareableHandle
+#undef hipMemImportFromShareableHandle
 #endif
 
 // Kernel macros

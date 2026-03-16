@@ -12,6 +12,7 @@ MPI_PATH  ?= /usr/local/openmpi
 # DISABLE_MPI_COMM: Disable MPI communicator support (default: 0)
 # DISABLE_DMA_BUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
 # DISABLE_AMD_SMI: Disable AMD-SMI pod membership checking support (default: 0)
+# DISABLE_NVML: Disable NVML pod membership detection for CUDA builds (default: 0)
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -194,6 +195,28 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     endif
   endif
 
+  NVML_ENABLED = 0
+  # Enable NVML support for pod membership detection on NVIDIA platforms
+  # Compile with NVML support if
+  # 1) DISABLE_NVML is not set to 1
+  # 2) Building TransferBenchCuda
+  # 3) nvml.h is found under CUDA_PATH
+  DISABLE_NVML ?= 0
+  ifneq ($(DISABLE_NVML), 1)
+    ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+      $(info Attempting to build with NVML support)
+      ifneq ($(wildcard $(CUDA_PATH)/include/nvml.h),)
+        COMMON_FLAGS += -DNVML_ENABLED
+        LDFLAGS += -lnvidia-ml
+        NVML_ENABLED = 1
+        $(info - Building with NVML support for pod membership detection)
+      else
+        $(info - nvml.h not found at $(CUDA_PATH)/include. Building without NVML support)
+        $(info - Pod membership may be forced by setting FORCE_SINGLE_POD=1)
+      endif
+    endif
+  endif
+
   POD_ENABLED = 0
   # Compile with pod support if
   # 1) DISABLE_POD_COMM is not set to 1
@@ -222,6 +245,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       ifeq ($(CUDA_VERSION_OK),yes)
         $(info - Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which has MNNVL support)
         COMMON_FLAGS += -DPOD_COMM_ENABLED
+        LDFLAGS += -lcuda
         POD_ENABLED = 1
       else
         $(info - Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which does not have MNNVL support)

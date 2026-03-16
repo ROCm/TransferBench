@@ -84,8 +84,7 @@ namespace TransferBench::Utils
 
   // Group information
   typedef std::tuple<
-    uint64_t,                      // Physical Pod ID
-    int64_t,                       // Virtual Pod ID
+    int64_t,                       // Pod Index
     std::vector<std::string>,      // CPU Names
     std::vector<int>,              // CPU #Subexecutors
     std::vector<std::string>,      // GPU Names
@@ -98,12 +97,16 @@ namespace TransferBench::Utils
     > GroupKey;
 
   typedef std::map<GroupKey, std::vector<int>> RankGroupMap;
+  typedef std::map<int64_t, std::vector<int>> RankPerPodMap;
 
   // Get information about how ranks can be organized into homogenous groups
   RankGroupMap& GetRankGroupMap();
 
   // Return the number of homogenous groups of ranks
-  int numRankGroups();
+  int GetNumRankGroups();
+
+  // Helper function for pod membership
+  RankPerPodMap& GetRankPerPodMap();
 
   // Helper function to convert an ExeType to a string
   std::string ExeTypeToStr(ExeType exeType);
@@ -302,8 +305,7 @@ namespace TransferBench::Utils
       // Build GroupKey for each rank
       for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
 
-        uint64_t ppodId = TransferBench::GetPpodId(rank);
-        int64_t  vpodId = TransferBench::GetVpodId(rank);
+        int64_t podId = TransferBench::GetPodIdx(rank);
 
         // CPU information
         int numCpus = TransferBench::GetNumExecutors(EXE_CPU, rank);
@@ -349,7 +351,7 @@ namespace TransferBench::Utils
           nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
         }
 
-        GroupKey key(ppodId, vpodId,
+        GroupKey key(podId,
                      cpuNames, cpuNumSubExecs,
                      gpuNames, gpuNumSubExecs, gpuClosestCpu,
                      nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
@@ -366,6 +368,21 @@ namespace TransferBench::Utils
     return GetRankGroupMap().size();
   }
 
+  RankPerPodMap& GetRankPerPodMap()
+  {
+    static RankPerPodMap pods;
+    static bool initialized = false;
+
+    if (!initialized) {
+      for (int rank = 0; rank < TransferBench::GetNumRanks(); rank++) {
+        int64_t const podId = TransferBench::GetPodIdx(rank);
+        if (podId == -1) continue;
+        pods[podId].push_back(rank);
+      }
+      initialized = true;
+    }
+    return pods;
+  }
   // Helper function to convert an ExeType to a string
   std::string ExeTypeToStr(ExeType exeType)
   {
