@@ -31,7 +31,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
     return 1;
   }
 
-  Utils::RankPodMap& rankToPod = Utils::GetRankPodMap();
+  Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   if (rankToPod.empty()) {
     Utils::Print("[ERROR] No pods detected. Set FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
     return 1;
