@@ -97,7 +97,7 @@ namespace TransferBench::Utils
     > GroupKey;
 
   typedef std::map<GroupKey, std::vector<int>> RankGroupMap;
-  typedef std::map<int64_t, std::vector<int>> RankPerPodMap;
+  typedef std::map<int64_t, std::vector<int>> RankPodMap;
 
   // Get information about how ranks can be organized into homogenous groups
   RankGroupMap& GetRankGroupMap();
@@ -106,7 +106,7 @@ namespace TransferBench::Utils
   int GetNumRankGroups();
 
   // Helper function for pod membership
-  RankPodMap& GetRankPerPodMap();
+  RankPodMap& GetRankPodMap();
 
   // Helper function to convert an ExeType to a string
   std::string ExeTypeToStr(ExeType exeType);
