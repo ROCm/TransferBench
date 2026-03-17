@@ -78,7 +78,7 @@ void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
   }
 }
 
-// Returns a schedule for ordered 2-combination of N elements 
+// Returns a schedule for ordered 2-combination of N elements
 // by pairing the list with its rotating self,
 // each round contains n pairs, where 1 <= n <= N and N is divisible by n
 // and an element cannot appear more than twice in a round,
@@ -129,7 +129,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] NIC p2p preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] NIC_FILTER may also be used to limit NIC visibility\n");
+    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return 1;
   }
 
@@ -363,10 +363,10 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   Utils::TableHelper summaryTable(11, 6, precision);
   Utils::Print("Summary of top 10 fastest/slowest connection\n");
 
-  summaryTable.Set(0, 0, " Fastest Bandwidth (GB/s) "); 
+  summaryTable.Set(0, 0, " Fastest Bandwidth (GB/s) ");
   summaryTable.Set(0, 1, " Src ");
   summaryTable.Set(0, 2, " Dst ");
-  summaryTable.Set(0, 3, " Slowest Bandwidth (GB/s) "); 
+  summaryTable.Set(0, 3, " Slowest Bandwidth (GB/s) ");
   summaryTable.Set(0, 4, " Src ");
   summaryTable.Set(0, 5, " Dst ");
 

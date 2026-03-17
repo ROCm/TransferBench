@@ -29,7 +29,7 @@ int NicRingsPreset(EnvVars&           ev,
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] NIC-rings preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] NIC_FILTER may also be used to limit NIC visibility\n");
+    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return 1;
   }
 

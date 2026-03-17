@@ -2778,9 +2778,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int numIbvDevices = 0;
       ibv_device** deviceList = ibv_get_device_list(&numIbvDevices);
 
-      // Check for NIC_FILTER
+      // Check for TB_NIC_FILTER
       // By default, accept all NIC names
-      std::string nicFilterPattern = getenv("NIC_FILTER") ? getenv("NIC_FILTER") : ".*";
+      std::string nicFilterPattern = getenv("TB_NIC_FILTER") ? getenv("TB_NIC_FILTER") : ".*";
 
       if (deviceList && numIbvDevices > 0) {
         // Loop over each device to collect information

@@ -18,6 +18,7 @@ Documentation for TransferBench is available at
   - a2asweep preset changes from USE_FINE_GRAIN to MEM_TYPE to reflect various memory types
   - a2asweep preset changes from NUM_CUS to NUM_SUB_EXECS to match with a2a preset naming convention
   - scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
+  - NIC_FILTER renamed to TB_NIC_FILTER for consistency
 
 ## v1.66.02
 ### Added
