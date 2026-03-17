@@ -33,7 +33,7 @@ int PodPeerToPeerPreset(EnvVars&           ev,
 
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   if (rankToPod.empty()) {
-    Utils::Print("[ERROR] No pods detected. Set FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
     return 1;
   }
 
@@ -176,7 +176,6 @@ int PodPeerToPeerPreset(EnvVars&           ev,
       }
 
       // Output results
-      int const podNumRanks = ranks.size();
       int const rowsPerSrc = isBidirectional ? 3 : 1;
       int const rowStride = isBidirectional ? rowsPerSrc + 1 : rowsPerSrc;
       int const numRows = showFullMatrix ? 2 + n * rowStride - (isBidirectional ? 1 : 0)
@@ -297,5 +296,5 @@ int PodPeerToPeerPreset(EnvVars&           ev,
 
   }
   return 0;
-  
+
 }

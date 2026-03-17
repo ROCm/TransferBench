@@ -154,7 +154,7 @@ int PodAllToAllPreset(EnvVars&           ev,
 
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   if (rankToPod.empty()) {
-    Utils::Print("[ERROR] No pods detected. Set FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
     return 1;
   }
   for (auto const& [pod, ranks] : rankToPod) {

@@ -1050,9 +1050,6 @@ namespace {
     std::vector<int> sockets;                 ///< Master list of sockets
     int              listenSocket;            ///< Master listener socket
 
-    // UALoE related
-    bool             fabricSupport = false;   ///< Whether Pod Communication is supported
-
     // Topology related
     struct RankTopology
     {
@@ -2824,9 +2821,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
           ibvDevice.busId = "";
           {
-            std::string device_path(ibvDevice.devicePtr->dev_path);
+            std::string device_path = std::string(ibvDevice.devicePtr->dev_path) + "/device";
             if (std::filesystem::exists(device_path)) {
-              std::string pciPath = std::filesystem::canonical(device_path + "/device").string();
+              std::string pciPath = std::filesystem::canonical(device_path).string();
               std::size_t pos = pciPath.find_last_of('/');
               if (pos != std::string::npos) {
                 ibvDevice.busId = pciPath.substr(pos + 1);
@@ -2837,9 +2834,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           // Get nearest numa node for this device
           ibvDevice.numaNode = -1;
           std::filesystem::path devicePath = "/sys/bus/pci/devices/" + ibvDevice.busId + "/numa_node";
-          std::string canonicalPath = std::filesystem::canonical(devicePath).string();
-
-          if (std::filesystem::exists(canonicalPath)) {
+          if (std::filesystem::exists(devicePath)) {
+            std::string canonicalPath = std::filesystem::canonical(devicePath).string();
             std::ifstream file(canonicalPath);
             if (file.is_open()) {
               std::string numaNodeStr;
@@ -2891,12 +2887,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     std::transform(lowerAddress.begin(), lowerAddress.end(), lowerAddress.begin(), ::tolower);
 
     std::filesystem::path devicePath = "/sys/bus/pci/devices/" + lowerAddress;
-    std::string canonicalPath = std::filesystem::canonical(devicePath).string();
-
     if (!std::filesystem::exists(devicePath)) {
       return {ERR_FATAL, "Device path %s does not exist", devicePath.c_str()};
     }
 
+    std::string canonicalPath = std::filesystem::canonical(devicePath).string();
     std::istringstream iss(canonicalPath);
     std::string token;
 
@@ -3584,7 +3579,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       std::shuffle(lineTypes.begin(), lineTypes.end(), gen);
 
       // Apply zero-ing
-      int dumpLines = getenv("DUMP_LINES") ? atoi(getenv("DUMP_LINES")) : 0;
+      int dumpLines = getenv("TB_DUMP_LINES") ? atoi(getenv("TB_DUMP_LINES")) : 0;
 
       if (dumpLines) {
         System::Get().Log("Input pattern 64B line statistics for bufferIdx %d:\n", bufferIdx);
@@ -6168,8 +6163,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     memset(ppodId, 0, 16);
     vpodId = -1;
 
-    // FORCE_SINGLE_POD skips any required queries to AMDSMI
-    char* forceSinglePod = getenv("FORCE_SINGLE_POD");
+    // TB_FORCE_SINGLE_POD skips any required queries to AMDSMI
+    char* forceSinglePod = getenv("TB_FORCE_SINGLE_POD");
     if (forceSinglePod) {
       vpodId = 0;
       return;
@@ -6199,7 +6194,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (err != NVML_SUCCESS || fabricInfo.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
       System::Get().Log("[WARN] MNNVL not supported\n");
     } else {
-      if (fabricSupport = MnnvlCheck()) {
+      if (MnnvlCheck()) {
         vpodId = fabricInfo.cliqueId;
         memcpy(ppodId, fabricInfo.clusterUuid, 16);
       }
@@ -6230,7 +6225,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           //       vpodId == -1 to represent no pod present
           memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
           vpodId = fabricInfo.info.v1.vpod_id;
-          fabricSupport = true;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);

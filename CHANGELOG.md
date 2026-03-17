@@ -7,7 +7,7 @@ Documentation for TransferBench is available at
 ### Added
 - Initial support for pod communication.  Requires compatible hardware / ROCm version and subject to further testing
   - This potentially enables GFX/DMA executors to access SRC/DST memory locations on GPUs within the same pod
-  - Pod membership requires amd-smi however can be skipped by setting FORCE_SINGLE_POD=1
+  - Pod membership requires amd-smi however can be skipped by setting TB_FORCE_SINGLE_POD=1
 - Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
   - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
 - Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
@@ -19,6 +19,7 @@ Documentation for TransferBench is available at
   - a2asweep preset changes from NUM_CUS to NUM_SUB_EXECS to match with a2a preset naming convention
   - scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
   - NIC_FILTER renamed to TB_NIC_FILTER for consistency
+  - DUMP_LINES renamed to TB_DUMP_LINES for consistency
 
 ## v1.66.02
 ### Added

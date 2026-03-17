@@ -189,7 +189,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
         else
           $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which does not have pod support)
           $(info - Pod membership querying requires amd-smi version of at least $(AMD_SMI_MIN_MAJOR).$(AMD_SMI_MIN_MINOR))
-          $(info - Pod membership may be forced in TransferBench by setting FORCE_SINGLE_POD=1)
+          $(info - Pod membership may be forced in TransferBench by setting TB_FORCE_SINGLE_POD=1)
         endif
       endif
     endif
@@ -212,7 +212,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
         $(info - Building with NVML support for pod membership detection)
       else
         $(info - nvml.h not found at $(CUDA_PATH)/include. Building without NVML support)
-        $(info - Pod membership may be forced by setting FORCE_SINGLE_POD=1)
+        $(info - Pod membership may be forced by setting TB_FORCE_SINGLE_POD=1)
       endif
     endif
   endif
