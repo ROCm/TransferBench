@@ -5736,19 +5736,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     if (getenv("TB_PAUSE")) {
-      System::Get().Log("Pausing for debug attachment\n");
+      Log("Pausing for debug attachment (e.g. sudo gdb -p %d)\n", getpid());
       volatile bool pause = true;
       while (pause);
     }
 
 #ifdef AMD_SMI_ENABLED
     if (verbose) {
-      System::Get().Log("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
+      Log("[INFO] Initializing AMD System Management Interface Library (AMDSMI)\n");
     }
     amdsmi_init(AMDSMI_INIT_AMD_APUS);
 #elif defined (NVML_ENABLED)
     if (verbose) {
-      System::Get().Log("[INFO] Initializing NVIDIA Management Library (NVML)\n");
+      Log("[INFO] Initializing NVIDIA Management Library (NVML)\n");
     }
     nvmlInit_v2();
 #endif
