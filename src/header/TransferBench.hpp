@@ -241,6 +241,7 @@ namespace TransferBench
   struct NicOptions
   {
     size_t      chunkBytes      = 1<<30;        ///< How much bytes to transfer at a time
+    int         cqPollBatch     = 4;            ///< Maximum CQ entries polled per call
     int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
     uint8_t     ibPort          = 1;            ///< NIC port number to be used
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
@@ -1923,6 +1924,7 @@ namespace {
       NicOptions nic = cfg.nic;
       System::Get().Broadcast(root, sizeof(nic), &nic);
       if (nic.chunkBytes      != cfg.nic.chunkBytes)      ADD_ERROR("cfg.nic.chunkBytes");
+      if (nic.cqPollBatch     != cfg.nic.cqPollBatch)     ADD_ERROR("cfg.nic.cqPollBatch");
       // nic.ibGidIndex  is permitted to be different across ranks
       // nic.ibPort      is permitted to be different across ranks
       if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
@@ -2032,6 +2034,9 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
     if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
       errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    }
+    if (cfg.nic.cqPollBatch <= 0) {
+      errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
     }
 #endif
 
@@ -3286,7 +3291,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
       // Create SRC completion queues
-      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
+      int srcCQSize = std::max(cfg.nic.queueSize, static_cast<int>(rss.qpCount));
+      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, srcCQSize, NULL, NULL, 0);
       // Get SRC port attributes
       IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
@@ -3350,7 +3357,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
       // Create DST completion queues
-      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
+      int dstCQSize = std::max(cfg.nic.queueSize,static_cast<int>(rss.qpCount));
+      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, dstCQSize, NULL, NULL, 0);
       // Get DST port attributes
       IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
@@ -4287,18 +4296,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       // poll for completions
       size_t completedTransfers = 0;
+      int pollBatch = std::max(1, cfg.nic.cqPollBatch);
+      std::vector<ibv_wc> wc((size_t)pollBatch);
+      ibv_wc* wc_array = wc.data();
       while (completedTransfers < transferCount) {
         for (auto i = 0; i < transferCount; i++) {
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-            ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, 1, &wc);
+            // Use batch polling to drain multiple completions at once for better efficiency
+            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, pollBatch, wc_array);
             if (nc > 0) {
-              receivedQPs[i]++;
-              if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc.status};
+              // Process all completions in the batch
+              for (int j = 0; j < nc; j++) {
+                if (wc_array[j].status != IBV_WC_SUCCESS) {
+                  return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
+                }
+                receivedQPs[i]++;
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};

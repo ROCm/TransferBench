@@ -11,6 +11,7 @@ Documentation for TransferBench is available at
 - Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
   - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
 - Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
+- Adding NIC_CQ_POLL_BATCH to control CQ poll batch size for NIC transfers
 
 ### Modified
   - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
@@ -20,6 +21,7 @@ Documentation for TransferBench is available at
   - scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
   - NIC_FILTER renamed to TB_NIC_FILTER for consistency
   - DUMP_LINES renamed to TB_DUMP_LINES for consistency
+  - Dynamically size CQs for NIC transfers in high QPs case
 
 ## v1.66.02
 ### Added
