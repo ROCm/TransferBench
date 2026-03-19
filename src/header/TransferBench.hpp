@@ -531,7 +531,7 @@ namespace TransferBench
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
    */
-  void GetClosestGpusToNic(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+  void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1);
 
   /**
    * @returns 0-indexed rank for this process
@@ -755,22 +755,22 @@ namespace TransferBench
     }                                                                      \
   } while (0)
 #else
-#define IBV_CALL(__func__, ...)                                         \
-  do {                                                                  \
-    int error = __func__(__VA_ARGS__);                                  \
-    if (error != 0) {                                                   \
-      return {ERR_FATAL, "Encountered IbVerbs error (%d) in func (%s) " \
-              , error, #__func__};                                      \
-    }                                                                   \
+#define IBV_CALL(__func__, ...)                                           \
+  do {                                                                    \
+    int error = __func__(__VA_ARGS__);                                    \
+    if (error != 0) {                                                     \
+      return {ERR_FATAL, "Encountered IbVerbs error (%d=%s) in func (%s)" \
+              , error, strerror(errno), #__func__};                       \
+    }                                                                     \
   } while (0)
 
-#define IBV_PTR_CALL(__ptr__, __func__, ...)                               \
-  do {                                                                     \
-    __ptr__ = __func__(__VA_ARGS__);                                       \
-    if (__ptr__ == nullptr) {                                              \
-      return {ERR_FATAL, "Encountered IbVerbs nullptr error in func (%s) " \
-              , #__func__};                                                \
-    }                                                                      \
+#define IBV_PTR_CALL(__ptr__, __func__, ...)                                    \
+  do {                                                                          \
+    __ptr__ = __func__(__VA_ARGS__);                                            \
+    if (__ptr__ == nullptr) {                                                   \
+      return {ERR_FATAL, "Encountered IbVerbs nullptr error (%s) in func (%s) " \
+              , strerror(errno), #__func__};                                    \
+    }                                                                           \
   } while (0)
 #endif
 
@@ -1656,6 +1656,9 @@ namespace {
       "/lib/modules/%s/build/.config",
     };
 
+    // Check if zcat is available in the system
+    int has_zcat = (system("which zcat > /dev/null 2>&1") == 0);
+
     for (const auto& path : possiblePaths) {
       // Reset flags for each file
       found_opt1 = 0;
@@ -1665,6 +1668,13 @@ namespace {
 
       // Special handling for /proc/config.gz
       if (strstr(path, "/proc/config.gz") != NULL) {
+        // Skip .gz files if zcat is not available
+        if (!has_zcat) {
+          if (System::Get().IsVerbose()) {
+            printf("[WARN] zcat not available, skipping %s\n", kernel_conf_file);
+          }
+          continue;
+        }
         fp = popen("zcat /proc/config.gz 2>/dev/null", "r");
       } else {
         fp = fopen(kernel_conf_file, "r");
@@ -2584,7 +2594,7 @@ namespace {
     int                        dstDmabufFd;       ///< DMA-BUF file descriptor for DST (if using dmabuf)
     uint64_t                   srcDmabufOffset;   ///< Offset within SRC DMA-BUF
     uint64_t                   dstDmabufOffset;   ///< Offset within DST DMA-BUF
-    uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
+    uint32_t                   qpCount;           ///< Number of QPs to be used for transferring data
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
@@ -4269,7 +4279,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
     do {
-      std::vector<uint8_t> receivedQPs(transferCount, 0);
+      std::vector<uint32_t> receivedQPs(transferCount, 0);
       // post the sends
       for (auto i = 0; i < transferCount; i++) {
         transferTimers[i] = std::chrono::high_resolution_clock::now();
