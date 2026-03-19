@@ -1657,9 +1657,6 @@ namespace {
       "/lib/modules/%s/build/.config",
     };
 
-    // Check if zcat is available in the system
-    int has_zcat = (system("which zcat > /dev/null 2>&1") == 0);
-
     for (const auto& path : possiblePaths) {
       // Reset flags for each file
       found_opt1 = 0;
@@ -1669,13 +1666,6 @@ namespace {
 
       // Special handling for /proc/config.gz
       if (strstr(path, "/proc/config.gz") != NULL) {
-        // Skip .gz files if zcat is not available
-        if (!has_zcat) {
-          if (System::Get().IsVerbose()) {
-            printf("[WARN] zcat not available, skipping %s\n", kernel_conf_file);
-          }
-          continue;
-        }
         fp = popen("zcat /proc/config.gz 2>/dev/null", "r");
       } else {
         fp = fopen(kernel_conf_file, "r");
