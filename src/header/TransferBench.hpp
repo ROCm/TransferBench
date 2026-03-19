@@ -6198,6 +6198,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Check fabric support
 #if defined(__NVCC__)
 #ifdef NVML_ENABLED
+    if (!MnnvlCheck()) return;
     int flag;
     char busId[] = "00000000:00:00.0";
     if (cudaDeviceGetPCIBusId(busId, sizeof(busId), 0)) return;
@@ -6219,10 +6220,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (err != NVML_SUCCESS || fabricInfo.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
       System::Get().Log("[WARN] MNNVL not supported\n");
     } else {
-      if (MnnvlCheck()) {
-        vpodId = fabricInfo.cliqueId;
-        memcpy(ppodId, fabricInfo.clusterUuid, 16);
-      }
+      vpodId = fabricInfo.cliqueId;
+      memcpy(ppodId, fabricInfo.clusterUuid, 16);
     }
 #endif
 #else
