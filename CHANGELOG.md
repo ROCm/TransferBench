@@ -11,6 +11,12 @@ Documentation for TransferBench is available at
 - Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
   - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
 - Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
+- Adding nica2a preset (NIC all-to-all over GPUs via NIC executors, multi-node): stride/device grouping and NIC planes.
+  - `STRIDE` — Step size for stride orbits on rank-major devices (`gcd` with total device count); no traffic between different orbits.
+  - `GROUP_SIZE` — Devices per subgroup inside each stride orbit (natural rank-major order); must divide orbit size (default: all devices per rank × GPUs).
+  - `NIC_A2A_SCOPE` — `intra`: transfers only within the same device subgroup; `inter`: only between different subgroups (same stride orbit only).
+  - `NIC_A2A_NO_SAME_RANK` — When non-zero, omit transfers where source and destination are the same rank.
+  - `NUM_NIC_PLANES` — Split NIC endpoints into this many disjoint planes (rank-major index modulo planes); traffic only between NICs in the same plane.
 
 ### Modified
   - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
