@@ -2595,9 +2595,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
           ibvDevice.busId = "";
           {
-            std::string device_path(ibvDevice.devicePtr->dev_path);
+            std::string device_path = std::string(ibvDevice.devicePtr->dev_path) + "/device";
             if (std::filesystem::exists(device_path)) {
-              std::string pciPath = std::filesystem::canonical(device_path + "/device").string();
+              std::string pciPath = std::filesystem::canonical(device_path).string();
               std::size_t pos = pciPath.find_last_of('/');
               if (pos != std::string::npos) {
                 ibvDevice.busId = pciPath.substr(pos + 1);
@@ -2608,9 +2608,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           // Get nearest numa node for this device
           ibvDevice.numaNode = -1;
           std::filesystem::path devicePath = "/sys/bus/pci/devices/" + ibvDevice.busId + "/numa_node";
-          std::string canonicalPath = std::filesystem::canonical(devicePath).string();
-
-          if (std::filesystem::exists(canonicalPath)) {
+          if (std::filesystem::exists(devicePath)) {
+            std::string canonicalPath = std::filesystem::canonical(devicePath).string();
             std::ifstream file(canonicalPath);
             if (file.is_open()) {
               std::string numaNodeStr;
@@ -2658,13 +2657,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         std::string const& description,
                                         PCIeNode&          root)
   {
-    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + pcieAddress;
-    std::string canonicalPath = std::filesystem::canonical(devicePath).string();
+    std::string lowerAddress = pcieAddress;
+    std::transform(lowerAddress.begin(), lowerAddress.end(), lowerAddress.begin(), ::tolower);
 
+    std::filesystem::path devicePath = "/sys/bus/pci/devices/" + lowerAddress;
     if (!std::filesystem::exists(devicePath)) {
       return {ERR_FATAL, "Device path %s does not exist", devicePath.c_str()};
     }
 
+    std::string canonicalPath = std::filesystem::canonical(devicePath).string();
     std::istringstream iss(canonicalPath);
     std::string token;
 
