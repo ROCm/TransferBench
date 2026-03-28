@@ -23,6 +23,7 @@ THE SOFTWARE.
 #pragma once
 #include <unordered_map>
 #include <unordered_set>
+#include <type_traits>
 #include "TransferBench.hpp"
 
 namespace TransferBench::Utils

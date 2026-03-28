@@ -216,7 +216,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
 
   // Check for consistency across ranks
   IS_UNIFORM(blockSizes,    "BLOCKSIZES");
-  IS_UNIFORM(blockSizes,    "CRITERIA");
+  IS_UNIFORM(criteria,      "CRITERIA");
   IS_UNIFORM(elemBytes,     "ELEM_BYTES");
   // GPU_INDICES may be different per rank
   IS_UNIFORM(memTypeIdx,    "MEM_TYPE");
@@ -225,7 +225,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
   IS_UNIFORM(numSesList,    "NUM_SUB_EXECS");
   IS_UNIFORM(prewarmMsec,   "PREWARM_MSEC");
   IS_UNIFORM(showDetails,   "SHOW_DETAILS");
-  IS_UNIFORM(showDetails,   "SHOW_EXTRA");
+  IS_UNIFORM(showExtra,     "SHOW_EXTRA");
   IS_UNIFORM(temporalMask,  "TEMPORAL_MASK");
   IS_UNIFORM(unrolls,       "UNROLLS");
   IS_UNIFORM(useWallClock,  "USE_WALLCLOCK");
@@ -262,17 +262,18 @@ int HbmBandwidthPreset(EnvVars&          ev,
   if (!gpuIndices.empty()) {
     for (auto gpuIdx : gpuIndices) {
       if (gpuIdx < 0 || gpuIdx >= numDetectedGpus) {
-        Utils::Print("[ERROR] GPU_INDICES index out of range (%d) (rank %d)", gpuIdx, myRank);
+        Utils::Print("[ERROR] GPU_INDICES index out of range (%d) (rank %d)\n", gpuIdx, myRank);
         return 1;
       }
     }
   }
 
-  if (numBuffers <= 1) {
+  if (numBuffers < 1) {
     Utils::Print("[ERROR] NUM_BUFFERS must be a positive number (not %d)\n", numBuffers);
+    return 1;
   }
   if (numBuffers > numIterations) {
-    Utils::Print("[WARN] NUM_BUFFERS (%d) exceeds NUM_ITERATIONS ($d), so some buffers will not be used\n",
+    Utils::Print("[WARN] NUM_BUFFERS (%d) exceeds NUM_ITERATIONS (%d), so some buffers will not be used\n",
                  numBuffers, numIterations);
     numBuffers = numIterations;
   }
@@ -307,6 +308,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
 
   if (unrolls.empty()) {
     Utils::Print("[ERROR] UNROLLS may not be empty");
+    return 1;
   }
   for (auto unroll : unrolls) {
     if (unroll != 1 && unroll != 2 && unroll != 4 && unroll != 8 && unroll != 16) {
@@ -383,16 +385,6 @@ int HbmBandwidthPreset(EnvVars&          ev,
   for (int gpuIdx : gpuIndices) {
     HIP_CALL(hipSetDevice(gpuIdx));
 
-    // Determine wall clock rate for this GPU
-    int wallClockRate;
-    if (useWallClock) {
-#if defined(__NVCC__)
-      wallClockRate = 1000000;
-#else
-      HIP_CALL(hipDeviceGetAttribute(&wallClockRate, hipDeviceAttributeWallClockRate, gpuIdx));
-#endif
-    }
-
     // Create streams/events for this GPU
     hipStream_t stream;
     hipEvent_t startEvent, stopEvent;
@@ -400,16 +392,22 @@ int HbmBandwidthPreset(EnvVars&          ev,
     HIP_CALL(hipEventCreate(&startEvent));
     HIP_CALL(hipEventCreate(&stopEvent));
 
-    // Allocate pinned host memory closest to this GPU to capture timestamps
-    long long* minStartCycle;
-    long long* maxStopCycle;
-    if (Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&minStartCycle)) {
-      Utils::Print("[ERROR] Unable to allocate pinned host memory on rank %d closest to GPU %d\n", myRank, gpuIdx);
-      return 1;
-    }
-    if (Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&maxStopCycle)) {
-      Utils::Print("[ERROR] Unable to allocate pinned host memory on rank %d closest to GPU %d\n", myRank, gpuIdx);
-      return 1;
+    // Allocate pinned host memory closest to this GPU to capture timestamps (if enabled)
+    int wallClockRate;
+    long long* minStartCycle = nullptr;
+    long long* maxStopCycle = nullptr;
+
+    if (useWallClock) {
+    #if defined(__NVCC__)
+      wallClockRate = 1000000;
+#else
+      HIP_CALL(hipDeviceGetAttribute(&wallClockRate, hipDeviceAttributeWallClockRate, gpuIdx));
+#endif
+      if (Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&minStartCycle) ||
+          Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&maxStopCycle)) {
+        Utils::Print("[ERROR] Unable to allocate pinned host memory on rank %d closest to GPU %d\n", myRank, gpuIdx);
+        return 1;
+      }
     }
 
     // Allocate and initialize each GPU buffer
@@ -458,7 +456,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
               int currBufferIdx = 0;
               auto prewarmEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(prewarmMsec);
               do {
-                kernel<<<gridDim, blockDim, 0, stream>>>(inputBuffers[currBufferIdx++], NULL, numSteps, minStartCycle, maxStopCycle);
+                kernel<<<gridDim, blockDim, 0, stream>>>(inputBuffers[currBufferIdx++], nullptr, numSteps, minStartCycle, maxStopCycle);
                 HIP_CALL(hipStreamSynchronize(stream));
                 if (currBufferIdx == numBuffers) currBufferIdx = 0;
               } while (std::chrono::steady_clock::now() < prewarmEnd);
@@ -473,15 +471,13 @@ int HbmBandwidthPreset(EnvVars&          ev,
                 if (!useWallClock) {
                   HIP_CALL(hipEventRecord(startEvent, stream));
                 }
-                kernel<<<gridDim, blockDim, 0, stream>>>(inputBuffers[currBufferIdx++], NULL, numSteps,
-                                                         useWallClock ? minStartCycle : NULL, maxStopCycle);
+                kernel<<<gridDim, blockDim, 0, stream>>>(inputBuffers[currBufferIdx++], nullptr, numSteps, minStartCycle, maxStopCycle);
                 if (!useWallClock) {
                   HIP_CALL(hipEventRecord(stopEvent, stream));
                 }
 #else
-                hipExtLaunchKernelGGL(kernel, gridDim, blockDim, 0, stream, useWallClock ? NULL : startEvent, useWallClock ? NULL : stopEvent, 0,
-                                      inputBuffers[currBufferIdx], nullptr , numSteps,
-                                      useWallClock ? minStartCycle : NULL, maxStopCycle);
+                hipExtLaunchKernelGGL(kernel, gridDim, blockDim, 0, stream, useWallClock ? nullptr : startEvent, useWallClock ? nullptr : stopEvent, 0,
+                                      inputBuffers[currBufferIdx++], nullptr, numSteps, minStartCycle, maxStopCycle);
 #endif
                 HIP_CALL(hipStreamSynchronize(stream));
                 if (currBufferIdx == numBuffers) currBufferIdx = 0;
@@ -539,6 +535,14 @@ int HbmBandwidthPreset(EnvVars&          ev,
       ErrResult err = DeallocateMemory(memType, inputBuffers[bufferIdx], largestTotalBytesPerBuffer);
       if (err.errType != ERR_NONE) {
         Utils::Print("[ERROR] Error when deallocating memory (%s)\n", err.errMsg.c_str());
+        return 1;
+      }
+    }
+
+    if (useWallClock) {
+      if (Utils::DeallocateMemory(MEM_CPU_CLOSEST, minStartCycle, sizeof(int64_t)) ||
+          Utils::DeallocateMemory(MEM_CPU_CLOSEST, maxStopCycle,  sizeof(int64_t))) {
+        Utils::Print("[ERROR] Unable to deallocate pinned host memory on rank %d closest to GPU %d\n", myRank, gpuIdx);
         return 1;
       }
     }

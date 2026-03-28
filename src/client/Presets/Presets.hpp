@@ -45,7 +45,7 @@ THE SOFTWARE.
 typedef int (*PresetFunc)(EnvVars&          ev,
                           size_t      const numBytesPerTransfer,
                           std::string const presetName,
-                          bool        const bytesSpecified);
+                          [[maybe_unused]] bool const bytesSpecified);
 
 std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 {
