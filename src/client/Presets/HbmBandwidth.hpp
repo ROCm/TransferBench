@@ -105,7 +105,7 @@ void HbmReadBwKernel(const void* __restrict pSrcBuffer,
 
   // Update min/max start times
   __syncthreads();
-  if (threadIdx.x == 0) {
+  if (threadIdx.x == 0 && minStartCycle != NULL) {
     int64_t stopTime = GetTimestamp();
     atomicMin(minStartCycle, startTime);
     atomicMax(maxStopCycle, stopTime);
@@ -473,13 +473,15 @@ int HbmBandwidthPreset(EnvVars&          ev,
                 if (!useWallClock) {
                   HIP_CALL(hipEventRecord(startEvent, stream));
                 }
-                kernel<<<gridDim, blockDim, 0, stream>>>(inputBuffers[currBufferIdx++], NULL, numSteps, minStartCycle, maxStopCycle);
+                kernel<<<gridDim, blockDim, 0, stream>>>(inputBuffers[currBufferIdx++], NULL, numSteps,
+                                                         useWallClock ? minStartCycle : NULL, maxStopCycle);
                 if (!useWallClock) {
                   HIP_CALL(hipEventRecord(stopEvent, stream));
                 }
 #else
                 hipExtLaunchKernelGGL(kernel, gridDim, blockDim, 0, stream, useWallClock ? NULL : startEvent, useWallClock ? NULL : stopEvent, 0,
-                                      inputBuffers[currBufferIdx], nullptr , numSteps, minStartCycle, maxStopCycle);
+                                      inputBuffers[currBufferIdx], nullptr , numSteps,
+                                      useWallClock ? minStartCycle : NULL, maxStopCycle);
 #endif
                 HIP_CALL(hipStreamSynchronize(stream));
                 if (currBufferIdx == numBuffers) currBufferIdx = 0;
