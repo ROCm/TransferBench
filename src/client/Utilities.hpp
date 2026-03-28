@@ -149,6 +149,11 @@ namespace TransferBench::Utils
   std::string GetAllGpuMemTypeStr();
   std::string GetAllMemTypeStr(bool isCpu);
 
+  // Helper forwarders to allocation/deallocation functions
+  // Returns true if error occurs
+  bool AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr);
+  bool DeallocateMemory(MemType memType, void *memPtr, size_t const bytes);
+
   // Implementation details below
   //================================================================
   TableHelper::TableHelper(int numRows, int numCols, int precision) :
@@ -409,6 +414,46 @@ namespace TransferBench::Utils
     }
     return ss.str();
   }
+
+  template <typename T>
+  struct is_std_vector : std::false_type {};
+
+  template <typename T, typename Alloc>
+  struct is_std_vector<std::vector<T, Alloc>> : std::true_type {};
+
+  // This function can be used to check if a value is identical across ranks
+  template <typename T>
+  bool IsUniform(const T& val) {
+    if constexpr (is_std_vector<T>::value) {
+      using Elem = typename T::value_type;
+      static_assert(std::is_trivially_copyable_v<Elem>, "vector element must be trivially copyable");
+
+      size_t size = val.size();
+      size_t rootSize = size;
+      System::Get().Broadcast(0, sizeof(rootSize), &rootSize);
+      if (size != rootSize) return false;
+
+      std::vector<Elem> ref = val;
+      System::Get().Broadcast(0, rootSize * sizeof(Elem), ref.data());
+
+      return (std::memcmp(ref.data(), val.data(), rootSize * sizeof(Elem)) == 0);
+    } else {
+      static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable");
+      T ref = val;
+      System::Get().Broadcast(0, sizeof(T), &ref);
+
+      return (std::memcmp(&ref, &val, sizeof(T)) == 0);
+    }
+  }
+
+  // Macro for use in presets that will return 1 if a value is not uniform across ranks
+#define IS_UNIFORM(val, name)                                                      \
+  do {                                                                             \
+    if (!Utils::IsUniform(val)) {                                                  \
+      Utils::Print("[ERROR] %s must be uniform across all ranks\n", name); \
+      return 1;                                                                    \
+    }                                                                              \
+  } while(0)
 
   // Helper function to determine if current rank does output
   bool RankDoesOutput()
@@ -713,4 +758,14 @@ namespace TransferBench::Utils
   {
     return isCpu ? GetAllCpuMemTypeStr() : GetAllGpuMemTypeStr();
   }
+
+  bool AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr)
+  {
+    return (TransferBench::AllocateMemory(memDevice, numBytes, memPtr).errType != TransferBench::ERR_NONE);
+  }
+  bool DeallocateMemory(MemType memType, void *memPtr, size_t const bytes)
+  {
+    return (TransferBench::DeallocateMemory(memType, memPtr, bytes).errType != TransferBench::ERR_NONE);
+  }
+
 };

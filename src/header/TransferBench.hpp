@@ -3877,7 +3877,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (srcMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
-                                   &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : NULL));
+                                   &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : nullptr));
         }
 
         // Exchange memory pointer across ranks
@@ -6199,7 +6199,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #if defined(__NVCC__)
 #ifdef NVML_ENABLED
     if (!MnnvlCheck()) return;
-    int flag;
     char busId[] = "00000000:00:00.0";
     if (cudaDeviceGetPCIBusId(busId, sizeof(busId), 0)) return;
 
