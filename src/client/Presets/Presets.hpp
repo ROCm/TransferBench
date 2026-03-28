@@ -44,7 +44,8 @@ THE SOFTWARE.
 
 typedef int (*PresetFunc)(EnvVars&          ev,
                           size_t      const numBytesPerTransfer,
-                          std::string const presetName);
+                          std::string const presetName,
+                          bool        const bytesSpecified);
 
 std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 {
@@ -80,8 +81,9 @@ int RunPreset(EnvVars&       ev,
               int&           retCode)
 {
   std::string preset = (argc > 1 ? argv[1] : "");
+  bool bytesSpecified = (argc > 2);
   if (presetFuncMap.count(preset)) {
-    retCode = (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset);
+    retCode = (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset, bytesSpecified);
     return 1;
   }
   return 0;

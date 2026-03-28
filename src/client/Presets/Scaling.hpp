@@ -20,9 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int ScalingPreset(EnvVars&           ev,
-                  size_t      const  numBytesPerTransfer,
-                  std::string const  presetName)
+int ScalingPreset(EnvVars&          ev,
+                  size_t      const numBytesPerTransfer,
+                  std::string const presetName,
+                  bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Scaling preset currently not supported for multi-node\n");

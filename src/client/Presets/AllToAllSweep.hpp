@@ -22,9 +22,10 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
-int AllToAllSweepPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int AllToAllSweepPreset(EnvVars&          ev,
+                        size_t      const numBytesPerTransfer,
+                        std::string const presetName,
+                        bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] All to All Sweep preset currently not supported for multi-node\n");

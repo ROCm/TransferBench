@@ -167,10 +167,14 @@ struct HbmBwResult
   double bw[3];  // MAX | AVG | MIN
 };
 
-int HbmBandwidthPreset(EnvVars&           ev,
-                       size_t      const  numBytesPerTransfer,
-                       std::string const  presetName)
+int HbmBandwidthPreset(EnvVars&          ev,
+                       size_t      const numBytesPerTransfer,
+                       std::string const presetName,
+                       bool        const bytesSpecified)
 {
+  // If bytes aren't specified, default to 1GB
+  size_t numBytesAtLeast = (bytesSpecified ? numBytesPerTransfer : 1024 * 1024 * 1024);
+
   // Determine rank information
   int numRanks = TransferBench::GetNumRanks();
   int myRank   = TransferBench::GetRank();
@@ -322,7 +326,7 @@ int HbmBandwidthPreset(EnvVars&           ev,
       ev.Print("CRITERIA"      , criteria                          , "Reporting highest %s bandwidth (0=MAX,1=AVG,2=MIN)", criteria == 0 ? "MAX" : criteria == 1 ? "AVG" : "MIN");
       ev.Print("ELEM_BYTES"    , EnvVars::ToStr(elemBytes).c_str() , "Element sizes in bytes to sweep over (must contain only 4,8 or 16)");
       ev.Print("GPU_INDICES"   , EnvVars::ToStr(gpuIndices).c_str(), "GPU indices to test.  Leave empty for all");
-      ev.Print("MEM_TYPE"      , memTypeIdx                        , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
+      ev.Print("MEM_TYPE"      , memTypeIdx                        , "Using %s memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_BUFFERS"   , numBuffers                        , "Number of buffers to rotate through (1 per iteration)");
       ev.Print("NUM_ITERATIONS", numIterations                     , "Number of iterations to time");
       ev.Print("NUM_SUB_EXECS" , EnvVars::ToStr(numSesList).c_str(), "Number of subexecutors to sweep over (default to all available)");
@@ -344,16 +348,16 @@ int HbmBandwidthPreset(EnvVars&           ev,
 
   // Determine how how much memory to allocate based on sweep setting
   // During each Step each threadblock works on BLOCKSIZE * UNROLL * ELEM_BYTES bytes
-  // Each buffer will be allocated as the smallest multiple of this, larger than numBytesPerTransfer,
+  // Each buffer will be allocated as the smallest multiple of this, larger than numBytesAtLeast,
   // NOTE: It's not safe to just base this on maximums values in each sweep parameter,
-  //       (e.g if maximum size divides numBytesPerTransfer perfectly) so looping over entire space is safer
+  //       (e.g if maximum size divides numBytesAtLeast perfectly) so looping over entire space is safer
   size_t largestTotalBytesPerBuffer = 0;
   for (int numSubExec : numSesList) {
     for (int blockSize : blockSizes) {
       for (int unroll : unrolls) {
         for (int elemByte : elemBytes) {
           size_t totalBytesPerStep = numSubExec * blockSize * unroll * elemByte;
-          size_t numSteps = std::max((size_t)1, (numBytesPerTransfer + totalBytesPerStep - 1) / totalBytesPerStep);
+          size_t numSteps = std::max((size_t)1, (numBytesAtLeast + totalBytesPerStep - 1) / totalBytesPerStep);
           size_t totalBytesPerBuffer = numSteps * totalBytesPerStep;
           if (totalBytesPerBuffer > largestTotalBytesPerBuffer) largestTotalBytesPerBuffer = totalBytesPerBuffer;
         }
@@ -372,7 +376,7 @@ int HbmBandwidthPreset(EnvVars&           ev,
     // Calculate total number of tests that will be executed per GPU
     size_t numTests = numSesList.size() * blockSizes.size() * unrolls.size() * elemBytes.size() * (temporalMask == 3 ? 2 : 1);
 
-    Utils::Print("Testing (%lu configs per GPU): ", numTests);
+    Utils::Print("Testing on at least %lu bytes (%lu configs per GPU): ", numBytesAtLeast, numTests);
     fflush(stdout);
   }
 
@@ -439,7 +443,7 @@ int HbmBandwidthPreset(EnvVars&           ev,
           for (int elemByte : elemBytes) {
             int elemByteIdx = (int)log2(elemByte) - 2;
             size_t totalBytesPerStep = numSubExec * blockSize * unroll * elemByte;
-            size_t numSteps = std::max((size_t)1, (numBytesPerTransfer + totalBytesPerStep - 1) / totalBytesPerStep);
+            size_t numSteps = std::max((size_t)1, (numBytesAtLeast + totalBytesPerStep - 1) / totalBytesPerStep);
             size_t totalBytes = numSteps * totalBytesPerStep;
 
             for (int useNt = 0; useNt <= 1; useNt++) {

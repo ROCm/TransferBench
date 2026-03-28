@@ -19,9 +19,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
-int SchmooPreset(EnvVars&           ev,
-                 size_t      const  numBytesPerTransfer,
-                 std::string const  presetName)
+int SchmooPreset(EnvVars&          ev,
+                 size_t      const numBytesPerTransfer,
+                 std::string const presetName,
+                 bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Schmoo preset currently not supported for multi-node\n");

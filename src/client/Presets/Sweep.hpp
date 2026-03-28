@@ -39,9 +39,10 @@ void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& tran
   }
 }
 
-int SweepPreset(EnvVars&           ev,
-                size_t      const  numBytesPerTransfer,
-                std::string const  presetName)
+int SweepPreset(EnvVars&          ev,
+                size_t      const numBytesPerTransfer,
+                std::string const presetName,
+                bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Sweep preset currently not supported for multi-node\n");
