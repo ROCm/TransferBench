@@ -105,7 +105,7 @@ void HbmReadBwKernel(const void* __restrict pSrcBuffer,
 
   // Update min/max start times
   __syncthreads();
-  if (threadIdx.x == 0 && minStartCycle != NULL) {
+  if (threadIdx.x == 0 && minStartCycle != nullptr) {
     int64_t stopTime = GetTimestamp();
     atomicMin(minStartCycle, startTime);
     atomicMax(maxStopCycle, stopTime);
@@ -464,8 +464,10 @@ int HbmBandwidthPreset(EnvVars&          ev,
               /* Run timed iterations */
               currBufferIdx = 0;
               for (int iteration = 0; iteration < numIterations; iteration++) {
-                *minStartCycle = std::numeric_limits<long long int>::max();
-                *maxStopCycle = 0;
+                if (useWallClock) {
+                  *minStartCycle = std::numeric_limits<long long int>::max();
+                  *maxStopCycle = 0;
+                }
 
 #if defined(__NVCC__)
                 if (!useWallClock) {
