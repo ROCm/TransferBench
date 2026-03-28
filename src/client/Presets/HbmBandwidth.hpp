@@ -318,18 +318,19 @@ int HbmBandwidthPreset(EnvVars&           ev,
   {
     if (!ev.outputToCsv) Utils::Print("[HBM Bandwidth Related]\n");
     if (Utils::RankDoesOutput()) {
-      ev.Print("BLOCKSIZES"    , EnvVars::ToStr(blockSizes).c_str(), "Threadblock sizes to sweep over");
-      ev.Print("CRITERIA"      , criteria                          , "Reporting highest %s bandwidth", criteria == 0 ? "MAX" : criteria == 1 ? "AVG" : "MIN");
-      ev.Print("ELEM_BYTES"    , EnvVars::ToStr(elemBytes).c_str() , "Element sizes in bytes to sweep over");
+      ev.Print("BLOCKSIZES"    , EnvVars::ToStr(blockSizes).c_str(), "Threadblock sizes to sweep over (multiple of 128 up to 1024)");
+      ev.Print("CRITERIA"      , criteria                          , "Reporting highest %s bandwidth (0=MAX,1=AVG,2=MIN)", criteria == 0 ? "MAX" : criteria == 1 ? "AVG" : "MIN");
+      ev.Print("ELEM_BYTES"    , EnvVars::ToStr(elemBytes).c_str() , "Element sizes in bytes to sweep over (must contain only 4,8 or 16)");
       ev.Print("GPU_INDICES"   , EnvVars::ToStr(gpuIndices).c_str(), "GPU indices to test.  Leave empty for all");
       ev.Print("MEM_TYPE"      , memTypeIdx                        , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_BUFFERS"   , numBuffers                        , "Number of buffers to rotate through (1 per iteration)");
       ev.Print("NUM_ITERATIONS", numIterations                     , "Number of iterations to time");
-      ev.Print("NUM_SUB_EXECS" , EnvVars::ToStr(numSesList).c_str(), "Number of subexecutors to sweep over");
+      ev.Print("NUM_SUB_EXECS" , EnvVars::ToStr(numSesList).c_str(), "Number of subexecutors to sweep over (default to all available)");
       ev.Print("PREWARM_MSEC"  , prewarmMsec                       , "Prewarm duration in msec");
-      ev.Print("SHOW_DETAILS"  , showDetails                       , "Show sweep details (ignored for multi-rank)");
+      ev.Print("SHOW_DETAILS"  , showDetails                       , "Show sweep details (ignored for multi-rank).  Setting to 2 shows per iteration output");
+      ev.Print("SHOW_EXTRA"    , showExtra                         , "Show best sweep config details");
       ev.Print("TEMPORAL_MASK" , temporalMask                      , "Temporal mask (1 = temporal, 2 = non-temporal, 3 = both)");
-      ev.Print("UNROLLS"       , EnvVars::ToStr(unrolls).c_str()   , "Unroll factors to sweep over");
+      ev.Print("UNROLLS"       , EnvVars::ToStr(unrolls).c_str()   , "Unroll factors to sweep over (must contain only 1,2,4,8 or 16)");
       ev.Print("USE_WALLCLOCK" , useWallClock                      , useWallClock ? "Using GPU wall-clock for timing" : "Using events for timing");
       Utils::Print("\n");
     }
