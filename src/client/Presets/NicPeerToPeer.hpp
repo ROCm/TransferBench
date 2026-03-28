@@ -122,9 +122,10 @@ int GetClosestDeviceToNic(MemType memType, int nicIdx, int rank) {
          TransferBench::GetClosestGpuToNic(nicIdx, rank);
 }
 
-int NicPeerToPeerPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int NicPeerToPeerPreset(EnvVars&          ev,
+                        size_t      const numBytesPerTransfer,
+                        std::string const presetName,
+                        bool        const bytesSpecified)
 {
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] NIC p2p preset can only be run across ranks that are homogenous\n");

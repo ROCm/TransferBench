@@ -12,6 +12,7 @@ Documentation for TransferBench is available at
   - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
 - Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
 - Adding NIC_CQ_POLL_BATCH to control CQ poll batch size for NIC transfers
+- New "hbm" preset which sweeps and tests local HBM read performance
 
 ### Modified
   - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options

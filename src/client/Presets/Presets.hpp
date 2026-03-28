@@ -30,6 +30,7 @@ THE SOFTWARE.
 #include "AllToAll.hpp"
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
+#include "HbmBandwidth.hpp"
 #include "HealthCheck.hpp"
 #include "NicRings.hpp"
 #include "NicPeerToPeer.hpp"
@@ -43,13 +44,15 @@ THE SOFTWARE.
 
 typedef int (*PresetFunc)(EnvVars&          ev,
                           size_t      const numBytesPerTransfer,
-                          std::string const presetName);
+                          std::string const presetName,
+                          [[maybe_unused]] bool const bytesSpecified);
 
 std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 {
   {"a2a",         {AllToAllPreset,      "Tests parallel transfers between all pairs of GPU devices"}},
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
+  {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
   {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
   {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
@@ -78,8 +81,9 @@ int RunPreset(EnvVars&       ev,
               int&           retCode)
 {
   std::string preset = (argc > 1 ? argv[1] : "");
+  bool bytesSpecified = (argc > 2);
   if (presetFuncMap.count(preset)) {
-    retCode = (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset);
+    retCode = (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset, bytesSpecified);
     return 1;
   }
   return 0;

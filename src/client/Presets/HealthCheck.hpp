@@ -439,9 +439,10 @@ int TestHbmPerformance(int modelId, bool verbose)
   return hasFail;
 }
 
-int HealthCheckPreset(EnvVars&           ev,
-                      size_t      const  numBytesPerTransfer,
-                      std::string const  presetName)
+int HealthCheckPreset(EnvVars&          ev,
+                      size_t      const numBytesPerTransfer,
+                      std::string const presetName,
+                      bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Healthcheck preset currently not supported for multi-node\n");

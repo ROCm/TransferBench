@@ -41,9 +41,10 @@ void StrideGenerate(std::vector<int>& list, int k) {
   list = std::move(out);
 }
 
-int PodAllToAllPreset(EnvVars&           ev,
-                      size_t      const  numBytesPerTransfer,
-                      std::string const  presetName)
+int PodAllToAllPreset(EnvVars&          ev,
+                      size_t      const numBytesPerTransfer,
+                      std::string const presetName,
+                      bool        const bytesSpecified)
 {
   enum
   {

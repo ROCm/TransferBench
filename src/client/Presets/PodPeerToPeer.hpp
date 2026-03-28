@@ -20,9 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int PodPeerToPeerPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int PodPeerToPeerPreset(EnvVars&          ev,
+                        size_t      const numBytesPerTransfer,
+                        std::string const presetName,
+                        bool        const bytesSpecified)
 {
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] Pod p2p preset can only be run across ranks that are homogenous\n");
