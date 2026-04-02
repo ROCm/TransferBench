@@ -11,6 +11,9 @@ Documentation for TransferBench is available at
 - Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
   - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
 - Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
+- Adding NIC_CQ_POLL_BATCH to control CQ poll batch size for NIC transfers
+- New "hbm" preset which sweeps and tests local HBM read performance
+- Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
 - Adding nica2a preset (NIC all-to-all over GPUs via NIC executors, multi-node): stride/device grouping and NIC planes.
   - `STRIDE` — Step size for stride orbits on rank-major devices (`gcd` with total device count); no traffic between different orbits.
   - `GROUP_SIZE` — Devices per subgroup inside each stride orbit (natural rank-major order); must divide orbit size (default: all devices per rank × GPUs).
@@ -26,6 +29,7 @@ Documentation for TransferBench is available at
   - scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
   - NIC_FILTER renamed to TB_NIC_FILTER for consistency
   - DUMP_LINES renamed to TB_DUMP_LINES for consistency
+  - Dynamically size CQs for NIC transfers in high QPs case
 
 ## v1.66.02
 ### Added

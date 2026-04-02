@@ -112,6 +112,7 @@ public:
   uint8_t ibPort;                    // NIC port number to be used
   int ipAddressFamily;               // IP Address Famliy
   int nicChunkBytes;                 // Number of bytes to send per chunk for RDMA operations
+  int nicCqPollBatch;                // Number of CQ entries to poll per ibv_poll_cq call
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
   int roceVersion;                   // RoCE version number
 
@@ -174,6 +175,7 @@ public:
     roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
     ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
     nicChunkBytes     = GetEnvVar("NIC_CHUNK_BYTES"     , 1073741824);
+    nicCqPollBatch    = GetEnvVar("NIC_CQ_POLL_BATCH"   , 4);
     nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
 
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
@@ -340,6 +342,7 @@ public:
     printf(" MAX_VAR_SUBEXEC   - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
 #if NIC_EXEC_ENABLED
     printf(" NIC_CHUNK_BYTES   - Number of bytes to send at a time using NIC (default = 1GB)\n");
+    printf(" NIC_CQ_POLL_BATCH - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
     printf(" NIC_RELAX_ORDER   - Set to non-zero to use relaxed ordering");
 #endif
     printf(" NUM_ITERATIONS    - # of timed iterations per test. If negative, run for this many seconds instead\n");
@@ -452,6 +455,8 @@ public:
 #if NIC_EXEC_ENABLED
     Print("NIC_CHUNK_BYTES", nicChunkBytes,
           "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
+    Print("NIC_CQ_POLL_BATCH", nicCqPollBatch,
+          "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
     Print("NIC_RELAX_ORDER", nicRelaxedOrder,
           "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
 #endif
@@ -644,6 +649,7 @@ public:
     cfg.gfx.wordSize               = gfxWordSize;
 
     cfg.nic.chunkBytes             = nicChunkBytes;
+    cfg.nic.cqPollBatch            = nicCqPollBatch;
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
     cfg.nic.ipAddressFamily        = ipAddressFamily;

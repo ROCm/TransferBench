@@ -20,9 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int PeerToPeerPreset(EnvVars&           ev,
-                     size_t      const  numBytesPerTransfer,
-                     std::string const  presetName)
+int PeerToPeerPreset(EnvVars&          ev,
+                     size_t      const numBytesPerTransfer,
+                     std::string const presetName,
+                     bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Peer-to-peer preset currently not supported for multi-node\n");
@@ -64,6 +65,8 @@ int PeerToPeerPreset(EnvVars&           ev,
       ev.Print("P2P_MODE",        p2pMode,        "Running %s transfers", p2pMode == 0 ? "Uni + Bi" :
                                                                           p2pMode == 1 ? "Unidirectional"
                                                                                        : "Bidirectional");
+      ev.Print("SHOW_ITERATIONS", ev.showIterations, (ev.showIterations ? "Showing detailed iteration info" :
+                                                      "Showing compact info"));
       ev.Print("USE_GPU_DMA",     useDmaCopy,     "Using GPU-%s as GPU executor", useDmaCopy ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");

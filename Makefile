@@ -185,6 +185,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
         ifeq ($(AMD_SMI_VERSION_OK),yes)
           $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which has pod support)
           COMMON_FLAGS += -DAMD_SMI_ENABLED
+          LDFLAGS += -lamd_smi
           AMD_SMI_ENABLED = 1
         else
           $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which does not have pod support)

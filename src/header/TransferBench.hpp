@@ -241,6 +241,7 @@ namespace TransferBench
   struct NicOptions
   {
     size_t      chunkBytes      = 1<<30;        ///< How much bytes to transfer at a time
+    int         cqPollBatch     = 4;            ///< Maximum CQ entries polled per call
     int         ibGidIndex      = -1;           ///< GID Index for RoCE NICs (-1 is auto)
     uint8_t     ibPort          = 1;            ///< NIC port number to be used
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
@@ -531,7 +532,7 @@ namespace TransferBench
    * @note This function is applicable when the IBV/RDMA executor is available
    * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
    */
-  void GetClosestGpusToNic(std::vector<int>& nicIndices, int gpuIndex, int targetRank = -1);
+  void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1);
 
   /**
    * @returns 0-indexed rank for this process
@@ -755,22 +756,22 @@ namespace TransferBench
     }                                                                      \
   } while (0)
 #else
-#define IBV_CALL(__func__, ...)                                         \
-  do {                                                                  \
-    int error = __func__(__VA_ARGS__);                                  \
-    if (error != 0) {                                                   \
-      return {ERR_FATAL, "Encountered IbVerbs error (%d) in func (%s) " \
-              , error, #__func__};                                      \
-    }                                                                   \
+#define IBV_CALL(__func__, ...)                                           \
+  do {                                                                    \
+    int error = __func__(__VA_ARGS__);                                    \
+    if (error != 0) {                                                     \
+      return {ERR_FATAL, "Encountered IbVerbs error (%d=%s) in func (%s)" \
+              , error, strerror(errno), #__func__};                       \
+    }                                                                     \
   } while (0)
 
-#define IBV_PTR_CALL(__ptr__, __func__, ...)                               \
-  do {                                                                     \
-    __ptr__ = __func__(__VA_ARGS__);                                       \
-    if (__ptr__ == nullptr) {                                              \
-      return {ERR_FATAL, "Encountered IbVerbs nullptr error in func (%s) " \
-              , #__func__};                                                \
-    }                                                                      \
+#define IBV_PTR_CALL(__ptr__, __func__, ...)                                    \
+  do {                                                                          \
+    __ptr__ = __func__(__VA_ARGS__);                                            \
+    if (__ptr__ == nullptr) {                                                   \
+      return {ERR_FATAL, "Encountered IbVerbs nullptr error (%s) in func (%s) " \
+              , strerror(errno), #__func__};                                    \
+    }                                                                           \
   } while (0)
 #endif
 
@@ -1656,6 +1657,9 @@ namespace {
       "/lib/modules/%s/build/.config",
     };
 
+    // Check if zcat is available in the system
+    int has_zcat = (system("which zcat > /dev/null 2>&1") == 0);
+
     for (const auto& path : possiblePaths) {
       // Reset flags for each file
       found_opt1 = 0;
@@ -1665,6 +1669,13 @@ namespace {
 
       // Special handling for /proc/config.gz
       if (strstr(path, "/proc/config.gz") != NULL) {
+        // Skip .gz files if zcat is not available
+        if (!has_zcat) {
+          if (System::Get().IsVerbose()) {
+            printf("[WARN] zcat not available, skipping %s\n", kernel_conf_file);
+          }
+          continue;
+        }
         fp = popen("zcat /proc/config.gz 2>/dev/null", "r");
       } else {
         fp = fopen(kernel_conf_file, "r");
@@ -1913,6 +1924,7 @@ namespace {
       NicOptions nic = cfg.nic;
       System::Get().Broadcast(root, sizeof(nic), &nic);
       if (nic.chunkBytes      != cfg.nic.chunkBytes)      ADD_ERROR("cfg.nic.chunkBytes");
+      if (nic.cqPollBatch     != cfg.nic.cqPollBatch)     ADD_ERROR("cfg.nic.cqPollBatch");
       // nic.ibGidIndex  is permitted to be different across ranks
       // nic.ibPort      is permitted to be different across ranks
       if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
@@ -2022,6 +2034,9 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
     if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
       errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    }
+    if (cfg.nic.cqPollBatch <= 0) {
+      errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
     }
 #endif
 
@@ -2584,7 +2599,7 @@ namespace {
     int                        dstDmabufFd;       ///< DMA-BUF file descriptor for DST (if using dmabuf)
     uint64_t                   srcDmabufOffset;   ///< Offset within SRC DMA-BUF
     uint64_t                   dstDmabufOffset;   ///< Offset within DST DMA-BUF
-    uint8_t                    qpCount;           ///< Number of QPs to be used for transferring data
+    uint32_t                   qpCount;           ///< Number of QPs to be used for transferring data
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
@@ -3276,7 +3291,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
       // Create SRC completion queues
-      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
+      int srcCQSize = std::max(cfg.nic.queueSize, static_cast<int>(rss.qpCount));
+      IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, srcCQSize, NULL, NULL, 0);
       // Get SRC port attributes
       IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
@@ -3340,7 +3357,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
       // Create DST completion queues
-      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+      // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
+      int dstCQSize = std::max(cfg.nic.queueSize,static_cast<int>(rss.qpCount));
+      IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, dstCQSize, NULL, NULL, 0);
       // Get DST port attributes
       IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
@@ -3858,7 +3877,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (srcMemDevice.memRank == localRank) {
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
-                                   &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : NULL));
+                                   &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : nullptr));
         }
 
         // Exchange memory pointer across ranks
@@ -4037,6 +4056,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       return {ERR_FATAL, "RDMA executor is not supported"};
 #endif
     }
+
+    // Check that GPU wallclock rate is non-zero
+    if (exeDevice.exeType == EXE_GPU_GFX && exeInfo.wallClockRate == 0) {
+      if (getenv("TB_WALLCLOCK_RATE")) {
+        exeInfo.wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
+        return {ERR_WARN,
+          "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
+          exeDevice.exeIndex, exeInfo.wallClockRate};
+      } else {
+        exeInfo.wallClockRate = 100000;
+        return {ERR_WARN,
+          "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
+          exeDevice.exeIndex, exeInfo.wallClockRate};
+      }
+    }
+
     return ERR_NONE;
   }
 
@@ -4269,7 +4304,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
     do {
-      std::vector<uint8_t> receivedQPs(transferCount, 0);
+      std::vector<uint32_t> receivedQPs(transferCount, 0);
       // post the sends
       for (auto i = 0; i < transferCount; i++) {
         transferTimers[i] = std::chrono::high_resolution_clock::now();
@@ -4277,18 +4312,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       // poll for completions
       size_t completedTransfers = 0;
+      int pollBatch = std::max(1, cfg.nic.cqPollBatch);
+      std::vector<ibv_wc> wc((size_t)pollBatch);
+      ibv_wc* wc_array = wc.data();
       while (completedTransfers < transferCount) {
         for (auto i = 0; i < transferCount; i++) {
           if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
             auto& rss = exeInfo.resources[i];
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-            ibv_wc wc;
-            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, 1, &wc);
+            // Use batch polling to drain multiple completions at once for better efficiency
+            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, pollBatch, wc_array);
             if (nc > 0) {
-              receivedQPs[i]++;
-              if (wc.status != IBV_WC_SUCCESS) {
-                return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc.status};
+              // Process all completions in the batch
+              for (int j = 0; j < nc; j++) {
+                if (wc_array[j].status != IBV_WC_SUCCESS) {
+                  return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
+                }
+                receivedQPs[i]++;
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
@@ -6173,7 +6214,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Check fabric support
 #if defined(__NVCC__)
 #ifdef NVML_ENABLED
-    int flag;
+    if (!MnnvlCheck()) return;
     char busId[] = "00000000:00:00.0";
     if (cudaDeviceGetPCIBusId(busId, sizeof(busId), 0)) return;
 
@@ -6194,10 +6235,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (err != NVML_SUCCESS || fabricInfo.state == NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
       System::Get().Log("[WARN] MNNVL not supported\n");
     } else {
-      if (MnnvlCheck()) {
-        vpodId = fabricInfo.cliqueId;
-        memcpy(ppodId, fabricInfo.clusterUuid, 16);
-      }
+      vpodId = fabricInfo.cliqueId;
+      memcpy(ppodId, fabricInfo.clusterUuid, 16);
     }
 #endif
 #else
