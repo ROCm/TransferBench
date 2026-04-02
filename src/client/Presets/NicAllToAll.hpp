@@ -42,17 +42,31 @@ int NicAllToAllPreset(EnvVars&           ev,
     return 1;
   }
 
-  // Device count from topology only (no NUM_GPU_DEVICES): same detected GFX count as PodAllToAll uses by default.
-  int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
+  int useCpuMem = EnvVars::GetEnvVar("USE_CPU_MEM", 0);
+  // Device count from topology: GFX executors, or CPU executors when USE_CPU_MEM (same pattern as NicRings).
+  int numMemDevices = TransferBench::GetNumExecutors(useCpuMem ? EXE_CPU : EXE_GPU_GFX);
+  if (numMemDevices == 0) {
+    Utils::Print("[ERROR] No %s executors detected for NIC all-to-all.\n", useCpuMem ? "CPU" : "GPU GFX");
+    return 1;
+  }
 
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS", 0);
   int useRdmaRead   = EnvVars::GetEnvVar("USE_RDMA_READ", 0);
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE", 0);
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
-  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numGpus);
+  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numMemDevices);
   int noSameRank    = EnvVars::GetEnvVar("NIC_A2A_NO_SAME_RANK", 1);
   int numNicPlanes  = EnvVars::GetEnvVar("NUM_NIC_PLANES" , 1);
+
+  if (numQueuePairs < 1) {
+    Utils::Print("[ERROR] NUM_QUEUE_PAIRS must be >= 1 (got %d)\n", numQueuePairs);
+    return 1;
+  }
+  if (groupSize < 1) {
+    Utils::Print("[ERROR] GROUP_SIZE must be >= 1 (got %d)\n", groupSize);
+    return 1;
+  }
 
   bool scopeInter = false;
   {
@@ -67,24 +81,24 @@ int NicAllToAllPreset(EnvVars&           ev,
     }
   }
 
-  MemType memType   = Utils::GetGpuMemType(memTypeIdx);
-  std::string memTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
+  MemType memType        = Utils::GetMemType(memTypeIdx, useCpuMem);
+  std::string memTypeStr = Utils::GetMemTypeStr(memTypeIdx, useCpuMem);
 
   if (numNicPlanes < 1) {
     Utils::Print("[ERROR] NUM_NIC_PLANES must be >= 1\n");
     return 1;
   }
 
-  // Same divisibility check as PodAllToAll (total devices = ranks × detected GPUs per rank).
-  if (numRanks * numGpus % groupSize) {
+  // Same divisibility check as PodAllToAll (total devices = ranks × memory devices per rank).
+  if (numRanks * numMemDevices % groupSize) {
     Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
-                 groupSize, numRanks * numGpus, numRanks);
+                 groupSize, numRanks * numMemDevices, numRanks);
     return 1;
   }
 
-  int const M = numRanks * numGpus;
+  int const M = numRanks * numMemDevices;
 
-  // Stride orbits on devices (rank-major devLin = rank * numGpus + gpu): same gcd structure as PodAllToAll's StrideGenerate,
+  // Stride orbits on devices (rank-major devLin = rank * numMemDevices + memIdx): same gcd structure as PodAllToAll's StrideGenerate,
   // but NIC A2A does not use the permuted slot order for GROUP_SIZE — subgroups follow natural order within each orbit.
   int kNorm = ((stride % M) + M) % M;
   int dCycles;
@@ -117,7 +131,8 @@ int NicAllToAllPreset(EnvVars&           ev,
     ev.DisplayEnvVars();
     if (!ev.hideEnv) {
       if (!ev.outputToCsv) printf("[NIC A2A Related]\n");
-      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
+      ev.Print("USE_CPU_MEM"    , useCpuMem    , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
+      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllMemTypeStr(useCpuMem).c_str());
       ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
       ev.Print("GROUP_SIZE"     , groupSize    , "Dividing all devices into groups of %d for a2a", groupSize);
       ev.Print("NUM_NIC_PLANES", numNicPlanes , "Number of planes on scale-out");
@@ -136,27 +151,29 @@ int NicAllToAllPreset(EnvVars&           ev,
     }
   }
 
-  // For each rank/NIC, closest GPU — several NICs may share the same GPU (same device / subgroup).
-  std::vector<std::vector<int>> nicToGpu(numRanks, std::vector<int>(numNicsPerRank, -1));
+  // For each rank/NIC, closest memory device (GPU or CPU NUMA) — several NICs may share the same device (same subgroup).
+  std::vector<std::vector<int>> nicToMem(numRanks, std::vector<int>(numNicsPerRank, -1));
   for (int rank = 0; rank < numRanks; rank++) {
     for (int nic = 0; nic < numNicsPerRank; nic++) {
-      int gpu = TransferBench::GetClosestGpuToNic(nic, rank);
-      if (gpu < 0) {
-        Utils::Print("[ERROR] Failed to identify closest GPU for Rank %d NIC %d\n", rank, nic);
+      int memIdx = useCpuMem ? TransferBench::GetClosestCpuNumaToNic(nic, rank)
+                             : TransferBench::GetClosestGpuToNic(nic, rank);
+      if (memIdx < 0) {
+        Utils::Print("[ERROR] Failed to identify closest %s for Rank %d NIC %d\n",
+                     useCpuMem ? "CPU NUMA node" : "GPU", rank, nic);
         return 1;
       }
-      if (gpu >= numGpus) {
-        Utils::Print("[ERROR] Closest GPU index %d for Rank %d NIC %d is out of detected GFX range [0,%d)\n",
-                     gpu, rank, nic, numGpus);
+      if (memIdx >= numMemDevices) {
+        Utils::Print("[ERROR] Closest %s index %d for Rank %d NIC %d is out of range [0,%d)\n",
+                     useCpuMem ? "CPU" : "GPU", memIdx, rank, nic, numMemDevices);
         return 1;
       }
-      nicToGpu[rank][nic] = gpu;
+      nicToMem[rank][nic] = memIdx;
     }
   }
 
-  auto devLinOf = [&](int rank, int gpuIdx) -> int { return rank * numGpus + gpuIdx; };
+  auto devLinOf = [&](int rank, int memIdx) -> int { return rank * numMemDevices + memIdx; };
 
-  // NIC plane: independent of GPU STRIDE. Global rank-major order over NIC endpoints, round-robin into P planes.
+  // NIC plane: independent of STRIDE over memory devices. Global rank-major order over NIC endpoints, round-robin into P planes.
   auto nicPlaneOf = [&](int rank, int nic) -> int {
     int const L = rank * numNicsPerRank + nic;
     return L % numNicPlanes;
@@ -172,8 +189,8 @@ int NicAllToAllPreset(EnvVars&           ev,
   auto const acceptPair = [&](int srcRank, int srcNic, int dstRank, int dstNic) -> bool {
     if (nicPlaneOf(srcRank, srcNic) != nicPlaneOf(dstRank, dstNic))
       return false;
-    int srcDevLin = devLinOf(srcRank, nicToGpu[srcRank][srcNic]);
-    int dstDevLin = devLinOf(dstRank, nicToGpu[dstRank][dstNic]);
+    int srcDevLin = devLinOf(srcRank, nicToMem[srcRank][srcNic]);
+    int dstDevLin = devLinOf(dstRank, nicToMem[dstRank][dstNic]);
     if ((srcDevLin % dCycles) != (dstDevLin % dCycles))
       return false;
     if (noSameRank && srcRank == dstRank)
@@ -185,16 +202,16 @@ int NicAllToAllPreset(EnvVars&           ev,
 
   for (int srcRank = 0; srcRank < numRanks; srcRank++) {
     for (int srcNic = 0; srcNic < numNicsPerRank; srcNic++) {
-      int srcGpu = nicToGpu[srcRank][srcNic];
+      int srcMem = nicToMem[srcRank][srcNic];
       for (int dstRank = 0; dstRank < numRanks; dstRank++) {
         for (int dstNic = 0; dstNic < numNicsPerRank; dstNic++) {
           if (!acceptPair(srcRank, srcNic, dstRank, dstNic)) continue;
 
-          int dstGpu = nicToGpu[dstRank][dstNic];
+          int dstMem = nicToMem[dstRank][dstNic];
 
           TransferBench::Transfer transfer;
-          transfer.srcs.push_back({memType, srcGpu, srcRank});
-          transfer.dsts.push_back({memType, dstGpu, dstRank});
+          transfer.srcs.push_back({memType, srcMem, srcRank});
+          transfer.dsts.push_back({memType, dstMem, dstRank});
           transfer.exeDevice   = {EXE_NIC, useRdmaRead ? dstNic : srcNic, useRdmaRead ? dstRank : srcRank};
           transfer.exeSubIndex = useRdmaRead ? srcNic : dstNic;
           transfer.numSubExecs = numQueuePairs;
@@ -210,11 +227,13 @@ int NicAllToAllPreset(EnvVars&           ev,
 
   Utils::Print("NIC All-To-All benchmark\n");
   Utils::Print("========================\n");
-  Utils::Print("GPU traffic over NIC executors. %d rank-major devices; STRIDE sets gcd-orbits; GROUP_SIZE chunks each orbit in natural order.\n", M);
-  Utils::Print("NICs map to devices via closest GPU;\n");
+  Utils::Print("%s traffic over NIC executors. %d rank-major devices; STRIDE sets gcd-orbits; GROUP_SIZE chunks each orbit in natural order.\n",
+               useCpuMem ? "CPU" : "GPU", M);
+  Utils::Print("NICs map to devices via closest %s;\n", useCpuMem ? "CPU NUMA node" : "GPU");
   Utils::Print("NIC planes: %d , traffic only between NICs in the same plane. Stride: %d\n",
                numNicPlanes, stride);
-  Utils::Print("Using closest GPU per NIC endpoint and %s memory.\n", memTypeStr.c_str());
+  Utils::Print("Using closest %s per NIC endpoint and %s memory.\n",
+               useCpuMem ? "CPU NUMA node" : "GPU", memTypeStr.c_str());
   Utils::Print("Visible NICs per rank: %d\n", numNicsPerRank);
   Utils::Print("%d queue pairs per NIC.  %lu bytes per Transfer.  All numbers are GB/s\n",
                numQueuePairs, numBytesPerTransfer);
@@ -261,7 +280,13 @@ int NicAllToAllPreset(EnvVars&           ev,
 
   std::vector<std::vector<double>> bwByRankNic(numRanks, std::vector<double>(numNicsPerRank, 0.0));
   for (size_t i = 0; i < results.tfrResults.size(); i++) {
-    bwByRankNic[srcRanks[i]][srcNics[i]] += results.tfrResults[i].avgBandwidthGbPerSec;
+    int nicIdx = 0;
+    if (useRdmaRead) {
+      nicIdx = results.tfrResults[i].exeDstDevice.exeIndex;
+    } else {
+      nicIdx = results.tfrResults[i].exeDevice.exeIndex;
+    }
+    bwByRankNic[srcRanks[i]][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
   }
 
   std::vector<double> rankTotal(numRanks, 0.0);
@@ -269,7 +294,11 @@ int NicAllToAllPreset(EnvVars&           ev,
   table.DrawColBorder(colIdx);
   for (int nic = 0; nic < numNicsPerRank; nic++) {
     table.Set(0, colIdx, " NIC %02d ", nic);
-    table.Set(1, colIdx, " SRC GPU ");
+    if (useCpuMem) {
+      table.Set(1, colIdx, " CPU %02d ", nicToMem[0][nic]);
+    } else {
+      table.Set(1, colIdx, " GPU %02d ", nicToMem[0][nic]);
+    }
     table.Set(2, colIdx, " %s ", TransferBench::GetExecutorName({EXE_NIC, nic}).c_str());
 
     double nicMin = std::numeric_limits<double>::max();
