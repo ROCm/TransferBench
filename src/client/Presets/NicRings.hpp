@@ -161,7 +161,7 @@ int NicRingsPreset(EnvVars&          ev,
 
       double ringMin = std::numeric_limits<double>::max();
       double ringAvg = 0.0;
-      double ringMax = std::numeric_limits<double>::min();
+      double ringMax = std::numeric_limits<double>::lowest();
 
       for (int rank = 0; rank < numRanks; rank++) {
         double avgBw = results.tfrResults[transferIdx].avgBandwidthGbPerSec;
@@ -185,7 +185,7 @@ int NicRingsPreset(EnvVars&          ev,
 
   double rankMin = std::numeric_limits<double>::max();
   double rankAvg = 0.0;
-  double rankMax = std::numeric_limits<double>::min();
+  double rankMax = std::numeric_limits<double>::lowest();
   for (int rank = 0; rank < numRanks; rank++) {
     table.Set(3 + rank, numCols - 1, " %.2f ", rankTotal[rank]);
     rankMin = std::min(rankMin, rankTotal[rank]);

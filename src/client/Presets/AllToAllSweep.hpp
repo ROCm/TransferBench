@@ -215,7 +215,7 @@ int AllToAllSweepPreset(EnvVars&          ev,
           transfer.numSubExecs = useSpray ? (c * targetCount) : c;
 
         double minBandwidth = std::numeric_limits<double>::max();
-        double maxBandwidth = std::numeric_limits<double>::min();
+        double maxBandwidth = std::numeric_limits<double>::lowest();
         TransferBench::TestResults result;
         if (TransferBench::RunTransfers(cfg, transfers, result)) {
           for (auto const& exeResult : result.exeResults) {
