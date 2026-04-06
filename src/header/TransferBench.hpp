@@ -194,6 +194,7 @@ namespace TransferBench
     int numWarmups         = 3;                 ///< Number of un-timed warmup iterations to perform
     int recordPerIteration = 0;                 ///< Record per-iteration timing information
     int useInteractive     = 0;                 ///< Pause for user-input before starting transfer loop
+    int pingpongStride     = 8;                 ///< Stride in bytes between flag slots for pingpong laps (must be multiple of 8)
   };
 
   /**
@@ -1848,6 +1849,7 @@ namespace {
       if (general.numIterations      != cfg.general.numIterations)      ADD_ERROR("cfg.general.numIterations");
       if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
+      if (general.pingpongStride     != cfg.general.pingpongStride)     ADD_ERROR("cfg.general.pingpongStride");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
     }
@@ -2557,8 +2559,10 @@ namespace {
     float*                     src[MAX_SRCS];     ///< Source array pointers
     float*                     dst[MAX_DSTS];     ///< Destination array pointers
     int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
-    volatile int64_t*          flagMem;           ///< Pingpong flag pointer (nullptr for normal transfers)
+    volatile int64_t*          flagMem;           ///< Pingpong flag base pointer (nullptr for normal transfers)
     int                        laps;              ///< 0 = normal, >0 = ping, <0 = pong
+    int                        flagStride;        ///< Stride in bytes between flag slots per lap
+    int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
 
     // Prepared
     int                        teamSize;          ///< Index of this sub executor amongst team
@@ -2629,6 +2633,8 @@ namespace {
     // Pingpong
     int                        laps = 0;           ///< 0 = normal, >0 = ping, <0 = pong
     void*                      flagMem = nullptr;  ///< Pointer to paired transfer's dstMem[0] (the flag to wait on)
+    int                        flagStride = 8;     ///< Stride in bytes between flag slots per lap
+    int                        flagAllocBytes = 8; ///< Total flag allocation in bytes (for wrap-around)
     std::future<void>          pingpongWaitFuture; ///< Async handle for pingpong wait
 
     // Counters
@@ -3770,6 +3776,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       p.numDsts        = rss.dstMem.size();
       p.flagMem        = nullptr;
       p.laps           = transfer.laps;
+      p.flagStride     = 0;
+      p.flagAllocBytes = 0;
       p.startCycle     = 0;
       p.stopCycle      = 0;
       p.hwId           = 0;
@@ -3930,9 +3938,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
 
         // Allocate destination memory (on the correct rank)
+        // For pingpong transfers, allocate a larger buffer to hold multiple flag slots
+        size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
+        if (t.laps != 0)
+          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * abs(t.laps)));
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
-          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
+          ERR_CHECK(AllocateMemory(dstMemDevice, dstAllocBytes, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
         }
 
@@ -4200,37 +4212,43 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     //TODO
   }
 
-  // CPU-side spin wait: polls a flag until it matches the expected value.
-  // Used by CPU executors (flag in CPU memory) and accessible from host code.
+  // CPU-side spin wait: polls a flag until it becomes non-zero.
+  // Used by CPU executors and NIC pingpong lambdas.
   template <typename T>
-  static void CpuWait(volatile T* flag, T expectedValue)
+  static void CpuWait(volatile T* flag)
   {
-    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) != expectedValue)
+    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) == T(0))
       ;
   }
 
-  // GPU-side spin wait: polls a flag from within a GPU kernel.
+  // GPU-side spin wait: polls a flag until it becomes non-zero.
   // Used by GPU-GFX executors (called inline from the transfer kernel).
-  // Flag can reside in CPU memory (load via PCIe/XGMI) or GPU memory (direct load).
   template <typename T>
-  __device__ void GpuWait(volatile T* flag, T expectedValue)
+  __device__ void GpuWait(volatile T* flag)
   {
 #if defined(__NVCC__)
-    while (atomicAdd(const_cast<T*>(flag), T(0)) != expectedValue)
+    while (atomicAdd(const_cast<T*>(flag), T(0)) == T(0))
       ;
 #else
-    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != expectedValue)
+    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) == T(0))
       ;
 #endif
   }
 
-  // Standalone GPU wait kernel: enqueued on a HIP stream for GPU-DMA executors,
-  // which cannot embed custom spin logic inside DMA operations.
+  // Standalone GPU wait kernel: enqueued on a HIP stream for GPU-DMA executors.
   // Launched with grid(1,1,1) block(1,1,1) on the same stream as the DMA transfer.
   template <typename T>
-  __global__ void GpuDmaWaitKernel(volatile T* flag, T expectedValue)
+  __global__ void GpuDmaWaitKernel(volatile T* flag)
   {
-    GpuWait(flag, expectedValue);
+    GpuWait(flag);
+  }
+
+  // Returns a pointer to the flag slot for the given lap, using strided wrap-around.
+  __host__ __device__
+  static volatile int64_t* FlagSlot(volatile int64_t* base, int lap, int stride, int allocBytes)
+  {
+    int offset = (lap * stride) % allocBytes;
+    return (volatile int64_t*)((volatile char*)base + offset);
   }
 
 // CPU Executor-related functions
@@ -4246,15 +4264,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     do {
       // Pong: wait for ping's signal before each lap
       if (p.laps < 0 && p.flagMem)
-        CpuWait(p.flagMem, (int64_t)(subIteration + 1));
+        CpuWait(FlagSlot(p.flagMem, subIteration, p.flagStride, p.flagAllocBytes));
+
+      // For pingpong, offset dst per lap so the 8-byte write lands on the correct flag slot
+      int const dstByteOff = (p.laps != 0) ? (subIteration * p.flagStride) % p.flagAllocBytes : 0;
+      int const dstFloatOff = dstByteOff / (int)sizeof(float);
 
       int const& numSrcs = p.numSrcs;
       int const& numDsts = p.numDsts;
 
       if (numSrcs == 0) {
         for (int i = 0; i < numDsts; ++i) {
-          memset(p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
-          //for (int j = 0; j < p.N; j++) p.dst[i][j] = MEMSET_VAL;
+          memset(p.dst[i] + dstFloatOff, MEMSET_CHAR, p.N * sizeof(float));
         }
       } else if (numSrcs == 1) {
         float const* __restrict__ src = p.src[0];
@@ -4263,26 +4284,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           for (int j = 0; j < p.N; j++)
             sum += p.src[0][j];
 
-          // Add a dummy check to ensure the read is not optimized out
           if (sum != sum) {
             System::Get().Log("[ERROR] Nan detected\n");
           }
         } else {
           for (int i = 0; i < numDsts; ++i)
-            memcpy(p.dst[i], src, p.N * sizeof(float));
+            memcpy(p.dst[i] + dstFloatOff, src, p.N * sizeof(float));
         }
       } else {
         float sum = 0.0f;
         for (int j = 0; j < p.N; j++) {
           sum = p.src[0][j];
           for (int i = 1; i < numSrcs; i++) sum += p.src[i][j];
-          for (int i = 0; i < numDsts; i++) p.dst[i][j] = sum;
+          for (int i = 0; i < numDsts; i++) p.dst[i][j + dstFloatOff] = sum;
         }
       }
 
       // Ping: wait for pong's signal before next lap
       if (p.laps > 0 && p.flagMem)
-        CpuWait(p.flagMem, (int64_t)(subIteration + 1));
+        CpuWait(FlagSlot(p.flagMem, subIteration, p.flagStride, p.flagAllocBytes));
 
     } while (++subIteration != iterations);
   }
@@ -4395,10 +4415,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           int const laps = abs(rss.laps);
           for (int lap = 0; lap < laps; ++lap) {
             if (rss.laps < 0)
-              CpuWait(static_cast<volatile int64_t*>(rss.flagMem), (int64_t)(lap + 1));
+              CpuWait(FlagSlot(static_cast<volatile int64_t*>(rss.flagMem), lap, rss.flagStride, rss.flagAllocBytes));
+
+            int dstByteOff = (lap * rss.flagStride) % rss.flagAllocBytes;
+            for (auto& wrVec : rss.sendWorkRequests)
+              for (auto& wr : wrVec)
+                wr.wr.rdma.remote_addr += dstByteOff;
 
             auto lapStart = std::chrono::high_resolution_clock::now();
             ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss));
+
+            for (auto& wrVec : rss.sendWorkRequests)
+              for (auto& wr : wrVec)
+                wr.wr.rdma.remote_addr -= dstByteOff;
 
             ibv_cq* cq = rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue;
             struct ibv_wc wc;
@@ -4415,7 +4444,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
 
             if (rss.laps > 0)
-              CpuWait(static_cast<volatile int64_t*>(rss.flagMem), (int64_t)(lap + 1));
+              CpuWait(FlagSlot(static_cast<volatile int64_t*>(rss.flagMem), lap, rss.flagStride, rss.flagAllocBytes));
 
             auto lapDelta = std::chrono::high_resolution_clock::now() - lapStart;
             if (iteration >= 0)
@@ -4701,9 +4730,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Pong: wait for ping's signal before each lap
       if (p.laps < 0 && p.flagMem) {
         if (threadIdx.x == 0)
-          GpuWait(p.flagMem, (int64_t)(subIterations + 1));
+          GpuWait(FlagSlot(p.flagMem, subIterations, p.flagStride, p.flagAllocBytes));
         if (seType == 0) __syncthreads(); else __syncwarp();
       }
+
+      // For pingpong, offset dst per lap so the 8-byte write lands on the correct flag slot
+      size_t const dstFloatOff = (p.laps != 0)
+        ? ((subIterations * p.flagStride) % p.flagAllocBytes) / sizeof(float)
+        : 0;
 
       // First loop: Each wavefront in the team works on UNROLL PACKED_FLOAT per thread
       size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
@@ -4782,7 +4816,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
 
             for (int d = 0; d < numDsts; d++)
-              Store<TEMPORAL_MODE>(val, &p.dst[d][idx]);
+              Store<TEMPORAL_MODE>(val, &p.dst[d][idx + dstFloatOff]);
           }
         }
       }
@@ -4790,7 +4824,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Ping: wait for pong's signal before next lap
       if (p.laps > 0 && p.flagMem) {
         if (threadIdx.x == 0)
-          GpuWait(p.flagMem, (int64_t)(subIterations + 1));
+          GpuWait(FlagSlot(p.flagMem, subIterations, p.flagStride, p.flagAllocBytes));
         if (seType == 0) __syncthreads(); else __syncwarp();
       }
 
@@ -5054,20 +5088,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         // Pong: enqueue wait kernel before DMA copy
         if (resources.laps < 0 && resources.flagMem)
-          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(static_cast<volatile int64_t*>(resources.flagMem), (int64_t)(subIterations + 1));
+          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
+
+        // For pingpong, offset dst per lap
+        int dstByteOff = (resources.laps != 0) ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
+        void* lapDst = (char*)resources.dstMem[0] + dstByteOff;
 
 #if defined(__NVCC__)
-        ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[0],
+        ERR_CHECK(cuMemcpyAsync((CUdeviceptr)lapDst,
                                 (CUdeviceptr)resources.srcMem[0],
                                 resources.numBytes, stream));
 #else
-        ERR_CHECK(hipMemcpyAsync(resources.dstMem[0], resources.srcMem[0], resources.numBytes,
+        ERR_CHECK(hipMemcpyAsync(lapDst, resources.srcMem[0], resources.numBytes,
                                  hipMemcpyDefault, stream));
 #endif
 
         // Ping: enqueue wait kernel after DMA copy (wait for pong before next lap)
         if (resources.laps > 0 && resources.flagMem)
-          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(static_cast<volatile int64_t*>(resources.flagMem), (int64_t)(subIterations + 1));
+          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
 
       } while (++subIterations != iterations);
 
@@ -5082,18 +5120,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         // Pong: enqueue wait kernel before HSA copy
         if (resources.laps < 0 && resources.flagMem) {
-          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(static_cast<volatile int64_t*>(resources.flagMem), (int64_t)(subIterations + 1));
+          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
           ERR_CHECK(hipStreamSynchronize(stream));
         }
 
+        // For pingpong, offset dst per lap
+        int hsaDstByteOff = (resources.laps != 0) ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
+        void* hsaLapDst = (char*)resources.dstMem[0] + hsaDstByteOff;
+
         hsa_signal_store_screlease(resources.signal, 1);
         if (!useSubIndices) {
-          ERR_CHECK(hsa_amd_memory_async_copy(resources.dstMem[0], resources.dstAgent,
+          ERR_CHECK(hsa_amd_memory_async_copy(hsaLapDst, resources.dstAgent,
                                               resources.srcMem[0], resources.srcAgent,
                                               resources.numBytes, 0, NULL,
                                               resources.signal));
         } else {
-          HSA_CALL(hsa_amd_memory_async_copy_on_engine(resources.dstMem[0], resources.dstAgent,
+          HSA_CALL(hsa_amd_memory_async_copy_on_engine(hsaLapDst, resources.dstAgent,
                                                        resources.srcMem[0], resources.srcAgent,
                                                        resources.numBytes, 0, NULL,
                                                        resources.signal,
@@ -5106,7 +5148,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         // Ping: enqueue wait kernel after HSA copy (wait for pong before next lap)
         if (resources.laps > 0 && resources.flagMem) {
-          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(static_cast<volatile int64_t*>(resources.flagMem), (int64_t)(subIterations + 1));
+          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
           ERR_CHECK(hipStreamSynchronize(stream));
         }
 
@@ -5333,8 +5375,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (transfers[i].laps > 0 && transfers[i+1].laps < 0) {
         auto pingRss = transferResources[i];
         auto pongRss = transferResources[i + 1];
-        pingRss->flagMem = pongRss->dstMem[0];
-        pongRss->flagMem = pingRss->dstMem[0];
+        pingRss->flagMem        = pongRss->dstMem[0];
+        pongRss->flagMem        = pingRss->dstMem[0];
+        int stride              = cfg.general.pingpongStride;
+        int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * abs(transfers[i].laps));
+        pingRss->flagStride     = stride;
+        pongRss->flagStride     = stride;
+        pingRss->flagAllocBytes = allocBytes;
+        pongRss->flagAllocBytes = allocBytes;
         i++;
       }
     }
@@ -5350,13 +5398,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         volatile int64_t* flag = static_cast<volatile int64_t*>(rss.flagMem);
 
         // Update per-transfer CPU-side SubExecParam (used by CPU executor)
-        for (auto& p : rss.subExecParamCpu)
-          p.flagMem = flag;
+        for (auto& p : rss.subExecParamCpu) {
+          p.flagMem        = flag;
+          p.flagStride     = rss.flagStride;
+          p.flagAllocBytes = rss.flagAllocBytes;
+        }
 
         // For GFX executors, also update the packed GPU-side buffer
         if (exeDevice.exeType == EXE_GPU_GFX) {
           int subIdx = rss.subExecIdx[0];
-          exeInfo.subExecParamCpu[subIdx].flagMem = flag;
+          exeInfo.subExecParamCpu[subIdx].flagMem        = flag;
+          exeInfo.subExecParamCpu[subIdx].flagStride     = rss.flagStride;
+          exeInfo.subExecParamCpu[subIdx].flagAllocBytes = rss.flagAllocBytes;
           ERR_APPEND(hipMemcpy(exeInfo.subExecParamGpu + subIdx,
                                &exeInfo.subExecParamCpu[subIdx],
                                sizeof(SubExecParam),
@@ -5434,6 +5487,23 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Wait for all ranks before starting any timing
       System::Get().Barrier();
+
+      // Zero flag memory for pingpong transfers so each lap's slot starts at 0
+      for (size_t i = 0; i + 1 < transfers.size(); i++) {
+        if (transfers[i].laps > 0 && transfers[i+1].laps < 0) {
+          size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(transfers[i].laps));
+          for (int k = 0; k < 2; k++) {
+            void* dst = transferResources[i + k]->dstMem[0];
+            if (!dst) continue;
+            MemType mt = transfers[i + k].dsts[0].memType;
+            if (mt == MEM_CPU || mt == MEM_NULL)
+              memset(dst, 0, allocBytes);
+            else
+              hipMemset(dst, 0, allocBytes);
+          }
+          i++;
+        }
+      }
 
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
