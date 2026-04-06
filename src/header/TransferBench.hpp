@@ -4197,6 +4197,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   // Dispatcher: selects the appropriate wait implementation based on executor type and flag memory type.
   void PingpongWait(void* flagMem, MemType flagMemType, ExeType exeType)
   {
+    //TODO
   }
 
   // CPU-side spin wait: polls a flag until it matches the expected value.
@@ -4231,15 +4232,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     GpuWait(flag, expectedValue);
   }
-
-#ifdef NIC_EXEC_ENABLED
-  // NIC wait: polls the IB completion queue until the expected number of completions arrive.
-  // The RDMA write completing on the remote side serves as the signal.
-  static ErrResult NicWait(struct ibv_cq* cq, int expectedCompletions)
-  {
-    return ERR_NONE;
-  }
-#endif
 
 // CPU Executor-related functions
 //========================================================================================
