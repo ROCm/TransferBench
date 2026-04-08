@@ -706,8 +706,15 @@ namespace TransferBench
 #endif
 
 // Macro for collecting XCC GFX kernel is running on
-#if defined(__gfx942__) || defined(__gfx950__)
+#if defined(__GFX9__)
 #define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val))
+#elif defined(__GFX12__)
+#define GetXccId(val) \
+  { asm volatile ("s_sendmsg_rtn_b32 %0, 0x87 \n" \
+                  "s_wait_kmcnt 0"                \
+                  : "=s" (val));                  \
+    val = ((val >> 16) & 0xF);                    \
+  }
 #else
 #define GetXccId(val) val = 0
 #endif
@@ -787,7 +794,7 @@ namespace {
 //========================================================================================
 
   int   constexpr MAX_BLOCKSIZE  = 1024;               // Max threadblock size
-  int   constexpr MAX_UNROLL     = 8;                  // Max unroll factor
+  int   constexpr MAX_UNROLL     = 16;                 // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                  // Max srcs per Transfer
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
   int   constexpr MEMSET_CHAR    = 75;                 // Value to memset (char)
@@ -4674,15 +4681,23 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2), \
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float4)}
 
-#define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND)    \
-  {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 1),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 2),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 3),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 4),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 5),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 6),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 7),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 8)}
+#define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND) \
+  {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  1),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  2),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  3),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  4),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  5),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  6),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  7),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  8),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  9),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 10),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 11),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 12),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 13),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 14),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 15),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 16)}
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
