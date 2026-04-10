@@ -70,6 +70,7 @@ public:
   int numIterations;                 // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numSubIterations;              // Number of subiterations to perform
   int numWarmups;                    // Number of un-timed warmup iterations to perform
+  int pingpongStride;                // Stride in bytes between flag slots for pingpong laps
   int showBorders;                   // Show ASCII box-drawing characaters in tables
   int showIterations;                // Show per-iteration timing info
   int useInteractive;                // Pause for user-input before starting transfer loop
@@ -159,6 +160,7 @@ public:
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , 10);
     numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , 3);
+    pingpongStride    = GetEnvVar("PINGPONG_STRIDE"     , 8);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
@@ -348,6 +350,7 @@ public:
     printf(" NUM_ITERATIONS    - # of timed iterations per test. If negative, run for this many seconds instead\n");
     printf(" NUM_SUBITERATIONS - # of sub-iterations to run per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS       - # of untimed warmup iterations per test\n");
+    printf(" PINGPONG_STRIDE   - Stride in bytes between flag slots for pingpong laps (default 8, must be multiple of 8)\n");
     printf(" OUTPUT_TO_CSV     - Outputs to CSV format if set\n");
 #if NIC_EXEC_ENABLED
     printf(" ROCE_VERSION      - RoCE version (default=2)\n");
@@ -467,6 +470,8 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
+    Print("PINGPONG_STRIDE", pingpongStride,
+          "Pingpong flag stride %d bytes per lap", pingpongStride);
 #if NIC_EXEC_ENABLED
     Print("ROCE_VERSION", roceVersion,
           "RoCE version is set to %d", roceVersion);
@@ -621,6 +626,7 @@ public:
     cfg.general.numIterations      = numIterations;
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
+    cfg.general.pingpongStride     = pingpongStride;
     cfg.general.recordPerIteration = showIterations;
     cfg.general.useInteractive     = useInteractive;
 
