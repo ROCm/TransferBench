@@ -22,9 +22,6 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
-#include <map>
-#include <tuple>
-
 namespace {
 
 bool LooksLikeFullTransferLine(std::string const& spec)
@@ -56,7 +53,7 @@ int GfxSweepPreset(EnvVars&          ev,
   std::vector<int> waveOrderList = EnvVars::GetEnvVarArray("WAVE_ORDERS", {0});
 
   std::string const spec = EnvVars::GetEnvVar("GFX_SWEEP_TRANSFER",
-                                               TransferBench::GetNumRanks() > 1 ? "G0->G0->G0" : "R0G0->R0G0->R0G0");
+                                               TransferBench::GetNumRanks() > 1 ? "R0G0->R0G0->R0G0" : "G0->G0->G0");
   std::string const line = LooksLikeFullTransferLine(spec) ? spec : (std::string("1 1 ") + spec);
 
   std::vector<TransferBench::Transfer> transfers;
@@ -67,7 +64,7 @@ int GfxSweepPreset(EnvVars&          ev,
       TransferBench::Utils::Print(
           "[WARN] gfxsweep: In Multinode setting, omitted rank fields on SRC/DST/EXE are filled per rank, "
           "and transfers without ranks specified will expand to multiple parallel copy per node. "
-          "gfxsweep expects exactly one entry here and forbid such entries; for a local sweep use a single rank (`-np 1`), "
+          "gfxsweep expects exactly one entry here and forbids such entries; for a local sweep use a single rank (`-np 1`), "
           "or adjust GFX_SWEEP_TRANSFER / rank syntax so expansion yields one transfer.\n");
     }
     TransferBench::Utils::Print(
@@ -173,7 +170,14 @@ int GfxSweepPreset(EnvVars&          ev,
                 TransferBench::Utils::Print(
                     "Blocksize: %d  WORD_SIZE: %d  TEMPORAL: %d  WAVE_ORDER: %d  SubExecs: %d  Unroll: %d\n",
                     blockSize, wordSize, temporalMode, waveOrder, c, u);
-                TransferBench::Utils::PrintResults(ev, ++testNum, transfers, results[key]);
+                transfers[0].numSubExecs = c;
+                auto const resultIt = results.find(key);
+                if (resultIt != results.end()) {
+                  TransferBench::Utils::PrintResults(ev, ++testNum, transfers, resultIt->second);
+                } else {
+                  ++testNum;
+                  TransferBench::Utils::Print("No results available for this sweep point (transfer run failed).\n");
+                }
               }
             }
           }
