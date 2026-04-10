@@ -22,6 +22,9 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
+#include <map>
+#include <tuple>
+
 namespace {
 
 bool LooksLikeFullTransferLine(std::string const& spec)
@@ -41,25 +44,32 @@ bool LooksLikeFullTransferLine(std::string const& spec)
 int GfxSweepPreset(EnvVars&          ev,
                    size_t      const numBytesPerTransfer,
                    std::string const presetName,
-                   [[maybe_unused]] bool const bytesSpecified)
+                   bool const bytesSpecified)
 {
-  (void)presetName;
-
-  ev.useSingleStream = 1;
-
   int showMinOnly   = EnvVars::GetEnvVar("SHOW_MIN_ONLY", 1);
   int verbose       = EnvVars::GetEnvVar("VERBOSE", 0);
-  std::vector<int> blockList  = EnvVars::GetEnvVarArray("BLOCKSIZES", {256});
-  std::vector<int> unrollList = EnvVars::GetEnvVarArray("UNROLLS", {1, 2, 3, 4, 6, 8});
-  std::vector<int> numSesList = EnvVars::GetEnvVarArray("NUM_SUB_EXECS", {4, 8, 12, 16, 24, 32});
+  std::vector<int> blockList    = EnvVars::GetEnvVarArray("BLOCKSIZES", {256});
+  std::vector<int> unrollList   = EnvVars::GetEnvVarArray("UNROLLS", {1, 2, 3, 4, 6, 8});
+  std::vector<int> numSesList   = EnvVars::GetEnvVarArray("NUM_SUB_EXECS", {4, 8, 12, 16, 24, 32});
+  std::vector<int> wordSizeList = EnvVars::GetEnvVarArray("WORDSIZES", {4});
+  std::vector<int> temporalList = EnvVars::GetEnvVarArray("TEMPORAL_MODES", {0});
+  std::vector<int> waveOrderList = EnvVars::GetEnvVarArray("WAVE_ORDERS", {0});
 
-  std::string const spec = EnvVars::GetEnvVar("GFX_SWEEP_TRANSFER", "G0->G0->G0");
+  std::string const spec = EnvVars::GetEnvVar("GFX_SWEEP_TRANSFER",
+                                               TransferBench::GetNumRanks() > 1 ? "G0->G0->G0" : "R0G0->R0G0->R0G0");
   std::string const line = LooksLikeFullTransferLine(spec) ? spec : (std::string("1 1 ") + spec);
 
   std::vector<TransferBench::Transfer> transfers;
   TransferBench::Utils::CheckForError(TransferBench::ParseTransfers(line, transfers));
 
   if (transfers.size() != 1) {
+    if (TransferBench::GetNumRanks() > 1 && transfers.size() > 1) {
+      TransferBench::Utils::Print(
+          "[WARN] gfxsweep: In Multinode setting, omitted rank fields on SRC/DST/EXE are filled per rank, "
+          "and transfers without ranks specified will expand to multiple parallel copy per node. "
+          "gfxsweep expects exactly one entry here and forbid such entries; for a local sweep use a single rank (`-np 1`), "
+          "or adjust GFX_SWEEP_TRANSFER / rank syntax so expansion yields one transfer.\n");
+    }
     TransferBench::Utils::Print(
         "[ERROR] gfxsweep expects exactly one transfer after parsing (got %zu). "
         "Set GFX_SWEEP_TRANSFER to a single SRC EXE DST triplet or one basic/advanced line that expands to one transfer.\n",
@@ -75,74 +85,98 @@ int GfxSweepPreset(EnvVars&          ev,
 
   transfers[0].numBytes = numBytesPerTransfer;
 
-  ev.DisplayEnvVars();
-  if (!ev.hideEnv) {
-    if (!ev.outputToCsv)
-      printf("[GfxSweep Related]\n");
-    ev.Print("GFX_SWEEP_TRANSFER", spec, "Transfer spec (see config file format)");
-    ev.Print("BLOCKSIZES", blockList.size(), EnvVars::ToStr(blockList).c_str());
-    ev.Print("NUM_SUB_EXECS", numSesList.size(), EnvVars::ToStr(numSesList).c_str());
-    ev.Print("SHOW_MIN_ONLY", showMinOnly, showMinOnly ? "Showing only slowest sub-executor aggregate" : "Showing slowest and fastest");
-    ev.Print("UNROLLS", unrollList.size(), EnvVars::ToStr(unrollList).c_str());
-    ev.Print("VERBOSE", verbose, verbose ? "Display test results" : "Display summary only");
-    printf("\n");
+  if (TransferBench::Utils::RankDoesOutput()) {
+    ev.DisplayEnvVars();
+    if (!ev.hideEnv) {
+      if (!ev.outputToCsv)
+        TransferBench::Utils::Print("[GfxSweep Related]\n");
+      ev.Print("GFX_SWEEP_TRANSFER", spec, "Transfer spec (see config file format)");
+      ev.Print("BLOCKSIZES", blockList.size(), EnvVars::ToStr(blockList).c_str());
+      ev.Print("NUM_SUB_EXECS", numSesList.size(), EnvVars::ToStr(numSesList).c_str());
+      ev.Print("WORDSIZES", wordSizeList.size(), EnvVars::ToStr(wordSizeList).c_str());
+      ev.Print("TEMPORAL_MODES", temporalList.size(), EnvVars::ToStr(temporalList).c_str());
+      ev.Print("WAVE_ORDERS", waveOrderList.size(), EnvVars::ToStr(waveOrderList).c_str());
+      ev.Print("SHOW_MIN_ONLY", showMinOnly, showMinOnly ? "Showing only slowest sub-executor aggregate" : "Showing slowest and fastest");
+      ev.Print("UNROLLS", unrollList.size(), EnvVars::ToStr(unrollList).c_str());
+      ev.Print("VERBOSE", verbose, verbose ? "Display test results" : "Display summary only");
+      TransferBench::Utils::Print("\n");
+    }
   }
 
-  printf("GFX sweep (single transfer):\n");
-  printf("============================\n");
-  printf("- Parsed line: %s\n", line.c_str());
-  printf("- %lu bytes per transfer\n", static_cast<unsigned long>(numBytesPerTransfer));
+  TransferBench::Utils::Print("GFX sweep (single transfer):\n");
+  TransferBench::Utils::Print("============================\n");
+  TransferBench::Utils::Print("- Parsed line: %s\n", line.c_str());
+  TransferBench::Utils::Print("- %lu bytes per transfer\n", static_cast<unsigned long>(numBytesPerTransfer));
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
 
-  std::map<std::pair<int, int>, TransferBench::TestResults> results;
+  using GfxSweepKey = std::tuple<int, int, int, int, int, int>;  // block, wordSize, temporal, waveOrder, subExecs, unroll
+  std::map<GfxSweepKey, TransferBench::TestResults> results;
 
   for (int blockSize : blockList) {
-    printf("Blocksize: %d\n", blockSize);
     ev.gfxBlockSize = cfg.gfx.blockSize = blockSize;
 
-    printf("#CUs\\Unroll");
-    for (int u : unrollList) {
-      printf("  %d(Min) ", u);
-      if (!showMinOnly)
-        printf("  %d(Max) ", u);
-    }
-    printf("\n");
+    for (int wordSize : wordSizeList) {
+      ev.gfxWordSize = cfg.gfx.wordSize = wordSize;
 
-    for (int c : numSesList) {
-      printf("   %5d   ", c);
-      fflush(stdout);
-      for (int u : unrollList) {
-        ev.gfxUnroll = cfg.gfx.unrollFactor = u;
-        transfers[0].numSubExecs = c;
+      for (int temporalMode : temporalList) {
+        ev.gfxTemporal = cfg.gfx.temporalMode = temporalMode;
 
-        double minBandwidth = std::numeric_limits<double>::max();
-        double maxBandwidth = std::numeric_limits<double>::min();
-        TransferBench::TestResults result;
-        if (TransferBench::RunTransfers(cfg, transfers, result)) {
-          for (auto const& exeResult : result.exeResults) {
-            minBandwidth = std::min(minBandwidth, exeResult.second.avgBandwidthGbPerSec);
-            maxBandwidth = std::max(maxBandwidth, exeResult.second.avgBandwidthGbPerSec);
+        for (int waveOrder : waveOrderList) {
+          ev.gfxWaveOrder = cfg.gfx.waveOrder = waveOrder;
+
+          TransferBench::Utils::Print("Blocksize: %d  WORD_SIZE: %d  TEMPORAL: %d  WAVE_ORDER: %d\n",
+                                      blockSize, wordSize, temporalMode, waveOrder);
+
+          TransferBench::Utils::Print("#CUs\\Unroll");
+          for (int u : unrollList) {
+            TransferBench::Utils::Print("  %d(Min) ", u);
+            if (!showMinOnly)
+              TransferBench::Utils::Print("  %d(Max) ", u);
           }
-          results[std::make_pair(c, u)] = result;
-        } else {
-          minBandwidth = 0.0;
-        }
-        printf(" %7.2f ", minBandwidth);
-        if (!showMinOnly)
-          printf(" %7.2f ", maxBandwidth);
-        fflush(stdout);
-      }
-      printf("\n");
-      fflush(stdout);
-    }
+          TransferBench::Utils::Print("\n");
 
-    if (verbose) {
-      int testNum = 0;
-      for (int c : numSesList) {
-        for (int u : unrollList) {
-          printf("SubExecs: %d Unroll %d\n", c, u);
-          TransferBench::Utils::PrintResults(ev, ++testNum, transfers, results[std::make_pair(c, u)]);
+          for (int c : numSesList) {
+            TransferBench::Utils::Print("   %5d   ", c);
+            fflush(stdout);
+            for (int u : unrollList) {
+              ev.gfxUnroll = cfg.gfx.unrollFactor = u;
+              transfers[0].numSubExecs = c;
+
+              double minBandwidth = std::numeric_limits<double>::max();
+              double maxBandwidth = std::numeric_limits<double>::min();
+              TransferBench::TestResults result;
+              GfxSweepKey const key = std::make_tuple(blockSize, wordSize, temporalMode, waveOrder, c, u);
+              if (TransferBench::RunTransfers(cfg, transfers, result)) {
+                for (auto const& exeResult : result.exeResults) {
+                  minBandwidth = std::min(minBandwidth, exeResult.second.avgBandwidthGbPerSec);
+                  maxBandwidth = std::max(maxBandwidth, exeResult.second.avgBandwidthGbPerSec);
+                }
+                results[key] = result;
+              } else {
+                minBandwidth = 0.0;
+              }
+              TransferBench::Utils::Print(" %7.2f ", minBandwidth);
+              if (!showMinOnly)
+                TransferBench::Utils::Print(" %7.2f ", maxBandwidth);
+              fflush(stdout);
+            }
+            TransferBench::Utils::Print("\n");
+            fflush(stdout);
+          }
+
+          if (verbose) {
+            int testNum = 0;
+            for (int c : numSesList) {
+              for (int u : unrollList) {
+                GfxSweepKey const key = std::make_tuple(blockSize, wordSize, temporalMode, waveOrder, c, u);
+                TransferBench::Utils::Print(
+                    "Blocksize: %d  WORD_SIZE: %d  TEMPORAL: %d  WAVE_ORDER: %d  SubExecs: %d  Unroll: %d\n",
+                    blockSize, wordSize, temporalMode, waveOrder, c, u);
+                TransferBench::Utils::PrintResults(ev, ++testNum, transfers, results[key]);
+              }
+            }
+          }
         }
       }
     }
