@@ -30,6 +30,7 @@ THE SOFTWARE.
 #include "AllToAll.hpp"
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
+#include "GfxSweep.hpp"
 #include "HbmBandwidth.hpp"
 #include "HealthCheck.hpp"
 #include "NicRings.hpp"
@@ -52,6 +53,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"a2a",         {AllToAllPreset,      "Tests parallel transfers between all pairs of GPU devices"}},
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
+  {"gfxsweep",    {GfxSweepPreset,      "Sweep BLOCKSIZES, UNROLLS, and NUM_SUB_EXECS for one GFX transfer (GFX_SWEEP_TRANSFER)"}},
   {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
   {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
