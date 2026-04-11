@@ -78,8 +78,10 @@ THE SOFTWARE.
 #endif
 /// @endcond
 
-// Batched DMA executor is only supported with HIP >= 7.0
-#if defined(__HIP_PLATFORM_AMD__) && defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR >= 7)
+// Batched DMA executor is only supported with HIP >= 7.1
+#if defined(__HIP_PLATFORM_AMD__) && \
+    defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR >= 7) && \
+    defined(HIP_VERSION_MINOR) && (HIP_VERSION_MINOR >= 1)
 #define BMA_EXEC_ENABLED
 #endif
 
@@ -104,7 +106,7 @@ namespace TransferBench
     EXE_GPU_DMA      = 2,                       ///<  GPU SDMA executor         (subExecutor = not supported)
     EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
-    EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA execttor (subExecutor = batch size)
+    EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
   };
   char const ExeTypeStr[7] = "CGDINB";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
@@ -2170,7 +2172,7 @@ namespace {
       }
 
       if (t.numBytes % 4) {
-        errors.push_back({ERR_FATAL, "Transfer %d: numBytes must be a multiple of 4\n", t.numBytes});
+        errors.push_back({ERR_FATAL, "Transfer %d: numBytes (%lu) must be a multiple of 4\n", i, t.numBytes});
         break;
       }
 
@@ -2418,7 +2420,7 @@ namespace {
         break;
 #else
         errors.push_back({ERR_FATAL,
-            "Transfer %d: BMA executor requires ROCm 7.0 or newer (AMD HIP with hipMemcpyBatchAsync)", i});
+            "Transfer %d: BMA executor requires ROCm 7.1 or newer (AMD HIP with hipMemcpyBatchAsync)", i});
         hasFatalError = true;
         break;
 #endif
@@ -3890,11 +3892,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     rss.batchSrcs.clear();
     rss.batchBytes.clear();
 
-    for (int i = 0; i < transfer.numSubExecs; ++i) {
-      for (int j = 0; j < (int)rss.dstMem.size(); j++) {
-        rss.batchSrcs.push_back(subExecParam[i].src[0]);
-        rss.batchDsts.push_back(subExecParam[i].dst[j]);
-        rss.batchBytes.push_back(subExecParam[i].N * sizeof(float));
+    if (transfer.exeDevice.exeType == EXE_GPU_BMDA) {
+      for (int i = 0; i < transfer.numSubExecs; ++i) {
+        for (int j = 0; j < (int)rss.dstMem.size(); j++) {
+          rss.batchSrcs.push_back(subExecParam[i].src[0]);
+          rss.batchDsts.push_back(subExecParam[i].dst[j]);
+          rss.batchBytes.push_back(subExecParam[i].N * sizeof(float));
+        }
       }
     }
 #endif
@@ -6601,7 +6605,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.numExecutorSubIndices[{EXE_GPU_BDMA, exeIndex}] = 0;
       topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
       topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
-      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
+      topo.numSubExecutors[{EXE_GPU_BDMA, exeIndex}] = numDmaEngines;
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
     }

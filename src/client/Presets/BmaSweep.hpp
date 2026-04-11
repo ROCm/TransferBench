@@ -31,7 +31,7 @@ int BmaSweepPreset(EnvVars&          ev,
   }
 
 #ifndef BMA_EXEC_ENABLED
-  Utils::Print("[ERROR] BMA executor requires ROCm 7.0 or newer\n");
+  Utils::Print("[ERROR] BMA executor requires ROCm 7.1 or newer\n");
   return 1;
 #endif
 
@@ -40,9 +40,11 @@ int BmaSweepPreset(EnvVars&          ev,
   // Collect env vars for this preset
   int         exeIndex      = EnvVars::GetEnvVar("EXE_INDEX"         ,               0);
   int         localCopy     = EnvVars::GetEnvVar("LOCAL_COPY"        ,               0);
+  vector<int> gfxSesList    = EnvVars::GetEnvVarArray("GFX_SUB_EXECS",              {});
   int         gpuMemTypeIdx = EnvVars::GetEnvVar("GPU_MEM_TYPE"      ,               0);
   int         numGpuDevices = EnvVars::GetEnvVar("NUM_GPU_DEVICES"   , numDetectedGpus);
-  vector<int> numSesList    = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",       {1,2,4,8});
+  vector<int> bmaSesList    = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",       {1,2,4,8});
+
 
   MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
 
@@ -54,9 +56,10 @@ int BmaSweepPreset(EnvVars&          ev,
       if (!outputToCsv) printf("[BMA Sweep Related]\n");
       ev.Print("EXE_INDEX"      , exeIndex,          "Executing on GPU %d", exeIndex);
       ev.Print("LOCAL_COPY"     , localCopy,         "%s local copy to GPU %d", localCopy ? "Including" : "Excluding", exeIndex);
+      ev.Print("GFX_SUB_EXECS"  , gfxSesList.size(), EnvVars::ToStr(gfxSesList).c_str());
       ev.Print("GPU_MEM_TYPE"   , gpuMemTypeIdx,     "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_GPU_DEVICES", numGpuDevices,     "Using %d GPUs", numGpuDevices);
-      ev.Print("NUM_SUB_EXECS"  , numSesList.size(), EnvVars::ToStr(numSesList).c_str());
+      ev.Print("NUM_SUB_EXECS"  , bmaSesList.size(), EnvVars::ToStr(bmaSesList).c_str());
       printf("\n");
     }
   }
@@ -66,7 +69,9 @@ int BmaSweepPreset(EnvVars&          ev,
     return 1;
   }
 
-  int numTransfers = numGpuDevices - 1 + (localCopy ? 1 : 0);
+  int numTransfers  = numGpuDevices - 1 + (localCopy ? 1 : 0);
+  int numBmaSubExec = (int)bmaSesList.size();
+  int numGfxSubExec = (int)gfxSesList.size();
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
@@ -74,25 +79,30 @@ int BmaSweepPreset(EnvVars&          ev,
   // Prepare table of results
   int minPow2Exp = 12;
   int maxPow2Exp = 30;
-  int numRows    = (maxPow2Exp - minPow2Exp + 1) + 1;
-  int numCols    = 2 + numSesList.size();
+  int numRows    = 1 + (bytesSpecified ? 1 : (maxPow2Exp - minPow2Exp + 1));
+  int numCols    = 2 + numBmaSubExec + numGfxSubExec;
 
   Utils::TableHelper table(numRows, numCols);
-
-  Utils::Print("Performing %d simultaneous DMA Transfers from GPU %0 to other GPUs\n", numTransfers, exeIndex);
+  Utils::Print("Performing %d simultaneous DMA Transfers from GPU %d to other GPUs\n", numTransfers, exeIndex);
 
   // Prepare headers
+
   table.Set(0, 0, " Bytes ");
   table.Set(0, 1, " DMA ");
-  for (int i = 0; i < numSesList.size(); i++) {
-    table.Set(0, 2+i, " BMA (%d) ", numSesList[i]);
+  for (int i = 0; i < numBmaSubExec; i++) {
+    table.Set(0, 2+i, " BMA(%02d) ", bmaSesList[i]);
   }
+  for (int i = 0; i < numGfxSubExec; i++) {
+    table.Set(0, 2+numBmaSubExec+i, " GFX(%02d) ", gfxSesList[i]);
+  }
+
   table.DrawRowBorder(0);
   table.DrawRowBorder(1);
   table.DrawRowBorder(numRows);
   table.DrawColBorder(0);
   table.DrawColBorder(1);
   table.DrawColBorder(2);
+  table.DrawColBorder(2+numBmaSubExec);
   table.DrawColBorder(numCols);
 
   if (!ev.outputToCsv){
@@ -101,6 +111,8 @@ int BmaSweepPreset(EnvVars&          ev,
   };
 
   for (size_t numBytes = 1ULL<<minPow2Exp, currRow=1; numBytes <= (1ULL<<maxPow2Exp); numBytes<<=1, currRow++) {
+    if (bytesSpecified) numBytes = numBytesPerTransfer;
+
     if (!ev.outputToCsv) {
       Utils::Print(".");
       fflush(stdout);
@@ -132,8 +144,8 @@ int BmaSweepPreset(EnvVars&          ev,
 
     // BMA executor next
     t.exeDevice = {EXE_GPU_BDMA, exeIndex};
-    for (int i = 0; i < numSesList.size(); i++) {
-      t.numSubExecs = numSesList[i];
+    for (int i = 0; i < numBmaSubExec; i++) {
+      t.numSubExecs = bmaSesList[i];
 
       if (!TransferBench::RunTransfers(cfg, transfers, results)) {
         for (auto const& err : results.errResults)
@@ -143,6 +155,21 @@ int BmaSweepPreset(EnvVars&          ev,
 
       table.Set(currRow, 2+i, " %6.2f ", numTransfers * results.tfrResults[0].avgBandwidthGbPerSec);
     }
+
+    // GFX executor last
+    t.exeDevice = {EXE_GPU_GFX, exeIndex};
+    for (int i = 0; i < numGfxSubExec; i++) {
+      t.numSubExecs = gfxSesList[i];
+
+      if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+        for (auto const& err : results.errResults)
+          Utils::Print("%s\n", err.errMsg.c_str());
+        return 1;
+      }
+
+      table.Set(currRow, 2+numBmaSubExec+i, " %6.2f ", results.tfrResults[0].avgBandwidthGbPerSec);
+    }
+    if (bytesSpecified) break;
   }
 
   if (!ev.outputToCsv) {

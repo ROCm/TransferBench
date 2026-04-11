@@ -26,7 +26,7 @@ Documentation for TransferBench is available at
 - NIC_FILTER renamed to TB_NIC_FILTER for consistency
 - DUMP_LINES renamed to TB_DUMP_LINES for consistency
 - Dynamically size CQs for NIC transfers in high QPs case
-- Switch to using hipMemcpyDevicetoDeviceNoCU instead of hipMemcpyDefault for DMA Executor if available (requires HIP >= 6.0)
+- Switch to using hipMemcpyDeviceToDeviceNoCU instead of hipMemcpyDefault for DMA Executor if available (requires HIP >= 6.0)
 - Allow for multiple destination memory locations for DMA/Batched-DMA Transfers
 
 ## v1.66.02
