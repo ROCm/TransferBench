@@ -79,9 +79,8 @@ THE SOFTWARE.
 /// @endcond
 
 // Batched DMA executor is only supported with HIP >= 7.1
-#if defined(__HIP_PLATFORM_AMD__) && \
-    defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR >= 7) && \
-    defined(HIP_VERSION_MINOR) && (HIP_VERSION_MINOR >= 1)
+#if defined(__HIP_PLATFORM_AMD__) && defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR) && \
+  ((HIP_VERSION_MAJOR > 7) || (HIP_VERSION_MAJOR == 7 && HIP_VERSION_MINOR >= 1))
 #define BMA_EXEC_ENABLED
 #endif
 
@@ -3892,7 +3891,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     rss.batchSrcs.clear();
     rss.batchBytes.clear();
 
-    if (transfer.exeDevice.exeType == EXE_GPU_BMDA) {
+    if (transfer.exeDevice.exeType == EXE_GPU_BDMA) {
       for (int i = 0; i < transfer.numSubExecs; ++i) {
         for (int j = 0; j < (int)rss.dstMem.size(); j++) {
           rss.batchSrcs.push_back(subExecParam[i].src[0]);

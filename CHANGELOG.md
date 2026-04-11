@@ -14,7 +14,7 @@ Documentation for TransferBench is available at
 - Adding NIC_CQ_POLL_BATCH to control CQ poll batch size for NIC transfers
 - New "hbm" preset which sweeps and tests local HBM read performance
 - Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
-- Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.0
+- Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.1
 - Added new bmasweep preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
 
 ### Modified
