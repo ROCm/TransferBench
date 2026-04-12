@@ -52,7 +52,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 {
   {"a2a",         {AllToAllPreset,      "Tests parallel transfers between all pairs of GPU devices"}},
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
-  {"nica2a",      {NicAllToAllPreset, "All-to-all GPU traffic over NIC transfers using each NIC's closest GPU endpoint"}},
+  {"nica2a",      {NicAllToAllPreset,   "All-to-all GPU traffic over NIC transfers using each NIC's closest GPU endpoint"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},

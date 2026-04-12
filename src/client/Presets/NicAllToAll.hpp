@@ -23,9 +23,10 @@ THE SOFTWARE.
 #include <cstring>
 #include <numeric>
 
-int NicAllToAllPreset(EnvVars&           ev,
-                      size_t      const  numBytesPerTransfer,
-                      std::string const  presetName)
+int NicAllToAllPreset(EnvVars&                    ev,
+                      size_t      const           numBytesPerTransfer,
+                      std::string const           presetName,
+                      [[maybe_unused]] bool const bytesSpecified)
 {
   // Check for single homogenous group
   if (Utils::GetNumRankGroups() > 1) {
@@ -182,9 +183,11 @@ int NicAllToAllPreset(EnvVars&           ev,
   std::vector<Transfer> transfers;
   std::vector<int> srcRanks;
   std::vector<int> srcNics;
+  std::vector<int> dstRanks;
   size_t const maxPairs = (size_t)numNicsPerRank * numNicsPerRank * (size_t)numRanks * (size_t)numRanks;
   srcRanks.reserve(maxPairs);
   srcNics.reserve(maxPairs);
+  dstRanks.reserve(maxPairs);
 
   auto const acceptPair = [&](int srcRank, int srcNic, int dstRank, int dstNic) -> bool {
     if (nicPlaneOf(srcRank, srcNic) != nicPlaneOf(dstRank, dstNic))
@@ -220,6 +223,7 @@ int NicAllToAllPreset(EnvVars&           ev,
           transfers.push_back(transfer);
           srcRanks.push_back(srcRank);
           srcNics.push_back(srcNic);
+          dstRanks.push_back(dstRank);
         }
       }
     }
@@ -280,13 +284,9 @@ int NicAllToAllPreset(EnvVars&           ev,
 
   std::vector<std::vector<double>> bwByRankNic(numRanks, std::vector<double>(numNicsPerRank, 0.0));
   for (size_t i = 0; i < results.tfrResults.size(); i++) {
-    int nicIdx = 0;
-    if (useRdmaRead) {
-      nicIdx = results.tfrResults[i].exeDstDevice.exeIndex;
-    } else {
-      nicIdx = results.tfrResults[i].exeDevice.exeIndex;
-    }
-    bwByRankNic[srcRanks[i]][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
+    int nicIdx  = results.tfrResults[i].exeDevice.exeIndex;
+    int rankIdx = useRdmaRead ? dstRanks[i] : srcRanks[i];
+    bwByRankNic[rankIdx][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
   }
 
   std::vector<double> rankTotal(numRanks, 0.0);
@@ -303,7 +303,7 @@ int NicAllToAllPreset(EnvVars&           ev,
 
     double nicMin = std::numeric_limits<double>::max();
     double nicAvg = 0.0;
-    double nicMax = std::numeric_limits<double>::min();
+    double nicMax = std::numeric_limits<double>::lowest();
     for (int rank = 0; rank < numRanks; rank++) {
       double bw = bwByRankNic[rank][nic];
       table.Set(3 + rank, colIdx, " %.2f ", bw);
@@ -322,7 +322,7 @@ int NicAllToAllPreset(EnvVars&           ev,
 
   double rankMin = std::numeric_limits<double>::max();
   double rankAvg = 0.0;
-  double rankMax = std::numeric_limits<double>::min();
+  double rankMax = std::numeric_limits<double>::lowest();
   for (int rank = 0; rank < numRanks; rank++) {
     table.Set(3 + rank, numCols - 1, " %.2f ", rankTotal[rank]);
     rankMin = std::min(rankMin, rankTotal[rank]);
