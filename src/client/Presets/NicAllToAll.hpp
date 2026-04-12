@@ -55,10 +55,19 @@ int NicAllToAllPreset(EnvVars&                    ev,
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS", 0);
   int useRdmaRead   = EnvVars::GetEnvVar("USE_RDMA_READ", 0);
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE", 0);
-  int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
-  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numMemDevices);
-  int noSameRank    = EnvVars::GetEnvVar("NIC_A2A_NO_SAME_RANK", 1);
-  int numNicPlanes  = EnvVars::GetEnvVar("NUM_NIC_PLANES" , 1);
+  int stride        = EnvVars::GetEnvVar("STRIDE", 1);
+
+  // Compute orbit structure before reading GROUP_SIZE so its default can be stride-aware.
+  // Stride orbits on devices (rank-major devLin = rank * numMemDevices + memIdx): same gcd structure as PodAllToAll's StrideGenerate,
+  // but NIC A2A does not use the permuted slot order for GROUP_SIZE — subgroups follow natural order within each orbit.
+  int const M         = numRanks * numMemDevices;
+  int const kNorm     = ((stride % M) + M) % M;
+  int const dCycles   = (kNorm == 0) ? 1 : std::gcd(kNorm, M);
+  int const orbitSize = M / dCycles;
+
+  int groupSize    = EnvVars::GetEnvVar("GROUP_SIZE", orbitSize);
+  int noSameRank   = EnvVars::GetEnvVar("NIC_A2A_NO_SAME_RANK", 1);
+  int numNicPlanes = EnvVars::GetEnvVar("NUM_NIC_PLANES", 1);
 
   if (numQueuePairs < 1) {
     Utils::Print("[ERROR] NUM_QUEUE_PAIRS must be >= 1 (got %d)\n", numQueuePairs);
@@ -91,24 +100,11 @@ int NicAllToAllPreset(EnvVars&                    ev,
   }
 
   // Same divisibility check as PodAllToAll (total devices = ranks × memory devices per rank).
-  if (numRanks * numMemDevices % groupSize) {
+  if (M % groupSize) {
     Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
-                 groupSize, numRanks * numMemDevices, numRanks);
+                 groupSize, M, numRanks);
     return 1;
   }
-
-  int const M = numRanks * numMemDevices;
-
-  // Stride orbits on devices (rank-major devLin = rank * numMemDevices + memIdx): same gcd structure as PodAllToAll's StrideGenerate,
-  // but NIC A2A does not use the permuted slot order for GROUP_SIZE — subgroups follow natural order within each orbit.
-  int kNorm = ((stride % M) + M) % M;
-  int dCycles;
-  if (kNorm == 0)
-    dCycles = 1;
-  else
-    dCycles = std::gcd(kNorm, M);
-
-  int const orbitSize = M / dCycles;
 
   // Within each stride orbit, partition by natural rank-major device index: orbit lists devLin = r, r+d, r+2d, ...
   // (r = devLin %% dCycles). Subgroup id = (index along that list) / GROUP_SIZE.
@@ -132,22 +128,19 @@ int NicAllToAllPreset(EnvVars&                    ev,
     ev.DisplayEnvVars();
     if (!ev.hideEnv) {
       if (!ev.outputToCsv) printf("[NIC A2A Related]\n");
-      ev.Print("USE_CPU_MEM"    , useCpuMem    , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
-      ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllMemTypeStr(useCpuMem).c_str());
-      ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
-      ev.Print("GROUP_SIZE"     , groupSize    , "Dividing all devices into groups of %d for a2a", groupSize);
-      ev.Print("NUM_NIC_PLANES", numNicPlanes , "Number of planes on scale-out");
+      ev.Print("USE_CPU_MEM"         , useCpuMem     , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
+      ev.Print("MEM_TYPE"            , memTypeIdx    , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllMemTypeStr(useCpuMem).c_str());
+      ev.Print("STRIDE"              , stride        , "Reordering devices by taking %d steps", stride);
+      ev.Print("GROUP_SIZE"          , groupSize     , "Dividing all devices into groups of %d for a2a", groupSize);
+      ev.Print("NUM_NIC_PLANES"      , numNicPlanes  , "Number of planes on scale-out");
       if (scopeInter)
-        ev.Print("NIC_A2A_SCOPE", "inter",
-                 "Between-group transfers only. Other value: intra");
+        ev.Print("NIC_A2A_SCOPE"     , "inter"       , "Between-group transfers only. Other value: intra");
       else
-        ev.Print("NIC_A2A_SCOPE", "intra",
-                 "Within-group transfers only. Other value: inter");
-      ev.Print("NIC_A2A_NO_SAME_RANK", noSameRank, "%s transfers where src rank == dst rank",
-               noSameRank ? "Excluding" : "Allowing");
-      ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
-      ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
-      ev.Print("USE_RDMA_READ"  , useRdmaRead  , "Performing RDMA %s", useRdmaRead ? "reads" : "writes");
+        ev.Print("NIC_A2A_SCOPE"     , "intra"       , "Within-group transfers only. Other value: inter");
+      ev.Print("NIC_A2A_NO_SAME_RANK", noSameRank    , "%s transfers where src rank == dst rank", noSameRank ? "Excluding" : "Allowing");
+      ev.Print("NUM_QUEUE_PAIRS"     , numQueuePairs , "Using %d queue pairs for NIC transfers", numQueuePairs);
+      ev.Print("SHOW_DETAILS"        , showDetails   , "%s full Test details", showDetails ? "Showing" : "Hiding");
+      ev.Print("USE_RDMA_READ"       , useRdmaRead   , "Performing RDMA %s", useRdmaRead ? "reads" : "writes");
       printf("\n");
     }
   }

@@ -16,7 +16,7 @@ Documentation for TransferBench is available at
 - Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
 - Adding nica2a preset (NIC all-to-all over GPUs via NIC executors, multi-node): stride/device grouping and NIC planes.
   - `STRIDE` — Step size for stride orbits on rank-major devices (`gcd` with total device count); no traffic between different orbits.
-  - `GROUP_SIZE` — Devices per subgroup inside each stride orbit (natural rank-major order); must divide orbit size (default: all devices per rank × GPUs).
+  - `GROUP_SIZE` — Devices per subgroup inside each stride orbit (natural rank-major order); must divide orbit size (default: orbit size, i.e., `M / gcd(STRIDE, M)`). Changing `STRIDE` without setting `GROUP_SIZE` is safe — the default tracks the orbit size automatically.
   - `NIC_A2A_SCOPE` — `intra`: transfers only within the same device subgroup; `inter`: only between different subgroups (same stride orbit only).
   - `NIC_A2A_NO_SAME_RANK` — When non-zero, omit transfers where source and destination are the same rank.
   - `NUM_NIC_PLANES` — Split NIC endpoints into this many disjoint planes (rank-major index modulo planes); traffic only between NICs in the same plane.
