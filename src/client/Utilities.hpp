@@ -393,12 +393,13 @@ namespace TransferBench::Utils
   std::string ExeTypeToStr(ExeType exeType)
   {
     switch (exeType) {
-    case EXE_CPU:         return "CPU";
-    case EXE_GPU_GFX:     return "GPU";
-    case EXE_GPU_DMA:     return "DMA";
-    case EXE_NIC:         return "NIC";
-    case EXE_NIC_NEAREST: return "NIC";
-    default:              return "N/A";
+    case EXE_CPU:           return "CPU";
+    case EXE_GPU_GFX:       return "GPU";
+    case EXE_GPU_DMA:       return "DMA";
+    case EXE_NIC:           return "NIC";
+    case EXE_NIC_NEAREST:   return "NIC";
+    case EXE_GPU_BDMA:      return "BMA";
+    default:                return "N/A";
     }
   }
 
