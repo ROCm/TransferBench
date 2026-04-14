@@ -78,9 +78,8 @@ THE SOFTWARE.
 #endif
 /// @endcond
 
-// Batched DMA executor is only supported with HIP >= 7.1
-#if defined(__HIP_PLATFORM_AMD__) && defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR) && \
-  ((HIP_VERSION_MAJOR > 7) || (HIP_VERSION_MAJOR == 7 && HIP_VERSION_MINOR >= 1))
+// Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
+#if (defined(HIP_VERSION) && (HIP_VERSION >= 710)) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12080))
 #define BMA_EXEC_ENABLED
 #endif
 
@@ -659,6 +658,7 @@ namespace TransferBench
   #define hipMallocManaged                                   cudaMallocManaged
   #define hipMemcpy                                          cudaMemcpy
   #define hipMemcpyAsync                                     cudaMemcpyAsync
+  #define hipMemcpyBatchAsync                                cudaMemcpyBatchAsync
   #define hipMemset                                          cudaMemset
   #define hipMemsetAsync                                     cudaMemsetAsync
   #define hipSetDevice                                       cudaSetDevice
@@ -2701,9 +2701,9 @@ namespace {
 
     // For BMA executor
 #ifdef BMA_EXEC_ENABLED
-    vector<void*>              batchDsts;
-    vector<void*>              batchSrcs;
-    vector<size_t>             batchBytes;
+    vector<void*>              batchDsts;         ///< Destination pointers (per batch item)
+    vector<void*>              batchSrcs;         ///< Source pointers (per batch item)
+    vector<size_t>             batchBytes;        ///< Bytes to copy (per batch item)
 #endif
 
     // Counters
@@ -3890,7 +3890,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     rss.batchDsts.clear();
     rss.batchSrcs.clear();
     rss.batchBytes.clear();
-
     if (transfer.exeDevice.exeType == EXE_GPU_BDMA) {
       for (int i = 0; i < transfer.numSubExecs; ++i) {
         for (int j = 0; j < (int)rss.dstMem.size(); j++) {
@@ -5146,7 +5145,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                     resources.batchSrcs.data(),
                                     resources.batchBytes.data(),
                                     resources.batchDsts.size(),
-                                    nullptr, nullptr, 0, &failIdx, stream));
+                                    nullptr, nullptr, 0,
+#if !defined(__NVCC__)
+                                    &failIdx,
+#endif
+                                    stream));
     } while (++subIterations != cfg.general.numSubIterations);
 
     if (cfg.dma.useHipEvents)
