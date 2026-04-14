@@ -1588,13 +1588,13 @@ namespace {
 
   // Deallocate memory
   static ErrResult DeallocateMemory(MemType memType, void *memPtr, size_t const bytes,
-                                    hipMemGenericAllocationHandle_t* memHandle = NULL)
+                                    hipMemGenericAllocationHandle_t* memHandle = nullptr)
   {
     // Avoid deallocating nullptr
     if (memPtr == nullptr)
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
-    if (memHandle == NULL || *memHandle == NULL) {
+    if (memHandle == nullptr || *memHandle == NULL) {
       switch (memType) {
       case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
       {
@@ -5019,8 +5019,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Force the use of SDMA engine if possible
 #if defined(__HIP_PLATFORM_AMD__) && defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR >= 6)
       hipMemcpyKind memcpyKind = hipMemcpyDeviceToDeviceNoCU;
-#else
-      hipMemcpyKind memcpyKind = hipMemcpyDefault;
 #endif
 
       // Use DMA copy engine
@@ -5139,14 +5137,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (cfg.dma.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
 
-    size_t failIdx = 0;
+    [[maybe_unused]] size_t failIdx = 0;
     do {
       ERR_CHECK(hipMemcpyBatchAsync(resources.batchDsts.data(),
                                     resources.batchSrcs.data(),
                                     resources.batchBytes.data(),
                                     resources.batchDsts.size(),
                                     nullptr, nullptr, 0,
-#if !defined(__NVCC__)
+    // In CUDA 13.0 the failIdx argument was removed from the original CUDA 12.8 API call
+#if !defined(__NVCC__) || (defined(CUDA_VERSION) && (CUDA_VERSION < 13000))
                                     &failIdx,
 #endif
                                     stream));
