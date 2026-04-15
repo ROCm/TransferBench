@@ -135,7 +135,8 @@ int GfxSweepPreset(EnvVars&          ev,
   Utils::Print("          WordSize     : %7d\n", best[1]);
   Utils::Print("          Temporal Mode: %7d\n", best[2]);
   Utils::Print("          BlockSize    : %7d\n", best[3]);
-  Utils::Print("          NumSubExec   : %7d\n", best[4]);
-  Utils::Print("          Unroll       : %7d\n", best[5]);
+  Utils::Print("          Unroll       : %7d\n", best[4]);
+  Utils::Print("          NumSubExec   : %7d\n", best[5]);
+
   return 0;
 }
