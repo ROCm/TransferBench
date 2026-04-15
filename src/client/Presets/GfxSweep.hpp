@@ -58,7 +58,7 @@ int GfxSweepPreset(EnvVars&          ev,
   std::vector<Transfer> transfers;
   Utils::CheckForError(ParseTransfers("1 1 " + transferStr, transfers));
 
-  // Print out the Transfers being ru
+  // Print out the Transfers being run
   Utils::Print("GFX sweep: (%lu bytes per Transfer). All values are CPU-timed GB/s\n", numBytesPerTransfer);
   Utils::Print("=======================================================================================\n");
 
