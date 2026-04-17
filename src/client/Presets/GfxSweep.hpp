@@ -28,14 +28,14 @@ int GfxSweepPreset(EnvVars&          ev,
                    bool        const bytesSpecified)
 {
   // Collect environment variables for this preset
-  vector<int> blockList     = EnvVars::GetEnvVarArray("BLOCKSIZES",   {256,512,768,1024});
-  std::string transferStr   = EnvVars::GetEnvVar(     "GFX_TRANSFER", "R0G0->R0G0->R0G0");
-  vector<int> numSesList    = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",    {4,8,16,32,64});
-  vector<int> temporalList  = EnvVars::GetEnvVarArray("TEMPORAL_MODES",              {0});
-  vector<int> unrollList    = EnvVars::GetEnvVarArray("UNROLLS",               {1,2,4,8});
-  vector<int> waveOrderList = EnvVars::GetEnvVarArray("WAVE_ORDERS",                 {0});
-  vector<int> wordSizeList  = EnvVars::GetEnvVarArray("WORDSIZES",                   {4});
-  int         verbose       = EnvVars::GetEnvVar(     "VERBOSE",                       0);
+  vector<int> blockList      = EnvVars::GetEnvVarArray("BLOCKSIZES",   {256,512,768,1024});
+  std::string transferStr    = EnvVars::GetEnvVar(     "GFX_TRANSFER", "R0G0->R0G0->R0G0");
+  vector<int> numSesList     = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",    {4,8,16,32,64});
+  int         numTransferStr = EnvVars::GetEnvVar(     "NUM_TRANSFERS",                 1);
+  vector<int> temporalList   = EnvVars::GetEnvVarArray("TEMPORAL_MODES",              {0});
+  vector<int> unrollList     = EnvVars::GetEnvVarArray("UNROLLS",               {1,2,4,8});
+  vector<int> waveOrderList  = EnvVars::GetEnvVarArray("WAVE_ORDERS",                 {0});
+  vector<int> wordSizeList   = EnvVars::GetEnvVarArray("WORDSIZES",                   {4});
 
   // Print off relevant environment variables
   if (Utils::RankDoesOutput()) {
@@ -45,18 +45,18 @@ int GfxSweepPreset(EnvVars&          ev,
         Utils::Print("[GFX Sweep Related]\n");
       ev.Print("BLOCKSIZES",     blockList.size(),     EnvVars::ToStr(blockList).c_str());
       ev.Print("GFX_TRANSFER",   transferStr,          "GFX Transfer to sweep (see config file format)");
+      ev.Print("NUM_TRANSFERS",  numTransferStr,       "Number of Transfers specified in GFX_TRANSFER");
       ev.Print("NUM_SUB_EXECS",  numSesList.size(),    EnvVars::ToStr(numSesList).c_str());
       ev.Print("TEMPORAL_MODES", temporalList.size(),  EnvVars::ToStr(temporalList).c_str());
       ev.Print("UNROLLS",        unrollList.size(),    EnvVars::ToStr(unrollList).c_str());
       ev.Print("WAVE_ORDERS",    waveOrderList.size(), EnvVars::ToStr(waveOrderList).c_str());
       ev.Print("WORDSIZES",      wordSizeList.size(),  EnvVars::ToStr(wordSizeList).c_str());
-      ev.Print("VERBOSE",        verbose,              verbose ? "Display test results" : "Display summary only");
       Utils::Print("\n");
     }
   }
 
   std::vector<Transfer> transfers;
-  Utils::CheckForError(ParseTransfers("1 1 " + transferStr, transfers));
+  Utils::CheckForError(ParseTransfers(std::to_string(numTransferStr) + " 1 " + transferStr, transfers));
 
   // Print out the Transfers being run
   Utils::Print("GFX sweep: (%lu bytes per Transfer). All values are CPU-timed GB/s\n", numBytesPerTransfer);
@@ -122,6 +122,7 @@ int GfxSweepPreset(EnvVars&          ev,
               }
             }
             Utils::Print("\n");
+            fflush(stdout);
           }
         }
       }
