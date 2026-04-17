@@ -79,7 +79,7 @@ THE SOFTWARE.
 /// @endcond
 
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
-#if (defined(HIP_VERSION) && (HIP_VERSION >= 710)) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12080))
+#if (defined(HIP_VERSION) && (HIP_VERSION >= 70100000)) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12080))
 #define BMA_EXEC_ENABLED
 #endif
 
