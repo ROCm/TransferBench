@@ -16,6 +16,7 @@ Documentation for TransferBench is available at
 - Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
 - Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.1 / CUDA 12.8
 - Added new bmasweep preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
+- Added new wallclock preset that compares wallclock counters across XCCs within a GPU
 
 ### Modified
 - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options

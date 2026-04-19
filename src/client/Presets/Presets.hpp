@@ -43,6 +43,7 @@ THE SOFTWARE.
 #include "Scaling.hpp"
 #include "Schmoo.hpp"
 #include "Sweep.hpp"
+#include "WallClock.hpp"
 
 typedef int (*PresetFunc)(EnvVars&          ev,
                           size_t      const numBytesPerTransfer,
@@ -68,6 +69,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
   {"sweep",       {SweepPreset,         "Ordered sweep through sets of Transfers"}},
+  {"wallclock",   {WallClockPreset,     "Tests wallclock consistency across XCCs within a GPU"}},
 };
 
 void DisplayPresets()

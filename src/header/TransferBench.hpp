@@ -7437,7 +7437,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 // Kernel macros
 #undef GetHwId
-#undef GetXccId
+//#undef GetXccId
 
 // Undefine helper macros
 #undef ERR_CHECK
