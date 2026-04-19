@@ -51,11 +51,8 @@ __global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
 
 #if defined(__NVCC__)
 #define hipDeviceSynchronize                               cudaDeviceSynchronize
-#define hipFree                                            cudaFree
-#define hipHostFree                                        cudaFreeHost
-#define hipHostMalloc                                      cudaMallocHost
-#define hipMalloc                                          cudaMalloc
 #define hipMemset                                          cudaMemset
+#define hipSetDevice                                       cudaSetDevice
 #endif
 
 int WallClockPreset(EnvVars&          ev,
@@ -63,6 +60,10 @@ int WallClockPreset(EnvVars&          ev,
                     std::string const presetName,
                     bool        const bytesSpecified)
 {
+  // Gather results and print
+  int numRanks = GetNumRanks();
+  int myRank   = GetRank();
+
   // Check for single homogenous group
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] wallclock preset can only be run across ranks that are homogenous\n");
@@ -121,8 +122,15 @@ int WallClockPreset(EnvVars&          ev,
     uint64_t* timestamps;
     int32_t* readyFlag;
 
-    HIP_CALL(hipHostMalloc((void**)&timestamps, numXccs * sizeof(uint64_t)));
-    HIP_CALL(hipMalloc((void**)&readyFlag,  sizeof(int)));
+    if (Utils::AllocateMemory({MEM_CPU_CLOSEST, deviceId}, numXccs * sizeof(uint64_t), (void**)&timestamps)) {
+      Utils::Print("[ERROR] Unable to allocate pinned host memory for storing timestamps for GPU device %d on rank %d\n",
+                   deviceId, myRank);
+      return 1;
+    }
+    if (Utils::AllocateMemory({MEM_GPU, deviceId}, sizeof(int32_t), (void**)&readyFlag)) {
+      Utils::Print("[ERROR] Unable to allocate readyFlag on GPU device %d on rank %d\n", deviceId, myRank);
+      return 1;
+    }
 
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
     {
@@ -135,13 +143,9 @@ int WallClockPreset(EnvVars&          ev,
       }
     }
 
-    HIP_CALL(hipHostFree(timestamps));
-    HIP_CALL(hipFree(readyFlag));
+    Utils::DeallocateMemory(MEM_CPU_CLOSEST, timestamps, numXccs * sizeof(uint64_t));
+    Utils::DeallocateMemory(MEM_GPU, readyFlag, sizeof(int32_t));
   }
-
-  // Gather results and print
-  int numRanks = GetNumRanks();
-  int myRank   = GetRank();
 
   // Prepare table of results
   int numRows   = 1 + numRanks * numGpuDevices * (ev.showIterations ? (ev.numIterations+1) : 1);
@@ -226,9 +230,5 @@ int WallClockPreset(EnvVars&          ev,
 
 #if defined(__NVCC__)
 #undef hipDeviceSynchronize
-#undef hipFree
-#undef hipHostFree
-#undef hipHostMalloc
-#undef hipMalloc
 #undef hipMemset
 #endif
