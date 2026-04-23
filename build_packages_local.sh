@@ -97,20 +97,29 @@ ok "Dependencies installed"
 
 # -------- fetch ROCm SDK from TheRock --------
 TAROBALL_BASE="https://therock-nightly-tarball.s3.amazonaws.com"
+TAR_PREFIX="therock-dist-linux-${GPU_FAMILY}-"
 
 if [[ -z "${ROCM_VERSION}" ]]; then
   log "ROCM_VERSION not set; auto-fetching latest for ${GPU_FAMILY}..."
-  # TheRock publishes a per-family LATEST.txt
-  LATEST_URL="${TAROBALL_BASE}/${GPU_FAMILY}-LATEST.txt"
-  if ROCM_VERSION="$(curl -fsSL "${LATEST_URL}" | tr -d '[:space:]')" && [[ -n "${ROCM_VERSION}" ]]; then
+  # No LATEST.txt is published; list the bucket and pick the highest version key.
+  LIST_URL="${TAROBALL_BASE}/?list-type=2&max-keys=1000&prefix=${TAR_PREFIX}"
+  LATEST_KEY="$(curl -fsSL "${LIST_URL}" 2>/dev/null \
+    | tr '<' '\n' \
+    | sed -n 's|^Key>||p' \
+    | grep -E '\.tar\.gz$' \
+    | sort -V \
+    | tail -1 || true)"
+  if [[ -n "${LATEST_KEY}" ]]; then
+    ROCM_VERSION="${LATEST_KEY#${TAR_PREFIX}}"
+    ROCM_VERSION="${ROCM_VERSION%.tar.gz}"
     ok "Latest ROCm version for ${GPU_FAMILY}: ${ROCM_VERSION}"
   else
-    warn "Could not fetch ${LATEST_URL}; falling back to pinned default"
-    ROCM_VERSION="7.11.0a20260121"
+    warn "Could not list ${LIST_URL}; falling back to pinned default"
+    ROCM_VERSION="7.13.0a20260423"
   fi
 fi
 
-TARBALL_NAME="${GPU_FAMILY}-${ROCM_VERSION}.tar.gz"
+TARBALL_NAME="${TAR_PREFIX}${ROCM_VERSION}.tar.gz"
 TARBALL_URL="${TAROBALL_BASE}/${TARBALL_NAME}"
 
 mkdir -p "${SDK_DIR}"
