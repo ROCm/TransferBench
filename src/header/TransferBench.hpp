@@ -25,7 +25,6 @@ THE SOFTWARE.
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
-#include <barrier>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
