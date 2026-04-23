@@ -294,9 +294,17 @@ if(BUILD_RELOCATABLE_PACKAGE)
   if(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
     set(CPACK_RPM_PACKAGE_RELEASE "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
   endif()
+  # Use the actual install prefix (caller-controlled in relocatable mode)
+  # rather than hard-coded /opt/... paths.
+  if(DEFINED CPACK_PACKAGING_INSTALL_PREFIX)
+    set(_rpm_exclude_prefix "${CPACK_PACKAGING_INSTALL_PREFIX}")
+  else()
+    set(_rpm_exclude_prefix "${CMAKE_INSTALL_PREFIX}")
+  endif()
   set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
-        "/opt" "/opt/rocm" "/opt/rocm/extras-${ROCM_MAJOR_VERSION}"
-        "/opt/rocm/extras-${ROCM_MAJOR_VERSION}/bin")
+        "/opt" "/opt/rocm"
+        "${_rpm_exclude_prefix}"
+        "${_rpm_exclude_prefix}/bin")
 
   # TGZ
   set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")

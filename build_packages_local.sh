@@ -23,6 +23,12 @@ err()  { echo -e "${RED}[FAIL]${NC} $*" >&2; }
 
 trap 'err "Build failed at line $LINENO"' ERR
 
+# -------- root check --------
+if [[ ${EUID} -ne 0 ]]; then
+  err "This script installs system packages and must run as root. Re-run with: sudo -E $0"
+  exit 1
+fi
+
 # -------- inputs --------
 ROCM_VERSION="${ROCM_VERSION:-}"                 # empty => auto-fetch latest
 GPU_FAMILY="${GPU_FAMILY:-gfx94X-dcgpu}"
@@ -96,13 +102,13 @@ fi
 ok "Dependencies installed"
 
 # -------- fetch ROCm SDK from TheRock --------
-TAROBALL_BASE="https://therock-nightly-tarball.s3.amazonaws.com"
+TARBALL_BASE="https://therock-nightly-tarball.s3.amazonaws.com"
 TAR_PREFIX="therock-dist-linux-${GPU_FAMILY}-"
 
 if [[ -z "${ROCM_VERSION}" ]]; then
   log "ROCM_VERSION not set; auto-fetching latest for ${GPU_FAMILY}..."
   # No LATEST.txt is published; list the bucket and pick the highest version key.
-  LIST_URL="${TAROBALL_BASE}/?list-type=2&max-keys=1000&prefix=${TAR_PREFIX}"
+  LIST_URL="${TARBALL_BASE}/?list-type=2&max-keys=1000&prefix=${TAR_PREFIX}"
   # Filter to versioned tarballs only (skip ADHOCBUILD-* and other non-release keys);
   # match: <prefix><MAJOR>.<MINOR>.<...>.tar.gz
   LATEST_KEY="$(curl -fsSL "${LIST_URL}" 2>/dev/null \
@@ -122,7 +128,7 @@ if [[ -z "${ROCM_VERSION}" ]]; then
 fi
 
 TARBALL_NAME="${TAR_PREFIX}${ROCM_VERSION}.tar.gz"
-TARBALL_URL="${TAROBALL_BASE}/${TARBALL_NAME}"
+TARBALL_URL="${TARBALL_BASE}/${TARBALL_NAME}"
 
 mkdir -p "${SDK_DIR}"
 if [[ ! -d "${ROCM_PATH}" ]] || [[ ! -f "${SDK_DIR}/.installed-${ROCM_VERSION}-${GPU_FAMILY}" ]]; then
@@ -172,7 +178,11 @@ GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo u
 if [[ "${GIT_BRANCH}" == rel* ]] || [[ "${GIT_BRANCH}" == release/* ]]; then
   PKG_RELEASE="${GITHUB_RUN_NUMBER}"
 else
-  PKG_RELEASE="${GIT_BRANCH//\//.}.${GIT_COMMIT}"
+  # Sanitize: DEB/RPM release fields disallow many punctuation chars.
+  # Collapse anything that's not [A-Za-z0-9] into a single dot, then trim.
+  SAFE_BRANCH="$(printf '%s' "${GIT_BRANCH}" | sed -E 's/[^[:alnum:]]+/./g; s/^\.+//; s/\.+$//')"
+  SAFE_BRANCH="${SAFE_BRANCH:-unknown}"
+  PKG_RELEASE="${SAFE_BRANCH}.${GIT_COMMIT}"
 fi
 export CPACK_DEBIAN_PACKAGE_RELEASE="${CPACK_DEBIAN_PACKAGE_RELEASE:-$PKG_RELEASE}"
 export CPACK_RPM_PACKAGE_RELEASE="${CPACK_RPM_PACKAGE_RELEASE:-$PKG_RELEASE}"
@@ -180,7 +190,11 @@ log "Package release tag: ${PKG_RELEASE}"
 
 # -------- configure --------
 INSTALL_PREFIX="/opt/rocm/extras-${ROCM_MAJOR}"
-RPATH_LIST="\$ORIGIN:\$ORIGIN/../lib:${INSTALL_PREFIX}/lib:${ROCM_PATH}/lib"
+# Relocatable RPATH: $ORIGIN-relative + install prefix + the conventional
+# install-time ROCm locations. Do NOT embed ${ROCM_PATH} (the ephemeral
+# build-time SDK download path) — that would leak CI paths into the
+# packaged binary and break relocatability.
+RPATH_LIST="\$ORIGIN:\$ORIGIN/../lib:${INSTALL_PREFIX}/lib:/opt/rocm/lib:/opt/rocm/lib64"
 
 log "Configuring CMake..."
 rm -rf "${BUILD_DIR}"
