@@ -20,6 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#include <numeric>
+
 // Helper functions
 
 // Returns a schedule of round robin pairing of N elements, using Circle Method
