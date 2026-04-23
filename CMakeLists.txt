@@ -260,6 +260,14 @@ target_link_libraries(TransferBench PRIVATE dl)
 target_link_libraries(TransferBench PRIVATE ${NUMA_LIBRARY})
 target_link_libraries(TransferBench PRIVATE ${HSA_LIBRARY})
 
+# gcc <9 ships std::filesystem in a separate library (libstdc++fs).
+# Required on AlmaLinux 8 / manylinux_2_28; harmless no-op stub on newer toolchains.
+find_library(STDCXXFS_LIBRARY stdc++fs)
+if(STDCXXFS_LIBRARY)
+  message(STATUS "Linking stdc++fs: ${STDCXXFS_LIBRARY}")
+  target_link_libraries(TransferBench PRIVATE stdc++fs)
+endif()
+
 if(BUILD_RELOCATABLE_PACKAGE)
   # RVS-style relocatable packaging: bypass rocm_install/rocm_create_package and
   # drive CPack directly so CMAKE_INSTALL_PREFIX / CPACK_PACKAGING_INSTALL_PREFIX
