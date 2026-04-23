@@ -91,7 +91,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Upload to S3
-        if: vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
         env:
           AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
         run: |
@@ -114,7 +114,7 @@ jobs:
           echo "Uploaded to ${S3_PATH}"
 
       - name: Generate apt repo metadata
-        if: env.DEB_METADATA == 'generate'
+        if: github.repository == 'ROCm/TransferBench' && env.DEB_METADATA == 'generate'
         env:
           AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
         run: |
@@ -203,7 +203,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Upload to S3
-        if: vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
         env:
           AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
         run: |
@@ -229,7 +229,7 @@ jobs:
           echo "Uploaded RPM to ${S3_RPM}, TGZ to ${S3_TAR}"
 
       - name: Generate yum repo metadata
-        if: env.RPM_METADATA == 'generate'
+        if: github.repository == 'ROCm/TransferBench' && env.RPM_METADATA == 'generate'
         env:
           AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
         run: |
