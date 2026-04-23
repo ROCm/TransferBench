@@ -103,10 +103,12 @@ if [[ -z "${ROCM_VERSION}" ]]; then
   log "ROCM_VERSION not set; auto-fetching latest for ${GPU_FAMILY}..."
   # No LATEST.txt is published; list the bucket and pick the highest version key.
   LIST_URL="${TAROBALL_BASE}/?list-type=2&max-keys=1000&prefix=${TAR_PREFIX}"
+  # Filter to versioned tarballs only (skip ADHOCBUILD-* and other non-release keys);
+  # match: <prefix><MAJOR>.<MINOR>.<...>.tar.gz
   LATEST_KEY="$(curl -fsSL "${LIST_URL}" 2>/dev/null \
     | tr '<' '\n' \
     | sed -n 's|^Key>||p' \
-    | grep -E '\.tar\.gz$' \
+    | grep -E "^${TAR_PREFIX}[0-9]+\.[0-9]+\.[0-9a-z]+\.tar\.gz$" \
     | sort -V \
     | tail -1 || true)"
   if [[ -n "${LATEST_KEY}" ]]; then
