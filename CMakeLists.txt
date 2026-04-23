@@ -259,6 +259,10 @@ target_link_libraries(TransferBench PRIVATE dl)
 target_link_libraries(TransferBench PRIVATE ${NUMA_LIBRARY})
 target_link_libraries(TransferBench PRIVATE ${HSA_LIBRARY})
 
+# gcc <9 ships std::filesystem in a separate library (libstdc++fs).
+# Required on AlmaLinux 8 / manylinux_2_28; harmless no-op stub on newer toolchains.
+target_link_libraries(TransferBench PRIVATE stdc++fs)
+
 rocm_install(TARGETS TransferBench COMPONENT devel)
 rocm_setup_version(VERSION ${VERSION_STRING})
 
