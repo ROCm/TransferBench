@@ -26,6 +26,7 @@ option(BUILD_LOCAL_GPU_TARGET_ONLY "Build only for GPUs detected on this machine
 option(ENABLE_NIC_EXEC             "Enable RDMA NIC Executor in TransferBench"    OFF)
 option(ENABLE_MPI_COMM             "Enable MPI Communicator support"              OFF)
 option(DISABLE_DMABUF              "Disable DMA-BUF support for GPU Direct RDMA"  ON)
+option(BUILD_RELOCATABLE_PACKAGE   "Build with RVS-style relocatable RPATH and amdrocm<MAJOR>-transferbench package naming" OFF)
 
 # Default GPU architectures to build
 #==================================================================================================
@@ -263,20 +264,65 @@ target_link_libraries(TransferBench PRIVATE ${HSA_LIBRARY})
 # Required on AlmaLinux 8 / manylinux_2_28; harmless no-op stub on newer toolchains.
 target_link_libraries(TransferBench PRIVATE stdc++fs)
 
-rocm_install(TARGETS TransferBench COMPONENT devel)
-rocm_setup_version(VERSION ${VERSION_STRING})
+if(BUILD_RELOCATABLE_PACKAGE)
+  # RVS-style relocatable packaging: bypass rocm_install/rocm_create_package and
+  # drive CPack directly so CMAKE_INSTALL_PREFIX / CPACK_PACKAGING_INSTALL_PREFIX
+  # set by the caller (build_packages_local.sh) are honored.
+  if(NOT DEFINED ROCM_MAJOR_VERSION)
+    set(ROCM_MAJOR_VERSION "7")
+  endif()
 
-# Package specific CPACK vars
-rocm_package_add_dependencies(DEPENDS "numactl" "hsa-rocr")
+  install(TARGETS TransferBench RUNTIME DESTINATION bin COMPONENT devel)
 
-set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
-set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+  set(CPACK_PACKAGE_NAME "amdrocm${ROCM_MAJOR_VERSION}-transferbench")
+  set(CPACK_PACKAGE_VERSION "${VERSION_STRING}")
+  set(CPACK_PACKAGE_VENDOR "Advanced Micro Devices, Inc.")
+  set(CPACK_PACKAGE_CONTACT "RCCL Team <gilbert.lee@amd.com>")
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "TransferBench: benchmark simultaneous transfers between CPU/GPU/NIC")
+  set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
 
-set(PACKAGE_NAME TB)
-set(LIBRARY_NAME TransferBench)
+  # DEB
+  set(CPACK_DEBIAN_PACKAGE_NAME       "${CPACK_PACKAGE_NAME}")
+  set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS    "numactl, libnuma1, hsa-rocr")
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
+  if(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
+    set(CPACK_DEBIAN_PACKAGE_RELEASE "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
+  endif()
 
-rocm_create_package(
-  NAME ${LIBRARY_NAME}
-  DESCRIPTION "TransferBench package"
-  MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
-)
+  # RPM
+  set(CPACK_RPM_PACKAGE_NAME    "${CPACK_PACKAGE_NAME}")
+  set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+  set(CPACK_RPM_PACKAGE_REQUIRES "numactl, hsa-rocr")
+  set(CPACK_RPM_PACKAGE_VENDOR  "${CPACK_PACKAGE_VENDOR}")
+  if(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
+    set(CPACK_RPM_PACKAGE_RELEASE "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
+  endif()
+  set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+        "/opt" "/opt/rocm" "/opt/rocm/extras-${ROCM_MAJOR_VERSION}"
+        "/opt/rocm/extras-${ROCM_MAJOR_VERSION}/bin")
+
+  # TGZ
+  set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
+
+  set(CPACK_GENERATOR "DEB;RPM;TGZ")
+  include(CPack)
+else()
+  rocm_install(TARGETS TransferBench COMPONENT devel)
+  rocm_setup_version(VERSION ${VERSION_STRING})
+
+  # Package specific CPACK vars
+  rocm_package_add_dependencies(DEPENDS "numactl" "hsa-rocr")
+
+  set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
+  set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+
+  set(PACKAGE_NAME TB)
+  set(LIBRARY_NAME TransferBench)
+
+  rocm_create_package(
+    NAME ${LIBRARY_NAME}
+    DESCRIPTION "TransferBench package"
+    MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
+  )
+endif()
