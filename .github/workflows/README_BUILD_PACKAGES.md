@@ -12,8 +12,10 @@ The workflow (`.github/workflows/build-relocatable-packages.yml`) and the
 - **TGZ** archives for any Linux distribution
 
 All packages install to `/opt/rocm/extras-<MAJOR>` and use relocatable
-`$ORIGIN`-relative `RPATH` so the binary can find its libraries regardless
-of install location.
+`$ORIGIN`-relative `RPATH` so the install tree itself can be moved without
+hard-coded library paths. These artifacts are **not** fully self-contained:
+target systems must still provide the required ROCm/HSA runtime libraries
+(declared as package dependencies: `hsa-rocr` and `numactl`).
 
 This workflow is modeled on the
 [ROCmValidationSuite packaging workflow](https://github.com/ROCm/ROCmValidationSuite/blob/master/.github/workflows/README_BUILD_PACKAGES.md).
@@ -89,7 +91,7 @@ sudo rpm -i --replacefiles --nodeps build/amdrocm7-transferbench-*.rpm
 /opt/rocm/extras-7/bin/TransferBench
 ```
 
-### Any Linux (TGZ — fully relocatable)
+### Any Linux (TGZ — relocatable install tree, requires ROCm runtime on target)
 
 ```bash
 sudo mkdir -p /opt/rocm/extras-7
