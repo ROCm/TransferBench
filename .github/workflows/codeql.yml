@@ -31,7 +31,7 @@ jobs:
         run: |
           apt update
           apt install -y software-properties-common
-          apt-add-repository ppa:git-core/ppa
+          apt-add-repository -y ppa:git-core/ppa
           apt-get update
           apt install -y git
 
@@ -40,8 +40,7 @@ jobs:
 
       - name: Configure Git Safe Directory
         run: |
-          git config --global --add safe.directory '*'
-          git config --global --add safe.directory '/__w/TransferBench/TransferBench'
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Install dependencies
         run: |
