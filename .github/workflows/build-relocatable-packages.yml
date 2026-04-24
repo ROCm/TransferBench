@@ -120,10 +120,14 @@ jobs:
         run: |
           set -euo pipefail
           WORK="$(mktemp -d)"
-          aws s3 sync "${S3_DEB_PATH}/" "${WORK}/" --exclude "*" --include "*.deb"
-          pushd "${WORK}" >/dev/null
-          dpkg-scanpackages -m . /dev/null > Packages
-          gzip -kf Packages
+          echo "Downloading existing DEBs from ${S3_DEB_PATH}/ ..."
+          aws s3 sync "${S3_DEB_PATH}/" "${WORK}/" \
+            --exclude "Packages*" --exclude "Release*" --exclude "InRelease" \
+            --no-progress || true
+          cp build/amdrocm*-transferbench*.deb "${WORK}/" 2>/dev/null || true
+          cd "${WORK}"
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -k -f Packages
           {
             echo "Origin: ROCm-TransferBench"
             echo "Label: ROCm TransferBench Packages"
@@ -134,10 +138,9 @@ jobs:
             echo "Description: TransferBench DEB packages built from TheRock SDK"
             echo "Date: $(date -Ru)"
           } > Release
-          aws s3 cp Packages    "${S3_DEB_PATH}/Packages"
-          aws s3 cp Packages.gz "${S3_DEB_PATH}/Packages.gz"
-          aws s3 cp Release     "${S3_DEB_PATH}/Release"
-          popd >/dev/null
+          aws s3 sync "${WORK}/" "${S3_DEB_PATH}/" --no-progress
+          echo "=== DEB repo metadata uploaded to ${S3_DEB_PATH}/ ==="
+          aws s3 ls "${S3_DEB_PATH}/" --human-readable
 
   # ============================================================
   # manylinux_2_28 (AlmaLinux 8) — RPM + TGZ
@@ -236,9 +239,13 @@ jobs:
           set -euo pipefail
           dnf install -y createrepo_c || yum install -y createrepo_c
           WORK="$(mktemp -d)"
-          aws s3 sync "${S3_RPM_PATH}/" "${WORK}/" --exclude "*" --include "*.rpm"
+          echo "Downloading existing RPMs from s3://${AWS_S3_BUCKET}/${S3_RPM_PATH#s3://${AWS_S3_BUCKET}/}/ ..."
+          aws s3 sync "${S3_RPM_PATH}/" "${WORK}/" --exclude "repodata/*" --no-progress || true
+          cp build/amdrocm*-transferbench*.rpm "${WORK}/" 2>/dev/null || true
           createrepo_c "${WORK}"
-          aws s3 sync "${WORK}/repodata/" "${S3_RPM_PATH}/repodata/" --delete
+          aws s3 sync "${WORK}/" "${S3_RPM_PATH}/" --no-progress
+          echo "=== RPM repodata uploaded to ${S3_RPM_PATH}/repodata/ ==="
+          aws s3 ls "${S3_RPM_PATH}/repodata/" --human-readable
 
   # ============================================================
   # Build report — collects S3 paths for browsing
