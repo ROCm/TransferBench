@@ -17,6 +17,7 @@ jobs:
   analyze:
     name: Analyze (C/C++)
     runs-on: ubuntu-latest
+    container: rocm/dev-ubuntu-22.04:latest
     permissions:
       security-events: write
       packages: read
@@ -24,13 +25,27 @@ jobs:
       contents: read
 
     steps:
+    - name: Install OS requirements
+      timeout-minutes: 10
+      run: |
+        apt update
+        apt install -y software-properties-common
+        apt-add-repository ppa:git-core/ppa
+        apt-get update
+        apt install -y git
+
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Configure Git Safe Directory
+      run: |
+        git config --global --add safe.directory '*'
+        git config --global --add safe.directory '/__w/TransferBench/TransferBench'
+
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake libnuma-dev
+        apt-get update
+        apt-get install -y build-essential cmake libnuma-dev
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
@@ -46,7 +61,8 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release \
                  -DBUILD_LOCAL_GPU_TARGET_ONLY=ON \
                  -DENABLE_NIC_EXEC=OFF \
-                 -DENABLE_MPI_COMM=OFF
+                 -DENABLE_MPI_COMM=OFF \
+                 -DCMAKE_PREFIX_PATH=/opt/rocm
         make -j $(nproc)
 
     - name: Perform CodeQL Analysis
