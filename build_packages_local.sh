@@ -74,8 +74,7 @@ if [[ "${DISTRO}" == "ubuntu" ]]; then
   apt-get install -y --no-install-recommends \
     build-essential cmake git curl tar xz-utils ca-certificates pkg-config \
     python3 python3-pip \
-    libnuma-dev libibverbs-dev rdma-core ibverbs-providers \
-    libopenmpi-dev openmpi-bin \
+    libnuma-dev \
     dpkg-dev rpm file apt-utils
   CMAKE_BIN="cmake"
   CMAKE_CXX_COMPILER_OVERRIDE=""
@@ -89,15 +88,11 @@ else
   ${PKG} install -y \
     gcc gcc-c++ make cmake3 git curl tar xz ca-certificates pkgconfig \
     python3 python3-pip \
-    numactl-devel rdma-core-devel libibverbs \
-    openmpi-devel \
+    numactl-devel \
     rpm-build dpkg createrepo_c file
   CMAKE_BIN="cmake3"
   command -v cmake3 >/dev/null 2>&1 || CMAKE_BIN="cmake"
   CMAKE_CXX_COMPILER_OVERRIDE="${ROCM_PATH}/bin/hipcc"
-  # OpenMPI on RHEL-likes ships under /usr/lib64/openmpi
-  if [[ -d /usr/lib64/openmpi/bin ]]; then export PATH="/usr/lib64/openmpi/bin:${PATH}"; fi
-  if [[ -d /usr/lib64/openmpi/lib ]]; then export LD_LIBRARY_PATH="/usr/lib64/openmpi/lib:${LD_LIBRARY_PATH:-}"; fi
 fi
 ok "Dependencies installed"
 
@@ -215,8 +210,8 @@ CMAKE_ARGS=(
   -DCMAKE_VERBOSE_MAKEFILE=ON
   -DBUILD_RELOCATABLE_PACKAGE=ON
   -DBUILD_LOCAL_GPU_TARGET_ONLY=OFF
-  -DENABLE_NIC_EXEC=ON
-  -DENABLE_MPI_COMM=ON
+  -DENABLE_NIC_EXEC=OFF
+  -DENABLE_MPI_COMM=OFF
   -DDISABLE_DMABUF=OFF
   -DGPU_TARGETS="${GPU_TARGETS}"
 )

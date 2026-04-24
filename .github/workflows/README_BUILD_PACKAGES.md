@@ -43,8 +43,8 @@ This workflow is modeled on the
 
 The workflow always builds with:
 
-- `ENABLE_NIC_EXEC=ON` — RDMA NIC executor (libibverbs)
-- `ENABLE_MPI_COMM=ON` — MPI multi-node communicator
+- `ENABLE_NIC_EXEC=OFF` — RDMA NIC executor disabled (would require libibverbs.so.1 at runtime; not bundled by TheRock SDK)
+- `ENABLE_MPI_COMM=OFF` — MPI multi-node communicator disabled (would require OpenMPI at runtime; not bundled by TheRock SDK). Packages are built to run out of the box with only `numactl`/`libnuma1` from the OS.
 - `DISABLE_DMABUF=OFF` — DMA-BUF support for GPU Direct RDMA
 - `BUILD_RELOCATABLE_PACKAGE=ON` — RVS-style install prefix + package naming
 - `GPU_TARGETS` — full data-center + consumer set (gfx906, 908, 90a, 942, 950, 1030, 1100/01/02, 1150/51, 1200/01)
@@ -199,12 +199,15 @@ readelf -d /opt/rocm/extras-7/bin/TransferBench | grep -E 'RPATH|RUNPATH'
 
 ### Build fails: missing `libibverbs.h` / `mpi.h`
 
-The script installs these via `apt-get` / `dnf` automatically. If you've
-disabled the dependency-install step, run:
+The packaged builds disable both `ENABLE_NIC_EXEC` and `ENABLE_MPI_COMM`, so these
+headers are not required. If you've manually re-enabled either flag for a local
+build, install the dev packages yourself:
 
 ```bash
-# Ubuntu
-sudo apt install -y libibverbs-dev rdma-core libopenmpi-dev openmpi-bin
+# Ubuntu — for ENABLE_NIC_EXEC=ON
+sudo apt install -y libibverbs-dev rdma-core
+# Ubuntu — for ENABLE_MPI_COMM=ON
+sudo apt install -y libopenmpi-dev openmpi-bin
 # Rocky/RHEL
 sudo dnf install -y rdma-core-devel openmpi-devel
 ```
