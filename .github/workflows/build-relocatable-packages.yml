@@ -122,8 +122,8 @@ jobs:
           WORK="$(mktemp -d)"
           echo "Downloading existing DEBs from ${S3_DEB_PATH}/ ..."
           aws s3 sync "${S3_DEB_PATH}/" "${WORK}/" \
-            --exclude "Packages*" --exclude "Release*" --exclude "InRelease" \
-            --no-progress || true
+            --exclude "*" --include "*.deb" \
+            --no-progress
           cp build/amdrocm*-transferbench*.deb "${WORK}/" 2>/dev/null || true
           cd "${WORK}"
           dpkg-scanpackages --multiversion . /dev/null > Packages
@@ -240,11 +240,11 @@ jobs:
           dnf install -y createrepo_c || yum install -y createrepo_c
           WORK="$(mktemp -d)"
           echo "Downloading existing RPMs from s3://${AWS_S3_BUCKET}/${S3_RPM_PATH#s3://${AWS_S3_BUCKET}/}/ ..."
-          aws s3 sync "${S3_RPM_PATH}/" "${WORK}/" --exclude "repodata/*" --no-progress || true
+          aws s3 sync "${S3_RPM_PATH}/" "${WORK}/" --exclude "repodata/*" --no-progress
           cp build/amdrocm*-transferbench*.rpm "${WORK}/" 2>/dev/null || true
           createrepo_c "${WORK}"
           aws s3 sync "${WORK}/" "${S3_RPM_PATH}/" --no-progress
-          echo "=== RPM repodata uploaded to ${S3_RPM_PATH}/repodata/ ==="
+          echo "=== RPM repository contents (RPMs + repodata) synced to ${S3_RPM_PATH}/ ==="
           aws s3 ls "${S3_RPM_PATH}/repodata/" --human-readable
 
   # ============================================================
