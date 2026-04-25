@@ -149,11 +149,20 @@ int RunTest(int                        testNum,
           exit(1);
         }
 
-        allTransfers.insert(allTransfers.end(), transfers.begin(), transfers.end());
+        if (isBroadcast || isGather) {
+          if (!RunTransfers(cfg, transfers, results)) {
+            allPass = false;
+            break;
+          }
+        } else {
+          allTransfers.insert(allTransfers.end(), transfers.begin(), transfers.end());
+        }
       }
     }
-    if (!RunTransfers(cfg, allTransfers, results)) {
-      allPass = false;
+    if (!(isBroadcast || isGather)) {
+      if (!RunTransfers(cfg, allTransfers, results)) {
+        allPass = false;
+      }
     }
     Utils::Print("%s", allPass ? pass.c_str() : fail.c_str()); fflush(stdout);
     numFail += (allPass ? 0 : 1);
