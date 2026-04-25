@@ -47,7 +47,7 @@ int RunTest(int                        testNum,
   char transferStr[128] = {};
 
   // What to print on pass/fail/skip
-  std::string pass = "\xE2\x9C\x93";
+  std::string pass = "P";
   std::string fail = "X";
   std::string skip = ".";
 
