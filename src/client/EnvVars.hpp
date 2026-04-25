@@ -587,7 +587,7 @@ public:
 
   std::string GetStr(std::vector<int> const& varnameList) const {
     std::string result = "";
-    for (int i = 0; i < varnameList.size(); i++) {
+    for (auto i = 0; i < varnameList.size(); i++) {
       if (i) result += ",";
       result += std::to_string(varnameList[i]);
     }
@@ -596,7 +596,7 @@ public:
 
   std::string GetStr(std::vector<std::string> const& varnameList) const {
     std::string result = "";
-    for (int i = 0; i < varnameList.size(); i++) {
+    for (auto i = 0; i < varnameList.size(); i++) {
       if (i) result += ",";
       result += varnameList[i];
     }

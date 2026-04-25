@@ -3805,6 +3805,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                 transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
             }
           }
+          return {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
         }
       }
     }

@@ -25,6 +25,12 @@ THE SOFTWARE.
 namespace  {
 
 #define NUM_SMOKE_TESTS 14
+#define MAX_TRANSFER_STRLEN 128
+
+// What to print on pass/fail/skip
+const std::string pass = "*";
+const std::string fail = "F";
+const std::string skip = ".";
 
 int RunTest(int                        testNum,
             std::set<int> const&       testsToRun,
@@ -44,12 +50,8 @@ int RunTest(int                        testNum,
   std::vector<Transfer> transfers;
   std::vector<Transfer> allTransfers;
   TestResults results;
-  char transferStr[128] = {};
+  char transferStr[MAX_TRANSFER_STRLEN] = {};
 
-  // What to print on pass/fail/skip
-  std::string pass = "*";
-  std::string fail = "F";
-  std::string skip = ".";
 
   // Different test categories
   bool isH2D       = (testNum == 1 || testNum ==  8);
@@ -100,14 +102,14 @@ int RunTest(int                        testNum,
     for (int rank = 0; allPass && rank < numRanks; rank++) {
       int numGpus = GetNumExecutors(exeType, rank);
       for (int gpuIdx = 0; allPass && gpuIdx < numGpus; gpuIdx++) {
-        if (isH2D | isD2H) {
+        if (isH2D || isD2H) {
           // Copy to/from closest CPU NUMA node for this GPU
           int cpuIdx = GetClosestCpuNumaToGpu(gpuIdx, rank);
-          sprintf(transferStr, "-1 (R%d%c%d R%d%c%d R%d%c%d %d %lu)",
-                  rank, MemTypeStr[isH2D ? cpuMemType : gpuMemType], isH2D ? cpuIdx : gpuIdx,
-                  rank, ExeTypeStr[exeType], gpuIdx,
-                  rank, MemTypeStr[isH2D ? gpuMemType : cpuMemType], isH2D ? gpuIdx : cpuIdx,
-                  numSubExec, numBytes);
+          snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R%d%c%d R%d%c%d R%d%c%d %d %lu)",
+                   rank, MemTypeStr[isH2D ? cpuMemType : gpuMemType], isH2D ? cpuIdx : gpuIdx,
+                   rank, ExeTypeStr[exeType], gpuIdx,
+                   rank, MemTypeStr[isH2D ? gpuMemType : cpuMemType], isH2D ? gpuIdx : cpuIdx,
+                   numSubExec, numBytes);
         } else if (isD2D_RW || isD2D_RR) {
           // Copy from this GPU to "next" GPU
           int dstRank = rank, dstGpuIdx = gpuIdx + 1;
@@ -115,32 +117,32 @@ int RunTest(int                        testNum,
             dstGpuIdx = 0;
             dstRank = (rank+1) % numRanks;
           }
-          sprintf(transferStr, "-1 (R%d%c%d R%d%c%d R%d%c%d %d %lu)",
-                  rank, MemTypeStr[gpuMemType], gpuIdx,
-                  isD2D_RW ? rank : dstRank, ExeTypeStr[exeType], isD2D_RW ? gpuIdx : dstGpuIdx,
-                  dstRank, MemTypeStr[gpuMemType], dstGpuIdx,
-                  numSubExec, numBytes);
+          snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R%d%c%d R%d%c%d R%d%c%d %d %lu)",
+                   rank, MemTypeStr[gpuMemType], gpuIdx,
+                   isD2D_RW ? rank : dstRank, ExeTypeStr[exeType], isD2D_RW ? gpuIdx : dstGpuIdx,
+                   dstRank, MemTypeStr[gpuMemType], dstGpuIdx,
+                   numSubExec, numBytes);
         } else if (isBroadcast) {
           // Split up the number of CUs across all Transfers
-          sprintf(transferStr, "-1 (R%d%c%d R%d%c%d R*%c* %d %lu)",
-                  rank, MemTypeStr[gpuMemType], gpuIdx,
-                  rank, ExeTypeStr[exeType], gpuIdx,
-                  MemTypeStr[gpuMemType],
-                  numSubExec, numBytes);
+          snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R%d%c%d R%d%c%d R*%c* %d %lu)",
+                   rank, MemTypeStr[gpuMemType], gpuIdx,
+                   rank, ExeTypeStr[exeType], gpuIdx,
+                   MemTypeStr[gpuMemType],
+                   numSubExec, numBytes);
         } else if (isGather) {
           // Split up the number of CUs across all Transfers
-          sprintf(transferStr, "-1 (R*%c* R%d%c%d R%d%c%d %d %lu)",
-                  MemTypeStr[gpuMemType],
-                  rank, ExeTypeStr[exeType], gpuIdx,
-                  rank, MemTypeStr[gpuMemType], gpuIdx,
-                  numSubExec, numBytes);
+          snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R*%c* R%d%c%d R%d%c%d %d %lu)",
+                   MemTypeStr[gpuMemType],
+                   rank, ExeTypeStr[exeType], gpuIdx,
+                   rank, MemTypeStr[gpuMemType], gpuIdx,
+                   numSubExec, numBytes);
         } else if (isAllToAll) {
           // Split up the number of CUs across all Transfers
-          sprintf(transferStr, "-1 (R%d%c%d R%d%c%d R*%c* %d %lu)",
-                  rank, MemTypeStr[gpuMemType], gpuIdx,
-                  rank, ExeTypeStr[exeType], gpuIdx,
-                  MemTypeStr[gpuMemType],
-                  numSubExec, numBytes);
+          snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R%d%c%d R%d%c%d R*%c* %d %lu)",
+                   rank, MemTypeStr[gpuMemType], gpuIdx,
+                   rank, ExeTypeStr[exeType], gpuIdx,
+                   MemTypeStr[gpuMemType],
+                   numSubExec, numBytes);
         }
 
         ErrResult err = ParseTransfers(transferStr, transfers);
@@ -282,7 +284,8 @@ int SmokeTestPreset(EnvVars&          ev,
     Utils::Print("\n");
   };
 
-  Utils::Print("Running tests on %d GPUs total across %d rank(s)\n\n", totalGpus, numRanks);
+  Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
+  Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
 
   // Print headers
   Utils::Print("                                    %s   %s       |", l1.c_str(), r1.c_str());
