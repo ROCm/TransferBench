@@ -327,7 +327,7 @@ int SmokeTestPreset(EnvVars&          ev,
   if (Utils::HasDuplicateHostname()) {
     Utils::Print("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
-  return 0;
+  return testFailed ? 1 : 0;
 }
 
 }
