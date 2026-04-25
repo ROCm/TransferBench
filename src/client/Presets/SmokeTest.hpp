@@ -47,8 +47,8 @@ int RunTest(int                        testNum,
   char transferStr[128] = {};
 
   // What to print on pass/fail/skip
-  std::string pass = "P";
-  std::string fail = "X";
+  std::string pass = "*";
+  std::string fail = "F";
   std::string skip = ".";
 
   // Different test categories
