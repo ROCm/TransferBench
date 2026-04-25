@@ -17,6 +17,7 @@ Documentation for TransferBench is available at
 - Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.1 / CUDA 12.8
 - Added new bmasweep preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
 - Added new wallclock preset that compares wallclock counters across XCCs within a GPU
+- Added new smoketest preset that runs a variety of DMA/GFX tests for simple correctness tests
 
 ### Modified
 - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
