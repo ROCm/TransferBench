@@ -61,9 +61,11 @@ endmacro()
 # -----------------------------------------------------------------------------
 # macro: tb_set_build_flags
 #
-# Sets default per-build-type flags for both CXX and C from a single definition.
-# Skipped per-language if the user has set $CXXFLAGS/$CFLAGS or the per-type
-# CMake variable explicitly (e.g. -DCMAKE_CXX_FLAGS_DEBUG=...).
+# Seeds default per-build-type flags via CMAKE_<LANG>_FLAGS_<CONFIG>_INIT.
+# These _INIT variables are the CMake-idiomatic way to set toolchain defaults:
+# CMake reads them when creating cache entries on first configure, so the cache
+# reflects the actual values (visible in ccmake/cmake-gui) and user overrides
+# via -DCMAKE_CXX_FLAGS_DEBUG=... or $CXXFLAGS/$CFLAGS are respected on re-runs.
 # -----------------------------------------------------------------------------
 macro(tb_set_build_flags)
     set(_debug          "-O0 -g -ggdb3")
@@ -71,27 +73,15 @@ macro(tb_set_build_flags)
     set(_relwithdebinfo "-O3 -g")
 
     if(NOT (DEFINED ENV{CXXFLAGS} AND NOT "$ENV{CXXFLAGS}" STREQUAL ""))
-        if(NOT CMAKE_CXX_FLAGS_DEBUG)
-            set(CMAKE_CXX_FLAGS_DEBUG          "${_debug}")
-        endif()
-        if(NOT CMAKE_CXX_FLAGS_RELEASE)
-            set(CMAKE_CXX_FLAGS_RELEASE        "${_release}")
-        endif()
-        if(NOT CMAKE_CXX_FLAGS_RELWITHDEBINFO)
-            set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${_relwithdebinfo}")
-        endif()
+        set(CMAKE_CXX_FLAGS_DEBUG_INIT          "${_debug}")
+        set(CMAKE_CXX_FLAGS_RELEASE_INIT        "${_release}")
+        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "${_relwithdebinfo}")
     endif()
 
     if(NOT (DEFINED ENV{CFLAGS} AND NOT "$ENV{CFLAGS}" STREQUAL ""))
-        if(NOT CMAKE_C_FLAGS_DEBUG)
-            set(CMAKE_C_FLAGS_DEBUG            "${_debug}")
-        endif()
-        if(NOT CMAKE_C_FLAGS_RELEASE)
-            set(CMAKE_C_FLAGS_RELEASE          "${_release}")
-        endif()
-        if(NOT CMAKE_C_FLAGS_RELWITHDEBINFO)
-            set(CMAKE_C_FLAGS_RELWITHDEBINFO   "${_relwithdebinfo}")
-        endif()
+        set(CMAKE_C_FLAGS_DEBUG_INIT          "${_debug}")
+        set(CMAKE_C_FLAGS_RELEASE_INIT        "${_release}")
+        set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "${_relwithdebinfo}")
     endif()
 
     unset(_debug)
