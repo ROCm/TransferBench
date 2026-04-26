@@ -1867,6 +1867,11 @@ namespace {
     // Compare data options
     {
       DataOptions data = cfg.data;
+      // Null out vector members before sizeof-broadcast: vectors carry heap pointers that are
+      // invalid on other ranks; freeing a remote pointer on scope exit causes a segfault
+      // These fields are permitted to differ across ranks and are not compared below
+      decltype(data.fillPattern)().swap(data.fillPattern);
+      decltype(data.fillCompress)().swap(data.fillCompress);
       System::Get().Broadcast(root, sizeof(data), &data);
 
       // data.alwaysValidate is permitted to be different across ranks
@@ -1911,6 +1916,10 @@ namespace {
     // Compare GFX Executor options
     {
       GfxOptions gfx = cfg.gfx;
+      // Same as above: null out vector members before sizeof-broadcast
+      // both fields are permitted to differ across ranks
+      decltype(gfx.cuMask)().swap(gfx.cuMask);
+      decltype(gfx.prefXccTable)().swap(gfx.prefXccTable);
       System::Get().Broadcast(root, sizeof(gfx), &gfx);
       if (gfx.blockOrder     != cfg.gfx.blockOrder)     ADD_ERROR("cfg.gfx.blockOrder");
       if (gfx.blockSize      != cfg.gfx.blockSize)      ADD_ERROR("cfg.gfx.blockSize");
@@ -3523,13 +3532,38 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Move queue pairs to ready-to-receive (RTR), using exchanged connection info
       // Then move them to read-to-send (RTS)
+      // Broadcast each rank's result so all ranks fail together rather than
+      // hanging on the next iteration's Broadcast when qpCount > 1.
+      struct QpTransitionResult { ErrType errType; bool rtrFailed; };
+      static_assert(std::is_trivially_copyable<QpTransitionResult>::value, "QpTransitionResult must be trivially copyable for MPI broadcast");
+      QpTransitionResult srcQpResult = {ERR_NONE, false};
       if (GetRank() == srcMemRank) {
-        ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu));
-        ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu);
+        srcQpResult.rtrFailed = (err.errType != ERR_NONE);
+        if (err.errType == ERR_NONE) {
+          err = TransitionQpToRts(rss.srcQueuePairs[i]);
+        }
+        srcQpResult.errType = err.errType;
       }
+      System::Get().Broadcast(srcMemRank, sizeof(srcQpResult), &srcQpResult);
+      if (srcQpResult.errType != ERR_NONE) {
+        return {ERR_FATAL, "SRC rank %d failed to transition QP %d to %s", srcMemRank, i,
+                srcQpResult.rtrFailed ? "RTR" : "RTS"};
+      }
+
+      QpTransitionResult dstQpResult = {ERR_NONE, false};
       if (GetRank() == dstMemRank) {
-        ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu));
-        ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu);
+        dstQpResult.rtrFailed = (err.errType != ERR_NONE);
+        if (err.errType == ERR_NONE) {
+          err = TransitionQpToRts(rss.dstQueuePairs[i]);
+        }
+        dstQpResult.errType = err.errType;
+      }
+      System::Get().Broadcast(dstMemRank, sizeof(dstQpResult), &dstQpResult);
+      if (dstQpResult.errType != ERR_NONE) {
+        return {ERR_FATAL, "DST rank %d failed to transition QP %d to %s", dstMemRank, i,
+                dstQpResult.rtrFailed ? "RTR" : "RTS"};
       }
 
       // Prepare scatter-gather element / work request for this queue pair in advance
@@ -3920,27 +3954,46 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
-      // mem rank exports to sharable fabric handle
-      hipMemFabricHandle_t fabricHandle;
+      // mem rank exports to sharable fabric handle; broadcast handle + status so all
+      // ranks fail together instead of hanging on the next collective if export fails
+      hipMemFabricHandle_t fabricHandle = {};
+      hipError_t exportErr = hipSuccess;
       if (memDevice.memRank == GetRank()) {
-        ERR_CHECK(hipSetDevice(memDevice.memIndex));
-        ERR_CHECK(hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0));
+        exportErr = hipSetDevice(memDevice.memIndex);
+        if (exportErr == hipSuccess) {
+          exportErr = hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0);
+        }
       }
 
       System::Get().Broadcast(memDevice.memRank, sizeof(hipMemFabricHandle_t), &fabricHandle);
+      System::Get().Broadcast(memDevice.memRank, sizeof(hipError_t), &exportErr);
+      if (exportErr != hipSuccess) {
+        return {ERR_FATAL, "HIP Error during fabric handle export: %s", hipGetErrorString(exportErr)};
+      }
 
-      // exe rank imports the fabric handle
+      // exe rank imports the fabric handle; broadcast result so all ranks fail together
+      hipError_t importErr = hipSuccess;
       if (exeDevice.exeRank == GetRank()) {
-        ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
-        ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
-        ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0));
-        ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0));
-
-        // Specify memory access descriptor to enable local read/write
-        hipMemAccessDesc desc;
-        desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
-        desc.flags = hipMemAccessFlagsProtReadWrite;
-        ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1));
+        importErr = hipSetDevice(exeDevice.exeIndex);
+        if (importErr == hipSuccess) {
+          importErr = hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric);
+        }
+        if (importErr == hipSuccess) {
+          importErr = hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0);
+        }
+        if (importErr == hipSuccess) {
+          importErr = hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0);
+        }
+        if (importErr == hipSuccess) {
+          hipMemAccessDesc desc;
+          desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
+          desc.flags = hipMemAccessFlagsProtReadWrite;
+          importErr = hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1);
+        }
+      }
+      System::Get().Broadcast(exeDevice.exeRank, sizeof(hipError_t), &importErr);
+      if (importErr != hipSuccess) {
+        return {ERR_FATAL, "HIP Error during fabric handle import: %s", hipGetErrorString(importErr)};
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
@@ -7000,7 +7053,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         } else {
           BROADCAST(setSize);
           tfrResult.perIterCUs[i].clear();
-          if (setSize > 0) {
+          for (size_t j = 0; j < setSize; j++) {
             pair<int, int> p;
             BROADCAST(p);
             tfrResult.perIterCUs[i].insert(p);
