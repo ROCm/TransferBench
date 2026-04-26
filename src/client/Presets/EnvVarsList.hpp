@@ -20,10 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int EnvVarsPreset(EnvVars&          ev,
-                  size_t      const numBytesPerTransfer,
-                  std::string const presetName,
-                  bool        const bytesSpecified)
+int EnvVarsPreset([[maybe_unused]] EnvVars&          ev,
+                  [[maybe_unused]] size_t      const numBytesPerTransfer,
+                  [[maybe_unused]] std::string const presetName,
+                  [[maybe_unused]] bool        const bytesSpecified)
 {
   if (!Utils::RankDoesOutput()) return 0;
   EnvVars::DisplayEnvVarsList();
