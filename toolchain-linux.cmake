@@ -6,7 +6,7 @@
 # Usage:
 #   cmake -DCMAKE_TOOLCHAIN_FILE=../toolchain-linux.cmake ..
 #
-# The toolchain is auto-loaded by CMakeLists.txt if no toolchain file is specified.
+# The toolchain is auto-applied on subsequent configures by CMakeLists.txt if no toolchain file is specified.
 
 # -----------------------------------------------------------------------------
 # macro: tb_detect_compilers
@@ -133,6 +133,7 @@ if(NOT ROCM_PATH)
         endif()
     endif()
     unset(_rocm_bin_hint CACHE)
+    unset(_rocm_bin_hint)
     unset(_bin_dir)
     unset(_parent)
     unset(_grandparent)

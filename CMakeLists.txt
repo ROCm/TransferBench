@@ -37,7 +37,7 @@ option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"      
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
 
 # Fallback for builds that bypass the toolchain file; toolchain sets ROCM_PATH in cache.
-if(NOT DEFINED ROCM_PATH)
+if(NOT ROCM_PATH)
   if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
     set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE PATH "Path to the ROCm installation.")
     message(STATUS "ROCM_PATH set from environment: ${ROCM_PATH}")
@@ -48,7 +48,7 @@ if(NOT DEFINED ROCM_PATH)
 else()
   message(STATUS "ROCM_PATH: ${ROCM_PATH}")
 endif()
-set(ENV{ROCM_PATH} ${ROCM_PATH})
+set(ENV{ROCM_PATH} "${ROCM_PATH}")
 
 include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets, rocm_check_target_ids
 
