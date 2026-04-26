@@ -353,7 +353,7 @@ public:
     printf(" ROCE_VERSION        - RoCE version (default=2)\n");
 #endif
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
-    printf(" SHOW_BORDERS        - Show ASCII box-drawing characaters in tables\n");
+    printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
