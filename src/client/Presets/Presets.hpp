@@ -102,8 +102,7 @@ int RunPreset(EnvVars&       ev,
               size_t   const numBytesPerTransfer,
               int      const argc,
               char**   const argv,
-              int&           retCode,
-              char const*    cmdName)
+              int&           retCode)
 {
   std::string preset = (argc > 1 ? argv[1] : "");
   bool bytesSpecified = (argc > 2);

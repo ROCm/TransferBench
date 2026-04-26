@@ -70,7 +70,7 @@ int main(int argc, char **argv)
 
   // Run preset benchmark if requested
   int retCode = 0;
-  if (RunPreset(ev, numBytesPerTransfer, argc, argv, retCode, argv[0])) return retCode;
+  if (RunPreset(ev, numBytesPerTransfer, argc, argv, retCode)) return retCode;
 
   // Read input from command line or configuration file
   bool isDryRun = !strcmp(argv[1], "dryrun");
