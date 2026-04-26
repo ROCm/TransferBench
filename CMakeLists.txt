@@ -148,7 +148,7 @@ endif()
 
 ## Check for hsa support
 find_library(HSA_LIBRARY hsa-runtime64 PATHS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64 NO_DEFAULT_PATH)
-find_path(HSA_INCLUDE_DIR hsa.h PATHS ${ROCM_PATH}/include ${ROCM_PATH}/include/hsa)
+find_path(HSA_INCLUDE_DIR hsa/hsa.h PATHS ${ROCM_PATH}/include)
 if(HSA_LIBRARY AND HSA_INCLUDE_DIR)
   add_library(hsa-runtime64 SHARED IMPORTED)
   set_target_properties(hsa-runtime64 PROPERTIES IMPORTED_LOCATION "${HSA_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${HSA_INCLUDE_DIR}" INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${HSA_INCLUDE_DIR}")
@@ -203,7 +203,7 @@ if(IBVERBS_FOUND)
     cmake_push_check_state()
     set(CMAKE_REQUIRED_INCLUDES ${HSA_INCLUDE_DIR})
     set(CMAKE_REQUIRED_LIBRARIES ${HSA_LIBRARY})
-    check_symbol_exists(hsa_amd_portable_export_dmabuf "hsa_ext_amd.h" HAVE_ROCM_DMABUF)
+    check_symbol_exists(hsa_amd_portable_export_dmabuf "hsa/hsa_ext_amd.h" HAVE_ROCM_DMABUF)
     cmake_pop_check_state()
 
     # Enable DMA-BUF only if both APIs are available
