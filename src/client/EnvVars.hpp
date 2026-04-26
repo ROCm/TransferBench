@@ -338,7 +338,7 @@ public:
     printf(" IB_PORT_NUMBER      - RDMA port count for RDMA NIC (default=1)\n");
     printf(" IP_ADDRESS_FAMILY   - IP address family (4=v4, 6=v6, default=v4)\n");
 #endif
-    printf(" MIN_VAR_SUBEXEC     - Minumum # of subexecutors to use for variable subExec Transfers\n");
+    printf(" MIN_VAR_SUBEXEC     - Minimum # of subexecutors to use for variable subExec Transfers\n");
     printf(" MAX_VAR_SUBEXEC     - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
 #if NIC_EXEC_ENABLED
     printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
