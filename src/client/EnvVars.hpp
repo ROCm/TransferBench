@@ -538,6 +538,21 @@ public:
     return defaultValue;
   }
 
+  static std::vector<std::string> GetEnvVarStrArray(std::string const& varname, std::vector<std::string> const& defaultValue)
+  {
+    if (getenv(varname.c_str())) {
+      std::vector<std::string> values;
+      char* arrayStr = getenv(varname.c_str());
+      char* token = strtok(arrayStr, ",");
+      while (token) {
+        values.push_back(token);
+        token = strtok(NULL, ",");
+      }
+      return values;
+    }
+    return defaultValue;
+  }
+
   static std::vector<int> GetEnvVarRangeArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
     if (getenv(varname.c_str())) {
@@ -572,9 +587,18 @@ public:
 
   std::string GetStr(std::vector<int> const& varnameList) const {
     std::string result = "";
-    for (int i = 0; i < varnameList.size(); i++) {
+    for (auto i = 0; i < varnameList.size(); i++) {
       if (i) result += ",";
       result += std::to_string(varnameList[i]);
+    }
+    return result;
+  }
+
+  std::string GetStr(std::vector<std::string> const& varnameList) const {
+    std::string result = "";
+    for (auto i = 0; i < varnameList.size(); i++) {
+      if (i) result += ",";
+      result += varnameList[i];
     }
     return result;
   }

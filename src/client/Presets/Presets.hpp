@@ -42,6 +42,7 @@ THE SOFTWARE.
 #include "PodPeerToPeer.hpp"
 #include "Scaling.hpp"
 #include "Schmoo.hpp"
+#include "SmokeTest.hpp"
 #include "Sweep.hpp"
 #include "WallClock.hpp"
 
@@ -68,6 +69,7 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
   {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
+  {"smoketest",   {SmokeTestPreset,     "Simple correctness smoke-test"}},
   {"sweep",       {SweepPreset,         "Ordered sweep through sets of Transfers"}},
   {"wallclock",   {WallClockPreset,     "Tests wallclock consistency across XCCs within a GPU"}},
 };

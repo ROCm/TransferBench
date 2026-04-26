@@ -769,5 +769,4 @@ namespace TransferBench::Utils
   {
     return (TransferBench::DeallocateMemory(memType, memPtr, bytes).errType != TransferBench::ERR_NONE);
   }
-
 };
