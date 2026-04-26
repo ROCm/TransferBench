@@ -111,11 +111,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # Load CMake modules
-# Extend MODULE_PATH before any include() that searches it.
 #==================================================================================================
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CheckIncludeFiles)
 include(CheckSymbolExists)
+include(CheckCXXSourceCompiles)
 include(CheckCXXCompilerFlag)
 include(CMakePushCheckState)
 
@@ -330,90 +330,89 @@ else()
   endif()
 endif()
 
-## Check for AMD-SMI support
-if(DEFINED ENV{DISABLE_AMD_SMI} AND "$ENV{DISABLE_AMD_SMI}" STREQUAL "1")
-  message(STATUS "Disabling AMD-SMI support as env. flag DISABLE_AMD_SMI was enabled")
-elseif(NOT ENABLE_AMD_SMI)
-  message(STATUS "For CMake builds, AMD-SMI support requires explicit opt-in by setting CMake flag -DENABLE_AMD_SMI=ON")
-  message(STATUS "- Disabling AMD-SMI support")
-else()
-  set(AMD_SMI_EXECUTABLE "amd-smi" CACHE STRING "Path to amd-smi executable")
-  execute_process(
-    COMMAND ${AMD_SMI_EXECUTABLE} version
-    OUTPUT_VARIABLE AMD_SMI_VERSION_OUTPUT
-    ERROR_VARIABLE AMD_SMI_VERSION_ERROR
-    RESULT_VARIABLE AMD_SMI_RESULT
-  )
-  if(NOT AMD_SMI_RESULT EQUAL 0)
-    message(STATUS "- ${AMD_SMI_EXECUTABLE} not found.  Disabling AMD-SMI support")
-  else()
-    string(REGEX MATCH "Library version: ([0-9]+)\\.([0-9]+)" _match "${AMD_SMI_VERSION_OUTPUT}")
-    if(CMAKE_MATCH_1)
-      set(AMD_SMI_MAJOR ${CMAKE_MATCH_1})
-      set(AMD_SMI_MINOR ${CMAKE_MATCH_2})
-      set(AMD_SMI_MIN_MAJOR 26)
-      set(AMD_SMI_MIN_MINOR 4)
-      if((AMD_SMI_MAJOR GREATER AMD_SMI_MIN_MAJOR) OR
-         (AMD_SMI_MAJOR EQUAL AMD_SMI_MIN_MAJOR AND (AMD_SMI_MINOR GREATER AMD_SMI_MIN_MINOR OR AMD_SMI_MINOR EQUAL AMD_SMI_MIN_MINOR)))
-        message(STATUS "- Detected amd-smi version ${AMD_SMI_MAJOR}.${AMD_SMI_MINOR} which has pod support")
-        find_library(AMD_SMI_LIBRARY amd_smi PATHS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64 NO_DEFAULT_PATH)
-        find_path(AMD_SMI_INCLUDE_DIR amd_smi/amdsmi.h PATHS ${ROCM_PATH}/include NO_DEFAULT_PATH)
-        if(AMD_SMI_LIBRARY AND AMD_SMI_INCLUDE_DIR)
-          set(AMD_SMI_FOUND 1)
-        else()
-          if(NOT AMD_SMI_LIBRARY)
-            message(WARNING "- amd-smi library not found under ${ROCM_PATH}/lib or ${ROCM_PATH}/lib64; disabling AMD-SMI support")
-          endif()
-          if(NOT AMD_SMI_INCLUDE_DIR)
-            message(WARNING "- amd_smi/amdsmi.h not found under ${ROCM_PATH}/include; disabling AMD-SMI support")
-          endif()
-        endif()
-      else()
-        message(STATUS "- Detected amd-smi version ${AMD_SMI_MAJOR}.${AMD_SMI_MINOR} which does not have pod support")
-        message(STATUS "- Pod membership querying requires amd-smi version of at least ${AMD_SMI_MIN_MAJOR}.${AMD_SMI_MIN_MINOR}")
-        message(STATUS "- Pod membership may be forced in TransferBench by setting TB_FORCE_SINGLE_POD=1")
-      endif()
-    else()
-      message(STATUS "- Could not parse amd-smi version.  Disabling AMD-SMI support")
-    endif()
-  endif()
-endif()
-
 ## Check for pod communication support
+if(ENABLE_AMD_SMI AND NOT ENABLE_POD_COMM)
+  message(WARNING "ENABLE_AMD_SMI=ON has no effect without ENABLE_POD_COMM=ON; AMD-SMI detection will be skipped")
+endif()
 if(DEFINED ENV{DISABLE_POD_COMM} AND "$ENV{DISABLE_POD_COMM}" STREQUAL "1")
   message(STATUS "Disabling pod communication support as env. flag DISABLE_POD_COMM was enabled")
 elseif(NOT ENABLE_POD_COMM)
   message(STATUS "For CMake builds, pod communication support requires explicit opt-in by setting CMake flag -DENABLE_POD_COMM=ON")
   message(STATUS "- Disabling pod communication support")
 else()
-  set(HIPCONFIG_EXECUTABLE "hipconfig" CACHE STRING "Path to hipconfig executable")
-  execute_process(
-    COMMAND ${HIPCONFIG_EXECUTABLE} --version
-    OUTPUT_VARIABLE HIP_VERSION_OUTPUT
-    ERROR_VARIABLE HIP_VERSION_ERROR
-    RESULT_VARIABLE HIPCONFIG_RESULT
-  )
-  if(NOT HIPCONFIG_RESULT EQUAL 0)
-    message(STATUS "- Unable to determine HIP version via ${HIPCONFIG_EXECUTABLE}.  Try specifying path to hipconfig in HIPCONFIG_EXECUTABLE")
-    message(STATUS "- Disabling pod communication support")
-  else()
-    string(REGEX MATCH "([0-9]+)\\.([0-9]+)" _match "${HIP_VERSION_OUTPUT}")
-    if(CMAKE_MATCH_1)
-      set(HIP_MAJOR ${CMAKE_MATCH_1})
-      set(HIP_MINOR ${CMAKE_MATCH_2})
-      set(HIP_MIN_MAJOR 8)
-      set(HIP_MIN_MINOR 0)
-      if((HIP_MAJOR GREATER HIP_MIN_MAJOR) OR
-         (HIP_MAJOR EQUAL HIP_MIN_MAJOR AND (HIP_MINOR GREATER HIP_MIN_MINOR OR HIP_MINOR EQUAL HIP_MIN_MINOR)))
-        message(STATUS "- Detected HIP version ${HIP_MAJOR}.${HIP_MINOR} which has pod support")
-        set(POD_COMM_FOUND 1)
-      else()
-        message(STATUS "- Detected HIP version ${HIP_MAJOR}.${HIP_MINOR} which does not have pod support")
-        message(STATUS "- Pod support requires HIP version of at least ${HIP_MIN_MAJOR}.${HIP_MIN_MINOR}")
-      endif()
+  find_library(HIP_RUNTIME_LIBRARY amdhip64 PATHS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64 NO_DEFAULT_PATH)
+  if(NOT HIP_RUNTIME_LIBRARY)
+    message(FATAL_ERROR "libamdhip64 not found under ${ROCM_PATH}/lib or ${ROCM_PATH}/lib64; cannot probe for HIP fabric API")
+  endif()
+  # Probe for the HIP fabric API functions used by TransferBench at runtime.
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_INCLUDES "${ROCM_PATH}/include")
+  set(CMAKE_REQUIRED_LIBRARIES "${HIP_RUNTIME_LIBRARY}")
+  check_cxx_source_compiles("
+    #include <hip/hip_runtime_api.h>
+    int main() {
+      hipMemFabricHandle_t fabricHandle = {};
+      hipMemGenericAllocationHandle_t allocationHandle = {};
+      hipMemExportToShareableHandle(&fabricHandle, allocationHandle, hipMemHandleTypeFabric, 0);
+      hipMemImportFromShareableHandle(&allocationHandle, &fabricHandle, hipMemHandleTypeFabric);
+      return 0;
+    }" HIP_HAS_FABRIC_API)
+  cmake_pop_check_state()
+
+  if(HIP_HAS_FABRIC_API)
+    message(STATUS "- HIP fabric API found; enabling pod communication support")
+    set(POD_COMM_FOUND 1)
+
+    # Check for AMD-SMI support
+    # Try amd-smi for pod membership queries; fall back to TB_FORCE_SINGLE_POD=1 at runtime.
+    if(DEFINED ENV{DISABLE_AMD_SMI} AND "$ENV{DISABLE_AMD_SMI}" STREQUAL "1")
+      message(STATUS "- AMD-SMI disabled via env. flag DISABLE_AMD_SMI was enabled")
+      message(WARNING "Set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership")
+    elseif(NOT ENABLE_AMD_SMI)
+      message(STATUS "- For CMake builds, AMD-SMI requires explicit opt-in by setting CMake flag -DENABLE_AMD_SMI=ON")
+      message(WARNING "Set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership")
     else()
-      message(STATUS "- Could not parse HIP version.  Disabling pod communication support")
+      find_path(AMD_SMI_INCLUDE_DIR amd_smi/amdsmi.h PATHS ${ROCM_PATH}/include NO_DEFAULT_PATH)
+      find_library(AMD_SMI_LIBRARY amd_smi PATHS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64 NO_DEFAULT_PATH)
+      if(AMD_SMI_INCLUDE_DIR AND AMD_SMI_LIBRARY)
+        # Probe for the AMD-SMI functions used by TransferBench at runtime.
+        cmake_push_check_state()
+        set(CMAKE_REQUIRED_INCLUDES "${AMD_SMI_INCLUDE_DIR}")
+        set(CMAKE_REQUIRED_LIBRARIES "${AMD_SMI_LIBRARY}")
+        check_cxx_source_compiles("
+          #include <amd_smi/amdsmi.h>
+          int main() {
+            amdsmi_bdf_t bdf = {};
+            amdsmi_processor_handle h;
+            amdsmi_get_processor_handle_from_bdf(bdf, &h);
+            amdsmi_fabric_info_t fi;
+            amdsmi_get_gpu_fabric_info(h, &fi);
+            (void)fi.fabric_info.fabric_version.v1.ppod_id;
+            (void)fi.fabric_info.fabric_version.v1.vpod_id;
+            return 0;
+          }" AMDSMI_HAS_FABRIC)
+        cmake_pop_check_state()
+
+        if(AMDSMI_HAS_FABRIC)
+          message(STATUS "- AMD-SMI fabric API found; using AMD-SMI for pod membership queries")
+          set(AMD_SMI_FOUND 1)
+        else()
+          message(STATUS "- AMD-SMI fabric API not found")
+          message(WARNING "Set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership")
+        endif()
+      else()
+        if(NOT AMD_SMI_INCLUDE_DIR)
+          message(STATUS "- amd_smi/amdsmi.h not found under ${ROCM_PATH}/include")
+        endif()
+        if(NOT AMD_SMI_LIBRARY)
+          message(STATUS "- libamd_smi not found under ${ROCM_PATH}/lib")
+        endif()
+        message(STATUS "- AMD-SMI not available")
+        message(WARNING "Set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership")
+      endif()
     endif()
+  else()
+    message(STATUS "- HIP fabric API not found; disabling pod communication support")
   endif()
 endif()
 
@@ -463,7 +462,7 @@ else()
   message(STATUS "Compiler does not support -parallel-jobs=12 (or the check failed); skipping -parallel-jobs optimisation")
 endif()
 
-target_link_options(TransferBench PRIVATE -fgpu-rdc)  # compiler driver flag; target_link_options deduplicates correctly
+target_link_options(TransferBench PRIVATE -fgpu-rdc)
 target_link_libraries(TransferBench PRIVATE Threads::Threads)
 target_link_libraries(TransferBench PRIVATE hip::host hip::device dl)
 target_link_libraries(TransferBench PRIVATE hsa-runtime64)

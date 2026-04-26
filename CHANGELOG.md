@@ -15,12 +15,12 @@ Documentation for TransferBench is available at
 - New "hbm" preset which sweeps and tests local HBM read performance
 - Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
 - Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.1 / CUDA 12.8
-- Added new bmasweep preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
-- Added new wallclock preset that compares wallclock counters across XCCs within a GPU
-- Added new smoketest preset that runs a variety of DMA/GFX tests for simple correctness tests
-- Added new help preset to show config file examples
-- Added new presets preset to show available presets and their descriptions
-- Added new envvars preset to show environment variables that can change TransferBench behavior
+- Added new "bmasweep" preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
+- Added new "wallclock" preset that compares wallclock counters across XCCs within a GPU
+- Added new "smoketest" preset that runs a variety of DMA/GFX tests for simple correctness tests
+- Added new "help" preset to show config file examples
+- Added new "presets" preset to show available presets and their descriptions
+- Added new "envvars" preset to show environment variables that can change TransferBench behavior
 - Adding information on how to run multi-rank with TransferBench, when run with no args
 
 ### Modified

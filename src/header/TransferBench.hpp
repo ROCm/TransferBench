@@ -6475,12 +6475,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #ifdef AMD_SMI_ENABLED
     int numGpus = 0;
     if (hipGetDeviceCount(&numGpus) == hipSuccess && numGpus > 0) {
-      // Get a AMD SMI processor handle to the first GPU (if it exists) based on PCI bus ID
+      // Query GPU 0 as the representative for pod membership. All GPUs on a node are
+      // expected to share the same pod (ppod_id/vpod_id), so querying any one is sufficient.
       char pciBusId[256] = "";
-      hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
+      hipError_t hipErr = hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
+      if (hipErr != hipSuccess) {
+        if (verbose) {
+          Log("[WARN] Unable to get PCI bus ID for GPU 0; skipping AMD-SMI pod membership query\n");
+        }
+        return;
+      }
+
+      amdsmi_bdf_t bdf = {};
+      unsigned domain, bus, device, func;
+      if (sscanf(pciBusId, "%x:%x:%x.%x", &domain, &bus, &device, &func) != 4) {
+        if (verbose) {
+          Log("[WARN] Unable to parse PCI bus ID '%s'; skipping AMD-SMI pod membership query\n", pciBusId);
+        }
+        return;
+      }
+      bdf.domain_number   = domain;
+      bdf.bus_number      = bus;
+      bdf.device_number   = device;
+      bdf.function_number = func;
 
       amdsmi_processor_handle gpuHandle;
-      amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(pciBusId, &gpuHandle);
+      amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(bdf, &gpuHandle);
       if (err != AMDSMI_STATUS_SUCCESS) {
         if (verbose) {
           const char *errString = NULL;
@@ -6492,10 +6512,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         amdsmi_fabric_info_t fabricInfo;
         err = amdsmi_get_gpu_fabric_info(gpuHandle, &fabricInfo);
         if (err == AMDSMI_STATUS_SUCCESS) {
-          // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
+          // NOTE: vpod_id is a uint32_t but System holds it as an int64_t to allow for
           //       vpodId == -1 to represent no pod present
-          memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
-          vpodId = fabricInfo.info.v1.vpod_id;
+          memcpy(ppodId, &fabricInfo.fabric_info.fabric_version.v1.ppod_id,
+                 sizeof(fabricInfo.fabric_info.fabric_version.v1.ppod_id));
+          vpodId = fabricInfo.fabric_info.fabric_version.v1.vpod_id;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);

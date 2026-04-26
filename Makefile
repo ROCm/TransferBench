@@ -51,11 +51,17 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     # Check for HIP compiler
     ifeq ("$(shell test -e $(HIPCC) && echo found)", "found")
       CXX=$(HIPCC)
-    else ifeq ("$(shell test -e $(ROCM_PATH)/bin/hipcc && echo found)", "found")
-      CXX=$(ROCM_PATH)/bin/hipcc
-      $(info "Could not find $(HIPCC). Using fallback to $(CXX)")
     else
-      $(error "Could not find $(HIPCC) or $(ROCM_PATH)/bin/hipcc. Check if the path is correct if you want to build $(EXE)")
+      ifeq ("$(shell test -e $(ROCM_PATH)/llvm/bin/amdclang++ && echo found)", "found")
+        CXX=$(ROCM_PATH)/llvm/bin/amdclang++
+      else ifeq ("$(shell test -e $(ROCM_PATH)/llvm/bin/clang++ && echo found)", "found")
+        CXX=$(ROCM_PATH)/llvm/bin/clang++
+      else ifeq ("$(shell test -e $(ROCM_PATH)/bin/hipcc && echo found)", "found")
+        CXX=$(ROCM_PATH)/bin/hipcc
+      else
+        $(error "Could not find a HIP compiler. Tried: $(HIPCC), $(ROCM_PATH)/llvm/bin/amdclang++, $(ROCM_PATH)/llvm/bin/clang++, $(ROCM_PATH)/bin/hipcc. Check if ROCM_PATH is correct")
+      endif
+      $(info "Could not find $(HIPCC). Using fallback to $(CXX)")
     endif
     GPU_TARGETS_FLAGS = $(foreach target,$(GPU_TARGETS),"--offload-arch=$(target)")
     $(info Compiling for $(GPU_TARGETS) architecture(s). Can modify this by setting GPU_TARGETS)
@@ -138,10 +144,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     else
       MPI_ENABLED = 1
       COMMON_FLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
-      LDFLAGS += -L$(MPI_PATH)/lib -lmpi
-      ifeq ($(DEBUG), 1)
-        LDFLAGS += -lmpi_cxx
-      endif
+      LDFLAGS += -L$(MPI_PATH)/lib -L$(MPI_PATH)/lib64 -lmpi
     endif
 
     ifeq ($(MPI_ENABLED), 0)
@@ -150,50 +153,6 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     else
       $(info - Building with MPI communicator support.  Can set DISABLE_MPI_COMM=1 to disable)
    endif
-  endif
-
-  AMD_SMI_ENABLED = 0
-  # Enable AMD-SMI support for pod membership detection
-  # Compile with AMD-SMI support if
-  # 1) DISABLE_AMD_SMI is not set to 1
-  # 2) AMD-SMI version >= 26.4.1
-  DISABLE_AMD_SMI ?= 0
-  ifneq ($(DISABLE_AMD_SMI), 1)
-    ifneq ($(MAKECMDGOALS),TransferBenchCuda)
-      $(info Attempting to build with amd-smi support)
-      # Check for appropriate AMD SMI version (for querying pod membership)
-      AMD_SMI_MIN_MAJOR := 26
-      AMD_SMI_MIN_MINOR := 4
-
-      AMD_SMI ?= amd-smi
-      AMD_SMI_EXISTS := $(shell command -v $(AMD_SMI) >/dev/null 2>&1 && echo yes || echo no)
-      ifeq ($(AMD_SMI_EXISTS),no)
-        $(info - $(AMD_SMI) not found.  Disabling pod communication support)
-      else
-        AMD_SMI_VERSION_STR := $(shell $(AMD_SMI) version | sed -n 's/.*Library version: \([0-9]\+\)\.\([0-9]\+\).*/\1 \2/p')
-        AMD_SMI_MAJOR := $(word 1,$(AMD_SMI_VERSION_STR))
-        AMD_SMI_MINOR := $(word 2,$(AMD_SMI_VERSION_STR))
-
-        AMD_SMI_VERSION_OK := $(shell \
-          if [ $(AMD_SMI_MAJOR) -gt $(AMD_SMI_MIN_MAJOR) ] || \
-             [ $(AMD_SMI_MAJOR) -eq $(AMD_SMI_MIN_MAJOR) -a $(AMD_SMI_MINOR) -ge $(AMD_SMI_MIN_MINOR) ]; then \
-            echo yes; \
-          else \
-            echo no; \
-          fi)
-
-        ifeq ($(AMD_SMI_VERSION_OK),yes)
-          $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which has pod support)
-          COMMON_FLAGS += -DAMD_SMI_ENABLED
-          LDFLAGS += -lamd_smi
-          AMD_SMI_ENABLED = 1
-        else
-          $(info - Detected amd-smi version $(AMD_SMI_MAJOR).$(AMD_SMI_MINOR) which does not have pod support)
-          $(info - Pod membership querying requires amd-smi version of at least $(AMD_SMI_MIN_MAJOR).$(AMD_SMI_MIN_MINOR))
-          $(info - Pod membership may be forced in TransferBench by setting TB_FORCE_SINGLE_POD=1)
-        endif
-      endif
-    endif
   endif
 
   NVML_ENABLED = 0
@@ -219,11 +178,13 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   endif
 
   POD_ENABLED = 0
+  AMD_SMI_ENABLED = 0
   # Compile with pod support if
   # 1) DISABLE_POD_COMM is not set to 1
-  # 2) For HIP: HIP Runtime version >= 8
-  #    For CUDA: CUDA Version >= 12.8.1
+  # 2) For HIP: hipMemFabricHandle_t is present in the HIP headers
+  #    For CUDA: CUDA Version >= 12.2
   DISABLE_POD_COMM ?= 0
+  DISABLE_AMD_SMI ?= 0
   ifneq ($(DISABLE_POD_COMM), 1)
     $(info Attempting to build with pod communication support)
     ifeq ($(MAKECMDGOALS),TransferBenchCuda)
@@ -253,36 +214,64 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
         $(info - Pod support will require CUDA version of at least $(CUDA_MIN_MAJOR).$(CUDA_MIN_MINOR))
       endif
     else
-      # Check for appropriate HIP version (for exchanging pod memory handles)
-      HIP_MIN_MAJOR := 8
-      HIP_MIN_MINOR := 0
+      # Check for the HIP fabric API functions used by TransferBench at runtime.
+      HIP_HAS_FABRIC := $(shell \
+        printf '%s\n' \
+          '#include <hip/hip_runtime_api.h>' \
+          'int main() {' \
+          '  hipMemFabricHandle_t fabricHandle = {};' \
+          '  hipMemGenericAllocationHandle_t allocationHandle = {};' \
+          '  hipMemExportToShareableHandle(&fabricHandle, allocationHandle, hipMemHandleTypeFabric, 0);' \
+          '  hipMemImportFromShareableHandle(&allocationHandle, &fabricHandle, hipMemHandleTypeFabric);' \
+          '  return 0;' \
+          '}' | \
+        $(CXX) -I$(ROCM_PATH)/include -D__HIP_PLATFORM_AMD__ -x c++ - -c -o /dev/null 2>/dev/null && echo yes || echo no)
 
-      # Check for hipconfig
-      HIPCONFIG ?= hipconfig
-      HIP_EXISTS := $(shell command -v $(HIPCONFIG) >/dev/null 2>&1 && echo yes || echo no)
-      ifeq ($(HIP_EXISTS),yes)
-        HIP_VERSION_STR := $(shell $(HIPCONFIG) --version | sed -E 's/([0-9]+)\.([0-9]+).*/\1 \2/')
-        HIP_MAJOR := $(word 1,$(HIP_VERSION_STR))
-        HIP_MINOR := $(word 2,$(HIP_VERSION_STR))
-
-        HIP_VERSION_OK := $(shell \
-          if [ $(HIP_MAJOR) -gt $(HIP_MIN_MAJOR) ] || \
-             [ $(HIP_MAJOR) -eq $(HIP_MIN_MAJOR) -a $(HIP_MINOR) -ge $(HIP_MIN_MINOR) ]; then \
-             echo yes; \
-          else \
-            echo no; \
-          fi)
-
-        ifeq ($(HIP_VERSION_OK),yes)
-          $(info - Detected HIP version $(HIP_MAJOR).$(HIP_MINOR) which has pod support)
-          COMMON_FLAGS += -DPOD_COMM_ENABLED
+      ifeq ($(HIP_HAS_FABRIC),yes)
+        $(info - HIP fabric API found; enabling pod communication support)
+        COMMON_FLAGS += -DPOD_COMM_ENABLED
+        POD_ENABLED = 1
+        ifeq ($(DISABLE_AMD_SMI), 1)
+          $(info - AMD-SMI disabled via DISABLE_AMD_SMI=1; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
         else
-          $(info - Detected HIP version $(HIP_MAJOR).$(HIP_MINOR) which does not have pod support)
-          $(info - Pod support requires HIP version of at least $(HIP_MIN_MAJOR).$(HIP_MIN_MINOR))
+          # Prefer AMD-SMI for pod membership queries; fall back to TB_FORCE_SINGLE_POD=1 at runtime.
+          AMD_SMI_HEADER := $(ROCM_PATH)/include/amd_smi/amdsmi.h
+          AMD_SMI_LIB    := $(firstword $(wildcard $(ROCM_PATH)/lib/libamd_smi.so $(ROCM_PATH)/lib64/libamd_smi.so))
+          ifneq ($(wildcard $(AMD_SMI_HEADER)),)
+            ifneq ($(AMD_SMI_LIB),)
+              # Check for the AMD-SMI functions used by TransferBench at runtime.
+              AMDSMI_HAS_FABRIC := $(shell \
+                printf '%s\n' \
+                  '#include <amd_smi/amdsmi.h>' \
+                  'int main() {' \
+                  '  amdsmi_bdf_t bdf = {};' \
+                  '  amdsmi_processor_handle h;' \
+                  '  amdsmi_get_processor_handle_from_bdf(bdf, &h);' \
+                  '  amdsmi_fabric_info_t fi;' \
+                  '  amdsmi_get_gpu_fabric_info(h, &fi);' \
+                  '  (void)fi.fabric_info.fabric_version.v1.ppod_id;' \
+                  '  (void)fi.fabric_info.fabric_version.v1.vpod_id;' \
+                  '  return 0;' \
+                  '}' | \
+                $(CXX) -I$(ROCM_PATH)/include -D__HIP_PLATFORM_AMD__ -x c++ - -c -o /dev/null 2>/dev/null && echo yes || echo no)
+
+              ifeq ($(AMDSMI_HAS_FABRIC),yes)
+                $(info - AMD-SMI fabric API found; using AMD-SMI for pod membership queries)
+                COMMON_FLAGS += -DAMD_SMI_ENABLED
+                LDFLAGS += -L$(dir $(AMD_SMI_LIB)) -lamd_smi
+                AMD_SMI_ENABLED = 1
+              else
+                $(info - AMD-SMI fabric API not found; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
+              endif
+            else
+              $(info - libamd_smi not found under $(ROCM_PATH)/lib; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
+            endif
+          else
+            $(info - amd_smi/amdsmi.h not found under $(ROCM_PATH)/include; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
+          endif
         endif
       else
-        $(info - Unable to determine HIP version via $(HIPCONFIG).  Try specifying path to hipconfig in HIPCONFIG)
-        $(info - Disabling pod communication support)
+        $(info - HIP fabric API not found; disabling pod communication support)
       endif
     endif
   endif
