@@ -3,14 +3,105 @@
 # MPI::MPI_CXX and hip:: config targets require >= 3.9; 3.16 for modern policy defaults.
 cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
 
-# CMake Toolchain file to define compilers and path to ROCm
-# Takes effect only on re-runs via cache; on first configure pass -DCMAKE_TOOLCHAIN_FILE explicitly.
+# Pre-project: ROCM_PATH detection and compiler/flag selection.
+# Must be before project() so CMake uses the right compiler on first configure.
+# Priority: -DROCM_PATH / $ROCM_PATH env > PATH (amdclang++) > /opt/rocm
 #==================================================================================================
-if(NOT CMAKE_TOOLCHAIN_FILE)
-  set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/toolchain-linux.cmake")
-  message(STATUS "CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
+
+# ROCM_PATH: Check CMake cache or environment.
+if(NOT ROCM_PATH)
+  if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
+    set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE PATH "Path to ROCm installation.")
+  endif()
 endif()
 
+# ROCM_PATH: Derive from PATH; walk up from amdclang++/clang++ to the ROCm root.
+# Handles both ${ROCM_PATH}/bin/ and ${ROCM_PATH}/llvm/bin/ layouts.
+if(NOT ROCM_PATH)
+  find_program(_rocm_bin_hint NAMES amdclang++ clang++)
+  if(_rocm_bin_hint)
+    get_filename_component(_bin_dir    "${_rocm_bin_hint}" DIRECTORY)
+    get_filename_component(_parent     "${_bin_dir}"       DIRECTORY)
+    if(EXISTS "${_parent}/lib/libamdhip64.so" OR EXISTS "${_parent}/lib64/libamdhip64.so")
+      set(ROCM_PATH "${_parent}" CACHE PATH "Path to ROCm installation (auto-detected from PATH).")
+      message(STATUS "ROCM_PATH auto-detected from PATH: ${ROCM_PATH}")
+    else()
+      get_filename_component(_grandparent "${_parent}" DIRECTORY)
+      if(EXISTS "${_grandparent}/lib/libamdhip64.so" OR EXISTS "${_grandparent}/lib64/libamdhip64.so")
+        set(ROCM_PATH "${_grandparent}" CACHE PATH "Path to ROCm installation (auto-detected from PATH).")
+        message(STATUS "ROCM_PATH auto-detected from PATH: ${ROCM_PATH}")
+      endif()
+    endif()
+  endif()
+  unset(_rocm_bin_hint CACHE)
+  unset(_rocm_bin_hint)
+  unset(_bin_dir)
+  unset(_parent)
+  unset(_grandparent)
+endif()
+
+# ROCM_PATH: Fallback.
+if(NOT ROCM_PATH)
+  set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to ROCm installation.")
+  message(WARNING "ROCM_PATH not found; falling back to ${ROCM_PATH}")
+endif()
+
+if(NOT EXISTS "${ROCM_PATH}")
+  message(FATAL_ERROR "ROCM_PATH=${ROCM_PATH} does not exist")
+endif()
+
+message(STATUS "ROCM_PATH: ${ROCM_PATH}")
+
+# Compiler detection: amdclang++ > llvm/amdclang++ > llvm/clang++
+# Respects -DCMAKE_CXX_COMPILER and $CXX / $CC env vars.
+if(NOT CMAKE_CXX_COMPILER)
+  if(DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL "")
+    set(CMAKE_CXX_COMPILER "$ENV{CXX}" CACHE PATH "Path to C++ compiler")
+  elseif(EXISTS "${ROCM_PATH}/bin/amdclang++")
+    set(CMAKE_CXX_COMPILER "${ROCM_PATH}/bin/amdclang++" CACHE PATH "Path to C++ compiler")
+  elseif(EXISTS "${ROCM_PATH}/llvm/bin/amdclang++")
+    set(CMAKE_CXX_COMPILER "${ROCM_PATH}/llvm/bin/amdclang++" CACHE PATH "Path to C++ compiler")
+  elseif(EXISTS "${ROCM_PATH}/llvm/bin/clang++")
+    set(CMAKE_CXX_COMPILER "${ROCM_PATH}/llvm/bin/clang++" CACHE PATH "Path to C++ compiler")
+  else()
+    message(FATAL_ERROR
+      "Cannot find amdclang++/clang++ under ${ROCM_PATH}/bin or ${ROCM_PATH}/llvm/bin")
+  endif()
+endif()
+
+if(NOT CMAKE_C_COMPILER)
+  if(DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL "")
+    set(CMAKE_C_COMPILER "$ENV{CC}" CACHE PATH "Path to C compiler")
+  else()
+    get_filename_component(_cxx_dir  "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_cxx_name "${CMAKE_CXX_COMPILER}" NAME)
+    string(REPLACE "clang++" "clang" _cc_name "${_cxx_name}")
+    if(EXISTS "${_cxx_dir}/${_cc_name}")
+      set(CMAKE_C_COMPILER "${_cxx_dir}/${_cc_name}" CACHE PATH "Path to C compiler")
+    endif()
+    unset(_cxx_dir)
+    unset(_cxx_name)
+    unset(_cc_name)
+  endif()
+endif()
+
+# Seed default per-config flags. _INIT vars are written to cache on first configure;
+# user overrides via -DCMAKE_CXX_FLAGS_DEBUG=... or $CXXFLAGS/$CFLAGS take precedence.
+if(NOT (DEFINED ENV{CXXFLAGS} AND NOT "$ENV{CXXFLAGS}" STREQUAL ""))
+  set(CMAKE_CXX_FLAGS_DEBUG_INIT          "-O0 -g -ggdb3")
+  set(CMAKE_CXX_FLAGS_RELEASE_INIT        "-O3")
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-O3 -g")
+endif()
+if(NOT (DEFINED ENV{CFLAGS} AND NOT "$ENV{CFLAGS}" STREQUAL ""))
+  set(CMAKE_C_FLAGS_DEBUG_INIT          "-O0 -g -ggdb3")
+  set(CMAKE_C_FLAGS_RELEASE_INIT        "-O3")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-O3 -g")
+endif()
+
+set(ENV{ROCM_PATH} "${ROCM_PATH}")
+
+# TransferBench project definitions
+#==================================================================================================
 set(VERSION_STRING "1.67.00")
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
@@ -36,20 +127,6 @@ option(ENABLE_MPI_COMM             "Enable MPI Communicator support"            
 option(ENABLE_DMA_BUF              "Enable DMA-BUF support for GPU Direct RDMA"   OFF)
 option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"        OFF)
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
-
-# Fallback for builds that bypass the toolchain file; toolchain sets ROCM_PATH in cache.
-if(NOT ROCM_PATH)
-  if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "$ENV{ROCM_PATH}" CACHE PATH "Path to the ROCm installation.")
-    message(STATUS "ROCM_PATH set from environment: ${ROCM_PATH}")
-  else()
-    set(ROCM_PATH "/opt/rocm" CACHE PATH "Path to the ROCm installation.")
-    message(WARNING "ROCM_PATH not specified; falling back to ${ROCM_PATH}")
-  endif()
-else()
-  message(STATUS "ROCM_PATH: ${ROCM_PATH}")
-endif()
-set(ENV{ROCM_PATH} "${ROCM_PATH}")
 
 include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets, rocm_check_target_ids
 
