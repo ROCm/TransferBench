@@ -62,7 +62,7 @@ int HelpPreset(EnvVars&          ev,
   printf("\n");
   printf("# Argument Details:\n");
   printf("#   #Transfers:   Number of Transfers to be run in parallel\n");
-  printf("#   #SEs      :   Number of SubExectors to use (CPU threads/ GPU threadblocks)\n");
+  printf("#   #SEs      :   Number of SubExecutors to use (CPU threads/ GPU threadblocks)\n");
   printf("#   srcMemL   :   Source memory locations (Where the data is to be read from)\n");
   printf("#   Executor  :   Executor is specified by a character indicating type, followed by device index (0-indexed)\n");
   printf("#                 - C:    CPU-executed          (Indexed from 0 to # NUMA nodes - 1)\n");
