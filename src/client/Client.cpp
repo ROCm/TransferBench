@@ -43,7 +43,6 @@ int main(int argc, char **argv)
       if (!ev.outputToCsv) {
         DisplayVersion();
         DisplayUsage(argv[0]);
-        DisplayPresets();
       }
       DisplayTopology(ev.outputToCsv, ev.showBorders);
     }
@@ -71,7 +70,7 @@ int main(int argc, char **argv)
 
   // Run preset benchmark if requested
   int retCode = 0;
-  if (RunPreset(ev, numBytesPerTransfer, argc, argv, retCode)) return retCode;
+  if (RunPreset(ev, numBytesPerTransfer, argc, argv, retCode, argv[0])) return retCode;
 
   // Read input from command line or configuration file
   bool isDryRun = !strcmp(argv[1], "dryrun");
@@ -256,16 +255,6 @@ void DisplayUsage(char const* cmdName)
     exit(1);
   }
 
-  Print("Usage: %s config <N>\n", cmdName);
-  Print("  config: Either:\n");
-  Print("          - Filename of configFile containing Transfers to execute (see example.cfg for format)\n");
-  Print("          - Name of preset config:\n");
-  Print("  N     : (Optional) Number of bytes to copy per Transfer.\n");
-  Print("          If not specified, defaults to %lu bytes. Must be a multiple of 4 bytes\n",
-        DEFAULT_BYTES_PER_TRANSFER);
-  Print("          If 0 is specified, a range of Ns will be benchmarked\n");
-  Print("          May append a suffix ('K', 'M', 'G') for kilobytes / megabytes / gigabytes\n");
+  DisplayBasicUsage(cmdName);
   Print("\n");
-
-  EnvVars::DisplayUsage();
 };
