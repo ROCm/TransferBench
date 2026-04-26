@@ -32,9 +32,11 @@ THE SOFTWARE.
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
 #include "BmaSweep.hpp"
+#include "EnvVarsList.hpp"
 #include "GfxSweep.hpp"
 #include "HbmBandwidth.hpp"
 #include "HealthCheck.hpp"
+#include "Help.hpp"
 #include "NicRings.hpp"
 #include "NicPeerToPeer.hpp"
 #include "OneToAll.hpp"
@@ -55,110 +57,45 @@ typedef int (*PresetFunc)(EnvVars&          ev,
 struct PresetInfo
 {
   PresetFunc   func;
-  bool         multiRankCompatible;
   std::string  description;
-  std::string  details;
 };
 
 std::map<std::string, PresetInfo> presetFuncMap =
 {
-  {"a2a",         {AllToAllPreset,      true,  "Tests parallel transfers between all pairs of GPU devices",
-                   "Runs dense all-to-all copies across all visible GPUs (and ranks when present)."}},
-  {"a2a_n",       {AllToAllRdmaPreset,  false, "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers",
-                   "Exercises nearest-NIC RDMA path for all GPU pairs (single rank only)."}},
-  {"a2asweep",    {AllToAllSweepPreset, false, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts",
-                   "Sweeps CU and unroll settings to tune GFX all-to-all behavior."}},
-  {"bmasweep",    {BmaSweepPreset,      false, "Test and compare batched DMA executor for multi destination copies",
-                   "Compares batched DMA strategies for fan-out copy patterns."}},
-  {"gfxsweep",    {GfxSweepPreset,      true,  "Sweep over various GFX kernel options for a given GFX Transfer",
-                   "Sweeps GFX kernel parameters and reports best-performing combinations."}},
-  {"hbm",         {HbmBandwidthPreset,  true,  "Tests HBM bandwidth",
-                   "Measures sustained HBM read/write/copy behavior per GPU."}},
-  {"healthcheck", {HealthCheckPreset,   false, "Simple bandwidth health check (MI300X series only)",
-                   "Quick functional and bandwidth sanity test for supported MI300X setups."}},
-  {"nicrings",    {NicRingsPreset,      true,  "Tests NIC rings created across identical NIC indices across ranks",
-                   "Builds rank-wise NIC rings and measures collective ring bandwidth."}},
-  {"nicp2p",      {NicPeerToPeerPreset, true,  "Multi-node peer-to-peer RDMA transfer test between all NICs",
-                   "Runs exhaustive NIC-to-NIC RDMA throughput checks across ranks."}},
-  {"one2all",     {OneToAllPreset,      false, "Test all subsets of parallel transfers from one GPU to all others",
-                   "Evaluates one-source to many-destination transfer combinations."}},
-  {"p2p"   ,      {PeerToPeerPreset,    false, "Peer-to-peer device memory bandwidth test",
-                   "Benchmarks direct GPU-to-GPU memory transfer throughput."}},
-  {"poda2a",      {PodAllToAllPreset,   true,  "All-to-all transfers between subgroups of ranks within a pod",
-                   "Runs all-to-all over pod-scoped rank groups using detected pod membership."}},
-  {"podp2p",      {PodPeerToPeerPreset, true,  "Peer-to-peer transfers test among ranks within a pod",
-                   "Benchmarks pod-local peer transfer patterns across participating ranks."}},
-  {"rsweep",      {SweepPreset,         false, "Randomly sweep through sets of Transfers",
-                   "Randomized transfer sweep for broad spot-checking of transfer combinations."}},
-  {"scaling",     {ScalingPreset,       false, "Run scaling test from one GPU to other devices",
-                   "Measures scaling as destination count grows from a source GPU."}},
-  {"schmoo",      {SchmooPreset,        false, "Scaling tests for local/remote read/write/copy",
-                   "Runs schmoo-style sweeps over size and transfer type combinations."}},
-  {"smoketest",   {SmokeTestPreset,     true,  "Simple correctness smoke-test",
-                   "Fast correctness and sanity checks before running longer benchmarks."}},
-  {"sweep",       {SweepPreset,         false, "Ordered sweep through sets of Transfers",
-                   "Deterministic ordered sweep through predefined transfer combinations."}},
-  {"wallclock",   {WallClockPreset,     true,  "Tests wallclock consistency across XCCs within a GPU",
-                   "Checks GPU wallclock consistency and timing alignment across XCCs."}},
+  {"a2a",         {AllToAllPreset,      "Tests parallel transfers between all pairs of GPU devices"}},
+  {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
+  {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
+  {"bmasweep",    {BmaSweepPreset,      "Test and compare batched DMA executor for multi destination copies"}},
+  {"envvars",     {EnvVarsPreset,       "Show list of environment variables that can be used to modify behavior"}},
+  {"gfxsweep",    {GfxSweepPreset,      "Sweep over various GFX kernel options for a given GFX Transfer"}},
+  {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
+  {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
+  {"help",        {HelpPreset,          "Shows example usage details"}},
+  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
+  {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
+  {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
+  {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
+  {"poda2a",      {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},
+  {"podp2p",      {PodPeerToPeerPreset, "Peer-to-peer transfers test among ranks within a pod"}},
+  {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
+  {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
+  {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
+  {"smoketest",   {SmokeTestPreset,     "Simple correctness smoke-test"}},
+  {"sweep",       {SweepPreset,         "Ordered sweep through sets of Transfers"}},
+  {"wallclock",   {WallClockPreset,     "Tests wallclock consistency across XCCs within a GPU"}},
 };
-
-void DisplayBasicUsage(char const* cmdName)
-{
-  printf("Usage: %s config <N>\n", cmdName);
-  printf("  config: Either:\n");
-  printf("          - Filename of config file containing Transfers to execute (see example.cfg for format)\n");
-  printf("          - Name of preset config (run '%s presets' to list available presets)\n", cmdName);
-  printf("          - 'cmdline' followed by one transfer expression\n");
-  printf("          - 'dryrun' followed by one transfer expression (prints parsed transfers only)\n");
-  printf("  N     : (Optional) Number of bytes to copy per Transfer.\n");
-  printf("          If not specified, defaults to 268435456 bytes. Must be a multiple of 4 bytes\n");
-  printf("          If 0 is specified, a range of Ns will be benchmarked\n");
-  printf("          May append a suffix ('K', 'M', 'G') for kilobytes / megabytes / gigabytes\n");
-}
-
-void DisplayTbEnvVarUsage()
-{
-  printf("\nInternal TB_* environment variables:\n");
-  printf("====================================\n");
-  printf(" TB_RANK            - Rank of this process (0-based, socket communicator)\n");
-  printf(" TB_NUM_RANKS       - Total number of ranks (socket communicator)\n");
-  printf(" TB_MASTER_ADDR     - Rank 0 IP/hostname for socket communicator\n");
-  printf(" TB_MASTER_PORT     - Rank 0 port for socket communicator (default: 29500)\n");
-  printf(" TB_SINGLE_LOG      - In socket mode, only rank 0 logs when set\n");
-  printf(" TB_VERBOSE         - Enables additional internal logging\n");
-  printf(" TB_DUMP_CFG_FILE   - Writes executed transfers to a config file\n");
-  printf(" TB_DUMP_LINES      - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
-  printf(" TB_NIC_FILTER      - Regex filter to limit NIC visibility for NIC executors\n");
-  printf(" TB_FORCE_SINGLE_POD- Forces all ranks into one pod (skips pod query)\n");
-  printf(" TB_WALLCLOCK_RATE  - Overrides queried GPU wallclock rate if needed\n");
-  printf(" TB_PAUSE           - Pauses startup for debugger attachment\n");
-}
 
 void DisplayPresets()
 {
-  printf("\nAvailable Presets:\n");
-  printf("======================================================================================================================\n");
-  printf(" %-12s | %-18s | %-56s\n", "Preset", "Multi-rank", "What it does");
-  printf("======================================================================================================================\n");
+  if (!Utils::RankDoesOutput()) return;
+  printf(" %-12s | %-56s\n", "Preset", "Description");
+  printf("=============================================================================================================\n");
   for (auto const& x : presetFuncMap) {
-    printf(" %-12s | %-18s | %-56s\n",
+    printf(" %-12s | %-56s\n",
            x.first.c_str(),
-           x.second.multiRankCompatible ? "Yes (see notes)" : "No",
-           x.second.details.c_str());
+           x.second.description.c_str());
   }
-  printf(" %-12s | %-18s | %-56s\n", "help", "N/A", "Shows usage details, public env vars, and internal TB_* env vars");
-  printf(" %-12s | %-18s | %-56s\n", "presets", "N/A", "Shows this preset table with compatibility and descriptions");
-  printf("======================================================================================================================\n");
-}
-
-void DisplayHelp(char const* cmdName)
-{
-  DisplayBasicUsage(cmdName);
-  printf("\n");
-  EnvVars::DisplayUsage();
-  DisplayTbEnvVarUsage();
-  printf("\n");
-  printf("Run '%s presets' for preset compatibility/details.\n", cmdName);
+  printf("=============================================================================================================\n");
 }
 
 int RunPreset(EnvVars&       ev,
@@ -170,15 +107,11 @@ int RunPreset(EnvVars&       ev,
 {
   std::string preset = (argc > 1 ? argv[1] : "");
   bool bytesSpecified = (argc > 2);
-  if (preset == "help") {
-    DisplayHelp(cmdName);
-    retCode = 0;
-    return 1;
-  }
+
   if (preset == "presets") {
-    DisplayPresets();
-    retCode = 0;
-    return 1;
+      DisplayPresets();
+      retCode = 0;
+      return 1;
   }
   if (presetFuncMap.count(preset)) {
     retCode = (presetFuncMap[preset].func)(ev, numBytesPerTransfer, preset, bytesSpecified);

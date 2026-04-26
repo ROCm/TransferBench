@@ -255,6 +255,28 @@ void DisplayUsage(char const* cmdName)
     exit(1);
   }
 
-  DisplayBasicUsage(cmdName);
+  Print("Usage: %s config <N>\n", cmdName);
+  Print("  config: Either:\n");
+  Print("          - Filename of config file containing Transfers to execute\n");
+  Print("          - Name of preset config\n");
+  Print("          - 'cmdline' followed by one transfer expression\n");
+  Print("          - 'dryrun' followed by one transfer expression (prints parsed transfers only)\n");
+  Print("  N     : (Optional) Number of bytes to copy per Transfer.\n");
+  Print("          If not specified, defaults to %lu. Must be a multiple of 4 bytes\n", DEFAULT_BYTES_PER_TRANSFER);
+  Print("          If 0 is specified, a range of Ns will be benchmarked\n");
+  Print("          May append a suffix ('K', 'M', 'G') for kilobytes / megabytes / gigabytes\n");
   Print("\n");
+  Print("- Use \"%s help\"    for more information about how to create config files / describe Transfers\n", cmdName);
+  Print("- Use \"%s envvars\" for more information about environment variables that customize behavior\n", cmdName);
+  Print("- Use \"%s presets\" to display list of available presets\n", cmdName);
+  Print("\n");
+  Print("For multi-rank usage, TransferBench must either be compiled with MPI support or rely on sockets\n");
+  Print("It is recommended to only run one process per node\n");
+  Print(" - MPI approach:\n");
+  Print("   Node 0> mpirun –np 4 –host node0,node1,node2,node3 ./TransferBench a2a\n");
+  Print(" - Socket approach:\n");
+  Print("   Node 0> TB_RANK=0 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
+  Print("   Node 1> TB_RANK=1 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
+  Print("   Node 2> TB_RANK=2 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
+  Print("   Node 3> TB_RANK=3 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
 };
