@@ -93,7 +93,7 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("# Examples:\n");
   printf("# 1 4 (G0->G0->G1)                   Uses 4 CUs on GPU0 to copy from GPU0 to GPU1\n");
   printf("# 1 4 (C1->G2->G0)                   Uses 4 CUs on GPU2 to copy from CPU1 to GPU0\n");
-  printf("# 2 4 G0->G0->G1 G1->G1->G0          Copes from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs\n");
+  printf("# 2 4 G0->G0->G1 G1->G1->G0          Copies from GPU0 to GPU1, and GPU1 to GPU0, each with 4 SEs\n");
   printf("# -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M) Copies 1Mb from GPU0 to GPU1 with 4 SEs, and 2Mb from GPU1 to GPU0 with 2 SEs\n");
   printf("# 1 2 (F0->I0.2->F1)                 Uses 2 QPs to transfer data from GPU0 via NIC0 to GPU1 via NIC2\n");
   printf("# 1 1 (F0->N0.1->F1)                 Uses 1 QP to transfer data from GPU0 via GPU0's closest NIC to GPU1 via GPU1's closest NIC\n");
