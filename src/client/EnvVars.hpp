@@ -365,7 +365,7 @@ public:
     printf("Environment variables (back-end):\n");
     printf("====================================\n");
     printf(" TB_RANK             - Used to specify the rank of this process (0-based, socket communicator)\n");
-    printf(" TB_NUM_RANKS        - Used to specific the total number of ranks (socket communicator)\n");
+    printf(" TB_NUM_RANKS        - Used to specify the total number of ranks (socket communicator)\n");
     printf(" TB_MASTER_ADDR      - Used to set Rank 0 IP/hostname for socket communicator\n");
     printf(" TB_MASTER_PORT      - Used to set Rank 0 port for socket communicator (default: 29500)\n");
     printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
