@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 #pragma once
 #include <map>
+#include <vector>
 
 // EnvVars is available to all presets
 #include "EnvVars.hpp"
@@ -31,9 +32,11 @@ THE SOFTWARE.
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
 #include "BmaSweep.hpp"
+#include "EnvVarsList.hpp"
 #include "GfxSweep.hpp"
 #include "HbmBandwidth.hpp"
 #include "HealthCheck.hpp"
+#include "Help.hpp"
 #include "NicRings.hpp"
 #include "NicPeerToPeer.hpp"
 #include "OneToAll.hpp"
@@ -51,15 +54,23 @@ typedef int (*PresetFunc)(EnvVars&          ev,
                           std::string const presetName,
                           [[maybe_unused]] bool const bytesSpecified);
 
-std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
+struct PresetInfo
+{
+  PresetFunc   func;
+  std::string  description;
+};
+
+std::map<std::string, PresetInfo> presetFuncMap =
 {
   {"a2a",         {AllToAllPreset,      "Tests parallel transfers between all pairs of GPU devices"}},
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"bmasweep",    {BmaSweepPreset,      "Test and compare batched DMA executor for multi destination copies"}},
+  {"envvars",     {EnvVarsPreset,       "Show list of environment variables that can be used to modify behavior"}},
   {"gfxsweep",    {GfxSweepPreset,      "Sweep over various GFX kernel options for a given GFX Transfer"}},
   {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
+  {"help",        {HelpPreset,          "Shows example usage details"}},
   {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
   {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
@@ -76,10 +87,15 @@ std::map<std::string, std::pair<PresetFunc, std::string>> presetFuncMap =
 
 void DisplayPresets()
 {
-  printf("\nAvailable Preset Benchmarks:\n");
-  printf("============================\n");
-  for (auto const& x : presetFuncMap)
-    printf("   %15s - %s\n", x.first.c_str(), x.second.second.c_str());
+  if (!Utils::RankDoesOutput()) return;
+  printf(" %-12s | %-56s\n", "Preset", "Description");
+  printf("=============================================================================================================\n");
+  for (auto const& x : presetFuncMap) {
+    printf(" %-12s | %-56s\n",
+           x.first.c_str(),
+           x.second.description.c_str());
+  }
+  printf("=============================================================================================================\n");
 }
 
 int RunPreset(EnvVars&       ev,
@@ -90,8 +106,14 @@ int RunPreset(EnvVars&       ev,
 {
   std::string preset = (argc > 1 ? argv[1] : "");
   bool bytesSpecified = (argc > 2);
+
+  if (preset == "presets") {
+      DisplayPresets();
+      retCode = 0;
+      return 1;
+  }
   if (presetFuncMap.count(preset)) {
-    retCode = (presetFuncMap[preset].first)(ev, numBytesPerTransfer, preset, bytesSpecified);
+    retCode = (presetFuncMap[preset].func)(ev, numBytesPerTransfer, preset, bytesSpecified);
     return 1;
   }
   return 0;
