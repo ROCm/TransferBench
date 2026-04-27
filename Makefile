@@ -138,7 +138,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     else
       MPI_ENABLED = 1
       COMMON_FLAGS += -DMPI_COMM_ENABLED -I$(MPI_PATH)/include
-      LDFLAGS += -L/$(MPI_PATH)/lib -lmpi
+      LDFLAGS += -L$(MPI_PATH)/lib -lmpi
       ifeq ($(DEBUG), 1)
         LDFLAGS += -lmpi_cxx
       endif
