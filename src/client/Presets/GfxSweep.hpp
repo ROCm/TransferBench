@@ -33,7 +33,7 @@ int GfxSweepPreset(EnvVars&          ev,
   vector<int> numSesList     = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",    {4,8,16,32,64});
   int         numTransferStr = EnvVars::GetEnvVar(     "NUM_TRANSFERS",                 1);
   vector<int> temporalList   = EnvVars::GetEnvVarArray("TEMPORAL_MODES",              {0});
-  vector<int> unrollList     = EnvVars::GetEnvVarArray("UNROLLS",               {1,2,4,8});
+  vector<int> unrollList     = EnvVars::GetEnvVarArray("UNROLLS",            {1,2,4,8,16});
   vector<int> waveOrderList  = EnvVars::GetEnvVarArray("WAVE_ORDERS",                 {0});
   vector<int> wordSizeList   = EnvVars::GetEnvVarArray("WORDSIZES",                   {4});
 
@@ -88,7 +88,7 @@ int GfxSweepPreset(EnvVars&          ev,
   char sep = ev.outputToCsv ? ',' : ' ';
   Utils::Print(" WvO %c WSz %c TpM %c BlkS %c UnR ", sep, sep, sep, sep);
   for  (int numSubExec : numSesList)
-    Utils::Print("%c SE %03d", sep, numSubExec);
+    Utils::Print("%c  SE %03d", sep, numSubExec);
   Utils::Print("\n");
 
   double bestBw = 0.0;
@@ -113,7 +113,7 @@ int GfxSweepPreset(EnvVars&          ev,
                   bestBw = bw;
                   best = {waveOrder, wordSize, temporalMode, blockSize, unroll, numSubExec};
                 }
-                Utils::Print("%c%7.2f", sep, bw);
+                Utils::Print("%c%8.2f", sep, bw);
                 fflush(stdout);
               } else {
                 Utils::Print("\n");
@@ -138,6 +138,5 @@ int GfxSweepPreset(EnvVars&          ev,
   Utils::Print("          BlockSize    : %7d\n", best[3]);
   Utils::Print("          Unroll       : %7d\n", best[4]);
   Utils::Print("          NumSubExec   : %7d\n", best[5]);
-
   return 0;
 }
