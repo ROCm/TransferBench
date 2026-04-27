@@ -111,6 +111,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # Load CMake modules
+# Extend MODULE_PATH before any include() that searches it.
 #==================================================================================================
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CheckIncludeFiles)
