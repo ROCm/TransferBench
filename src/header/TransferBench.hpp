@@ -667,14 +667,15 @@ namespace TransferBench
   #define hipStreamSynchronize                               cudaStreamSynchronize
   #define hipMemGetAllocationGranularity                     cuMemGetAllocationGranularity
   #define hipMemCreate                                       cuMemCreate
-  #define hipMemAddressReserve                               cuMemAddressReserve
-  #define hipMemMap                                          cuMemMap
-  #define hipMemSetAccess                                    cuMemSetAccess
-  #define hipMemUnmap                                        cuMemUnmap
-  #define hipMemRelease                                      cuMemRelease
-  #define hipMemAddressFree                                  cuMemAddressFree
-  #define hipMemExportToShareableHandle                      cuMemExportToShareableHandle
-  #define hipMemImportFromShareableHandle                    cuMemImportFromShareableHandle
+  // cu* driver API returns CUresult; cast to cudaError_t so callers can use a single error variable
+  #define hipMemAddressReserve(...)                          ((cudaError_t)cuMemAddressReserve(__VA_ARGS__))
+  #define hipMemMap(...)                                     ((cudaError_t)cuMemMap(__VA_ARGS__))
+  #define hipMemSetAccess(...)                               ((cudaError_t)cuMemSetAccess(__VA_ARGS__))
+  #define hipMemUnmap(...)                                   ((cudaError_t)cuMemUnmap(__VA_ARGS__))
+  #define hipMemRelease(...)                                 ((cudaError_t)cuMemRelease(__VA_ARGS__))
+  #define hipMemAddressFree(...)                             ((cudaError_t)cuMemAddressFree(__VA_ARGS__))
+  #define hipMemExportToShareableHandle(...)                 ((cudaError_t)cuMemExportToShareableHandle(__VA_ARGS__))
+  #define hipMemImportFromShareableHandle(...)               ((cudaError_t)cuMemImportFromShareableHandle(__VA_ARGS__))
 
   using gpu_device_ptr = CUdeviceptr;
 
@@ -3547,8 +3548,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       System::Get().Broadcast(srcMemRank, sizeof(srcQpResult), &srcQpResult);
       if (srcQpResult.errType != ERR_NONE) {
-        return {ERR_FATAL, "SRC rank %d failed to transition QP %d to %s", srcMemRank, i,
-                srcQpResult.rtrFailed ? "RTR" : "RTS"};
+        return {ERR_FATAL, "SRC rank %d failed to transition QP %d to %s",
+                srcMemRank, i, srcQpResult.rtrFailed ? "RTR" : "RTS"};
       }
 
       QpTransitionResult dstQpResult = {ERR_NONE, false};
@@ -3562,8 +3563,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       System::Get().Broadcast(dstMemRank, sizeof(dstQpResult), &dstQpResult);
       if (dstQpResult.errType != ERR_NONE) {
-        return {ERR_FATAL, "DST rank %d failed to transition QP %d to %s", dstMemRank, i,
-                dstQpResult.rtrFailed ? "RTR" : "RTS"};
+        return {ERR_FATAL, "DST rank %d failed to transition QP %d to %s",
+                dstMemRank, i, dstQpResult.rtrFailed ? "RTR" : "RTS"};
       }
 
       // Prepare scatter-gather element / work request for this queue pair in advance
@@ -3954,13 +3955,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
-      // mem rank exports to sharable fabric handle; broadcast handle + status so all
+      // mem rank exports to shareable fabric handle; broadcast handle + status so all
       // ranks fail together instead of hanging on the next collective if export fails
       hipMemFabricHandle_t fabricHandle = {};
       hipError_t exportErr = hipSuccess;
+      const char* exportStep = "hipSetDevice";
       if (memDevice.memRank == GetRank()) {
         exportErr = hipSetDevice(memDevice.memIndex);
         if (exportErr == hipSuccess) {
+          exportStep = "hipMemExportToShareableHandle";
           exportErr = hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0);
         }
       }
@@ -3968,23 +3971,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       System::Get().Broadcast(memDevice.memRank, sizeof(hipMemFabricHandle_t), &fabricHandle);
       System::Get().Broadcast(memDevice.memRank, sizeof(hipError_t), &exportErr);
       if (exportErr != hipSuccess) {
-        return {ERR_FATAL, "HIP Error during fabric handle export: %s", hipGetErrorString(exportErr)};
+        return {ERR_FATAL, "HIP Error in %s during fabric handle export: %s", exportStep, hipGetErrorString(exportErr)};
       }
 
       // exe rank imports the fabric handle; broadcast result so all ranks fail together
       hipError_t importErr = hipSuccess;
+      const char* importStep = "hipSetDevice";
       if (exeDevice.exeRank == GetRank()) {
         importErr = hipSetDevice(exeDevice.exeIndex);
         if (importErr == hipSuccess) {
+          importStep = "hipMemImportFromShareableHandle";
           importErr = hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric);
         }
         if (importErr == hipSuccess) {
+          importStep = "hipMemAddressReserve";
           importErr = hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0);
         }
         if (importErr == hipSuccess) {
+          importStep = "hipMemMap";
           importErr = hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0);
         }
         if (importErr == hipSuccess) {
+          importStep = "hipMemSetAccess";
           hipMemAccessDesc desc;
           desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
           desc.flags = hipMemAccessFlagsProtReadWrite;
@@ -3993,7 +4001,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       System::Get().Broadcast(exeDevice.exeRank, sizeof(hipError_t), &importErr);
       if (importErr != hipSuccess) {
-        return {ERR_FATAL, "HIP Error during fabric handle import: %s", hipGetErrorString(importErr)};
+        return {ERR_FATAL, "HIP Error in %s during fabric handle import: %s", importStep, hipGetErrorString(importErr)};
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
