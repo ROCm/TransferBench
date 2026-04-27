@@ -521,7 +521,7 @@ namespace TransferBench::Utils
       ExeResult const& exeResult = exeInfoPair.second;
       numRows += 1 + exeResult.transferIdx.size();
       if (ev.showIterations) {
-        numRows += (numTimedIterations + 1);
+        numRows += (numTimedIterations + 1) * exeResult.transferIdx.size();
 
         // Check that per-iteration information exists
         for (int idx : exeResult.transferIdx) {
