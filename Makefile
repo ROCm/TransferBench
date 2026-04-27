@@ -181,7 +181,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   AMD_SMI_ENABLED = 0
   # Compile with pod support if
   # 1) DISABLE_POD_COMM is not set to 1
-  # 2) For HIP: hipMemFabricHandle_t is present in the HIP headers
+  # 2) For HIP: the HIP headers provide hipMemFabricHandle_t,
+  #    hipMemExportToShareableHandle, and hipMemImportFromShareableHandle,
+  #    and the probe links successfully against amdhip64
   #    For CUDA: CUDA Version >= 12.2
   DISABLE_POD_COMM ?= 0
   DISABLE_AMD_SMI ?= 0
