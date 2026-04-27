@@ -554,10 +554,11 @@ public:
 
   static std::vector<std::string> GetEnvVarStrArray(std::string const& varname, std::vector<std::string> const& defaultValue)
   {
-    if (getenv(varname.c_str())) {
+    char const* raw = getenv(varname.c_str());
+    if (raw) {
       std::vector<std::string> values;
-      char* arrayStr = getenv(varname.c_str());
-      char* token = strtok(arrayStr, ",");
+      std::string copy(raw);
+      char* token = strtok(&copy[0], ",");
       while (token) {
         values.push_back(token);
         token = strtok(NULL, ",");

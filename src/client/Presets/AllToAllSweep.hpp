@@ -101,7 +101,9 @@ int AllToAllSweepPreset(EnvVars&          ev,
     ev.Print("NUM_SUB_EXECS"  , numSesList.size(), EnvVars::ToStr(numSesList).c_str());
     ev.Print("SHOW_MIN_ONLY"  , showMinOnly      , showMinOnly ? "Showing only slowest GPU results" : "Showing slowest and fastest GPU results");
     ev.Print("UNROLLS"        , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
-    ev.Print("USE_FINE_GRAIN" , useFineGrain     , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
+    if (useFineGrain != -999) {
+      ev.Print("USE_FINE_GRAIN", useFineGrain    , "[DEPRECATED] Using %s-grained memory; prefer MEM_TYPE", useFineGrain ? "fine" : "coarse");
+    }
     ev.Print("USE_REMOTE_READ", useRemoteRead    , "Using %s as executor", useRemoteRead ? "DST" : "SRC");
     ev.Print("USE_SPRAY"      , useSpray         , "%s per SubExecutor", useSpray ? "All targets" : "One target");
     ev.Print("VERBOSE"        , verbose          , verbose ? "Display test results" : "Display summary only");
@@ -303,5 +305,5 @@ int AllToAllSweepPreset(EnvVars&          ev,
     Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", memTypeIdx, useFineGrain);
   }
 
-  return 1;
+  return 0;
 }
