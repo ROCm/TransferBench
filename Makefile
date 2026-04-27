@@ -225,7 +225,8 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
           '  hipMemImportFromShareableHandle(&allocationHandle, &fabricHandle, hipMemHandleTypeFabric);' \
           '  return 0;' \
           '}' | \
-        $(CXX) -I$(ROCM_PATH)/include -D__HIP_PLATFORM_AMD__ -x c++ - -c -o /dev/null 2>/dev/null && echo yes || echo no)
+        $(CXX) -I$(ROCM_PATH)/include -D__HIP_PLATFORM_AMD__ -x c++ - \
+          -L$(ROCM_PATH)/lib -L$(ROCM_PATH)/lib64 -lamdhip64 -o /dev/null 2>/dev/null && echo yes || echo no)
 
       ifeq ($(HIP_HAS_FABRIC),yes)
         $(info - HIP fabric API found; enabling pod communication support)
@@ -253,7 +254,8 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
                   '  (void)fi.fabric_info.fabric_version.v1.vpod_id;' \
                   '  return 0;' \
                   '}' | \
-                $(CXX) -I$(ROCM_PATH)/include -D__HIP_PLATFORM_AMD__ -x c++ - -c -o /dev/null 2>/dev/null && echo yes || echo no)
+                $(CXX) -I$(ROCM_PATH)/include -x c++ - \
+                  -L$(dir $(AMD_SMI_LIB)) -lamd_smi -o /dev/null 2>/dev/null && echo yes || echo no)
 
               ifeq ($(AMDSMI_HAS_FABRIC),yes)
                 $(info - AMD-SMI fabric API found; using AMD-SMI for pod membership queries)

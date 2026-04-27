@@ -348,6 +348,7 @@ else()
   cmake_push_check_state()
   set(CMAKE_REQUIRED_INCLUDES "${ROCM_PATH}/include")
   set(CMAKE_REQUIRED_LIBRARIES "${HIP_RUNTIME_LIBRARY}")
+  set(CMAKE_REQUIRED_DEFINITIONS "-D__HIP_PLATFORM_AMD__")
   check_cxx_source_compiles("
     #include <hip/hip_runtime_api.h>
     int main() {
