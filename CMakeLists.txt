@@ -192,15 +192,12 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Always search ROCM_PATH first. Also include /opt/rocm as a fallback when using a
-# non-default ROCm installation so packages installed there remain discoverable.
+# Search only the active ROCm installation. ROCM_PATH is already resolved by the
+# pre-project() block, so this is always the right install.
 list(APPEND CMAKE_PREFIX_PATH
             ${ROCM_PATH}
             ${ROCM_PATH}/llvm
             ${ROCM_PATH}/hip)
-if(NOT ROCM_PATH STREQUAL "/opt/rocm")
-  list(APPEND CMAKE_PREFIX_PATH /opt/rocm /opt/rocm/llvm /opt/rocm/hip)
-endif()
 
 find_package(hip REQUIRED CONFIG)
 message(STATUS "HIP compiler: ${HIP_COMPILER}")
@@ -309,7 +306,7 @@ elseif(NOT ENABLE_MPI_COMM)
 else()
   message(STATUS "Attempting to build with MPI communicator support")
   if(MPI_PATH AND EXISTS "${MPI_PATH}/include/mpi.h")
-    find_library(MPI_LIBRARY NAMES mpi PATHS ${MPI_PATH}/lib NO_DEFAULT_PATH)
+    find_library(MPI_LIBRARY NAMES mpi PATHS ${MPI_PATH}/lib ${MPI_PATH}/lib64 NO_DEFAULT_PATH)
     if(MPI_LIBRARY)
       set(MPI_COMM_FOUND 1)
       set(MPI_INCLUDE_DIR "${MPI_PATH}/include")
