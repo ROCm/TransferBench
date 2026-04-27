@@ -43,6 +43,8 @@ int AllToAllSweepPreset(EnvVars&          ev,
 
   // Force single-stream mode for all-to-all benchmark
   ev.useSingleStream = 1;
+  // Default to GPU-event timing for a2asweep (overridable via USE_HIP_EVENTS=0 for CPU wall-clock)
+  ev.useHipEvents = EnvVars::GetEnvVar("USE_HIP_EVENTS", 1);
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
@@ -57,7 +59,7 @@ int AllToAllSweepPreset(EnvVars&          ev,
   int useSpray      = EnvVars::GetEnvVar("USE_SPRAY",       0);
   int verbose       = EnvVars::GetEnvVar("VERBOSE",         0);
 
-  std::vector<int> blockList  = EnvVars::GetEnvVarArray("BLOCKSIZES", {256});
+  std::vector<int> blockList  = EnvVars::GetEnvVarArray("BLOCKSIZES", {256,512,768,1024});
   std::vector<int> unrollList = EnvVars::GetEnvVarArray("UNROLLS", {1,2,3,4,6,8});
   std::vector<int> numSesList = EnvVars::GetEnvVarArray("NUM_SUB_EXECS", {4,8,12,16,24,32});
 
@@ -182,71 +184,99 @@ int AllToAllSweepPreset(EnvVars&          ev,
     }
   }
 
-  printf("GPU-GFX All-To-All Sweep benchmark:\n");
-  printf("==========================\n");
-  printf("- Copying %lu bytes between %s pairs of GPUs\n", numBytesPerTransfer, a2aDirect ? "directly connected" : "all");
+  Utils::Print("GPU-GFX All-To-All Sweep benchmark (%lu bytes, local=%s). All values are %s GB/s\n",
+               numBytesPerTransfer,
+               a2aLocal         ? "yes"                            : "no",
+               ev.useHipEvents  ? "GPU-Event-Timed (min over GPUs)": "CPU-Timed");
+  Utils::Print("=======================================================================================\n");
   if (transfers.size() == 0) {
-    printf("[WARN} No transfers requested. Try adjusting A2A_DIRECT or A2A_LOCAL\n");
+    Utils::Print("[WARN] No transfers requested. Try adjusting A2A_DIRECT or A2A_LOCAL\n");
     return 0;
   }
 
   // Execute Transfers
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
 
-  // Run tests
-  std::map<std::pair<int, int>, TransferBench::TestResults> results;
+  char sep = ev.outputToCsv ? ',' : ' ';
 
-  // Display summary
+  double bestMinBw = 0.0;
+  int bestBlock = -1, bestUnroll = -1, bestNumSes = -1;
+
+  // Print header once
+  Utils::Print(" BlkS %c UnR ", sep);
+  for (int c : numSesList) {
+    Utils::Print("%c  SE %03d", sep, c);
+    if (ev.useHipEvents && !showMinOnly) Utils::Print("%c SE%03dMx", sep, c);
+  }
+  Utils::Print("\n");
+
+  // Results keyed by (blockSize, numSes, unroll) for verbose output
+  std::map<std::tuple<int,int,int>, TransferBench::TestResults> results;
+
   for (int blockSize : blockList) {
-    printf("Blocksize: %d\n", blockSize);
-    ev.gfxBlockSize = cfg.gfx.blockSize = blockSize;
+    cfg.gfx.blockSize = blockSize;
 
-    printf("#CUs\\Unroll");
     for (int u : unrollList) {
-      printf("  %d(Min) ", u);
-      if (!showMinOnly) printf("  %d(Max) ", u);
-    }
-    printf("\n");
-    for (int c : numSesList) {
-      printf("   %5d   ", c);  fflush(stdout);
-      for (int u : unrollList) {
-        ev.gfxUnroll = cfg.gfx.unrollFactor = u;
+      cfg.gfx.unrollFactor = u;
+      Utils::Print("%5d %c %3d ", blockSize, sep, u);
+      fflush(stdout);
+
+      for (int c : numSesList) {
         for (auto& transfer : transfers)
           transfer.numSubExecs = useSpray ? (c * targetCount) : c;
 
-        double minBandwidth = std::numeric_limits<double>::max();
-        double maxBandwidth = std::numeric_limits<double>::lowest();
         TransferBench::TestResults result;
+        double minBw = 0.0, maxBw = 0.0;
         if (TransferBench::RunTransfers(cfg, transfers, result)) {
-          for (auto const& exeResult : result.exeResults) {
-            minBandwidth = std::min(minBandwidth, exeResult.second.avgBandwidthGbPerSec);
-            maxBandwidth = std::max(maxBandwidth, exeResult.second.avgBandwidthGbPerSec);
+          if (!ev.useHipEvents) {
+            minBw = result.avgTotalBandwidthGbPerSec;
+            if (useSpray) minBw *= targetCount;
+          } else {
+            minBw = std::numeric_limits<double>::max();
+            maxBw = std::numeric_limits<double>::lowest();
+            for (auto const& exeResult : result.exeResults) {
+              minBw = std::min(minBw, exeResult.second.avgBandwidthGbPerSec);
+              maxBw = std::max(maxBw, exeResult.second.avgBandwidthGbPerSec);
+            }
+            if (useSpray) { minBw *= targetCount; maxBw *= targetCount; }
           }
-          if (useSpray) {
-            minBandwidth *= targetCount;
-            maxBandwidth *= targetCount;
+          if (minBw > bestMinBw) {
+            bestMinBw  = minBw;
+            bestBlock  = blockSize;
+            bestUnroll = u;
+            bestNumSes = c;
           }
-          results[std::make_pair(c,u)] = result;
-        } else {
-          minBandwidth = 0.0;
+          results[std::make_tuple(blockSize, c, u)] = result;
         }
-        printf(" %7.2f ", minBandwidth);
-        if (!showMinOnly) printf(" %7.2f ", maxBandwidth);
+        Utils::Print("%c%8.2f", sep, minBw);
+        if (ev.useHipEvents && !showMinOnly)
+          Utils::Print("%c%8.2f", sep, maxBw);
         fflush(stdout);
       }
-      printf("\n"); fflush(stdout);
+      Utils::Print("\n");
+      fflush(stdout);
     }
+  }
+  Utils::Print("=======================================================================================\n");
 
-    if (verbose) {
-      int testNum = 0;
+  if (verbose) {
+    int testNum = 0;
+    for (int blockSize : blockList) {
       for (int c : numSesList) {
         for (int u : unrollList) {
-          printf("SubExecs: %d Unroll %d\n", c, u);
-          Utils::PrintResults(ev, ++testNum, transfers, results[std::make_pair(c,u)]);
+          Utils::Print("BlockSize: %d SubExecs: %d Unroll: %d\n", blockSize, c, u);
+          Utils::PrintResults(ev, ++testNum, transfers, results[std::make_tuple(blockSize, c, u)]);
         }
       }
     }
   }
+
+  // Print combination that produced highest bandwidth
+  Utils::Print("Highest %s bandwidth found: %7.2f GB/s\n",
+               ev.useHipEvents ? "GPU-event-timed (min)" : "CPU-timed", bestMinBw);
+  Utils::Print("          BlockSize  : %7d\n", bestBlock);
+  Utils::Print("          Unroll     : %7d\n", bestUnroll);
+  Utils::Print("          NumSubExec : %7d\n", bestNumSes);
 
   if (useFineGrain != -999) {
     Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
