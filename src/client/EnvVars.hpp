@@ -148,7 +148,7 @@ public:
     gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
     gfxSeType         = GetEnvVar("GFX_SE_TYPE"         , 0);
-    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
+    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
     gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
