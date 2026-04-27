@@ -156,7 +156,10 @@ int AllToAllSweepPreset(EnvVars&          ev,
       }
     }
   } else {
-    // Each CU will work on all targets
+    // Each CU will work on all targets.
+    // NOTE: targetCount ends up reflecting the last GPU's target count. This is correct for
+    // symmetric topologies (all GPUs have equal peer counts), but may be inaccurate with
+    // A2A_DIRECT on asymmetric hardware where different GPUs have different hop-1 peer counts.
     for (int i = 0; i < numGpus; i++) {
       TransferBench::Transfer transfer;
       transfer.numBytes = numBytesPerTransfer;
@@ -206,7 +209,9 @@ int AllToAllSweepPreset(EnvVars&          ev,
   Utils::Print(" BlkS %c UnR ", sep);
   for (int c : numSesList) {
     Utils::Print("%c  SE %03d", sep, c);
-    if (ev.useHipEvents && !showMinOnly) Utils::Print("%c SE%03dMx", sep, c);
+    if (ev.useHipEvents && !showMinOnly) {
+      Utils::Print("%c SE%03dMx", sep, c);
+    }
   }
   Utils::Print("\n");
 
@@ -222,15 +227,18 @@ int AllToAllSweepPreset(EnvVars&          ev,
       fflush(stdout);
 
       for (int c : numSesList) {
-        for (auto& transfer : transfers)
+        for (auto& transfer : transfers) {
           transfer.numSubExecs = useSpray ? (c * targetCount) : c;
+        }
 
         TransferBench::TestResults result;
         double minBw = 0.0, maxBw = 0.0;
         if (TransferBench::RunTransfers(cfg, transfers, result)) {
           if (!ev.useHipEvents) {
             minBw = result.avgTotalBandwidthGbPerSec;
-            if (useSpray) minBw *= targetCount;
+            if (useSpray) {
+              minBw *= targetCount;
+            }
           } else {
             minBw = std::numeric_limits<double>::max();
             maxBw = std::numeric_limits<double>::lowest();
@@ -238,7 +246,10 @@ int AllToAllSweepPreset(EnvVars&          ev,
               minBw = std::min(minBw, exeResult.second.avgBandwidthGbPerSec);
               maxBw = std::max(maxBw, exeResult.second.avgBandwidthGbPerSec);
             }
-            if (useSpray) { minBw *= targetCount; maxBw *= targetCount; }
+            if (useSpray) {
+              minBw *= targetCount;
+              maxBw *= targetCount;
+            }
           }
           if (minBw > bestMinBw) {
             bestMinBw  = minBw;
@@ -246,11 +257,14 @@ int AllToAllSweepPreset(EnvVars&          ev,
             bestUnroll = u;
             bestNumSes = c;
           }
-          results[std::make_tuple(blockSize, c, u)] = result;
+          if (verbose) {
+            results[std::make_tuple(blockSize, c, u)] = result;
+          }
         }
         Utils::Print("%c%8.2f", sep, minBw);
-        if (ev.useHipEvents && !showMinOnly)
+        if (ev.useHipEvents && !showMinOnly) {
           Utils::Print("%c%8.2f", sep, maxBw);
+        }
         fflush(stdout);
       }
       Utils::Print("\n");
@@ -264,19 +278,25 @@ int AllToAllSweepPreset(EnvVars&          ev,
     for (int blockSize : blockList) {
       for (int c : numSesList) {
         for (int u : unrollList) {
+          auto verboseTransfers = transfers;
+          for (auto& t : verboseTransfers) {
+            t.numSubExecs = useSpray ? (c * targetCount) : c;
+          }
           Utils::Print("BlockSize: %d SubExecs: %d Unroll: %d\n", blockSize, c, u);
-          Utils::PrintResults(ev, ++testNum, transfers, results[std::make_tuple(blockSize, c, u)]);
+          Utils::PrintResults(ev, ++testNum, verboseTransfers, results[std::make_tuple(blockSize, c, u)]);
         }
       }
     }
   }
 
   // Print combination that produced highest bandwidth
-  Utils::Print("Highest %s bandwidth found: %7.2f GB/s\n",
-               ev.useHipEvents ? "GPU-event-timed (min)" : "CPU-timed", bestMinBw);
-  Utils::Print("          BlockSize  : %7d\n", bestBlock);
-  Utils::Print("          Unroll     : %7d\n", bestUnroll);
-  Utils::Print("          NumSubExec : %7d\n", bestNumSes);
+  if (bestBlock != -1) {
+    Utils::Print("Highest %s bandwidth found: %7.2f GB/s\n",
+                 ev.useHipEvents ? "GPU-event-timed (min)" : "CPU-timed", bestMinBw);
+    Utils::Print("          BlockSize  : %7d\n", bestBlock);
+    Utils::Print("          Unroll     : %7d\n", bestUnroll);
+    Utils::Print("          NumSubExec : %7d\n", bestNumSes);
+  }
 
   if (useFineGrain != -999) {
     Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
