@@ -266,7 +266,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
                 $(info - AMD-SMI fabric API not found; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
               endif
             else
-              $(info - libamd_smi not found under $(ROCM_PATH)/lib; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
+              $(info - libamd_smi not found under $(ROCM_PATH)/lib or $(ROCM_PATH)/lib64; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
             endif
           else
             $(info - amd_smi/amdsmi.h not found under $(ROCM_PATH)/include; set TB_FORCE_SINGLE_POD=1 at runtime to override pod membership)
