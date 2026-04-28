@@ -274,14 +274,17 @@ int SmokeTestPreset(EnvVars&          ev,
   int testsFailed = 0;
   auto test = [&](int x, int y) {
     Utils::Print("  %02d  |%s", x, l2.c_str());
+    fflush(stdout);
     testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, totalGpus);
     Utils::Print("%s|  %02d  |", r2.c_str(), y);
     for (auto numSubExec : gfxSesList) {
       Utils::Print("%s", l2.c_str());
+      fflush(stdout);
       testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, totalGpus);
       Utils::Print("%s|", r2.c_str());
     }
     Utils::Print("\n");
+    fflush(stdout);
   };
 
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
