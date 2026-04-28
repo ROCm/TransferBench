@@ -30,6 +30,12 @@ int PodRingPreset(EnvVars&          ev,
   int numRanks       = TransferBench::GetNumRanks();
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
+  Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
+  if (rankToPod.empty()) {
+    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return 1;
+  }
+
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
@@ -40,15 +46,32 @@ int PodRingPreset(EnvVars&          ev,
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
   int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numGpus);
 
+  if (numGpus <= 0 || numGpus > numDetectedGpus) {
+    Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
+    return 1;
+  }
+  if (groupSize < 2) {
+    Utils::Print("[ERROR] Group size must be at least 2 to form a ring\n");
+    return 1;
+  }
+
   int numNics = TransferBench::GetNumExecutors(EXE_NIC, 0);
   bool nicDifference = false;
-  for (int rank = 0; rank < numRanks; rank++) {
-    if (numGpus > TransferBench::GetNumExecutors(EXE_GPU_GFX, rank)) {
-      Utils::Print("[ERROR] PodRing preset requires each rank to have the same number of GPUs\n");
+  for (auto const& [pod, ranks] : rankToPod) {
+    int const podDevices = ranks.size() * numGpus;
+    if (podDevices % groupSize) {
+      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %ld (%zu ranks x %d GPUs).\n",
+                   groupSize, podDevices, pod, ranks.size(), numGpus);
       return 1;
     }
-    if (numQueuePairs > 0 && numNics != TransferBench::GetNumExecutors(EXE_NIC, rank))
-      nicDifference = true;
+    for (int rank : ranks) {
+      if (numGpus > TransferBench::GetNumExecutors(EXE_GPU_GFX, rank)) {
+        Utils::Print("[ERROR] Pod %ld rank %d has fewer than %d GPUs\n", pod, rank, numGpus);
+        return 1;
+      }
+      if (numQueuePairs > 0 && numNics != TransferBench::GetNumExecutors(EXE_NIC, rank))
+        nicDifference = true;
+    }
   }
   if (nicDifference)
     Utils::Print("[WARN] Not all ranks have the same number of NICs\n");
@@ -67,39 +90,19 @@ int PodRingPreset(EnvVars&          ev,
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
-      ev.Print("GROUP_SIZE"     , groupSize    , "Dividing all devices into ring groups of %d", groupSize);
+      ev.Print("GROUP_SIZE"     , groupSize    , "Dividing each pod's devices into ring groups of %d", groupSize);
       printf("\n");
     }
   }
 
-  if (numGpus <= 0 || numGpus > numDetectedGpus) {
-    Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    return 1;
-  }
-  if (groupSize < 2) {
-    Utils::Print("[ERROR] Group size must be at least 2 to form a ring\n");
-    return 1;
-  }
-  if (numRanks * numDetectedGpus % groupSize) {
-    Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
-                 groupSize, numRanks * numDetectedGpus, numRanks);
-    return 1;
-  }
-
   Utils::Print("GPU-%s IntraPod Ring benchmark:\n", useDmaExec ? "DMA" : "GFX");
   Utils::Print("==============================\n");
-  Utils::Print("[%lu bytes per Transfer] [%s:%d] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
+  Utils::Print("[%lu bytes per Transfer] [%s:%d] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d] [#Pods:%zu]\n",
                numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs,
-               devMemTypeStr.c_str(), numQueuePairs, numRanks);
+               devMemTypeStr.c_str(), numQueuePairs, numRanks, rankToPod.size());
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
-
-  Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
-  if (rankToPod.empty()) {
-    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return 1;
-  }
 
   for (auto const& [pod, ranks] : rankToPod) {
     int n = ranks.size() * numGpus;
