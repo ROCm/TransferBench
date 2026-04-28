@@ -20,27 +20,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-// Reorder elements of list by stepping through with stride k, wrapping around.
-// When gcd(k, n) > 1 the single cycle breaks into gcd(k, n) orbits which are
-// concatenated, so every element appears exactly once in the output.
-// The reordered list will be further separated into different groups.
-void StrideGenerate(std::vector<int>& list, int k) {
-  int n = list.size();
-  k = ((k % n) + n) % n;  // normalize to 0..n-1
-  if (k == 0) return;
-
-  int d = std::gcd(k, n);
-  std::vector<int> out;
-  out.reserve(n);
-
-  for (int s = 0; s < d; s++) {
-    for (int j = 0; j < n / d; j++) {
-      out.push_back(list[(s + j * k) % n]);
-    }
-  }
-  list = std::move(out);
-}
-
 int PodAllToAllPreset(EnvVars&          ev,
                       size_t      const numBytesPerTransfer,
                       std::string const presetName,
@@ -164,7 +143,7 @@ int PodAllToAllPreset(EnvVars&          ev,
     std::vector<MemDevice> devices(n);
     std::vector<int> indices(n);
     for (int k = 0; k < n; k++) indices[k] = k;
-    StrideGenerate(indices, stride);
+    Utils::StrideGenerate(indices, stride);
     int idx = 0;
     for (int rank : ranks) {
       for (int devIdx = 0; devIdx < numGpus; devIdx++) {
