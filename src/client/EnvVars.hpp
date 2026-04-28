@@ -236,14 +236,15 @@ public:
     // Check for CU mask
     int numXccs = TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
     cuMask.clear();
-    char* cuMaskStr = getenv("CU_MASK");
-    if (cuMaskStr != NULL) {
+    char const* cuMaskRaw = getenv("CU_MASK");
+    if (cuMaskRaw != NULL) {
 #if defined(__NVCC__)
       printf("[WARN] CU_MASK is not supported in CUDA\n");
 #else
       std::vector<std::pair<int, int>> ranges;
       int maxCU = 0;
-      char* token = strtok(cuMaskStr, ",");
+      std::string cuMaskCopy(cuMaskRaw);
+      char* token = cuMaskCopy.empty() ? NULL : strtok(&cuMaskCopy[0], ",");
       while (token) {
         int start, end;
         if (sscanf(token, "%d-%d", &start, &end) == 2) {
@@ -272,13 +273,14 @@ public:
     }
 
     // Parse preferred XCC table (if provided)
-    char* prefXccStr = getenv("XCC_PREF_TABLE");
-    if (prefXccStr) {
+    char const* prefXccRaw = getenv("XCC_PREF_TABLE");
+    if (prefXccRaw) {
       prefXccTable.resize(numDetectedGpus);
       for (int i = 0; i < numDetectedGpus; i++){
         prefXccTable[i].resize(numDetectedGpus, -1);
       }
-      char* token = strtok(prefXccStr, ",");
+      std::string prefXccCopy(prefXccRaw);
+      char* token = prefXccCopy.empty() ? NULL : strtok(&prefXccCopy[0], ",");
       int tokenCount = 0;
       while (token) {
         int xccId;
@@ -519,6 +521,9 @@ public:
   {
     char const* varStr = getenv(varname.c_str());
     if (varStr) {
+      if (varStr[0] == '\0') {
+        return defaultValue;
+      }
       int val = atoi(varStr);
       char units = varStr[strlen(varStr)-1];
       switch (units) {
@@ -533,10 +538,11 @@ public:
 
   static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
-    if (getenv(varname.c_str())) {
+    char const* raw = getenv(varname.c_str());
+    if (raw) {
       std::vector<int> values;
-      char* arrayStr = getenv(varname.c_str());
-      char* token = strtok(arrayStr, ",");
+      std::string copy(raw);
+      char* token = copy.empty() ? NULL : strtok(&copy[0], ",");
       while (token) {
         int val;
         if (sscanf(token, "%d", &val) == 1) {
@@ -558,7 +564,7 @@ public:
     if (raw) {
       std::vector<std::string> values;
       std::string copy(raw);
-      char* token = strtok(&copy[0], ",");
+      char* token = copy.empty() ? NULL : strtok(&copy[0], ",");
       while (token) {
         values.push_back(token);
         token = strtok(NULL, ",");
@@ -570,10 +576,11 @@ public:
 
   static std::vector<int> GetEnvVarRangeArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
-    if (getenv(varname.c_str())) {
-      char* rangeStr = getenv(varname.c_str());
+    char const* raw = getenv(varname.c_str());
+    if (raw) {
+      std::string copy(raw);
       std::set<int> values;
-      char* token = strtok(rangeStr, ",");
+      char* token = copy.empty() ? NULL : strtok(&copy[0], ",");
       while (token) {
         int start, end;
         if (sscanf(token, "%d-%d", &start, &end) == 2) {
