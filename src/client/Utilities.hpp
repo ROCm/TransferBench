@@ -831,7 +831,7 @@ namespace TransferBench::Utils
           if (item1 > 0) item1 = ((item1 - 1 + round) % (paddedN - 1)) + 1;
           if (item2 > 0) item2 = ((item2 - 1 + round) % (paddedN - 1)) + 1;
         }
-        // Ignore dummy round, its partner sits out this ronud
+        // Ignore dummy round, its partner sits out this round
         if (item1 < N && item2 < N) {
           roundPairs.push_back({item1, item2});
           roundPairsReversed.push_back({item2, item1});
@@ -871,7 +871,7 @@ namespace TransferBench::Utils
     if (N <= 0 || n > N || N % n != 0) // Assuming balanced load for each round
     {
       n = 1;
-      Print("[WARN] cannot create round robin schedule, falling back to serial");
+      Print("[WARN] cannot create combination schedule, falling back to serial\n");
     }
 
     // Generate rounds of combination based on incrementing distance
