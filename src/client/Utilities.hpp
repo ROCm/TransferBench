@@ -155,6 +155,24 @@ namespace TransferBench::Utils
   bool AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr);
   bool DeallocateMemory(MemType memType, void *memPtr, size_t const bytes);
 
+  // Reorder elements of list by stepping through with stride k, wrapping around.
+  // When gcd(k, n) > 1 the single cycle breaks into gcd(k, n) orbits which are
+  // concatenated, so every element appears exactly once in the output.
+  // The reordered list will be further separated into different groups.
+  void StrideGenerate(std::vector<int>& list, int k);
+
+  // Returns a schedule of round robin pairing of N elements, using Circle Method.
+  // If parallel, each round contains N/2 pairs, otherwise serial.
+  void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                          int N, int parallel = 0);
+
+  // Returns a schedule for ordered 2-combination of N elements
+  // by pairing the list with its rotating self.
+  // Each round contains n pairs, where 1 <= n <= N and N is divisible by n,
+  // and an element cannot appear more than twice in a round.
+  void CombinationSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                           int N, int n = 0);
+
   // Implementation details below
   //================================================================
   TableHelper::TableHelper(int numRows, int numCols, int precision) :
@@ -393,12 +411,13 @@ namespace TransferBench::Utils
   std::string ExeTypeToStr(ExeType exeType)
   {
     switch (exeType) {
-    case EXE_CPU:         return "CPU";
-    case EXE_GPU_GFX:     return "GPU";
-    case EXE_GPU_DMA:     return "DMA";
-    case EXE_NIC:         return "NIC";
-    case EXE_NIC_NEAREST: return "NIC";
-    default:              return "N/A";
+    case EXE_CPU:           return "CPU";
+    case EXE_GPU_GFX:       return "GPU";
+    case EXE_GPU_DMA:       return "DMA";
+    case EXE_NIC:           return "NIC";
+    case EXE_NIC_NEAREST:   return "NIC";
+    case EXE_GPU_BDMA:      return "BMA";
+    default:                return "N/A";
     }
   }
 
@@ -520,7 +539,7 @@ namespace TransferBench::Utils
       ExeResult const& exeResult = exeInfoPair.second;
       numRows += 1 + exeResult.transferIdx.size();
       if (ev.showIterations) {
-        numRows += (numTimedIterations + 1);
+        numRows += (numTimedIterations + 1) * exeResult.transferIdx.size();
 
         // Check that per-iteration information exists
         for (int idx : exeResult.transferIdx) {
@@ -769,4 +788,112 @@ namespace TransferBench::Utils
     return (TransferBench::DeallocateMemory(memType, memPtr, bytes).errType != TransferBench::ERR_NONE);
   }
 
+  void StrideGenerate(std::vector<int>& list, int k)
+  {
+    int n = list.size();
+    if (n == 0) return;
+    k = ((k % n) + n) % n;  // normalize to 0..n-1
+    if (k == 0) return;
+
+    int d = std::gcd(k, n);
+    std::vector<int> out;
+    out.reserve(n);
+
+    for (int s = 0; s < d; s++) {
+      for (int j = 0; j < n / d; j++) {
+        out.push_back(list[(s + j * k) % n]);
+      }
+    }
+    list = std::move(out);
+  }
+
+  void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                          int N, int parallel)
+  {
+    if (N == 1) {
+      schedule.push_back({{0, 0}});
+      return;
+    }
+    // Generate standard round-robin tournament (maximum parallelism)
+    std::vector<std::vector<std::pair<int, int>>> fullSchedule;
+
+    // Pad odd number of ranks with a dummy round (N+1)
+    int paddedN = N + N % 2;
+    // Round-robin tournament scheduling
+    for (int round = 0; round < paddedN - 1; round++) {
+      std::vector<std::pair<int, int>> roundPairs;
+      std::vector<std::pair<int, int>> roundPairsReversed;
+      for (int i = 0; i < paddedN / 2; i++) {
+        int item1 = i;
+        int item2 = paddedN - 1 - i;
+        if (round > 0) {
+          // Rotate all except the first item
+          if (item1 > 0) item1 = ((item1 - 1 + round) % (paddedN - 1)) + 1;
+          if (item2 > 0) item2 = ((item2 - 1 + round) % (paddedN - 1)) + 1;
+        }
+        // Ignore dummy round, its partner sits out this round
+        if (item1 < N && item2 < N) {
+          roundPairs.push_back({item1, item2});
+          roundPairsReversed.push_back({item2, item1});
+        }
+      }
+      fullSchedule.push_back(roundPairs);
+      fullSchedule.push_back(roundPairsReversed);
+    }
+
+    // A loopback round where all run in parallel
+    std::vector<std::pair<int, int>> selfRound;
+    for (int i = 0; i < N; i++) {
+      selfRound.push_back({i, i});
+    }
+    fullSchedule.push_back(selfRound);
+
+    if (parallel) {
+      schedule = std::move(fullSchedule);
+    } else {
+      // Serialize each round if needed
+      for (auto const& fullRound : fullSchedule) {
+        for (auto const& match : fullRound) {
+          std::vector<std::pair<int, int>> subRound;
+          subRound.push_back({match.first, match.second});
+          schedule.push_back(subRound);
+        }
+      }
+    }
+  }
+
+  void CombinationSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
+                           int N, int n)
+  {
+    std::vector<std::vector<std::pair<int, int>>> fullSchedule;
+
+    if (n <= 0) n = N;
+    if (N <= 0 || n > N || N % n != 0) // Assuming balanced load for each round
+    {
+      n = 1;
+      Print("[WARN] cannot create combination schedule, falling back to serial\n");
+    }
+
+    // Generate rounds of combination based on incrementing distance
+    for (int i = 0; i < N; i++) {
+      std::vector<std::pair<int, int>> round;
+      for (int j = 0; j < N; j++) {
+        round.push_back({j, (j + i) % N});
+      }
+      fullSchedule.push_back(round);
+    }
+
+    // Step 2: Split each full round into sub-rounds with at most n pairs
+    for (auto const& fullRound : fullSchedule) {
+      for (size_t start = 0; start < fullRound.size(); start += n) {
+        std::vector<std::pair<int, int>> subRound;
+        for (size_t i = start; i < start + n && i < fullRound.size(); i++) {
+          subRound.push_back(fullRound[i]);
+        }
+        if (!subRound.empty()) {
+          schedule.push_back(subRound);
+        }
+      }
+    }
+  }
 };

@@ -126,7 +126,7 @@ int PodPeerToPeerPreset(EnvVars&          ev,
       } else {
         // parallelLevel == 1: node pairs run concurrently, one device pair at a time per node pair
         std::vector<std::vector<std::pair<int, int>>> nodePairSchedule;
-        RoundRobinSchedule(nodePairSchedule, (int)ranks.size(), 1);
+        Utils::RoundRobinSchedule(nodePairSchedule, (int)ranks.size(), 1);
 
         for (auto const& roundNodePairs : nodePairSchedule) {
           for (int srcDev = 0; srcDev < numGpuDevices; srcDev++) {

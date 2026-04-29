@@ -78,6 +78,11 @@ THE SOFTWARE.
 #endif
 /// @endcond
 
+// Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
+#if (defined(HIP_VERSION) && (HIP_VERSION >= 70100000)) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12080))
+#define BMA_EXEC_ENABLED
+#endif
+
 namespace TransferBench
 {
   using std::map;
@@ -98,11 +103,12 @@ namespace TransferBench
     EXE_GPU_GFX      = 1,                       ///<  GPU kernel-based executor (subExecutor = threadblock/CU)
     EXE_GPU_DMA      = 2,                       ///<  GPU SDMA executor         (subExecutor = not supported)
     EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
-    EXE_NIC_NEAREST  = 4                        ///<  NIC RDMA nearest executor (subExecutor = queue pair)
+    EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
+    EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
   };
-  char const ExeTypeStr[6] = "CGDIN";
+  char const ExeTypeStr[7] = "CGDINB";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA; }
+  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA; }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
@@ -621,6 +627,7 @@ namespace TransferBench
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
   #define hipMemcpyDefault                                   cudaMemcpyDefault
+  #define hipMemcpyKind                                      cudaMemcpyKind
   #define hipMemcpyDeviceToHost                              cudaMemcpyDeviceToHost
   #define hipMemcpyHostToDevice                              cudaMemcpyHostToDevice
   #define hipSuccess                                         cudaSuccess
@@ -651,6 +658,7 @@ namespace TransferBench
   #define hipMallocManaged                                   cudaMallocManaged
   #define hipMemcpy                                          cudaMemcpy
   #define hipMemcpyAsync                                     cudaMemcpyAsync
+  #define hipMemcpyBatchAsync                                cudaMemcpyBatchAsync
   #define hipMemset                                          cudaMemset
   #define hipMemsetAsync                                     cudaMemsetAsync
   #define hipSetDevice                                       cudaSetDevice
@@ -659,14 +667,15 @@ namespace TransferBench
   #define hipStreamSynchronize                               cudaStreamSynchronize
   #define hipMemGetAllocationGranularity                     cuMemGetAllocationGranularity
   #define hipMemCreate                                       cuMemCreate
-  #define hipMemAddressReserve                               cuMemAddressReserve
-  #define hipMemMap                                          cuMemMap
-  #define hipMemSetAccess                                    cuMemSetAccess
-  #define hipMemUnmap                                        cuMemUnmap
-  #define hipMemRelease                                      cuMemRelease
-  #define hipMemAddressFree                                  cuMemAddressFree
-  #define hipMemExportToShareableHandle                      cuMemExportToShareableHandle
-  #define hipMemImportFromShareableHandle                    cuMemImportFromShareableHandle
+  // cu* driver API returns CUresult; cast to cudaError_t so callers can use a single error variable
+  #define hipMemAddressReserve(...)                          ((cudaError_t)cuMemAddressReserve(__VA_ARGS__))
+  #define hipMemMap(...)                                     ((cudaError_t)cuMemMap(__VA_ARGS__))
+  #define hipMemSetAccess(...)                               ((cudaError_t)cuMemSetAccess(__VA_ARGS__))
+  #define hipMemUnmap(...)                                   ((cudaError_t)cuMemUnmap(__VA_ARGS__))
+  #define hipMemRelease(...)                                 ((cudaError_t)cuMemRelease(__VA_ARGS__))
+  #define hipMemAddressFree(...)                             ((cudaError_t)cuMemAddressFree(__VA_ARGS__))
+  #define hipMemExportToShareableHandle(...)                 ((cudaError_t)cuMemExportToShareableHandle(__VA_ARGS__))
+  #define hipMemImportFromShareableHandle(...)               ((cudaError_t)cuMemImportFromShareableHandle(__VA_ARGS__))
 
   using gpu_device_ptr = CUdeviceptr;
 
@@ -708,6 +717,13 @@ namespace TransferBench
 // Macro for collecting XCC GFX kernel is running on
 #if defined(__gfx942__) || defined(__gfx950__)
 #define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val))
+#elif defined(__GFX12__)
+#define GetXccId(val) \
+  { asm volatile ("s_sendmsg_rtn_b32 %0, 0x87 \n" \
+                  "s_wait_kmcnt 0"                \
+                  : "=s" (val));                  \
+    val = ((val >> 16) & 0xF);                    \
+  }
 #else
 #define GetXccId(val) val = 0
 #endif
@@ -787,7 +803,7 @@ namespace {
 //========================================================================================
 
   int   constexpr MAX_BLOCKSIZE  = 1024;               // Max threadblock size
-  int   constexpr MAX_UNROLL     = 8;                  // Max unroll factor
+  int   constexpr MAX_UNROLL     = 16;                 // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                  // Max srcs per Transfer
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
   int   constexpr MEMSET_CHAR    = 75;                 // Value to memset (char)
@@ -1054,7 +1070,7 @@ namespace {
     // Topology related
     struct RankTopology
     {
-      char hostname[33];
+      char    hostname[33];
       char    ppodId[16];
       int64_t vpodId;
 
@@ -1573,13 +1589,13 @@ namespace {
 
   // Deallocate memory
   static ErrResult DeallocateMemory(MemType memType, void *memPtr, size_t const bytes,
-                                    hipMemGenericAllocationHandle_t* memHandle = NULL)
+                                    hipMemGenericAllocationHandle_t* memHandle = nullptr)
   {
     // Avoid deallocating nullptr
     if (memPtr == nullptr)
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
 
-    if (memHandle == NULL || *memHandle == NULL) {
+    if (memHandle == nullptr || *memHandle == NULL) {
       switch (memType) {
       case MEM_CPU: case MEM_CPU_CLOSEST: case MEM_CPU_COHERENT: case MEM_CPU_NONCOHERENT: case MEM_CPU_UNCACHED:
       {
@@ -1852,6 +1868,11 @@ namespace {
     // Compare data options
     {
       DataOptions data = cfg.data;
+      // Null out vector members before sizeof-broadcast: vectors carry heap pointers that are
+      // invalid on other ranks; freeing a remote pointer on scope exit causes a segfault
+      // These fields are permitted to differ across ranks and are not compared below
+      decltype(data.fillPattern)().swap(data.fillPattern);
+      decltype(data.fillCompress)().swap(data.fillCompress);
       System::Get().Broadcast(root, sizeof(data), &data);
 
       // data.alwaysValidate is permitted to be different across ranks
@@ -1896,6 +1917,10 @@ namespace {
     // Compare GFX Executor options
     {
       GfxOptions gfx = cfg.gfx;
+      // Same as above: null out vector members before sizeof-broadcast
+      // both fields are permitted to differ across ranks
+      decltype(gfx.cuMask)().swap(gfx.cuMask);
+      decltype(gfx.prefXccTable)().swap(gfx.prefXccTable);
       System::Get().Broadcast(root, sizeof(gfx), &gfx);
       if (gfx.blockOrder     != cfg.gfx.blockOrder)     ADD_ERROR("cfg.gfx.blockOrder");
       if (gfx.blockSize      != cfg.gfx.blockSize)      ADD_ERROR("cfg.gfx.blockSize");
@@ -2155,10 +2180,15 @@ namespace {
         break;
       }
 
+      if (t.numBytes % 4) {
+        errors.push_back({ERR_FATAL, "Transfer %d: numBytes (%lu) must be a multiple of 4\n", i, t.numBytes});
+        break;
+      }
+
       // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
       // mean that some subexecutors might not have any work assigned to them if the amount to
       // transfer is small
-      if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU) {
+      if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU || t.exeDevice.exeType == EXE_GPU_BDMA) {
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
         int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
@@ -2243,9 +2273,15 @@ namespace {
         }
         break;
       case EXE_GPU_DMA:
-        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+        if (t.srcs.size() != 1) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: DMA executor must have exactly 1 source and 1 destination", i});
+                            "Transfer %d: DMA executor must have exactly 1 source", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.dsts.size() < 1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: DMA executor must have at least 1 destination", i});
           hasFatalError = true;
           break;
         }
@@ -2287,19 +2323,10 @@ namespace {
             }
 
           }
-          err = System::Get().GetHsaAgent(t.dsts[0], dstAgent);
-          if (err.errType != ERR_NONE) {
-            errors.push_back(err);
-            if (err.errType == ERR_FATAL) {
-              hasFatalError = true;
-              break;
-            }
-          }
 
-          // Skip check of engine Id mask for self copies
-          if (srcAgent.handle != dstAgent.handle) {
-            uint32_t engineIdMask = 0;
-            err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
+          int numDsts = (int)t.dsts.size();
+          for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+            err = System::Get().GetHsaAgent(t.dsts[dstIdx], dstAgent);
             if (err.errType != ERR_NONE) {
               errors.push_back(err);
               if (err.errType == ERR_FATAL) {
@@ -2307,15 +2334,29 @@ namespace {
                 break;
               }
             }
-            hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
-            if (!(sdmaEngineId & engineIdMask)) {
-              errors.push_back({ERR_FATAL,
-                  "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
-                  i, t.exeDevice.exeIndex, t.exeSubIndex});
-              hasFatalError = true;
-              break;
+
+            // Skip check of engine Id mask for self copies
+            if (srcAgent.handle != dstAgent.handle) {
+              uint32_t engineIdMask = 0;
+              err = hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &engineIdMask);
+              if (err.errType != ERR_NONE) {
+                errors.push_back(err);
+                if (err.errType == ERR_FATAL) {
+                  hasFatalError = true;
+                  break;
+                }
+              }
+              hsa_amd_sdma_engine_id_t sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
+              if (!(sdmaEngineId & engineIdMask)) {
+                errors.push_back({ERR_FATAL,
+                    "Transfer %d: DMA %d.%d does not exist or cannot copy between src/dst",
+                    i, t.exeDevice.exeIndex, t.exeSubIndex});
+                hasFatalError = true;
+                break;
+              }
             }
           }
+          if (hasFatalError) break;
 #endif
         }
 
@@ -2338,6 +2379,60 @@ namespace {
           }
         }
         break;
+      case EXE_GPU_BDMA:
+#ifdef BMA_EXEC_ENABLED
+        if (t.srcs.size() != 1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: BMA executor must have exactly 1 source", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.dsts.size() < 1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: BMA executor must have at least 1 destination", i});
+          hasFatalError = true;
+          break;
+        }
+
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: BMA index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
+        }
+
+        if (t.exeSubIndex != -1) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: BMA executor does not support executor subindices (SDMA engine selection)", i});
+          hasFatalError = true;
+          break;
+        }
+
+        if (!IsGpuMemType(t.srcs[0].memType) && !IsGpuMemType(t.dsts[0].memType)) {
+          errors.push_back({ERR_WARN,
+              "Transfer %d: No GPU memory for source or destination.  Copy might not execute on BMA %d",
+              i, t.exeDevice.exeIndex});
+        } else {
+          if (IsGpuMemType(t.srcs[0].memType)) {
+            if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
+              errors.push_back({ERR_WARN,
+                  "Transfer %d: BMA executor may use the source memory device (%d) not (%d)",
+                  i, t.srcs[0].memIndex, t.exeDevice.exeIndex});
+            }
+          } else if (t.dsts[0].memIndex != t.exeDevice.exeIndex) {
+            errors.push_back({ERR_WARN,
+                "Transfer %d: BMA executor may use the destination memory device (%d) not (%d)",
+                i, t.dsts[0].memIndex, t.exeDevice.exeIndex});
+          }
+        }
+        break;
+#else
+        errors.push_back({ERR_FATAL,
+            "Transfer %d: BMA executor requires ROCm 7.1 or newer (AMD HIP with hipMemcpyBatchAsync)", i});
+        hasFatalError = true;
+        break;
+#endif
       case EXE_NIC: case EXE_NIC_NEAREST:
 #ifdef NIC_EXEC_ENABLED
       {
@@ -2514,6 +2609,15 @@ namespace {
                             "DMA %d copies will fallback to blit (GFX) kernels", exeDevice.exeIndex});
         break;
       }
+      case EXE_GPU_BDMA:
+      {
+        if (transferCount[exeDevice] > gpuMaxHwQueues) {
+          errors.push_back({ERR_WARN,
+                           "BMA %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
+                           exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
+        }
+        break;
+      }
       default:
         break;
       }
@@ -2571,13 +2675,13 @@ namespace {
 
     // For targeted-SDMA
 #if !defined(__NVCC__)
-    hsa_agent_t                dstAgent;          ///< DMA destination memory agent
+    vector<hsa_agent_t>        dstAgent;          ///< DMA destination memory agents
     hsa_agent_t                srcAgent;          ///< DMA source memory agent
     hsa_signal_t               signal;            ///< HSA signal for completion
     hsa_amd_sdma_engine_id_t   sdmaEngineId;      ///< DMA engine ID
 #endif
 
-// For IBV executor
+    // For IBV executor
 #ifdef NIC_EXEC_ENABLED
     int                        srcNicIndex;       ///< SRC NIC index
     int                        dstNicIndex;       ///< DST NIC index
@@ -2603,6 +2707,13 @@ namespace {
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
+#endif
+
+    // For BMA executor
+#ifdef BMA_EXEC_ENABLED
+    vector<void*>              batchDsts;         ///< Destination pointers (per batch item)
+    vector<void*>              batchSrcs;         ///< Source pointers (per batch item)
+    vector<size_t>             batchBytes;        ///< Bytes to copy (per batch item)
 #endif
 
     // Counters
@@ -3422,13 +3533,38 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Move queue pairs to ready-to-receive (RTR), using exchanged connection info
       // Then move them to read-to-send (RTS)
+      // Broadcast each rank's result so all ranks fail together rather than
+      // hanging on the next iteration's Broadcast when qpCount > 1.
+      struct QpTransitionResult { ErrType errType; bool rtrFailed; };
+      static_assert(std::is_trivially_copyable<QpTransitionResult>::value, "QpTransitionResult must be trivially copyable for MPI broadcast");
+      QpTransitionResult srcQpResult = {ERR_NONE, false};
       if (GetRank() == srcMemRank) {
-        ERR_CHECK(TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu));
-        ERR_CHECK(TransitionQpToRts(rss.srcQueuePairs[i]));
+        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu);
+        srcQpResult.rtrFailed = (err.errType != ERR_NONE);
+        if (err.errType == ERR_NONE) {
+          err = TransitionQpToRts(rss.srcQueuePairs[i]);
+        }
+        srcQpResult.errType = err.errType;
       }
+      System::Get().Broadcast(srcMemRank, sizeof(srcQpResult), &srcQpResult);
+      if (srcQpResult.errType != ERR_NONE) {
+        return {ERR_FATAL, "SRC rank %d failed to transition QP %d to %s",
+                srcMemRank, i, srcQpResult.rtrFailed ? "RTR" : "RTS"};
+      }
+
+      QpTransitionResult dstQpResult = {ERR_NONE, false};
       if (GetRank() == dstMemRank) {
-        ERR_CHECK(TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu));
-        ERR_CHECK(TransitionQpToRts(rss.dstQueuePairs[i]));
+        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu);
+        dstQpResult.rtrFailed = (err.errType != ERR_NONE);
+        if (err.errType == ERR_NONE) {
+          err = TransitionQpToRts(rss.dstQueuePairs[i]);
+        }
+        dstQpResult.errType = err.errType;
+      }
+      System::Get().Broadcast(dstMemRank, sizeof(dstQpResult), &dstQpResult);
+      if (dstQpResult.errType != ERR_NONE) {
+        return {ERR_FATAL, "DST rank %d failed to transition QP %d to %s",
+                dstMemRank, i, dstQpResult.rtrFailed ? "RTR" : "RTS"};
       }
 
       // Prepare scatter-gather element / work request for this queue pair in advance
@@ -3784,6 +3920,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
+#ifdef BMA_EXEC_ENABLED
+    // Prepare src/dst pointers for batched DMA executor
+    rss.batchDsts.clear();
+    rss.batchSrcs.clear();
+    rss.batchBytes.clear();
+    if (transfer.exeDevice.exeType == EXE_GPU_BDMA) {
+      for (int i = 0; i < transfer.numSubExecs; ++i) {
+        for (int j = 0; j < (int)rss.dstMem.size(); j++) {
+          rss.batchSrcs.push_back(subExecParam[i].src[0]);
+          rss.batchDsts.push_back(subExecParam[i].dst[j]);
+          rss.batchBytes.push_back(subExecParam[i].N * sizeof(float));
+        }
+      }
+    }
+#endif
+
     // Clear counters
     rss.totalDurationMsec = 0.0;
 
@@ -3803,27 +3955,53 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
-      // mem rank exports to sharable fabric handle
-      hipMemFabricHandle_t fabricHandle;
+      // mem rank exports to shareable fabric handle; broadcast handle + status so all
+      // ranks fail together instead of hanging on the next collective if export fails
+      hipMemFabricHandle_t fabricHandle = {};
+      hipError_t exportErr = hipSuccess;
+      const char* exportStep = "hipSetDevice";
       if (memDevice.memRank == GetRank()) {
-        ERR_CHECK(hipSetDevice(memDevice.memIndex));
-        ERR_CHECK(hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0));
+        exportErr = hipSetDevice(memDevice.memIndex);
+        if (exportErr == hipSuccess) {
+          exportStep = "hipMemExportToShareableHandle";
+          exportErr = hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0);
+        }
       }
 
       System::Get().Broadcast(memDevice.memRank, sizeof(hipMemFabricHandle_t), &fabricHandle);
+      System::Get().Broadcast(memDevice.memRank, sizeof(hipError_t), &exportErr);
+      if (exportErr != hipSuccess) {
+        return {ERR_FATAL, "HIP Error in %s during fabric handle export: %s", exportStep, hipGetErrorString(exportErr)};
+      }
 
-      // exe rank imports the fabric handle
+      // exe rank imports the fabric handle; broadcast result so all ranks fail together
+      hipError_t importErr = hipSuccess;
+      const char* importStep = "hipSetDevice";
       if (exeDevice.exeRank == GetRank()) {
-        ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
-        ERR_CHECK(hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric));
-        ERR_CHECK(hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0));
-        ERR_CHECK(hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0));
-
-        // Specify memory access descriptor to enable local read/write
-        hipMemAccessDesc desc;
-        desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
-        desc.flags = hipMemAccessFlagsProtReadWrite;
-        ERR_CHECK(hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1));
+        importErr = hipSetDevice(exeDevice.exeIndex);
+        if (importErr == hipSuccess) {
+          importStep = "hipMemImportFromShareableHandle";
+          importErr = hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric);
+        }
+        if (importErr == hipSuccess) {
+          importStep = "hipMemAddressReserve";
+          importErr = hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0);
+        }
+        if (importErr == hipSuccess) {
+          importStep = "hipMemMap";
+          importErr = hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0);
+        }
+        if (importErr == hipSuccess) {
+          importStep = "hipMemSetAccess";
+          hipMemAccessDesc desc;
+          desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
+          desc.flags = hipMemAccessFlagsProtReadWrite;
+          importErr = hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1);
+        }
+      }
+      System::Get().Broadcast(exeDevice.exeRank, sizeof(hipError_t), &importErr);
+      if (importErr != hipSuccess) {
+        return {ERR_FATAL, "HIP Error in %s during fabric handle import: %s", importStep, hipGetErrorString(importErr)};
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
@@ -3919,8 +4097,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
         info.size = sizeof(info);
-        ERR_CHECK(hsa_amd_pointer_info(rss.dstMem[0], &info, NULL, NULL, NULL));
-        rss.dstAgent = info.agentOwner;
+        int numDst = (int)rss.dstMem.size();
+        rss.dstAgent.resize(numDst);
+        for (int dstIdx = 0; dstIdx < numDst; dstIdx++) {
+          ERR_CHECK(hsa_amd_pointer_info(rss.dstMem[dstIdx], &info, NULL, NULL, NULL));
+          rss.dstAgent[dstIdx] = info.agentOwner;
+        }
 
         ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
         rss.srcAgent = info.agentOwner;
@@ -3938,11 +4120,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Prepare additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
+        && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
-      int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA ||
+      int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
                                   (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
                                   ? exeInfo.resources.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
@@ -4140,7 +4323,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Teardown additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA) && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
+        && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
@@ -4674,15 +4858,23 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2), \
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float4)}
 
-#define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND)    \
-  {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 1),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 2),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 3),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 4),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 5),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 6),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 7),      \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 8)}
+#define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND) \
+  {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  1),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  2),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  3),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  4),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  5),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  6),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  7),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  8),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  9),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 10),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 11),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 12),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 13),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 14),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 15),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 16)}
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
@@ -4878,22 +5070,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
+    int numDsts = (int)resources.dstMem.size();
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
 
+      // Force the use of SDMA engine if possible
+#if defined(__HIP_PLATFORM_AMD__) && defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR >= 6)
+      hipMemcpyKind memcpyKind = hipMemcpyDeviceToDeviceNoCU;
+#endif
+
       // Use DMA copy engine
       do {
+        // Queue for each output location
+        for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
 #if defined(__NVCC__)
-        ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[0],
-                                (CUdeviceptr)resources.srcMem[0],
-                                resources.numBytes, stream));
+          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[dstIdx],
+                                  (CUdeviceptr)resources.srcMem[0],
+                                  resources.numBytes, stream));
 #else
-        ERR_CHECK(hipMemcpyAsync(resources.dstMem[0], resources.srcMem[0], resources.numBytes,
-                                 hipMemcpyDefault, stream));
+          ERR_CHECK(hipMemcpyAsync(resources.dstMem[dstIdx], resources.srcMem[0], resources.numBytes,
+                                   memcpyKind, stream));
 #endif
+        }
       } while (++subIterations != cfg.general.numSubIterations);
 
       if (cfg.dma.useHipEvents)
@@ -4905,20 +5106,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #else
       // Use HSA async copy
       do {
-        hsa_signal_store_screlease(resources.signal, 1);
-        if (!useSubIndices) {
-          ERR_CHECK(hsa_amd_memory_async_copy(resources.dstMem[0], resources.dstAgent,
-                                              resources.srcMem[0], resources.srcAgent,
-                                              resources.numBytes, 0, NULL,
-                                              resources.signal));
-        } else {
-          HSA_CALL(hsa_amd_memory_async_copy_on_engine(resources.dstMem[0], resources.dstAgent,
-                                                       resources.srcMem[0], resources.srcAgent,
-                                                       resources.numBytes, 0, NULL,
-                                                       resources.signal,
-                                                       resources.sdmaEngineId, true));
+        hsa_signal_store_screlease(resources.signal, numDsts);
+        for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+          if (!useSubIndices) {
+            ERR_CHECK(hsa_amd_memory_async_copy(resources.dstMem[dstIdx], resources.dstAgent[dstIdx],
+                                                resources.srcMem[0], resources.srcAgent,
+                                                resources.numBytes, 0, NULL,
+                                                resources.signal));
+          } else {
+            HSA_CALL(hsa_amd_memory_async_copy_on_engine(resources.dstMem[dstIdx], resources.dstAgent[dstIdx],
+                                                         resources.srcMem[0], resources.srcAgent,
+                                                         resources.numBytes, 0, NULL,
+                                                         resources.signal,
+                                                         resources.sdmaEngineId, true));
+          }
         }
-        // Wait for SDMA transfer to complete
+        // Wait for SDMA transfer(s) to complete
         while(hsa_signal_wait_scacquire(resources.signal,
                                         HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
                                         HSA_WAIT_STATE_ACTIVE) >= 1);
@@ -4975,6 +5178,93 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+// BMA Executor-related functions
+//========================================================================================
+#ifdef BMA_EXEC_ENABLED
+  // Execute a single BMA Transfer (one hipMemcpyBatchAsync per sub-iteration; each subexecutor is one batch entry)
+  static ErrResult ExecuteBatchDmaTransfer(int           const  iteration,
+                                           int           const  exeIndex,
+                                           hipStream_t   const  stream,
+                                           hipEvent_t    const  startEvent,
+                                           hipEvent_t    const  stopEvent,
+                                           ConfigOptions const& cfg,
+                                           TransferResources&   resources)
+  {
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    ERR_CHECK(hipSetDevice(exeIndex));
+
+    int subIterations = 0;
+    if (cfg.dma.useHipEvents)
+      ERR_CHECK(hipEventRecord(startEvent, stream));
+
+    [[maybe_unused]] size_t failIdx = 0;
+    do {
+      ERR_CHECK(hipMemcpyBatchAsync(resources.batchDsts.data(),
+                                    resources.batchSrcs.data(),
+                                    resources.batchBytes.data(),
+                                    resources.batchDsts.size(),
+                                    nullptr, nullptr, 0,
+    // In CUDA 13.0 the failIdx argument was removed from the original CUDA 12.8 API call
+#if !defined(__NVCC__) || (defined(CUDA_VERSION) && (CUDA_VERSION < 13000))
+                                    &failIdx,
+#endif
+                                    stream));
+    } while (++subIterations != cfg.general.numSubIterations);
+
+    if (cfg.dma.useHipEvents)
+      ERR_CHECK(hipEventRecord(stopEvent, stream));
+    ERR_CHECK(hipStreamSynchronize(stream));
+
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+
+    if (iteration >= 0) {
+      double deltaMsec = cpuDeltaMsec;
+      if (cfg.dma.useHipEvents) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
+      }
+      resources.totalDurationMsec += deltaMsec;
+      if (cfg.general.recordPerIteration)
+        resources.perIterMsec.push_back(deltaMsec);
+    }
+    return ERR_NONE;
+  }
+
+  static ErrResult RunBmaExecutor(int           const  iteration,
+                                  ConfigOptions const& cfg,
+                                  int           const  exeIndex,
+                                  ExeInfo&             exeInfo)
+  {
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    ERR_CHECK(hipSetDevice(exeIndex));
+
+    vector<std::future<ErrResult>> asyncTransfers;
+    for (int i = 0; i < exeInfo.resources.size(); i++) {
+      asyncTransfers.emplace_back(std::async(std::launch::async,
+                                             ExecuteBatchDmaTransfer,
+                                             iteration,
+                                             exeIndex,
+                                             exeInfo.streams[i],
+                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                             std::cref(cfg),
+                                             std::ref(exeInfo.resources[i])));
+    }
+
+    for (auto& asyncTransfer : asyncTransfers)
+      ERR_CHECK(asyncTransfer.get());
+
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+    if (iteration >= 0)
+      exeInfo.totalDurationMsec += deltaMsec;
+    return ERR_NONE;
+  }
+#endif // BMA_EXEC_ENABLED
+
 // Executor-related functions
 //========================================================================================
   static ErrResult RunExecutor(int           const  iteration,
@@ -4983,13 +5273,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                ExeInfo&             exeInfo)
   {
     switch (exeDevice.exeType) {
-    case EXE_CPU:     return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-    case EXE_GPU_GFX: return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-    case EXE_GPU_DMA: return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_CPU:           return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef NIC_EXEC_ENABLED
-    case EXE_NIC:     return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
-    default:          return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
+#ifdef BMA_EXEC_ENABLED
+    case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+#endif
+    default:            return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
   }
 
@@ -5594,7 +5887,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
         return result;
-      case EXE_GPU_GFX: case EXE_GPU_DMA:
+      case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
       {
         // Iterate over all available subindices
         ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
@@ -6243,12 +6536,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #ifdef AMD_SMI_ENABLED
     int numGpus = 0;
     if (hipGetDeviceCount(&numGpus) == hipSuccess && numGpus > 0) {
-      // Get a AMD SMI processor handle to the first GPU (if it exists) based on PCI bus ID
+      // Query GPU 0 as the representative for pod membership. All GPUs on a node are
+      // expected to share the same pod (ppod_id/vpod_id), so querying any one is sufficient.
       char pciBusId[256] = "";
-      hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
+      hipError_t hipErr = hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
+      if (hipErr != hipSuccess) {
+        if (verbose) {
+          Log("[WARN] Unable to get PCI bus ID for GPU 0; skipping AMD-SMI pod membership query\n");
+        }
+        return;
+      }
+
+      amdsmi_bdf_t bdf = {};
+      unsigned domain, bus, device, func;
+      if (sscanf(pciBusId, "%x:%x:%x.%x", &domain, &bus, &device, &func) != 4) {
+        if (verbose) {
+          Log("[WARN] Unable to parse PCI bus ID '%s'; skipping AMD-SMI pod membership query\n", pciBusId);
+        }
+        return;
+      }
+      bdf.domain_number   = domain;
+      bdf.bus_number      = bus;
+      bdf.device_number   = device;
+      bdf.function_number = func;
 
       amdsmi_processor_handle gpuHandle;
-      amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(pciBusId, &gpuHandle);
+      amdsmi_status_t err = amdsmi_get_processor_handle_from_bdf(bdf, &gpuHandle);
       if (err != AMDSMI_STATUS_SUCCESS) {
         if (verbose) {
           const char *errString = NULL;
@@ -6260,10 +6573,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         amdsmi_fabric_info_t fabricInfo;
         err = amdsmi_get_gpu_fabric_info(gpuHandle, &fabricInfo);
         if (err == AMDSMI_STATUS_SUCCESS) {
-          // NOTE: vpod_id is a uint32_t but System holds it as a int64_t to alllow for
+          // NOTE: vpod_id is a uint32_t but System holds it as an int64_t to allow for
           //       vpodId == -1 to represent no pod present
-          memcpy(ppodId, &fabricInfo.info.v1.ppod_id, sizeof(fabricInfo.info.v1.ppod_id));
-          vpodId = fabricInfo.info.v1.vpod_id;
+          memcpy(ppodId, &fabricInfo.fabric_info.fabric_version.v1.ppod_id,
+                 sizeof(fabricInfo.fabric_info.fabric_version.v1.ppod_id));
+          vpodId = fabricInfo.fabric_info.fabric_version.v1.vpod_id;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
@@ -6323,6 +6637,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (status != hipSuccess) numGpus = 0;
     topo.numExecutors[EXE_GPU_GFX] = numGpus;
     topo.numExecutors[EXE_GPU_DMA] = numGpus;
+    topo.numExecutors[EXE_GPU_BDMA] = numGpus;
 
     for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
       int numDeviceCUs  = 0;
@@ -6341,6 +6656,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_BDMA, exeIndex}] = gpuName;
 
 #if !defined(__NVCC__)
       hsa_agent_t gpuAgent = gpuAgents[exeIndex];
@@ -6369,8 +6685,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}] = numXccs;
       topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
+      topo.numExecutorSubIndices[{EXE_GPU_BDMA, exeIndex}] = 0;
       topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
       topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
+      topo.numSubExecutors[{EXE_GPU_BDMA, exeIndex}] = numDmaEngines;
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
     }
@@ -6743,7 +7061,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         } else {
           BROADCAST(setSize);
           tfrResult.perIterCUs[i].clear();
-          if (setSize > 0) {
+          for (size_t j = 0; j < setSize; j++) {
             pair<int, int> p;
             BROADCAST(p);
             tfrResult.perIterCUs[i].insert(p);
@@ -6790,7 +7108,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
       agent = cpuAgents[exeDevice.exeIndex];
       break;
-    case EXE_GPU_GFX: case EXE_GPU_DMA:
+    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
@@ -7149,6 +7467,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #undef hipErrorPeerAccessAlreadyEnabled
 #undef hipFuncCachePreferShared
 #undef hipMemcpyDefault
+#undef hipMemcpyKind
 #undef hipMemcpyDeviceToHost
 #undef hipMemcpyHostToDevice
 #undef hipSuccess
@@ -7200,7 +7519,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 // Kernel macros
 #undef GetHwId
-#undef GetXccId
+//#undef GetXccId
 
 // Undefine helper macros
 #undef ERR_CHECK

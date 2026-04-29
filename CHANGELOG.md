@@ -14,22 +14,28 @@ Documentation for TransferBench is available at
 - Adding NIC_CQ_POLL_BATCH to control CQ poll batch size for NIC transfers
 - New "hbm" preset which sweeps and tests local HBM read performance
 - Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
-- Adding nica2a preset (NIC all-to-all over GPUs via NIC executors, multi-node): stride/device grouping and NIC planes.
-  - `STRIDE` — Step size for stride orbits on rank-major devices (`gcd` with total device count); no traffic between different orbits.
-  - `GROUP_SIZE` — Devices per subgroup inside each stride orbit (natural rank-major order); must divide orbit size (default: orbit size, i.e., `M / gcd(STRIDE, M)`). Changing `STRIDE` without setting `GROUP_SIZE` is safe — the default tracks the orbit size automatically.
-  - `NIC_A2A_SCOPE` — `intra`: transfers only within the same device subgroup; `inter`: only between different subgroups (same stride orbit only).
-  - `NIC_A2A_NO_SAME_RANK` — When non-zero, omit transfers where source and destination are the same rank.
-  - `NUM_NIC_PLANES` — Split NIC endpoints into this many disjoint planes (rank-major index modulo planes); traffic only between NICs in the same plane.
+- Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.1 / CUDA 12.8
+- Added new "bmasweep" preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
+- Added new "wallclock" preset that compares wallclock counters across XCCs within a GPU
+- Added new "smoketest" preset that runs a variety of DMA/GFX tests for simple correctness tests
+- Adding new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)
+- Added new "help" preset to show config file examples
+- Added new "presets" preset to show available presets and their descriptions
+- Added new "envvars" preset to show environment variables that can change TransferBench behavior
+- Adding information on how to run multi-rank with TransferBench, when run with no args
 
 ### Modified
-  - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
-  - Adding extra information to CMake and make build methods to indicate enabled / disabled features
-  - a2asweep preset changes from USE_FINE_GRAIN to MEM_TYPE to reflect various memory types
-  - a2asweep preset changes from NUM_CUS to NUM_SUB_EXECS to match with a2a preset naming convention
-  - scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
-  - NIC_FILTER renamed to TB_NIC_FILTER for consistency
-  - DUMP_LINES renamed to TB_DUMP_LINES for consistency
-  - Dynamically size CQs for NIC transfers in high QPs case
+- DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
+- Adding extra information to CMake and make build methods to indicate enabled / disabled features
+- a2asweep preset changes from USE_FINE_GRAIN to MEM_TYPE to reflect various memory types
+- a2asweep preset changes from NUM_CUS to NUM_SUB_EXECS to match with a2a preset naming convention
+- scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
+- NIC_FILTER renamed to TB_NIC_FILTER for consistency
+- DUMP_LINES renamed to TB_DUMP_LINES for consistency
+- Dynamically size CQs for NIC transfers in high QPs case
+- Switch to using hipMemcpyDeviceToDeviceNoCU instead of hipMemcpyDefault for DMA Executor if available (requires HIP >= 6.0)
+- Allow for multiple destination memory locations for DMA/Batched-DMA Transfers
+- Removed env vars printing and preset print when running TransferBench with no args
 
 ## v1.66.02
 ### Added
