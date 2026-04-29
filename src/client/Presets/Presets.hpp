@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include "HbmBandwidth.hpp"
 #include "HealthCheck.hpp"
 #include "Help.hpp"
+#include "NicAllToAll.hpp"
 #include "NicRings.hpp"
 #include "NicPeerToPeer.hpp"
 #include "OneToAll.hpp"
@@ -72,8 +73,9 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
   {"help",        {HelpPreset,          "Shows example usage details"}},
-  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
+  {"nica2a",      {NicAllToAllPreset,   "All-to-all GPU traffic over NIC transfers using each NIC's closest GPU/CPU endpoint"}},
   {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
+  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"poda2a",      {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},
