@@ -5453,8 +5453,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
-            if (IsGpuMemType(t.srcs[srcIdx].memType))
+            if (IsGpuMemType(t.srcs[srcIdx].memType)) {
               ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
+            }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
           }
