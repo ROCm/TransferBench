@@ -51,7 +51,7 @@ int GfxSweepPreset(EnvVars&          ev,
       ev.Print("NUM_TRANSFERS",  numTransfers,         "Number of Transfers specified in GFX_TRANSFER");
       ev.Print("NUM_SUB_EXECS",  numSesList.size(),    EnvVars::ToStr(numSesList).c_str());
       ev.Print("TEMPORAL_MODES", temporalList.size(),  EnvVars::ToStr(temporalList).c_str());
-      ev.Print("TIMING_MODE",    timingMode,           "0=Aggregate CPU, 1=Executor Time, 2=Transfer Time");
+      ev.Print("TIMING_MODE",    timingMode,           "-1=auto 0=Aggregate CPU, 1=Executor Time, 2=Transfer Time");
       ev.Print("UNROLLS",        unrollList.size(),    EnvVars::ToStr(unrollList).c_str());
       ev.Print("WAVE_ORDERS",    waveOrderList.size(), EnvVars::ToStr(waveOrderList).c_str());
       ev.Print("WORDSIZES",      wordSizeList.size(),  EnvVars::ToStr(wordSizeList).c_str());
@@ -59,8 +59,17 @@ int GfxSweepPreset(EnvVars&          ev,
     }
   }
 
+  if (numSesList.empty()){
+    Utils::Print("NUM_SUB_EXECS should not be empty\n");
+    return 1;
+  }
+
   std::vector<Transfer> transfers;
   Utils::CheckForError(ParseTransfers(std::to_string(numTransfers) + " 1 " + transferStr, transfers));
+  if (transfers.size() == 0) {
+    Utils::Print("[WARN] No valid Transfers found in GFX_TRANSFER\n");
+    return 0;
+  }
 
   // Automatically pick timing method
   if (timingMode == -1) {
@@ -69,7 +78,7 @@ int GfxSweepPreset(EnvVars&          ev,
     // Use Executor timing if there is only one executor
     else {
       bool singleExecutor = true;
-      for (auto i = 1; i < transfers.size(); i++) {
+      for (size_t i = 1; i < transfers.size(); i++) {
         if (transfers[i].exeDevice   <  transfers[0].exeDevice   ||
             transfers[0].exeDevice   <  transfers[i].exeDevice   ||
             transfers[i].exeSubIndex != transfers[0].exeSubIndex ||
@@ -80,6 +89,10 @@ int GfxSweepPreset(EnvVars&          ev,
       }
       timingMode = singleExecutor ? 1 : 0;
     }
+  }
+  if (timingMode < 0 || timingMode > 2) {
+    Utils::Print("[ERROR] Invalid timing mode %d\n", timingMode);
+    return 1;
   }
 
   // Print out the Transfers being run
@@ -186,9 +199,17 @@ int GfxSweepPreset(EnvVars&          ev,
   }
   Utils::Print("\n");
 
+  if (bestSe == -1) {
+    Utils::Print("[WARN] No transfers executed - make sure sweep parameters lists are not empty\n");
+    return 1;
+  }
+
   // Print combination that produced highest bandwidth
   Utils::Print("=======================================================================================\n");
-  Utils::Print("Highest bandwidth found: %7.2f GB/s (CPU-timed)\n", overallBestBw);
+  Utils::Print("Highest bandwidth found: %7.2f GB/s (%s-timed)\n", overallBestBw,
+               timingMode == 0 ? "Aggregate-CPU" :
+               timingMode == 1 ? "HIP-event"     :
+                                 "GPU wallclock");
   Utils::Print("          WaveOrder    : %7d  [GFX_WAVE_ORDER=%d]\n", best[bestSe][0], best[bestSe][0]);
   Utils::Print("          WordSize     : %7d  [GFX_WORD_SIZE=%d]\n",  best[bestSe][1], best[bestSe][1]);
   Utils::Print("          Temporal Mode: %7d  [GFX_TEMPORAL=%d]\n",   best[bestSe][2], best[bestSe][2]);

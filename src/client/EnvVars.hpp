@@ -335,7 +335,7 @@ public:
     printf(" GFX_KERNEL          - -1=auto, 0=force GpuReduceKernel, 1=force GpuCopyKernel (may error if ineligible)\n");
     printf(" GFX_SE_TYPE         - SubExecutor granularity type (0=threadblock, 1=warp)\n");
     printf(" GFX_TEMPORAL        - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
-    printf(" GFX_UNROLL          - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
+    printf(" GFX_UNROLL          - Unroll factor for GFX kernel\n");
     printf(" GFX_SINGLE_TEAM     - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER      - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
     printf(" GFX_WORD_SIZE       - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
@@ -438,7 +438,8 @@ public:
           "Threadblock size of %d", gfxBlockSize);
     Print("GFX_KERNEL", gfxKernel,
           "%s", gfxKernel == -1 ? "auto" :
-                gfxKernel == 0 ? "force GpuReduceKernel" : "force GpuCopyKernel");
+                gfxKernel ==  0 ? "force GpuReduceKernel" :
+                gfxKernel ==  1 ? "force GpuCopyKernel"   : "unknown");
     Print("GFX_SE_TYPE", gfxSeType,
           "SubExecutor granularity: %s", gfxSeType == 0 ? "Threadblock" : "Warp");
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
