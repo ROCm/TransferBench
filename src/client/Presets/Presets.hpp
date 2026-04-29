@@ -66,7 +66,6 @@ std::map<std::string, PresetInfo> presetFuncMap =
 {
   {"a2a",         {AllToAllPreset,      "Tests parallel transfers between all pairs of GPU devices"}},
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
-  {"nica2a",      {NicAllToAllPreset,   "All-to-all GPU traffic over NIC transfers using each NIC's closest GPU endpoint"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"bmasweep",    {BmaSweepPreset,      "Test and compare batched DMA executor for multi destination copies"}},
   {"envvars",     {EnvVarsPreset,       "Show list of environment variables that can be used to modify behavior"}},
@@ -74,8 +73,9 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
   {"healthcheck", {HealthCheckPreset,   "Simple bandwidth health check (MI300X series only)"}},
   {"help",        {HelpPreset,          "Shows example usage details"}},
-  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
+  {"nica2a",      {NicAllToAllPreset,   "All-to-all GPU traffic over NIC transfers using each NIC's closest GPU/CPU endpoint"}},
   {"nicp2p",      {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
+  {"nicrings",    {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
   {"one2all",     {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
   {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"poda2a",      {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},

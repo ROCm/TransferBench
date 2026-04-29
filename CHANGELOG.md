@@ -18,11 +18,11 @@ Documentation for TransferBench is available at
 - Added new "bmasweep" preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
 - Added new "wallclock" preset that compares wallclock counters across XCCs within a GPU
 - Added new "smoketest" preset that runs a variety of DMA/GFX tests for simple correctness tests
-- Adding new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)
 - Added new "help" preset to show config file examples
 - Added new "presets" preset to show available presets and their descriptions
 - Added new "envvars" preset to show environment variables that can change TransferBench behavior
 - Adding information on how to run multi-rank with TransferBench, when run with no args
+- Added new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)
 
 ### Modified
 - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options

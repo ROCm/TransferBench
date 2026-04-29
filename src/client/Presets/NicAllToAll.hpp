@@ -21,6 +21,7 @@ THE SOFTWARE.
 */
 
 #include <cstring>
+#include <limits>
 #include <numeric>
 
 int NicAllToAllPreset(EnvVars&                    ev,
@@ -174,13 +175,6 @@ int NicAllToAllPreset(EnvVars&                    ev,
   };
 
   std::vector<Transfer> transfers;
-  std::vector<int> srcRanks;
-  std::vector<int> srcNics;
-  std::vector<int> dstRanks;
-  size_t const maxPairs = (size_t)numNicsPerRank * numNicsPerRank * (size_t)numRanks * (size_t)numRanks;
-  srcRanks.reserve(maxPairs);
-  srcNics.reserve(maxPairs);
-  dstRanks.reserve(maxPairs);
 
   auto const acceptPair = [&](int srcRank, int srcNic, int dstRank, int dstNic) -> bool {
     if (nicPlaneOf(srcRank, srcNic) != nicPlaneOf(dstRank, dstNic))
@@ -214,9 +208,6 @@ int NicAllToAllPreset(EnvVars&                    ev,
           transfer.numBytes    = numBytesPerTransfer;
 
           transfers.push_back(transfer);
-          srcRanks.push_back(srcRank);
-          srcNics.push_back(srcNic);
-          dstRanks.push_back(dstRank);
         }
       }
     }
@@ -278,8 +269,21 @@ int NicAllToAllPreset(EnvVars&                    ev,
   std::vector<std::vector<double>> bwByRankNic(numRanks, std::vector<double>(numNicsPerRank, 0.0));
   for (size_t i = 0; i < results.tfrResults.size(); i++) {
     int nicIdx  = results.tfrResults[i].exeDevice.exeIndex;
-    int rankIdx = useRdmaRead ? dstRanks[i] : srcRanks[i];
+    int rankIdx = results.tfrResults[i].exeDevice.exeRank;
     bwByRankNic[rankIdx][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
+  }
+
+  std::vector<bool> nicHasMixedMemMapping(numNicsPerRank, false);
+  bool hasMixedMemMapping = false;
+  for (int nic = 0; nic < numNicsPerRank; nic++) {
+    int refMem = nicToMem[0][nic];
+    for (int rank = 1; rank < numRanks; rank++) {
+      if (nicToMem[rank][nic] != refMem) {
+        nicHasMixedMemMapping[nic] = true;
+        hasMixedMemMapping = true;
+        break;
+      }
+    }
   }
 
   std::vector<double> rankTotal(numRanks, 0.0);
@@ -287,7 +291,9 @@ int NicAllToAllPreset(EnvVars&                    ev,
   table.DrawColBorder(colIdx);
   for (int nic = 0; nic < numNicsPerRank; nic++) {
     table.Set(0, colIdx, " NIC %02d ", nic);
-    if (useCpuMem) {
+    if (nicHasMixedMemMapping[nic]) {
+      table.Set(1, colIdx, " MIXED ");
+    } else if (useCpuMem) {
       table.Set(1, colIdx, " CPU %02d ", nicToMem[0][nic]);
     } else {
       table.Set(1, colIdx, " GPU %02d ", nicToMem[0][nic]);
@@ -328,6 +334,35 @@ int NicAllToAllPreset(EnvVars&                    ev,
 
   table.PrintTable(ev.outputToCsv, ev.showBorders);
   Utils::Print("\n");
+  if (hasMixedMemMapping) {
+    Utils::Print("[WARN] NIC-to-%s mapping differs across ranks. 'MIXED' columns are detailed below.\n",
+                 useCpuMem ? "CPU" : "GPU");
+
+    int mapRows = 2 + numRanks;
+    int mapCols = 2 + numNicsPerRank;
+    Utils::TableHelper mapTable(mapRows, mapCols);
+    mapTable.Set(0, 0, " Rank ");
+    mapTable.Set(0, 1, " Name ");
+    mapTable.SetColAlignment(1, Utils::TableHelper::ALIGN_LEFT);
+    for (int nic = 0; nic < numNicsPerRank; nic++) {
+      mapTable.Set(0, 2 + nic, " NIC %02d ", nic);
+      mapTable.SetCellAlignment(0, 2 + nic, Utils::TableHelper::ALIGN_CENTER);
+    }
+    mapTable.DrawRowBorder(1);
+    mapTable.DrawColBorder(2);
+
+    for (int rank = 0; rank < numRanks; rank++) {
+      int rowIdx = 1 + rank;
+      mapTable.Set(rowIdx, 0, " %d ", rank);
+      mapTable.Set(rowIdx, 1, " %s ", TransferBench::GetHostname(rank).c_str());
+      for (int nic = 0; nic < numNicsPerRank; nic++) {
+        mapTable.Set(rowIdx, 2 + nic, " %s %02d ", useCpuMem ? "CPU" : "GPU", nicToMem[rank][nic]);
+      }
+    }
+
+    mapTable.PrintTable(ev.outputToCsv, ev.showBorders);
+    Utils::Print("\n");
+  }
   Utils::Print("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
   Utils::PrintErrors(results.errResults);
 
