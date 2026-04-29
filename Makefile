@@ -13,6 +13,8 @@ MPI_PATH  ?= /usr/local/openmpi
 # DISABLE_DMA_BUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
 # DISABLE_AMD_SMI: Disable AMD-SMI pod membership checking support (default: 0)
 # DISABLE_NVML: Disable NVML pod membership detection for CUDA builds (default: 0)
+# DISABLE_POD_COMM: Disable pod communication support (default: 0)
+# DISABLE_CUMEM: Disable CUDA driver API (default: 0). On CUDA, POD_COMM_ENABLED requires CUMEM_ENABLED.
 
 HIPCC ?= $(ROCM_PATH)/bin/amdclang++
 NVCC ?= $(CUDA_PATH)/bin/nvcc
@@ -177,6 +179,18 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     endif
   endif
 
+  # TransferBenchCuda: CUDA driver API (libcuda). Independent of POD, but POD on CUDA requires CUMEM.
+  DISABLE_CUMEM ?= 0
+  ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+    ifneq ($(DISABLE_CUMEM),1)
+      $(info - Building with CUMEM_ENABLED (CUDA driver API, -lcuda))
+      COMMON_FLAGS += -DCUMEM_ENABLED
+      LDFLAGS += -lcuda
+    else
+      $(info - CUDA driver API disabled (DISABLE_CUMEM=1); POD comm unavailable on CUDA)
+    endif
+  endif
+
   POD_ENABLED = 0
   AMD_SMI_ENABLED = 0
   # Compile with pod support if
@@ -208,9 +222,12 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
 
       ifeq ($(CUDA_VERSION_OK),yes)
         $(info - Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which has MNNVL support)
-        COMMON_FLAGS += -DPOD_COMM_ENABLED
-        LDFLAGS += -lcuda
-        POD_ENABLED = 1
+        ifeq ($(DISABLE_CUMEM),1)
+          $(info - Pod communication skipped on CUDA: requires CUMEM_ENABLED (DISABLE_CUMEM=1))
+        else
+          COMMON_FLAGS += -DPOD_COMM_ENABLED
+          POD_ENABLED = 1
+        endif
       else
         $(info - Detected CUDA version $(CUDA_MAJOR).$(CUDA_MINOR) which does not have MNNVL support)
         $(info - Pod support will require CUDA version of at least $(CUDA_MIN_MAJOR).$(CUDA_MIN_MINOR))

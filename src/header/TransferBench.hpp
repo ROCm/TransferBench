@@ -5080,7 +5080,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         // Queue for each output location
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-#if defined(__NVCC__)
+#if defined(CUMEM_ENABLED)
           ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[dstIdx],
                                   (CUdeviceptr)resources.srcMem[0],
                                   resources.numBytes, stream));
@@ -5314,7 +5314,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#if defined(__NVCC__)
+#if !defined(__NVCC__)
+  ErrResult::ErrResult(hsa_status_t err)
+  {
+    if (err == HSA_STATUS_SUCCESS) {
+      this->errType = ERR_NONE;
+      this->errMsg  = "";
+    } else {
+      const char *errString = NULL;
+      hsa_status_string(err, &errString);
+      this->errType = ERR_FATAL;
+      this->errMsg  = std::string("HSA Error: ") + errString;
+    }
+  }
+#elif defined(CUMEM_ENABLED)
   ErrResult::ErrResult(CUresult err)
   {
     if (err == CUDA_SUCCESS) {
@@ -5327,19 +5340,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       this->errType = ERR_FATAL;
       this->errMsg  = std::string("CUDA Driver Error: ") + errName
                       + " (" + errString + ")";
-    }
-  }
-#else
-  ErrResult::ErrResult(hsa_status_t err)
-  {
-    if (err == HSA_STATUS_SUCCESS) {
-      this->errType = ERR_NONE;
-      this->errMsg  = "";
-    } else {
-      const char *errString = NULL;
-      hsa_status_string(err, &errString);
-      this->errType = ERR_FATAL;
-      this->errMsg  = std::string("HSA Error: ") + errString;
     }
   }
 #endif
@@ -6136,7 +6136,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 #ifdef AMD_SMI_ENABLED
     amdsmi_shut_down();
-#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+#elif defined(NVML_ENABLED)
     nvmlShutdown();
 #endif
   }
