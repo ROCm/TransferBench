@@ -35,6 +35,8 @@ THE SOFTWARE.
   } while (0)
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <numa.h>
 #include <random>
@@ -87,18 +89,19 @@ public:
   int useHsaDma;                     // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
 
   // GFX options
+  vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
   int gfxBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
   int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
-  vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
-  vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int gfxKernel;                     // GFX Kernel to use (-1=auto, 0=reduce, 1=copy-only)
   int gfxSeType;                     // GFX subexecutor type (0=threadblock, 1=warp)
+  int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxTemporal;                   // Non-temporal load/store mode (0=none, 1=load, 2=store, 3=both)
   int gfxUnroll;                     // GFX-kernel unroll factor
-  int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
-  int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
-  int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxWaveOrder;                  // GFX-kernel wavefront ordering
   int gfxWordSize;                   // GFX-kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)
+  vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
+  int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
 
   // Client options
   int hideEnv;                       // Skip printing environment variable
@@ -147,6 +150,7 @@ public:
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
     gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
+    gfxKernel         = GetEnvVar("GFX_KERNEL"          , 0);
     gfxSeType         = GetEnvVar("GFX_SE_TYPE"         , 0);
     gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
     gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
@@ -328,6 +332,7 @@ public:
     printf(" FILL_PATTERN        - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
     printf(" GFX_BLOCK_ORDER     - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
     printf(" GFX_BLOCK_SIZE      - # of threads per threadblock (Must be multiple of 64)\n");
+    printf(" GFX_KERNEL          - -1=auto, 0=force GpuReduceKernel, 1=force GpuCopyKernel (may error if ineligible)\n");
     printf(" GFX_SE_TYPE         - SubExecutor granularity type (0=threadblock, 1=warp)\n");
     printf(" GFX_TEMPORAL        - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
     printf(" GFX_UNROLL          - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
@@ -431,6 +436,9 @@ public:
           "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential" : "Interleaved");
     Print("GFX_BLOCK_SIZE", gfxBlockSize,
           "Threadblock size of %d", gfxBlockSize);
+    Print("GFX_KERNEL", gfxKernel,
+          "%s", gfxKernel == -1 ? "auto" :
+                gfxKernel == 0 ? "force GpuReduceKernel" : "force GpuCopyKernel");
     Print("GFX_SE_TYPE", gfxSeType,
           "SubExecutor granularity: %s", gfxSeType == 0 ? "Threadblock" : "Warp");
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
@@ -684,6 +692,7 @@ public:
     cfg.gfx.blockOrder             = gfxBlockOrder;
     cfg.gfx.blockSize              = gfxBlockSize;
     cfg.gfx.cuMask                 = cuMask;
+    cfg.gfx.gfxKernel              = gfxKernel;
     cfg.gfx.prefXccTable           = prefXccTable;
     cfg.gfx.seType                 = gfxSeType;
     cfg.gfx.unrollFactor           = gfxUnroll;

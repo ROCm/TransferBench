@@ -272,17 +272,15 @@ int HbmBandwidthPreset(EnvVars&          ev,
     Utils::Print("[ERROR] NUM_BUFFERS must be a positive number (not %d)\n", numBuffers);
     return 1;
   }
+  if (numIterations <= 0) {
+    Utils::Print("[ERROR] NUM_ITERATIONS must be positive (not %d)\n", numIterations);
+    return 1;
+  }
   if (numBuffers > numIterations) {
     Utils::Print("[WARN] NUM_BUFFERS (%d) exceeds NUM_ITERATIONS (%d), so some buffers will not be used\n",
                  numBuffers, numIterations);
     numBuffers = numIterations;
   }
-
-  if (numIterations <= 0) {
-    Utils::Print("[ERROR] NUM_ITERATIONS must be positive (not %d)\n", numIterations);
-    return 1;
-  }
-
 
   if (numSesList.empty()) {
     // By default, use all available sub executors
