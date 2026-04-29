@@ -1460,8 +1460,6 @@ namespace {
     // If memHandle is provided, allocate sharable memory
     if (memHandle != NULL) {
 #ifdef POD_COMM_ENABLED
-      ERR_CHECK(hipSetDevice(deviceIdx));
-      // Prepare HIP memory allocation properties structure
       hipMemAllocationProp prop = {};
       ERR_CHECK(GetMemAllocationProp(memDevice, prop));
 
@@ -4276,13 +4274,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         if (t.srcs[iSrc].memRank == localRank) {
-          ERR_CHECK(hipSetDevice(t.srcs[iSrc].memIndex));
           ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
         } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
 #ifdef POD_COMM_ENABLED
-          ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
           ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
           ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
@@ -4293,13 +4289,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         if (t.dsts[iDst].memRank == localRank) {
-          ERR_CHECK(hipSetDevice(t.dsts[iDst].memIndex));
           ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
         } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
 #ifdef POD_COMM_ENABLED
-          ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
           ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
           ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
@@ -5086,7 +5080,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         // Queue for each output location
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-#if defined(__NVCC__)
+#if defined(CUMEM_ENABLED)
           ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[dstIdx],
                                   (CUdeviceptr)resources.srcMem[0],
                                   resources.numBytes, stream));
@@ -5312,11 +5306,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       this->errMsg  = "";
     } else {
       this->errType = ERR_FATAL;
+#if defined(__NVCC__)
+      this->errMsg  = std::string("CUDA Runtime Error: ") + hipGetErrorString(err);
+#else
       this->errMsg  = std::string("HIP Error: ") + hipGetErrorString(err);
+#endif
     }
   }
 
-#if defined(__NVCC__)
+#if !defined(__NVCC__)
+  ErrResult::ErrResult(hsa_status_t err)
+  {
+    if (err == HSA_STATUS_SUCCESS) {
+      this->errType = ERR_NONE;
+      this->errMsg  = "";
+    } else {
+      const char *errString = NULL;
+      hsa_status_string(err, &errString);
+      this->errType = ERR_FATAL;
+      this->errMsg  = std::string("HSA Error: ") + errString;
+    }
+  }
+#elif defined(CUMEM_ENABLED)
   ErrResult::ErrResult(CUresult err)
   {
     if (err == CUDA_SUCCESS) {
@@ -5329,19 +5340,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       this->errType = ERR_FATAL;
       this->errMsg  = std::string("CUDA Driver Error: ") + errName
                       + " (" + errString + ")";
-    }
-  }
-#else
-  ErrResult::ErrResult(hsa_status_t err)
-  {
-    if (err == HSA_STATUS_SUCCESS) {
-      this->errType = ERR_NONE;
-      this->errMsg  = "";
-    } else {
-      const char *errString = NULL;
-      hsa_status_string(err, &errString);
-      this->errType = ERR_FATAL;
-      this->errMsg  = std::string("HSA Error: ") + errString;
     }
   }
 #endif
@@ -5455,7 +5453,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
-            ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
+            if (IsGpuMemType(t.srcs[srcIdx].memType)) {
+              ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
+            }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
           }
@@ -6137,7 +6137,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 #ifdef AMD_SMI_ENABLED
     amdsmi_shut_down();
-#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+#elif defined(NVML_ENABLED)
     nvmlShutdown();
 #endif
   }
