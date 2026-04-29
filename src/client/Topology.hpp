@@ -299,9 +299,9 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
       // Loop over remaining NICs not associated with GPU but associated with this CPU
       for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
         if (nicClosestGpu[nicIndex] != -1 || nicClosestCpu[nicIndex] != cpuIndex) continue;
-        table.Set(rowIdx, 4, " - NIC %02d ", nicIndex);
-        table.Set(rowIdx, 5, " - %s ", nicNames[nicIndex].c_str());
-        table.Set(rowIdx, 6, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
+        table.Set(rowIdx, 3, " - NIC %02d ", nicIndex);
+        table.Set(rowIdx, 4, " - %s ", nicNames[nicIndex].c_str());
+        table.Set(rowIdx, 5, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
         rowIdx++;
       }
     }
