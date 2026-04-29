@@ -2640,8 +2640,8 @@ namespace {
     int                        teamIdx;           ///< Size of team this sub executor is part of
 
     // Outputs
-    long long                  startCycle;        ///< Start timestamp for in-kernel timing (GPU-GFX executor)
-    long long                  stopCycle;         ///< Stop  timestamp for in-kernel timing (GPU-GFX executor)
+    int64_t                    startCycle;        ///< Start timestamp for in-kernel timing (GPU-GFX executor)
+    int64_t                    stopCycle;         ///< Stop  timestamp for in-kernel timing (GPU-GFX executor)
     uint32_t                   hwId;              ///< Hardware ID
     uint32_t                   xccId;             ///< XCC ID
   };
@@ -3855,7 +3855,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (exeInfo.resources.empty()) return false;
       for (auto const& rss : exeInfo.resources) {
         Transfer const& t = transfers[rss.transferIdx];
-        if (t.srcs.size() != 1 || t.dsts.size() != 1) return false;
+        if (t.srcs.size() > 1 || t.dsts.size() > 1) return false;
         if (cfg.gfx.useSingleTeam && t.numSubExecs > 1) return false;
       }
       return true;
@@ -4851,7 +4851,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     if (shouldRecordTiming) {
-      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5030,7 +5029,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     if (shouldRecordTiming) {
-      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5240,8 +5238,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (!cfg.gfx.useMultiStream) {
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
-          long long minStartCycle = std::numeric_limits<long long>::max();
-          long long maxStopCycle  = std::numeric_limits<long long>::min();
+          int64_t minStartCycle = std::numeric_limits<int64_t>::max();
+          int64_t maxStopCycle  = std::numeric_limits<int64_t>::min();
           std::set<std::pair<int, int>> CUs;
 
           for (auto subExecIdx : rss.subExecIdx) {
@@ -5252,6 +5250,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
             }
           }
+
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
           deltaMsec /= cfg.general.numSubIterations;
           rss.totalDurationMsec += deltaMsec;
