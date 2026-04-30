@@ -23,6 +23,7 @@ Documentation for TransferBench is available at
 - Added new "envvars" preset to show environment variables that can change TransferBench behavior
 - Adding information on how to run multi-rank with TransferBench, when run with no args
 - Added new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)
+- Added new GFX_KERNEL to allow experimenting with copy-only GFX kernel.  Currently this is opt-in only
 
 ### Modified
 - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options

@@ -62,7 +62,7 @@ int PodAllToAllPreset(EnvVars&          ev,
   for (int rank = 0; rank < numRanks; rank++) {
     if (numGpus > TransferBench::GetNumExecutors(EXE_GPU_GFX, rank)) {
       Utils::Print("[ERROR] All-to-All preset requires each rank to have the same number of GPUs\n");
-      return 1;
+      return ERR_FATAL;
     }
     if (numQueuePairs > 0 && numNics != TransferBench::GetNumExecutors(EXE_NIC, rank))
       nicDifference = true;
@@ -79,7 +79,7 @@ int PodAllToAllPreset(EnvVars&          ev,
     a2aMode = EnvVars::GetEnvVar("A2A_MODE", 0);
     if (a2aMode < 0 || a2aMode > 2) {
       Utils::Print("[ERROR] a2aMode must be between 0 and 2, or else numSrcs:numDsts\n");
-      return 1;
+      return ERR_FATAL;
     }
     numSrcs = (a2aMode == A2A_WRITE_ONLY ? 0 : 1);
     numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
@@ -111,16 +111,16 @@ int PodAllToAllPreset(EnvVars&          ev,
   // Validate env vars
   if (numGpus < 0 || numGpus > numDetectedGpus) {
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    return 1;
+    return ERR_FATAL;
   }
   if (useDmaExec && (numSrcs != 1 || numDsts != 1)) {
     Utils::Print("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   if (numRanks * numDetectedGpus % groupSize) {
     Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n", groupSize, numRanks * numDetectedGpus, numRanks);
-    return 1;
+    return ERR_FATAL;
   }
 
   Utils::Print("GPU-%s IntraPod All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
@@ -135,7 +135,7 @@ int PodAllToAllPreset(EnvVars&          ev,
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   if (rankToPod.empty()) {
     Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return 1;
+    return ERR_FATAL;
   }
   for (auto const& [pod, ranks] : rankToPod) {
     int n = ranks.size() * numGpus;
@@ -192,7 +192,7 @@ int PodAllToAllPreset(EnvVars&          ev,
       if (!TransferBench::RunTransfers(cfg, transfers, results)) {
         for (auto const& err : results.errResults)
           Utils::Print("%s\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
       if (showDetails) {
         Utils::PrintResults(ev, 1, transfers, results);
@@ -266,5 +266,5 @@ int PodAllToAllPreset(EnvVars&          ev,
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
 
-  return 0;
+  return ERR_NONE;
 }

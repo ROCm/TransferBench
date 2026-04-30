@@ -153,6 +153,17 @@ namespace TransferBench
   inline bool IsGpuMemType(MemType m) { return (MEM_GPU <= m && m <= MEM_MANAGED);}
 
   /**
+   * Enumeration of supported GFX kernels
+   */
+  enum GfxKernelType
+  {
+    GFX_KERNEL_AUTO   = -1,                     ///< Automatically choose a kernel
+    GFX_KERNEL_REDUCE =  0,                     ///< Default kernel that supports any multiple input/output buffers
+    GFX_KERNEL_COPY   =  1,                     ///< Simpler kernel that supports copies only
+    NUM_GFX_KERNELS   =  2                      ///< Number of GFX kernels currently supported
+  };
+
+  /**
    * A MemDevice indicates a memory type on a specific device
    */
   struct MemDevice
@@ -221,6 +232,7 @@ namespace TransferBench
     int                 blockOrder     = 0;     ///< Determines how threadblocks are ordered (0=sequential, 1=interleaved, 2=random)
     int                 blockSize      = 256;   ///< Size of each threadblock (must be multiple of 64)
     vector<uint32_t>    cuMask         = {};    ///< Bit-vector representing the CU mask
+    int                 gfxKernel      = 0;     ///< Kernel selector: -1=auto, 0=reduce, 1=copy-only
     vector<vector<int>> prefXccTable   = {};    ///< 2D table with preferred XCD to use for a specific [src][dst] GPU device
     int                 seType         = 0;     ///< SubExecutor granularity type (0=threadblock, 1=warp)
     int                 temporalMode   = 0;     ///< Non-temporal load/store mode 0=none, 1=load, 2=store, 3=both
@@ -396,29 +408,10 @@ namespace TransferBench
                     vector<Transfer> const& transfers,
                     TestResults&            results);
 
-  /**
-   * Enumeration of implementation attributes
-   */
-  enum IntAttribute
-  {
-    ATR_GFX_MAX_BLOCKSIZE,                      ///< Maximum blocksize for GFX executor
-    ATR_GFX_MAX_UNROLL,                         ///< Maximum unroll factor for GFX executor
-  };
-
   enum StrAttribute
   {
     ATR_SRC_PREP_DESCRIPTION                    ///< Description of how source memory is prepared
   };
-
-  /**
-   * Query attributes (integer)
-   *
-   * @note This allows querying of implementation information such as limits
-   *
-   * @param[in] attribute   Attribute to query
-   * @returns Value of the attribute
-   */
-  int GetIntAttribute(IntAttribute attribute);
 
   /**
    * Query attributes (string)
@@ -665,9 +658,9 @@ namespace TransferBench
   #define hipStreamCreate                                    cudaStreamCreate
   #define hipStreamDestroy                                   cudaStreamDestroy
   #define hipStreamSynchronize                               cudaStreamSynchronize
-  #define hipMemGetAllocationGranularity                     cuMemGetAllocationGranularity
-  #define hipMemCreate                                       cuMemCreate
   // cu* driver API returns CUresult; cast to cudaError_t so callers can use a single error variable
+#define hipMemGetAllocationGranularity(...)                  ((cudaError_t)cuMemGetAllocationGranularity(__VA_ARGS__))
+  #define hipMemCreate(...)                                  ((cudaError_t)cuMemCreate(__VA_ARGS__))
   #define hipMemAddressReserve(...)                          ((cudaError_t)cuMemAddressReserve(__VA_ARGS__))
   #define hipMemMap(...)                                     ((cudaError_t)cuMemMap(__VA_ARGS__))
   #define hipMemSetAccess(...)                               ((cudaError_t)cuMemSetAccess(__VA_ARGS__))
@@ -801,9 +794,7 @@ namespace {
 
 // Constants
 //========================================================================================
-
   int   constexpr MAX_BLOCKSIZE  = 1024;               // Max threadblock size
-  int   constexpr MAX_UNROLL     = 16;                 // Max unroll factor
   int   constexpr MAX_SRCS       = 8;                  // Max srcs per Transfer
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
   int   constexpr MEMSET_CHAR    = 75;                 // Value to memset (char)
@@ -1874,7 +1865,6 @@ namespace {
       System::Get().Broadcast(root, sizeof(data), &data);
 
       // data.alwaysValidate is permitted to be different across ranks
-
       if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
       if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
 
@@ -1915,14 +1905,14 @@ namespace {
     // Compare GFX Executor options
     {
       GfxOptions gfx = cfg.gfx;
-      // Same as above: null out vector members before sizeof-broadcast
-      // both fields are permitted to differ across ranks
+      // Null out vector members before sizeof broadcast
       decltype(gfx.cuMask)().swap(gfx.cuMask);
       decltype(gfx.prefXccTable)().swap(gfx.prefXccTable);
       System::Get().Broadcast(root, sizeof(gfx), &gfx);
       if (gfx.blockOrder     != cfg.gfx.blockOrder)     ADD_ERROR("cfg.gfx.blockOrder");
       if (gfx.blockSize      != cfg.gfx.blockSize)      ADD_ERROR("cfg.gfx.blockSize");
       // gfx.cuMask       is permitted to be different across ranks
+      if (gfx.gfxKernel      != cfg.gfx.gfxKernel)      ADD_ERROR("cfg.gfx.gfxKernel");
       // gfx.perfXccTable is permitted to be different across ranks
       if (gfx.seType         != cfg.gfx.seType)         ADD_ERROR("cfg.gfx.seType");
       if (gfx.temporalMode   != cfg.gfx.temporalMode)   ADD_ERROR("cfg.gfx.temporalMode");
@@ -1962,6 +1952,9 @@ namespace {
     #undef ADD_ERROR
   }
 
+  // Forward declaration
+  int GetGpuKernelUnrollIdx(int unroll);
+
   // Validate configuration options - return trues if and only if an fatal error is detected
   static bool ConfigOptionsHaveErrors(ConfigOptions const&    cfg,
                                       std::vector<ErrResult>& errors)
@@ -2000,11 +1993,10 @@ namespace {
     if (cfg.gfx.useMultiStream && cfg.gfx.blockOrder > 0)
       errors.push_back({ERR_WARN, "[gfx.blockOrder] will be ignored when running in multi-stream mode"});
 
-    int gfxMaxBlockSize = GetIntAttribute(ATR_GFX_MAX_BLOCKSIZE);
-    if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > gfxMaxBlockSize)
+    if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
       errors.push_back({ERR_FATAL,
                         "[gfx.blockSize] must be positive multiple of 64 less than or equal to %d",
-                        gfxMaxBlockSize});
+                        MAX_BLOCKSIZE});
 
     if (cfg.gfx.temporalMode < 0 || cfg.gfx.temporalMode > 3)
       errors.push_back({ERR_FATAL,
@@ -2016,17 +2008,20 @@ namespace {
           "[gfx.temporalMode] is not supported on NVIDIA hardware"});
 #endif
 
-    int gfxMaxUnroll = GetIntAttribute(ATR_GFX_MAX_UNROLL);
-    if (cfg.gfx.unrollFactor < 0 || cfg.gfx.unrollFactor > gfxMaxUnroll)
+    if (GetGpuKernelUnrollIdx(cfg.gfx.unrollFactor) == -1) {
       errors.push_back({ERR_FATAL,
-                        "[gfx.unrollFactor] must be non-negative and less than or equal to %d",
-                        gfxMaxUnroll});
+          "[gfx.unrollFactor] unroll factor of %d is unsupported", cfg.gfx.unrollFactor});
+    }
     if (cfg.gfx.waveOrder < 0 || cfg.gfx.waveOrder >= 6)
       errors.push_back({ERR_FATAL,
                         "[gfx.waveOrder] must be non-negative and less than 6"});
 
     if (!(cfg.gfx.wordSize == 1 || cfg.gfx.wordSize == 2 || cfg.gfx.wordSize == 4))
       errors.push_back({ERR_FATAL, "[gfx.wordSize] must be either 1, 2 or 4"});
+
+    if (cfg.gfx.gfxKernel < -1 || cfg.gfx.gfxKernel >= NUM_GFX_KERNELS)
+      errors.push_back(
+        {ERR_FATAL, "[gfx.gfxKernel] must be -1 for auto, or less than %d", NUM_GFX_KERNELS});
 
     int numGpus = GetNumExecutors(EXE_GPU_GFX);
     int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
@@ -2646,8 +2641,8 @@ namespace {
     int                        teamIdx;           ///< Size of team this sub executor is part of
 
     // Outputs
-    long long                  startCycle;        ///< Start timestamp for in-kernel timing (GPU-GFX executor)
-    long long                  stopCycle;         ///< Stop  timestamp for in-kernel timing (GPU-GFX executor)
+    int64_t                    startCycle;        ///< Start timestamp for in-kernel timing (GPU-GFX executor)
+    int64_t                    stopCycle;         ///< Stop  timestamp for in-kernel timing (GPU-GFX executor)
     uint32_t                   hwId;              ///< Hardware ID
     uint32_t                   xccId;             ///< XCC ID
   };
@@ -2737,6 +2732,7 @@ namespace {
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
     int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
+    int                        gfxKernelToUse;    ///< (GFX-only) Which GFX kernel to use
   };
 
   // Structure to track PCIe topology
@@ -3845,6 +3841,48 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  // Determine eligibility requirements for a particular GFX kernel
+  static bool CanUseGfxKernel(int const                gpuKernelIdx,
+                              ConfigOptions const&     cfg,
+                              vector<Transfer> const&  transfers,
+                              ExeInfo const&           exeInfo)
+  {
+    // GpuReduceKernel always works
+    if (gpuKernelIdx == GFX_KERNEL_REDUCE) return true;
+
+    // CopyKernel works if all Transfers have at most one SRC / one DST with no warp subexecutors
+    if (gpuKernelIdx == GFX_KERNEL_COPY) {
+      if (cfg.gfx.seType != 0) return false;
+      if (exeInfo.resources.empty()) return false;
+      for (auto const& rss : exeInfo.resources) {
+        Transfer const& t = transfers[rss.transferIdx];
+        if (t.srcs.size() > 1 || t.dsts.size() > 1) return false;
+        if (cfg.gfx.useSingleTeam && t.numSubExecs > 1) return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  static ErrResult SelectGfxKernel(ConfigOptions const& cfg, vector<Transfer> const& transfers, ExeInfo& exeInfo)
+  {
+    // Decide on which GFX kernel to use
+    // Auto-select - prefer copyKernel if eligible
+    if (cfg.gfx.gfxKernel == GFX_KERNEL_AUTO) {
+      exeInfo.gfxKernelToUse = CanUseGfxKernel(GFX_KERNEL_COPY, cfg, transfers, exeInfo) ? 1 : 0;
+    } else {
+      exeInfo.gfxKernelToUse = cfg.gfx.gfxKernel;
+    }
+
+    // Warn if using forcing copy kernel, but allow kernel to continue
+    if (cfg.gfx.gfxKernel == GFX_KERNEL_COPY && !CanUseGfxKernel(GFX_KERNEL_COPY, cfg, transfers, exeInfo)) {
+      return {ERR_WARN,
+        "GFX copy kernel forced even though deemed incompatible for current set of Transfers / config"};
+    }
+    return ERR_NONE;
+  }
+
 // Preparation-related functions
 //========================================================================================
 
@@ -4662,6 +4700,165 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
+  // Simplified Kernel for GFX execution for copies only
+  template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
+  __global__ void __launch_bounds__(LAUNCH_BOUND)
+    GpuCopyKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
+  {
+    int64_t startCycle;
+    // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
+    bool shouldRecordTiming = (seType == 1) ? (threadIdx.x % warpSize == 0) : (threadIdx.x == 0);
+    if (shouldRecordTiming) startCycle = GetTimestamp();
+
+    // seType: 0=threadblock, 1=warp
+    int subExecIdx;
+    if (seType == 0) {
+      // Threadblock-level: each threadblock is a subexecutor
+      subExecIdx = blockIdx.y;
+    } else {
+      // Warp-level: each warp is a subexecutor
+      int warpIdx       = threadIdx.x / warpSize;
+      int warpsPerBlock = blockDim.x  / warpSize;
+      subExecIdx = blockIdx.y * warpsPerBlock + warpIdx;
+    }
+
+    SubExecParam& p = params[subExecIdx];
+
+    // For warp-level dispatch, inactive warps should return early
+    if (seType == 1 && p.N == 0) return;
+
+    // Filter by XCC
+#if !defined(__NVCC__)
+    int32_t xccId;
+    GetXccId(xccId);
+    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
+#endif
+
+    // Collect data information
+    bool hasSrc = p.numSrcs > 0;
+    bool hasDst = p.numDsts > 0;
+    PACKED_FLOAT const* __restrict__ srcFloatPacked = (PACKED_FLOAT const*)p.src[0];
+    PACKED_FLOAT*       __restrict__ dstFloatPacked = (PACKED_FLOAT*)p.dst[0];
+
+    // Operate on wavefront granularity
+    int32_t const nTeams  = p.teamSize;             // Number of threadblocks working together on this subarray
+    int32_t const teamIdx = p.teamIdx;              // Index of this threadblock within the team
+    int32_t nWaves, waveIdx;
+    if (seType == 0) {
+      // Threadblock-level: all wavefronts in block work together
+      nWaves  = blockDim.x  / warpSize;              // Number of wavefronts within this threadblock
+      waveIdx = threadIdx.x / warpSize;              // Index of this wavefront within the threadblock
+    } else {
+      // Warp-level: each warp works independently
+      nWaves  = 1;
+      waveIdx = 0;
+    }
+    int32_t const tIdx = threadIdx.x % warpSize;     // Thread index within wavefront
+
+    size_t  const numPackedFloat = p.N / (sizeof(PACKED_FLOAT)/sizeof(float));
+
+    int32_t teamStride, waveStride, unrlStride, teamStride2, waveStride2;
+    switch (waveOrder) {
+    case 0: /* U,W,C */ unrlStride = 1; waveStride = UNROLL; teamStride = UNROLL * nWaves;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+    case 1: /* U,C,W */ unrlStride = 1; teamStride = UNROLL; waveStride = UNROLL * nTeams;  teamStride2 = 1;      waveStride2 = nTeams; break;
+    case 2: /* W,U,C */ waveStride = 1; unrlStride = nWaves; teamStride = nWaves * UNROLL;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+    case 3: /* W,C,U */ waveStride = 1; teamStride = nWaves; unrlStride = nWaves * nTeams;  teamStride2 = nWaves; waveStride2 = 1     ; break;
+    case 4: /* C,U,W */ teamStride = 1; unrlStride = nTeams; waveStride = nTeams * UNROLL;  teamStride2 = 1;      waveStride2 = nTeams; break;
+    case 5: /* C,W,U */ teamStride = 1; waveStride = nTeams; unrlStride = nTeams * nWaves;  teamStride2 = 1;      waveStride2 = nTeams; break;
+    }
+
+    int subIterations = 0;
+    while (1) {
+      // First loop: Each wavefront in the team works on UNROLL PACKED_FLOAT per thread
+      size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
+      size_t const loop1Limit  = numPackedFloat / loop1Stride * loop1Stride;
+      {
+        PACKED_FLOAT val[UNROLL];
+        if (!hasSrc) {
+          #pragma unroll
+          for (int u = 0; u < UNROLL; u++)
+            val[u] = MemsetVal<PACKED_FLOAT>();
+        }
+
+        for (size_t idx = (teamIdx * teamStride + waveIdx * waveStride) * warpSize + tIdx; idx < loop1Limit; idx += loop1Stride) {
+          // Read sources into memory and accumulate in registers
+          if (hasSrc) {
+            #pragma unroll
+            for (int u = 0; u < UNROLL; u++)
+              Load<TEMPORAL_MODE>(&srcFloatPacked[idx + u * unrlStride * warpSize], val[u]);
+          }
+
+          // Write accumulation to all outputs
+          if (hasDst) {
+            #pragma unroll
+            for (int u = 0; u < UNROLL; u++)
+              Store<TEMPORAL_MODE>(val[u], &dstFloatPacked[idx + u * unrlStride * warpSize]);
+          }
+        }
+      }
+
+      // Second loop: Deal with remaining PACKED_FLOAT
+      {
+        if (loop1Limit < numPackedFloat) {
+          PACKED_FLOAT val;
+          if (!hasSrc) val = MemsetVal<PACKED_FLOAT>();
+
+          size_t const loop2Stride = nTeams * nWaves * warpSize;
+          for (size_t idx = loop1Limit + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx;
+               idx < numPackedFloat; idx += loop2Stride) {
+            if (hasSrc) {
+              Load<TEMPORAL_MODE>(&srcFloatPacked[idx], val);
+            }
+            if (hasDst) {
+              Store<TEMPORAL_MODE>(val, &dstFloatPacked[idx]);
+            }
+          }
+        }
+      }
+
+      // Third loop; Deal with remaining floats
+      {
+        if (numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) < p.N) {
+          float val;
+          if (!hasSrc) val = MemsetVal<float>();
+
+          size_t const loop3Stride = nTeams * nWaves * warpSize;
+          for (size_t idx = numPackedFloat * (sizeof(PACKED_FLOAT)/sizeof(float)) + (teamIdx * teamStride2 + waveIdx * waveStride2) * warpSize + tIdx; idx < p.N; idx += loop3Stride) {
+            if (hasSrc) {
+              Load<TEMPORAL_MODE>(&p.src[0][idx], val);
+            }
+
+            if (hasDst) {
+              Store<TEMPORAL_MODE>(val, &p.dst[0][idx]);
+            }
+          }
+        }
+      }
+      // Allows for numSubiterations == 0 to run infinitely
+      if (++subIterations == numSubIterations) break;
+    }
+
+    // Wait for all threads to finish
+    if (seType == 1) {
+      // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+      __builtin_amdgcn_wave_barrier();
+#else
+      __syncwarp();
+#endif
+    } else {
+      // For threadblock-level, sync all threads
+      __syncthreads();
+    }
+
+    if (shouldRecordTiming) {
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+      GetHwId(p.hwId);
+      GetXccId(p.xccId);
+    }
+  }
+
   // Kernel for GFX execution
   template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
   __global__ void __launch_bounds__(LAUNCH_BOUND)
@@ -4814,26 +5011,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
-
+      // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
     }
 
     // Wait for all threads to finish
     if (seType == 1) {
       // For warp-level, sync within warp only
- #if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
       __builtin_amdgcn_wave_barrier();
- #else
+#else
 
       __syncwarp();
- #endif
+#endif
     } else {
       // For threadblock-level, sync all threads
       __syncthreads();
     }
 
     if (shouldRecordTiming) {
-      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -4841,17 +5037,43 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-#define GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, DWORD)           \
-  {GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_NONE>,      \
-   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_LOAD>,      \
-   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_STORE>,     \
-   GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL_BOTH>}
+  // Must match ordering in GfxKernelType
+#define GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL) \
+  {GpuReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL>,            \
+   GpuCopyKernel  <DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL>}
 
+  // Must match mapping in GetGpuKernelTemporalIdx
+  constexpr int KERN_TEMPORALS = 4;
+#define GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, DWORD)           \
+  {GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_NONE),  \
+   GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_LOAD),  \
+   GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_STORE), \
+   GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_BOTH)}
+
+  int GetGpuKernelTemporalIdx(int temporalMode) {
+    if (temporalMode == TEMPORAL_NONE)  return 0;
+    if (temporalMode == TEMPORAL_LOAD)  return 1;
+    if (temporalMode == TEMPORAL_STORE) return 2;
+    if (temporalMode == TEMPORAL_BOTH)  return 3;
+    return -1;
+  }
+
+  // Must match mapping in GetGpuKernelWordsizeIdx
+  constexpr int KERN_WORDSIZES = 3;
 #define GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, UNROLL)        \
   {GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float),  \
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2), \
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float4)}
 
+  int GetGpuKernelWordsizeIdx(int wordsize) {
+    if (wordsize == 1) return 0;
+    if (wordsize == 2) return 1;
+    if (wordsize == 4) return 2;
+    return -1;
+  }
+
+  // Must match mapping in GetGpuKernelUnrollIdx
+  constexpr int KERN_UNROLLS = 10;
 #define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND) \
   {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  1),  \
    GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  2),  \
@@ -4861,19 +5083,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
    GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  6),  \
    GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  7),  \
    GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  8),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  9),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 10),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 11),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 12),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 13),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 14),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 15),  \
-   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 16)}
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 16),  \
+   GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, 32)}
 
-  // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal)
+  // Must match the unroll mapping in GPU_KERNEL_UNROLL_DECL
+  int GetGpuKernelUnrollIdx(int unroll) {
+    if (1 <= unroll && unroll <= 8) return unroll - 1;
+    if (unroll == 16)               return 8;
+    if (unroll == 32)               return 9;
+    return -1;
+  }
+
+  // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal / kernel)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
+  constexpr int KERN_BOUNDS = 4;
 #ifndef SINGLE_KERNEL
-  GpuKernelFuncPtr GpuKernelTable[4][MAX_UNROLL][3][4] =
+  GpuKernelFuncPtr GpuKernelsTable[KERN_BOUNDS][KERN_UNROLLS][KERN_WORDSIZES][KERN_TEMPORALS][NUM_GFX_KERNELS] =
   {
     GPU_KERNEL_UNROLL_DECL(256),
     GPU_KERNEL_UNROLL_DECL(512),
@@ -4886,63 +5111,82 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
 
+  int GetGpuKernelBlocksizeIdx(int blocksize) {
+    return (blocksize + 255) / 256 - 1;
+  }
+
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
+                                      int           const  exeTotalSubExecs,
+                                      SubExecParam*        exeSubExecParam,
                                       hipStream_t   const  stream,
                                       hipEvent_t    const  startEvent,
                                       hipEvent_t    const  stopEvent,
                                       int           const  xccDim,
                                       ConfigOptions const& cfg,
+                                      int           const  gfxKernelIdx,
                                       TransferResources&   rss)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    // Determine which kernel to launch
+    int const blockSizeIdx = GetGpuKernelBlocksizeIdx(cfg.gfx.blockSize);
+    int const unrollIdx    = GetGpuKernelUnrollIdx(cfg.gfx.unrollFactor);
+    int const wordSizeIdx  = GetGpuKernelWordsizeIdx(cfg.gfx.wordSize);
+    int const temporalIdx  = GetGpuKernelTemporalIdx(cfg.gfx.temporalMode);
 
-    int numSubExecs = rss.subExecParamCpu.size();
-    int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
-    dim3 const gridSize(xccDim, gridY, 1);
-    dim3 const blockSize(cfg.gfx.blockSize, 1);
-
-    int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
-                      cfg.gfx.wordSize == 2 ? 1 :
-                                              2;
 #ifdef SINGLE_KERNEL
-    auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
+    auto gpuKernel = GpuReduceKernel<float4, 1024, 1, 0>;
 #else
-    auto gpuKernel = GpuKernelTable[(cfg.gfx.blockSize+255)/256 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
+    auto gpuKernel = GpuKernelsTable[blockSizeIdx][unrollIdx][wordSizeIdx][temporalIdx][gfxKernelIdx];
 #endif
 
+    // Compute kernel launch parameters
+    int  const numSubExecs = cfg.gfx.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
+    int  const gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
+    dim3 const gridSize(xccDim, gridY, 1);
+    dim3 const blockSize(cfg.gfx.blockSize);
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    SubExecParam* params = cfg.gfx.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
+
 #if defined(__NVCC__)
-    if (startEvent != NULL)
+    if (cfg.gfx.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
-    gpuKernel<<<gridSize, blockSize, 0, stream>>>(rss.subExecParamGpuPtr, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-    if (stopEvent != NULL)
+    gpuKernel<<<gridSize, blockSize, 0 , stream>>>(params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+    if (cfg.gfx.useHipEvents)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream, startEvent, stopEvent,
-                          0, rss.subExecParamGpuPtr, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
+    hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
+                          cfg.gfx.useHipEvents ? startEvent : NULL,
+                          cfg.gfx.useHipEvents ? stopEvent  : NULL, 0,
+                          params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
 
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+    // Record this timing if this Transfer is being run in multistream mode
+    if (cfg.gfx.useMultiStream) {
+      if (iteration >= 0) {
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
 
-    if (iteration >= 0) {
-      double deltaMsec = cpuDeltaMsec;
-      if (startEvent != NULL) {
-        float gpuDeltaMsec;
-        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
-      }
-      rss.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration) {
-        rss.perIterMsec.push_back(deltaMsec);
-        std::set<std::pair<int,int>> CUs;
-        for (int i = 0; i < numSubExecs; i++) {
-          CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
-                                    GetId(rss.subExecParamGpuPtr[i].hwId)));
+        double deltaMsec = cpuDeltaMsec;
+        if (startEvent != NULL) {
+          float gpuDeltaMsec;
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+          deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
         }
-        rss.perIterCUs.push_back(CUs);
+
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration) {
+          rss.perIterMsec.push_back(deltaMsec);
+          std::set<std::pair<int,int>> CUs;
+          for (int i = 0; i < numSubExecs; i++) {
+            CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
+                                      GetId(rss.subExecParamGpuPtr[i].hwId)));
+          }
+          rss.perIterCUs.push_back(CUs);
+        }
       }
     }
     return ERR_NONE;
@@ -4960,72 +5204,56 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
     if (cfg.gfx.useMultiStream) {
-      // Launch each Transfer separately in its own stream
+      // Launch one thread per Transfer in separate streams
       vector<std::future<ErrResult>> asyncTransfers;
       for (int i = 0; i < exeInfo.streams.size(); i++) {
         asyncTransfers.emplace_back(std::async(std::launch::async,
                                                ExecuteGpuTransfer,
                                                iteration,
+                                               exeInfo.totalSubExecs,
+                                               exeInfo.subExecParamGpu,
                                                exeInfo.streams[i],
                                                cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
                                                cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
                                                xccDim,
                                                std::cref(cfg),
+                                               exeInfo.gfxKernelToUse,
                                                std::ref(exeInfo.resources[i])));
       }
       for (auto& asyncTransfer : asyncTransfers)
         ERR_CHECK(asyncTransfer.get());
     } else {
-      // Combine all the Transfers into a single kernel launch
-      int numSubExecs = exeInfo.totalSubExecs;
-      int gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
-      dim3 const gridSize(xccDim, gridY, 1);
-      dim3 const blockSize(cfg.gfx.blockSize, 1);
-      hipStream_t stream = exeInfo.streams[0];
-
-      int wordSizeIdx = cfg.gfx.wordSize == 1 ? 0 :
-                        cfg.gfx.wordSize == 2 ? 1 :
-                                                2;
-#ifdef SINGLE_KERNEL
-      auto gpuKernel = GpuReduceKernel<float4, 256, 1, 0>;
-#else
-      auto gpuKernel = GpuKernelTable[(cfg.gfx.blockSize+255)/256 - 1][cfg.gfx.unrollFactor - 1][wordSizeIdx][cfg.gfx.temporalMode];
-#endif
-
-#if defined(__NVCC__)
-      if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], stream));
-      gpuKernel<<<gridSize, blockSize, 0 , stream>>>(exeInfo.subExecParamGpu, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-      if (cfg.gfx.useHipEvents)
-        ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], stream));
-#else
-      hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
-                            cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                            cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL, 0,
-                            exeInfo.subExecParamGpu, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-#endif
-      ERR_CHECK(hipStreamSynchronize(stream));
+      // Launch all Transfers in one kernel launch (avoid extra thread creation)
+      ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
+                         cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                         cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                         xccDim, cfg, exeInfo.gfxKernelToUse, exeInfo.resources[0]);
     }
+
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
-      / cfg.general.numSubIterations;
 
     if (iteration >= 0) {
+      // Determine executor timing
+      // - Use HIP event timing if enabled and not using multi-stream
+      // - Otherwise, Use CPU timing
       if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
         gpuDeltaMsec /= cfg.general.numSubIterations;
         exeInfo.totalDurationMsec += gpuDeltaMsec;
       } else {
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+          / cfg.general.numSubIterations;
         exeInfo.totalDurationMsec += cpuDeltaMsec;
       }
 
+      // If Transfers were combined into a single launch, figure out per-Transfer timing
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
-          long long minStartCycle = std::numeric_limits<long long>::max();
-          long long maxStopCycle  = std::numeric_limits<long long>::min();
+          int64_t minStartCycle = std::numeric_limits<int64_t>::max();
+          int64_t maxStopCycle  = std::numeric_limits<int64_t>::min();
           std::set<std::pair<int, int>> CUs;
 
           for (auto subExecIdx : rss.subExecIdx) {
@@ -5036,6 +5264,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
             }
           }
+
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
           deltaMsec /= cfg.general.numSubIterations;
           rss.totalDurationMsec += deltaMsec;
@@ -5427,6 +5656,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (exeDevice.exeRank == localRank) {
         localExecutors.push_back(exeDevice);
       }
+
+      // Select which GFX kernel to use for this executor
+      if (exeDevice.exeType == EXE_GPU_GFX) {
+        ERR_APPEND(SelectGfxKernel(cfg, transfers, exeInfo), errResults);
+      }
     }
 
     // Prepare reference src/dst arrays - only once for largest size
@@ -5629,15 +5863,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (err.errType == ERR_FATAL) return false;
     }
     return true;
-  }
-
-  int GetIntAttribute(IntAttribute attribute)
-  {
-    switch (attribute) {
-    case ATR_GFX_MAX_BLOCKSIZE: return MAX_BLOCKSIZE;
-    case ATR_GFX_MAX_UNROLL:    return MAX_UNROLL;
-    default:                    return -1;
-    }
   }
 
   std::string GetStrAttribute(StrAttribute attribute)

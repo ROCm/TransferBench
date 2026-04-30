@@ -37,14 +37,14 @@ int NicPeerToPeerPreset(EnvVars&          ev,
     Utils::Print("[ERROR] NIC p2p preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numRanks = TransferBench::GetNumRanks();
   int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
   if (numNicsPerRank == 0) {
     Utils::Print("No NIC detected, NICs are required to run this preset\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect env vars for this preset
@@ -144,7 +144,7 @@ int NicPeerToPeerPreset(EnvVars&          ev,
           if (srcMemIndex == -1 || dstMemIndex == -1) {
             Utils::Print("[ERROR] No proper GPU device can be found for transfer R%dN%d - R%dN%d\n",
                          srcRank, srcNicIdx, dstRank, dstNicIdx);
-            return 1;
+            return ERR_FATAL;
           }
           transfer.numBytes = numBytesPerTransfer;
           transfer.srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
@@ -160,7 +160,7 @@ int NicPeerToPeerPreset(EnvVars&          ev,
       if (!TransferBench::RunTransfers(cfg, transfers, results)) {
         for (auto const& err : results.errResults)
           Utils::Print("%s\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
 
       counter += transfers.size();
@@ -315,5 +315,5 @@ int NicPeerToPeerPreset(EnvVars&          ev,
   }
   summaryTable.PrintTable(ev.outputToCsv, ev.showBorders);
 
-  return 0;
+  return ERR_NONE;
 }

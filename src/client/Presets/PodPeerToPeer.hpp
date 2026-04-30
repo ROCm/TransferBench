@@ -29,13 +29,13 @@ int PodPeerToPeerPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Pod p2p preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] All ranks currently have to be under the same physical and virtual pod\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   if (rankToPod.empty()) {
     Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -165,7 +165,7 @@ int PodPeerToPeerPreset(EnvVars&          ev,
         if (!TransferBench::RunTransfers(cfg, transfers, results)) {
           for (auto const& err : results.errResults)
             Utils::Print("%s\n", err.errMsg.c_str());
-          return 1;
+          return ERR_FATAL;
         }
 
         for (size_t k = 0; k < round.size(); k++) {
@@ -296,6 +296,5 @@ int PodPeerToPeerPreset(EnvVars&          ev,
     }
 
   }
-  return 0;
-
+  return ERR_NONE;
 }
