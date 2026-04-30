@@ -275,8 +275,8 @@ void DisplayUsage(char const* cmdName)
   Print(" - MPI approach:\n");
   Print("   Node 0> mpirun -np 4 -host node0,node1,node2,node3 ./TransferBench a2a\n");
   Print(" - Socket approach:\n");
-  Print("   Node 0> TB_RANK=0 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
-  Print("   Node 1> TB_RANK=1 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
-  Print("   Node 2> TB_RANK=2 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
-  Print("   Node 3> TB_RANK=3 TB_NUM_RANKS=4 TB_MASTER_ADDR=X.X.X.X ./TransferBench a2a\n");
+  Print("   Node 0> TB_NUM_RANKS=4 [TB_RANK=0] [TB_MASTER_ADDR=<from rank 0>] ./TransferBench a2a # Displays connect info for other ranks\n" );
+  Print("   Node 1> TB_NUM_RANKS=4  TB_RANK=1   TB_MASTER_ADDR=<from rank 0>  ./TransferBench a2a\n");
+  Print("   Node 2> TB_NUM_RANKS=4  TB_RANK=2   TB_MASTER_ADDR=<from rank 0>  ./TransferBench a2a\n");
+  Print("   Node 3> TB_NUM_RANKS=4  TB_RANK=3   TB_MASTER_ADDR=<from rank 0>  ./TransferBench a2a\n");
 };

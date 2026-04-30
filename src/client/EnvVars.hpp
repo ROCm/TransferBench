@@ -371,9 +371,10 @@ public:
     printf("\n");
     printf("Environment variables (back-end):\n");
     printf("====================================\n");
-    printf(" TB_RANK             - Used to specify the rank of this process (0-based, socket communicator)\n");
-    printf(" TB_NUM_RANKS        - Used to specify the total number of ranks (socket communicator)\n");
-    printf(" TB_MASTER_ADDR      - Used to set Rank 0 IP/hostname for socket communicator\n");
+    printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
+    printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
+    printf(" TB_MASTER_ADDR      - Rank 0 hostname or IPv4 for workers; optional on rank 0 (auto-detected if unset)\n");
+    printf(" TB_MASTER_IFACE     - When TB_MASTER_ADDR unset on rank 0, optional interface for IPv4 detection (e.g. eth0)\n");
     printf(" TB_MASTER_PORT      - Used to set Rank 0 port for socket communicator (default: 29500)\n");
     printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
     printf(" TB_VERBOSE          - Enables additional internal logging\n");

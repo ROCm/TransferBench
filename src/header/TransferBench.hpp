@@ -28,12 +28,15 @@ THE SOFTWARE.
 #include <barrier>
 #include <cstring>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
 #include <map>
 #include <mutex>
+#include <net/if.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
@@ -839,14 +842,15 @@ namespace {
    *
    * This supports three possible communication modes - Socket-based, MPI-based, disabled
    *
-   * - Will first attempt to use sockets if TB_RANK env var is detected
+   * - Will first attempt to use sockets when TB_NUM_RANKS is set (>= 2)
    * - Will then try MPI-based, if compiled with MPI support
    * - Drop back to single node functionality
 
    * - Configuration for socket-based communicator is read via environment variables
-   *   - TB_RANK:        Rank of this process (0-based)
-   *   - TB_NUM_RANKS:   Total number of processes
-   *   - TB_MASTER_ADDR: IP address of rank 0
+   *   - TB_NUM_RANKS:   Total number of processes (only variable required on rank 0; rank 0 logs how workers should connect)
+   *   - TB_RANK:        Rank of this process (0-based); defaults to 0 if unset or empty
+   *   - TB_MASTER_ADDR: Rank 0 address for workers to connect; optional on rank 0 (auto-detected IPv4 after listen)
+   *   - TB_MASTER_IFACE: Optional interface name when auto-detecting rank-0 address (e.g. eth0)
    *   - TB_MASTER_PORT: Port for communication (default: 29500)
    */
   class System
@@ -6367,6 +6371,103 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
   }
 
+  namespace detail {
+
+  inline std::string FormatIpv4(struct in_addr const& addr)
+  {
+    char buf[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &addr, buf, sizeof(buf)))
+      return std::string(buf);
+    return std::string();
+  }
+
+  inline bool IsUsableIpv4(sockaddr_in const* sin)
+  {
+    if (!sin || sin->sin_family != AF_INET)
+      return false;
+    uint32_t a = ntohl(sin->sin_addr.s_addr);
+    if (a == INADDR_ANY || a == INADDR_NONE)
+      return false;
+    if ((a >> 24) == 127)
+      return false;
+    return true;
+  }
+
+  // IPv4 to advertise when TB_MASTER_ADDR is unset on rank 0 (after listen).
+  inline std::string DetectPrimaryIpv4(char const* preferredIface)
+  {
+    ifaddrs* ifap = nullptr;
+    if (getifaddrs(&ifap) != 0)
+      return std::string();
+
+    auto tryPick = [&](bool allowLinkLocal) -> std::string {
+      for (ifaddrs* ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+          continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK)
+          continue;
+        if (!(ifa->ifa_flags & IFF_UP))
+          continue;
+        auto* sin = reinterpret_cast<sockaddr_in*>(ifa->ifa_addr);
+        if (!IsUsableIpv4(sin))
+          continue;
+        if (preferredIface && preferredIface[0]) {
+          if (!ifa->ifa_name || strcmp(ifa->ifa_name, preferredIface) != 0)
+            continue;
+        } else {
+          uint32_t a = ntohl(sin->sin_addr.s_addr);
+          if (!allowLinkLocal && (a & 0xffff0000) == 0xa9fe0000)
+            continue;
+        }
+        return FormatIpv4(sin->sin_addr);
+      }
+      return std::string();
+    };
+
+    std::string chosen;
+    if (preferredIface && preferredIface[0]) {
+      chosen = tryPick(true);
+      freeifaddrs(ifap);
+      return chosen;
+    }
+
+    chosen = tryPick(false);
+    if (chosen.empty())
+      chosen = tryPick(true);
+    freeifaddrs(ifap);
+    return chosen;
+  }
+
+  inline bool ResolveMasterAddrV4(char const* host, int port, sockaddr_in* out, char const** gaiErr)
+  {
+    *gaiErr = nullptr;
+    if (!host || !host[0] || !out)
+      return false;
+    char portBuf[16];
+    snprintf(portBuf, sizeof(portBuf), "%d", port);
+    addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    int gai = getaddrinfo(host, portBuf, &hints, &res);
+    if (gai != 0) {
+      *gaiErr = gai_strerror(gai);
+      return false;
+    }
+    for (addrinfo* p = res; p; p = p->ai_next) {
+      if (p->ai_family == AF_INET && p->ai_addrlen >= sizeof(sockaddr_in)) {
+        memcpy(out, p->ai_addr, sizeof(sockaddr_in));
+        freeaddrinfo(res);
+        return true;
+      }
+    }
+    freeaddrinfo(res);
+    return false;
+  }
+
+  } // namespace detail
+
   void System::SetupSocketCommunicator()
   {
     char* rankStr       = getenv("TB_RANK");
@@ -6374,18 +6475,29 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     char* masterAddrStr = getenv("TB_MASTER_ADDR");
     char* masterPortStr = getenv("TB_MASTER_PORT");
 
-    // Socket communicator requires rank / numRanks / masterAddr
-    if (!rankStr || !numRanksStr || !masterAddrStr) {
+    if (!numRanksStr) {
       if (verbose) {
-        Log("[INFO] SocketCommunicator skipped due to missing TB_RANK | TB_NUM_RANKS | TB_MASTER_ADDR\n");
+        Log("[INFO] SocketCommunicator skipped (TB_NUM_RANKS not set)\n");
       }
       return;
     }
 
-    rank       = atoi(rankStr);
-    numRanks   = atoi(numRanksStr);
-    masterAddr = masterAddrStr;
+    numRanks = atoi(numRanksStr);
+    if (numRanks < 2) {
+      if (verbose) {
+        Log("[INFO] SocketCommunicator skipped (TB_NUM_RANKS=%d requires at least 2 for socket mode)\n", numRanks);
+      }
+      return;
+    }
+
+    rank = (rankStr && rankStr[0]) ? atoi(rankStr) : 0;
+    masterAddr = masterAddrStr ? std::string(masterAddrStr) : std::string();
     masterPort = masterPortStr ? atoi(masterPortStr) : 29500;
+
+    if (rank != 0 && masterAddr.empty()) {
+      Log("[ERROR] TB_MASTER_ADDR is required when TB_RANK is greater than 0 (socket communicator)\n");
+      exit(1);
+    }
 
     if (rank < 0 || rank >= numRanks) {
       Log("[ERROR] Invalid rank index.  Must be between 0 and %d (not %d)\n", numRanks - 1, rank);
@@ -6423,9 +6535,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         Log("[ERROR] Failed to listen on socket\n");
         exit(1);
       }
-      // Accept connections from other ranks
-      Log("Waiting for connections from %d other ranks [listening on TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
-                        numRanks-1, masterAddr.c_str(), masterPort);
+
+      if (masterAddr.empty()) {
+        char const* ifaceEnv = getenv("TB_MASTER_IFACE");
+        masterAddr = detail::DetectPrimaryIpv4(ifaceEnv);
+        if (masterAddr.empty()) {
+          Log("[ERROR] TB_MASTER_ADDR not set and could not detect a primary IPv4 for workers");
+          if (ifaceEnv && ifaceEnv[0])
+            Log(" (check TB_MASTER_IFACE=%s)\n", ifaceEnv);
+          else
+            Log(" (set TB_MASTER_ADDR or TB_MASTER_IFACE)\n");
+          exit(1);
+        }
+        Log("[INFO] TB_MASTER_ADDR not set; using detected IPv4 %s\n", masterAddr.c_str());
+      }
+
+      Log("[INFO] Socket rank 0: on each other host set TB_RANK to a unique value in 1..%d, then for example:\n",
+          numRanks - 1);
+      Log("       TB_NUM_RANKS=%d TB_MASTER_ADDR=%s TB_MASTER_PORT=%d TB_RANK=1\n",
+          numRanks, masterAddr.c_str(), masterPort);
+
+      Log("[INFO] Waiting for connections from %d other rank(s) [TB_MASTER_ADDR=%s TB_MASTER_PORT=%d]\n",
+          numRanks - 1, masterAddr.c_str(), masterPort);
 
       for (int i = 1; i < numRanks; i++) {
         sockaddr_in clientAddr;
@@ -6462,24 +6593,33 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       sockaddr_in serverAddr;
       memset(&serverAddr, 0, sizeof(serverAddr));
       serverAddr.sin_family = AF_INET;
-      serverAddr.sin_port = htons(masterPort);
-      if (inet_pton(AF_INET, masterAddr.c_str(), &serverAddr.sin_addr) <= 0) {
-        Log("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
+      char const* gaiErr = nullptr;
+      if (!detail::ResolveMasterAddrV4(masterAddr.c_str(), masterPort, &serverAddr, &gaiErr)) {
+        if (gaiErr)
+          Log("[ERROR] Invalid master address '%s': %s\n", masterAddr.c_str(), gaiErr);
+        else
+          Log("[ERROR] Invalid master address: %s\n", masterAddr.c_str());
         exit(1);
       }
 
       // Retry connection with backoff
       if (verbose)
-        Log("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddrStr, masterPort);
+        Log("[INFO] Rank %d attempting to connect to %s:%d\n", rank, masterAddr.c_str(), masterPort);
       int maxRetries = 50;
+      bool connected = false;
       for (int retry = 0; retry < maxRetries; retry++) {
         if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == 0) {
+          connected = true;
           break;
         }
         if (retry == maxRetries - 1) {
           Log("[ERROR] Failed to connect to master after %d retries\n", maxRetries);
         }
         sleep(1);
+      }
+      if (!connected) {
+        close(sock);
+        exit(1);
       }
 
       // Send local rank to the server

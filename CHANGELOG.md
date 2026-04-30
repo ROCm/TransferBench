@@ -37,6 +37,7 @@ Documentation for TransferBench is available at
 - Switch to using hipMemcpyDeviceToDeviceNoCU instead of hipMemcpyDefault for DMA Executor if available (requires HIP >= 6.0)
 - Allow for multiple destination memory locations for DMA/Batched-DMA Transfers
 - Removed env vars printing and preset print when running TransferBench with no args
+- Modification to simplify socket comm usage - first rank only needs to set TB_NUM_RANKS=X to see connection info
 
 ## v1.66.02
 ### Added
