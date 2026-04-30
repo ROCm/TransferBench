@@ -27,12 +27,12 @@ int BmaSweepPreset(EnvVars&          ev,
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] BMA sweep preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
 #ifndef BMA_EXEC_ENABLED
   Utils::Print("[ERROR] BMA executor requires ROCm 7.1 or newer\n");
-  return 1;
+  return ERR_FATAL;
 #endif
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -66,7 +66,7 @@ int BmaSweepPreset(EnvVars&          ev,
 
   if (exeIndex < 0 || exeIndex >= numGpuDevices) {
     Utils::Print("EXE_INDEX must be between 0 and %d inclusively\n", numGpuDevices - 1);
-    return 1;
+    return ERR_FATAL;
   }
 
   int numTransfers  = numGpuDevices - 1 + (localCopy ? 1 : 0);
@@ -137,7 +137,7 @@ int BmaSweepPreset(EnvVars&          ev,
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       for (auto const& err : results.errResults)
         Utils::Print("%s\n", err.errMsg.c_str());
-      return 1;
+      return ERR_FATAL;
     }
 
     table.Set(currRow, 1, " %6.2f ", numTransfers * results.tfrResults[0].avgBandwidthGbPerSec);
@@ -150,7 +150,7 @@ int BmaSweepPreset(EnvVars&          ev,
       if (!TransferBench::RunTransfers(cfg, transfers, results)) {
         for (auto const& err : results.errResults)
           Utils::Print("%s\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
 
       table.Set(currRow, 2+i, " %6.2f ", numTransfers * results.tfrResults[0].avgBandwidthGbPerSec);
@@ -164,7 +164,7 @@ int BmaSweepPreset(EnvVars&          ev,
       if (!TransferBench::RunTransfers(cfg, transfers, results)) {
         for (auto const& err : results.errResults)
           Utils::Print("%s\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
 
       table.Set(currRow, 2+numBmaSubExec+i, " %6.2f ", results.tfrResults[0].avgBandwidthGbPerSec);
@@ -178,5 +178,5 @@ int BmaSweepPreset(EnvVars&          ev,
   table.PrintTable(ev.outputToCsv, ev.showBorders);
   Utils::Print("Reported numbers are all GB/s, normalized for per Transfer for %d Transfers\n", numTransfers);
 
-  return 0;
+  return ERR_NONE;
 }

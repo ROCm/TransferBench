@@ -183,7 +183,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
   for (int rank = 0; rank < numRanks; rank++) {
     if (TransferBench::GetNumExecutors(EXE_GPU_GFX, rank) == 0) {
       Utils::Print("[ERROR] Each rank must have at least GPU.  Rank %d has no GPUs\n", rank);
-      return 1;
+      return ERR_FATAL;
     }
   }
   int defSubExec = TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0});
@@ -233,28 +233,28 @@ int HbmBandwidthPreset(EnvVars&          ev,
   // Validate environment variables and set defaults
   if (blockSizes.empty()) {
     Utils::Print("[ERROR] BLOCKSIZES may not be empty\n");
-    return 1;
+    return ERR_FATAL;
   }
   for (auto blockSize : blockSizes) {
     if (blockSize <= 0 || blockSize % 128 != 0 || blockSize > 1024) {
       Utils::Print("[ERROR] BLOCKSIZES must only contain positive multiples of 128 up to 1024 (not %d)\n", blockSize);
-      return 1;
+      return ERR_FATAL;
     }
   }
 
   if (criteria < 0 || criteria > 2) {
     Utils::Print("[ERROR] CRITERIA must be either 0 (for MAX), 1 (for AVG), or 2 (for MIN) (not %d)\n", criteria);
-    return 1;
+    return ERR_FATAL;
   }
 
   if (elemBytes.empty()) {
     Utils::Print("[ERROR] ELEM_BYTES may not be empty\n");
-    return 1;
+    return ERR_FATAL;
   }
   for (auto elemByte : elemBytes) {
     if (elemByte != 4 && elemByte != 8 && elemByte != 16) {
       Utils::Print("[ERROR] ELEM_BYTES may only contain {4,8 or 16}\n");
-      return 1;
+      return ERR_FATAL;
     }
   }
 
@@ -263,18 +263,18 @@ int HbmBandwidthPreset(EnvVars&          ev,
     for (auto gpuIdx : gpuIndices) {
       if (gpuIdx < 0 || gpuIdx >= numDetectedGpus) {
         Utils::Print("[ERROR] GPU_INDICES index out of range (%d) (rank %d)\n", gpuIdx, myRank);
-        return 1;
+        return ERR_FATAL;
       }
     }
   }
 
   if (numBuffers < 1) {
     Utils::Print("[ERROR] NUM_BUFFERS must be a positive number (not %d)\n", numBuffers);
-    return 1;
+    return ERR_FATAL;
   }
   if (numIterations <= 0) {
     Utils::Print("[ERROR] NUM_ITERATIONS must be positive (not %d)\n", numIterations);
-    return 1;
+    return ERR_FATAL;
   }
   if (numBuffers > numIterations) {
     Utils::Print("[WARN] NUM_BUFFERS (%d) exceeds NUM_ITERATIONS (%d), so some buffers will not be used\n",
@@ -289,29 +289,29 @@ int HbmBandwidthPreset(EnvVars&          ev,
     for (auto x : numSesList) {
       if (x <= 0 || x > defSubExec) {
         Utils::Print("[ERROR] Number of subexecutors must be positive and less than %d\n", defSubExec);
-        return 1;
+        return ERR_FATAL;
       }
     }
   }
 
   if (prewarmMsec < 0) {
     Utils::Print("[ERROR] PREWARM_MSEC must be non-negative (not %d)\n", prewarmMsec);
-    return 1;
+    return ERR_FATAL;
   }
 
   if (temporalMask < 1 || temporalMask > 3) {
     Utils::Print("[ERROR] TEMPORAL_MASK must be between 1 to 3 (not %d)\n", temporalMask);
-    return 1;
+    return ERR_FATAL;
   }
 
   if (unrolls.empty()) {
     Utils::Print("[ERROR] UNROLLS may not be empty");
-    return 1;
+    return ERR_FATAL;
   }
   for (auto unroll : unrolls) {
     if (unroll != 1 && unroll != 2 && unroll != 4 && unroll != 8 && unroll != 16) {
       Utils::Print("[ERROR] UNROLLS must only contain {1,2,4,8 or 16} (not %d)\n", unroll);
-      return 1;
+      return ERR_FATAL;
     }
   }
 
@@ -404,7 +404,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
       if (Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&minStartCycle) ||
           Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&maxStopCycle)) {
         Utils::Print("[ERROR] Unable to allocate pinned host memory on rank %d closest to GPU %d\n", myRank, gpuIdx);
-        return 1;
+        return ERR_FATAL;
       }
     }
 
@@ -415,7 +415,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
       ErrResult err = AllocateMemory(memDevice, largestTotalBytesPerBuffer, &inputBuffers[bufferIdx]);
       if (err.errType != ERR_NONE) {
         Utils::Print("[ERROR] Error when allocating memory (%s)\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
       FillPsuedoRandomData<<<32, 256, 0, stream>>>(largestTotalBytesPerBuffer / sizeof(uint32_t),
                                                    (uint32_t*)inputBuffers[bufferIdx], bufferIdx);
@@ -535,7 +535,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
       ErrResult err = DeallocateMemory(memType, inputBuffers[bufferIdx], largestTotalBytesPerBuffer);
       if (err.errType != ERR_NONE) {
         Utils::Print("[ERROR] Error when deallocating memory (%s)\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
     }
 
@@ -543,7 +543,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
       if (Utils::DeallocateMemory(MEM_CPU_CLOSEST, minStartCycle, sizeof(int64_t)) ||
           Utils::DeallocateMemory(MEM_CPU_CLOSEST, maxStopCycle,  sizeof(int64_t))) {
         Utils::Print("[ERROR] Unable to deallocate pinned host memory on rank %d closest to GPU %d\n", myRank, gpuIdx);
-        return 1;
+        return ERR_FATAL;
       }
     }
 
@@ -615,5 +615,5 @@ int HbmBandwidthPreset(EnvVars&          ev,
   }
   table.PrintTable(outputToCsv, showBorders);
 
-  return 0;
+  return ERR_NONE;
 }

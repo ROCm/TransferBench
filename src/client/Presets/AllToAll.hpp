@@ -53,7 +53,6 @@ int AllToAllPreset(EnvVars&          ev,
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
   // Check that all ranks have at least the number of GPUs requested
@@ -63,7 +62,7 @@ int AllToAllPreset(EnvVars&          ev,
   for (int rank = 0; rank < numRanks; rank++) {
     if (numGpus > TransferBench::GetNumExecutors(EXE_GPU_GFX, rank)) {
       Utils::Print("[ERROR] All-to-All preset requires each rank to have the same number of GPUs\n");
-      return 1;
+      return ERR_FATAL;
     }
     if (numQueuePairs > 0 && numNics != TransferBench::GetNumExecutors(EXE_NIC, rank))
       nicDifference = true;
@@ -80,15 +79,10 @@ int AllToAllPreset(EnvVars&          ev,
     a2aMode = EnvVars::GetEnvVar("A2A_MODE", 0);
     if (a2aMode < 0 || a2aMode > 2) {
       Utils::Print("[ERROR] a2aMode must be between 0 and 2, or else numSrcs:numDsts\n");
-      return 1;
+      return ERR_FATAL;
     }
     numSrcs = (a2aMode == A2A_WRITE_ONLY ? 0 : 1);
     numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
-  }
-
-  // Deprecated env var check
-  if (useFineGrain != -999) {
-    memTypeIdx = useFineGrain ? 2 : 0;
   }
 
   MemType memType = Utils::GetGpuMemType(memTypeIdx);
@@ -119,15 +113,15 @@ int AllToAllPreset(EnvVars&          ev,
   // Validate env vars
   if (numGpus < 0 || numGpus > numDetectedGpus) {
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    return 1;
+    return ERR_FATAL;
   }
   if (useDmaExec && (numSrcs != 1 || numDsts != 1)) {
     Utils::Print("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
-    return 1;
+    return ERR_FATAL;
   }
   if (numResults * 2 > numRanks) {
     Utils::Print("[ERROR] Number of extrema results requested exceeds number of ranks.  NUM_RESULTS should be at most half the number of ranks\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect the number of GPU devices to use
@@ -200,14 +194,14 @@ int AllToAllPreset(EnvVars&          ev,
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
       Utils::Print("%s\n", err.errMsg.c_str());
-    return 1;
+    return ERR_FATAL;
   } else if (showDetails) {
     Utils::PrintResults(ev, 1, transfers, results);
     Utils::Print("\n");
   }
 
   // Only ranks that actually do output will compile results
-  if (!Utils::RankDoesOutput()) return 0;
+  if (!Utils::RankDoesOutput()) return ERR_NONE;
 
   // Prepare table of results
   int numRows   = 2 + (numGpus + 1) * (1 + 2*numResults);
@@ -490,10 +484,5 @@ int AllToAllPreset(EnvVars&          ev,
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
 
-  if (useFineGrain != -999) {
-    Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
-    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", memTypeIdx, useFineGrain);
-  }
-
-  return 0;
+  return ERR_NONE;
 }

@@ -27,7 +27,7 @@ int ScalingPreset(EnvVars&          ev,
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Scaling preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
@@ -41,7 +41,6 @@ int ScalingPreset(EnvVars&          ev,
   int numGpuDevices = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int sweepMax      = EnvVars::GetEnvVar("SWEEP_MAX",       32);
   int sweepMin      = EnvVars::GetEnvVar("SWEEP_MIN",       1);
-  int useFineGrain   = EnvVars::GetEnvVar("USE_FINE_GRAIN",  -999); // Deprecated
 
   // Display environment variables
   MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
@@ -64,13 +63,7 @@ int ScalingPreset(EnvVars&          ev,
   // Validate env vars
   if (localIdx >= numDetectedGpus) {
     printf("[ERROR] Cannot execute scaling test with local GPU device %d\n", localIdx);
-    return 1;
-  }
-
-  // Check for deprecated env vars
-  if (useFineGrain != -999) {
-    Utils::Print("[ERROR] USE_FINE_GRAIN has been deprecated and replaced by CPU_MEM_TYPE and GPU_MEM_TYPE\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
@@ -106,7 +99,7 @@ int ScalingPreset(EnvVars&          ev,
                  i < numCpuDevices ? i : i - numCpuDevices}};
       if (!RunTransfers(cfg, transfers, results)) {
         Utils::PrintErrors(results.errResults);
-        return 1;
+        return ERR_FATAL;
       }
       double bw = results.tfrResults[0].avgBandwidthGbPerSec;
       printf("%c%7.2f     ", separator, bw);
@@ -124,5 +117,5 @@ int ScalingPreset(EnvVars&          ev,
     printf("%c%7.2f(%3d)", separator, bestResult[i].first, bestResult[i].second);
   printf("\n");
 
-  return 0;
+  return ERR_NONE;
 }

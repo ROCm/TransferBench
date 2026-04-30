@@ -5042,6 +5042,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
    GpuCopyKernel  <DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL>}
 
   // Must match mapping in GetGpuKernelTemporalIdx
+  constexpr int KERN_TEMPORALS = 4;
 #define GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, DWORD)           \
   {GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_NONE),  \
    GPU_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_LOAD),  \
@@ -5057,6 +5058,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Must match mapping in GetGpuKernelWordsizeIdx
+  constexpr int KERN_WORDSIZES = 3;
 #define GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND, UNROLL)        \
   {GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float),  \
    GPU_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2), \
@@ -5070,6 +5072,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   // Must match mapping in GetGpuKernelUnrollIdx
+  constexpr int KERN_UNROLLS = 10;
 #define GPU_KERNEL_UNROLL_DECL(LAUNCH_BOUND) \
   {GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  1),  \
    GPU_KERNEL_DWORD_DECL(LAUNCH_BOUND,  2),  \
@@ -5092,8 +5095,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   // Table of all GPU Reduction kernel functions (templated blocksize / unroll / dword size / temporal / kernel)
   typedef void (*GpuKernelFuncPtr)(SubExecParam*, int, int, int);
+  constexpr int KERN_BOUNDS = 4;
 #ifndef SINGLE_KERNEL
-  GpuKernelFuncPtr GpuKernelsTable[4][10][3][4][2] =
+  GpuKernelFuncPtr GpuKernelsTable[KERN_BOUNDS][KERN_UNROLLS][KERN_WORDSIZES][KERN_TEMPORALS][NUM_GFX_KERNELS] =
   {
     GPU_KERNEL_UNROLL_DECL(256),
     GPU_KERNEL_UNROLL_DECL(512),

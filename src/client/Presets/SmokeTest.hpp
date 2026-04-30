@@ -181,7 +181,7 @@ int SmokeTestPreset(EnvVars&          ev,
   if (Utils::GetRankPerPodMap().size() > 1) {
     Utils::Print("[ERROR] %s preset can only be run within a single pod\n", presetName.c_str());
     Utils::Print("[ERROR] Pod membership may be forced by setting TB_FORCE_SINGLE_POD=1\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect topology and check that all GPUs have the same number of subExecutors
@@ -194,7 +194,7 @@ int SmokeTestPreset(EnvVars&          ev,
     for (int gpu = 0; gpu < numGpus; gpu++) {
       if (numSubExec != TransferBench::GetNumSubExecutors({EXE_GPU_GFX, gpu, rank})) {
         Utils::Print("[ERROR] %s preset can only be run on GPUs with the same number of subexecutors\n", presetName.c_str());
-        return 1;
+        return ERR_FATAL;
       }
     }
   }
@@ -330,7 +330,7 @@ int SmokeTestPreset(EnvVars&          ev,
   if (Utils::HasDuplicateHostname()) {
     Utils::Print("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
-  return testsFailed ? 1 : 0;
+  return testsFailed ? ERR_FATAL : ERR_NONE;
 }
 
 }

@@ -26,46 +26,48 @@ int SchmooPreset(EnvVars&          ev,
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Schmoo preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   if (numDetectedGpus < 2) {
     printf("[ERROR] Schmoo benchmark requires at least 2 GPUs\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect env vars for this preset
-  int localIdx     = EnvVars::GetEnvVar("LOCAL_IDX",      0);
-  int remoteIdx    = EnvVars::GetEnvVar("REMOTE_IDX",     1);
-  int sweepMax     = EnvVars::GetEnvVar("SWEEP_MAX",      32);
-  int sweepMin     = EnvVars::GetEnvVar("SWEEP_MIN",      1);
-  int useFineGrain = EnvVars::GetEnvVar("USE_FINE_GRAIN", 0);
+  int gpuMemTypeIdx = EnvVars::GetEnvVar("GPU_MEM_TYPE",    0);
+  int localIdx      = EnvVars::GetEnvVar("LOCAL_IDX",      0);
+  int remoteIdx     = EnvVars::GetEnvVar("REMOTE_IDX",     1);
+  int sweepMax      = EnvVars::GetEnvVar("SWEEP_MAX",      32);
+  int sweepMin      = EnvVars::GetEnvVar("SWEEP_MIN",      1);
+
+  MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
 
   // Display environment variables
   ev.DisplayEnvVars();
   if (!ev.hideEnv) {
     int outputToCsv = ev.outputToCsv;
     if (!outputToCsv) printf("[Schmoo Related]\n");
+    ev.Print("GPU_MEM_TYPE"   , gpuMemTypeIdx,  "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
     ev.Print("LOCAL_IDX",      localIdx,     "Local GPU index");
     ev.Print("REMOTE_IDX",     remoteIdx,    "Remote GPU index");
     ev.Print("SWEEP_MAX",      sweepMax,     "Max number of subExecutors to use");
     ev.Print("SWEEP_MIN",      sweepMin,     "Min number of subExecutors to use");
-    ev.Print("USE_FINE_GRAIN", useFineGrain, "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
     printf("\n");
   }
 
   // Validate env vars
   if (localIdx >= numDetectedGpus || remoteIdx >= numDetectedGpus) {
     printf("[ERROR] Cannot execute schmoo test with local GPU device %d, remote GPU device %d\n", localIdx, remoteIdx);
-    return 1;
+    return ERR_FATAL;
   }
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
 
-  char memChar = useFineGrain ? 'F' : 'G';
+  char memChar = MemTypeStr[gpuMemType];
   printf("Bytes to transfer: %lu Local GPU: %d Remote GPU: %d\n", numBytesPerTransfer, localIdx, remoteIdx);
   printf("       | Local Read  | Local Write | Local Copy  | Remote Read | Remote Write| Remote Copy |\n");
   printf("  #CUs |%c%02d->G%02d->N00|N00->G%02d->%c%02d|%c%02d->G%02d->%c%02d|%c%02d->G%02d->N00|N00->G%02d->%c%02d|%c%02d->G%02d->%c%02d|\n",
@@ -83,69 +85,67 @@ int SchmooPreset(EnvVars&          ev,
   t.exeSubIndex = -1;
   t.numBytes    = numBytesPerTransfer;
 
-  MemType memType = (useFineGrain ? MEM_GPU_FINE : MEM_GPU);
-
   for (int numCUs = sweepMin; numCUs <= sweepMax; numCUs++) {
     t.numSubExecs = numCUs;
 
     // Local Read
-    t.srcs = {{memType, localIdx}};
+    t.srcs = {{gpuMemType, localIdx}};
     t.dsts = {};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      return 1;
+      return ERR_FATAL;
     }
     double const localRead = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Local Write
     t.srcs = {};
-    t.dsts = {{memType, localIdx}};
+    t.dsts = {{gpuMemType, localIdx}};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      return 1;
+      return ERR_FATAL;
     }
     double const localWrite = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Local Copy
-    t.srcs = {{memType, localIdx}};
-    t.dsts = {{memType, localIdx}};
+    t.srcs = {{gpuMemType, localIdx}};
+    t.dsts = {{gpuMemType, localIdx}};
     t.srcs = {};
-    t.dsts = {{memType, localIdx}};
+    t.dsts = {{gpuMemType, localIdx}};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      return 1;
+      return ERR_FATAL;
     }
     double const localCopy = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Remote Read
-    t.srcs = {{memType, remoteIdx}};
+    t.srcs = {{gpuMemType, remoteIdx}};
     t.dsts = {};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      return 1;
+      return ERR_FATAL;
     }
     double const remoteRead = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Remote Write
     t.srcs = {};
-    t.dsts = {{memType, remoteIdx}};
+    t.dsts = {{gpuMemType, remoteIdx}};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      return 1;
+      return ERR_FATAL;
     }
     double const remoteWrite = results.tfrResults[0].avgBandwidthGbPerSec;
 
     // Remote Copy
-    t.srcs = {{memType, localIdx}};
-    t.dsts = {{memType, remoteIdx}};
+    t.srcs = {{gpuMemType, localIdx}};
+    t.dsts = {{gpuMemType, remoteIdx}};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      return 1;
+      return ERR_FATAL;
     }
     double const remoteCopy = results.tfrResults[0].avgBandwidthGbPerSec;
 
     printf("   %3d   %11.3f   %11.3f   %11.3f   %11.3f   %11.3f   %11.3f  \n",
            numCUs, localRead, localWrite, localCopy, remoteRead, remoteWrite, remoteCopy);
   }
-  return 0;
+  return ERR_NONE;
 }

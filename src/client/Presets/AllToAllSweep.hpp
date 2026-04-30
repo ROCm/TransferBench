@@ -29,7 +29,7 @@ int AllToAllSweepPreset(EnvVars&          ev,
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] All to All Sweep preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   enum
@@ -54,7 +54,6 @@ int AllToAllSweepPreset(EnvVars&          ev,
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int showMinOnly   = EnvVars::GetEnvVar("SHOW_MIN_ONLY",   1);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int useSpray      = EnvVars::GetEnvVar("USE_SPRAY",       0);
   int verbose       = EnvVars::GetEnvVar("VERBOSE",         0);
@@ -78,11 +77,6 @@ int AllToAllSweepPreset(EnvVars&          ev,
     numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
   }
 
-  // Deprecated env var check
-  if (useFineGrain != -999) {
-    memTypeIdx = useFineGrain ? 2 : 0;
-  }
-
   MemType memType = Utils::GetGpuMemType(memTypeIdx);
   std::string devMemTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
 
@@ -101,9 +95,6 @@ int AllToAllSweepPreset(EnvVars&          ev,
     ev.Print("NUM_SUB_EXECS"  , numSesList.size(), EnvVars::ToStr(numSesList).c_str());
     ev.Print("SHOW_MIN_ONLY"  , showMinOnly      , showMinOnly ? "Showing only slowest GPU results" : "Showing slowest and fastest GPU results");
     ev.Print("UNROLLS"        , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
-    if (useFineGrain != -999) {
-      ev.Print("USE_FINE_GRAIN", useFineGrain    , "[DEPRECATED] Using %s-grained memory; prefer MEM_TYPE", useFineGrain ? "fine" : "coarse");
-    }
     ev.Print("USE_REMOTE_READ", useRemoteRead    , "Using %s as executor", useRemoteRead ? "DST" : "SRC");
     ev.Print("USE_SPRAY"      , useSpray         , "%s per SubExecutor", useSpray ? "All targets" : "One target");
     ev.Print("VERBOSE"        , verbose          , verbose ? "Display test results" : "Display summary only");
@@ -300,10 +291,5 @@ int AllToAllSweepPreset(EnvVars&          ev,
     Utils::Print("          NumSubExec : %7d\n", bestNumSes);
   }
 
-  if (useFineGrain != -999) {
-    Utils::Print("[WARN] USE_FINE_GRAIN has been deprecated and replaced by MEM_TYPE\n");
-    Utils::Print("[WARN] MEM_TYPE has been set to %d to correspond to previous use of USE_FINE_GRAIN=%d\n", memTypeIdx, useFineGrain);
-  }
-
-  return 0;
+  return ERR_NONE;
 }

@@ -27,6 +27,14 @@ int GfxSweepPreset(EnvVars&          ev,
                    std::string const presetName,
                    bool        const bytesSpecified)
 {
+  enum TimingMode
+  {
+    TimingModeAuto = -1,
+    TimingModeCpu  =  0,
+    TimingModeHip  =  1,
+    TimingModeGpu  =  2
+  };
+
   // Collect environment variables for this preset
   vector<int> blockList      = EnvVars::GetEnvVarArray("BLOCKSIZES",   {256,512,768,1024});
   std::string transferStr    = EnvVars::GetEnvVar(     "GFX_TRANSFER", "R0G0->R0G0->R0G0");
@@ -34,7 +42,7 @@ int GfxSweepPreset(EnvVars&          ev,
   vector<int> numSesList     = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",    {4,8,16,32,64});
   int         numTransfers   = EnvVars::GetEnvVar(     "NUM_TRANSFERS",                 1);
   vector<int> temporalList   = EnvVars::GetEnvVarArray("TEMPORAL_MODES",              {0});
-  int         timingMode     = EnvVars::GetEnvVar(     "TIMING_MODE",                  -1);
+  int         timingMode     = EnvVars::GetEnvVar(     "TIMING_MODE",      TimingModeAuto);
   vector<int> unrollList     = EnvVars::GetEnvVarArray("UNROLLS",            {1,2,4,8,16});
   vector<int> waveOrderList  = EnvVars::GetEnvVarArray("WAVE_ORDERS",                 {0});
   vector<int> wordSizeList   = EnvVars::GetEnvVarArray("WORDSIZES",                   {4});
@@ -59,9 +67,14 @@ int GfxSweepPreset(EnvVars&          ev,
     }
   }
 
+  if (timingMode < TimingModeAuto || timingMode > TimingModeGpu) {
+    Utils::Print("TIMING_MODE value is invalid (%d)\n", timingMode);
+    return ERR_FATAL;
+  }
+
   if (numSesList.empty()){
     Utils::Print("NUM_SUB_EXECS should not be empty\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   std::vector<Transfer> transfers;
@@ -72,9 +85,9 @@ int GfxSweepPreset(EnvVars&          ev,
   }
 
   // Automatically pick timing method
-  if (timingMode == -1) {
+  if (timingMode == TimingModeAuto) {
     // Use Transfer timing if there is only one Transfer
-    if (transfers.size() == 1) timingMode = 2;
+    if (transfers.size() == 1) timingMode = TimingModeGpu;
     // Use Executor timing if there is only one executor
     else {
       bool singleExecutor = true;
@@ -87,19 +100,19 @@ int GfxSweepPreset(EnvVars&          ev,
           break;
         }
       }
-      timingMode = singleExecutor ? 1 : 0;
+      timingMode = singleExecutor ? TimingModeHip : TimingModeCpu;
     }
   }
   if (timingMode < 0 || timingMode > 2) {
     Utils::Print("[ERROR] Invalid timing mode %d\n", timingMode);
-    return 1;
+    return ERR_FATAL;
   }
 
   // Print out the Transfers being run
   Utils::Print("GFX sweep: (%lu bytes per Transfer). All values are %s-timed GB/s\n", numBytesPerTransfer,
-               timingMode == 0 ? "Aggregate-CPU" :
-               timingMode == 1 ? "HIP-event"     :
-                                 "GPU wallclock");
+               timingMode == TimingModeCpu ? "Aggregate-CPU" :
+               timingMode == TimingModeHip ? "HIP-event"     :
+                                             "GPU wallclock");
   Utils::Print("=======================================================================================\n");
 
   bool isMultiNode = GetNumRanks() > 1;
@@ -115,7 +128,7 @@ int GfxSweepPreset(EnvVars&          ev,
 
     if (t.exeDevice.exeType != EXE_GPU_GFX) {
       Utils::Print("[ERROR] gfxsweep preset only works on Transfers that are using GFX executor\n");
-      return 1;
+      return ERR_FATAL;
     }
     t.numBytes = numBytesPerTransfer;
   }
@@ -181,7 +194,7 @@ int GfxSweepPreset(EnvVars&          ev,
                 } else {
                   Utils::Print("\n");
                   Utils::PrintErrors(result.errResults);
-                  return 1;
+                  return ERR_FATAL;
                 }
               }
               Utils::Print("\n");
@@ -201,15 +214,15 @@ int GfxSweepPreset(EnvVars&          ev,
 
   if (bestSe == -1) {
     Utils::Print("[WARN] No transfers executed - make sure sweep parameters lists are not empty\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Print combination that produced highest bandwidth
   Utils::Print("=======================================================================================\n");
   Utils::Print("Highest bandwidth found: %7.2f GB/s (%s-timed)\n", overallBestBw,
-               timingMode == 0 ? "Aggregate-CPU" :
-               timingMode == 1 ? "HIP-event"     :
-                                 "GPU wallclock");
+               timingMode == TimingModeCpu ? "Aggregate-CPU" :
+               timingMode == TimingModeHip ? "HIP-event"     :
+                                             "GPU wallclock");
   Utils::Print("          WaveOrder    : %7d  [GFX_WAVE_ORDER=%d]\n", best[bestSe][0], best[bestSe][0]);
   Utils::Print("          WordSize     : %7d  [GFX_WORD_SIZE=%d]\n",  best[bestSe][1], best[bestSe][1]);
   Utils::Print("          Temporal Mode: %7d  [GFX_TEMPORAL=%d]\n",   best[bestSe][2], best[bestSe][2]);
@@ -222,5 +235,5 @@ int GfxSweepPreset(EnvVars&          ev,
                "GFX_UNROLL=%d GFX_KERNEL=%d ./TransferBench cmdline %lu \"%d %d %s\"\n",
                best[bestSe][0], best[bestSe][1], best[bestSe][2], best[bestSe][3],
                best[bestSe][4], best[bestSe][5], numBytesPerTransfer, numTransfers, best[bestSe][6], transferStr.c_str());
-  return 0;
+  return ERR_NONE;
 }

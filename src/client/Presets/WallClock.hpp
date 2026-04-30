@@ -69,7 +69,7 @@ int WallClockPreset(EnvVars&          ev,
     Utils::Print("[ERROR] wallclock preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -94,7 +94,7 @@ int WallClockPreset(EnvVars&          ev,
 
   if (numGpuDevices <= 0) {
     Utils::Print("[ERROR] wallclock preset requires at least one GPU\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect local results
@@ -125,11 +125,11 @@ int WallClockPreset(EnvVars&          ev,
     if (Utils::AllocateMemory({MEM_CPU_CLOSEST, deviceId}, numXccs * sizeof(uint64_t), (void**)&timestamps)) {
       Utils::Print("[ERROR] Unable to allocate pinned host memory for storing timestamps for GPU device %d on rank %d\n",
                    deviceId, myRank);
-      return 1;
+      return ERR_FATAL;
     }
     if (Utils::AllocateMemory({MEM_GPU, deviceId}, sizeof(int32_t), (void**)&readyFlag)) {
       Utils::Print("[ERROR] Unable to allocate readyFlag on GPU device %d on rank %d\n", deviceId, myRank);
-      return 1;
+      return ERR_FATAL;
     }
 
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
@@ -225,7 +225,7 @@ int WallClockPreset(EnvVars&          ev,
   if (Utils::HasDuplicateHostname()) {
     Utils::Print("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
-  return 0;
+  return ERR_NONE;
 }
 
 #if defined(__NVCC__)

@@ -446,13 +446,13 @@ int HealthCheckPreset(EnvVars&          ev,
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Healthcheck preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Check for supported platforms
 #if defined(__NVCC__)
   printf("[WARN] healthcheck preset not supported on NVIDIA hardware\n");
-  return 0;
+  return ERR_NONE;
 #endif
 
   printf("Disclaimer:\n");
@@ -474,5 +474,5 @@ int HealthCheckPreset(EnvVars&          ev,
   numFails += TestUnidir(modelId, verbose);
   numFails += TestBidir(modelId, verbose);
   numFails += TestAllToAll(modelId, verbose);
-  return numFails ? 1 : 0;
+  return numFails ? ERR_FATAL : ERR_NONE;
 }
