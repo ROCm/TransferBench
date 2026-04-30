@@ -157,9 +157,10 @@ namespace TransferBench
    */
   enum GfxKernelType
   {
-    GFX_KERNEL_REDUCE = 0,                     ///< Default kernel that supports any multiple input/output buffers
-    GFX_KERNEL_COPY   = 1,                     ///< Simpler kernel that supports copies only
-    NUM_GFX_KERNELS   = 2                      ///< Number of GFX kernels currently supported
+    GFX_KERNEL_AUTO   = -1,                     ///< Automatically choose a kernel
+    GFX_KERNEL_REDUCE =  0,                     ///< Default kernel that supports any multiple input/output buffers
+    GFX_KERNEL_COPY   =  1,                     ///< Simpler kernel that supports copies only
+    NUM_GFX_KERNELS   =  2                      ///< Number of GFX kernels currently supported
   };
 
   /**
@@ -658,16 +659,16 @@ namespace TransferBench
   #define hipStreamDestroy                                   cudaStreamDestroy
   #define hipStreamSynchronize                               cudaStreamSynchronize
   // cu* driver API returns CUresult; cast to cudaError_t so callers can use a single error variable
-  #define hipMemGetAllocationGranularity                     cuMemGetAllocationGranularity
-  #define hipMemCreate                                       cuMemCreate
-  #define hipMemAddressReserve                               cuMemAddressReserve
-  #define hipMemMap                                          cuMemMap
-  #define hipMemSetAccess                                    cuMemSetAccess
-  #define hipMemUnmap                                        cuMemUnmap
-  #define hipMemRelease                                      cuMemRelease
-  #define hipMemAddressFree                                  cuMemAddressFree
-  #define hipMemExportToShareableHandle                      cuMemExportToShareableHandle
-  #define hipMemImportFromShareableHandle                    cuMemImportFromShareableHandle
+#define hipMemGetAllocationGranularity(...)                  ((cudaError_t)cuMemGetAllocationGranularity(__VA_ARGS__))
+  #define hipMemCreate(...)                                  ((cudaError_t)cuMemCreate(__VA_ARGS__))
+  #define hipMemAddressReserve(...)                          ((cudaError_t)cuMemAddressReserve(__VA_ARGS__))
+  #define hipMemMap(...)                                     ((cudaError_t)cuMemMap(__VA_ARGS__))
+  #define hipMemSetAccess(...)                               ((cudaError_t)cuMemSetAccess(__VA_ARGS__))
+  #define hipMemUnmap(...)                                   ((cudaError_t)cuMemUnmap(__VA_ARGS__))
+  #define hipMemRelease(...)                                 ((cudaError_t)cuMemRelease(__VA_ARGS__))
+  #define hipMemAddressFree(...)                             ((cudaError_t)cuMemAddressFree(__VA_ARGS__))
+  #define hipMemExportToShareableHandle(...)                 ((cudaError_t)cuMemExportToShareableHandle(__VA_ARGS__))
+  #define hipMemImportFromShareableHandle(...)               ((cudaError_t)cuMemImportFromShareableHandle(__VA_ARGS__))
 
   using gpu_device_ptr = CUdeviceptr;
 
@@ -3849,7 +3850,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // GpuReducKernel always works
     if (gpuKernelIdx == GFX_KERNEL_REDUCE) return true;
 
-    // CopyKernel only works if all Transfers are single SRC / single DST copies, with no warp subexecutors
+    // CopyKernel works if all Transfers have at most one SRC / one DST with no warp subexecutors
     if (gpuKernelIdx == GFX_KERNEL_COPY) {
       if (cfg.gfx.seType != 0) return false;
       if (exeInfo.resources.empty()) return false;
@@ -3868,14 +3869,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     // Decide on which GFX kernel to use
     // Auto-select - prefer copyKernel if eligible
-    if (cfg.gfx.gfxKernel == -1) {
+    if (cfg.gfx.gfxKernel == GFX_KERNEL_AUTO) {
       exeInfo.gfxKernelToUse = CanUseGfxKernel(GFX_KERNEL_COPY, cfg, transfers, exeInfo) ? 1 : 0;
     } else {
       exeInfo.gfxKernelToUse = cfg.gfx.gfxKernel;
     }
 
-    // Warn if using forcing copy kernel
-    if (exeInfo.gfxKernelToUse == GFX_KERNEL_COPY && !CanUseGfxKernel(GFX_KERNEL_COPY, cfg, transfers, exeInfo)) {
+    // Warn if using forcing copy kernel, but allow kernel to continue
+    if (cfg.gfx.gfxKernel == GFX_KERNEL_COPY && !CanUseGfxKernel(GFX_KERNEL_COPY, cfg, transfers, exeInfo)) {
       return {ERR_WARN,
         "GFX copy kernel forced even though deemed incompatible for current set of Transfers / config"};
     }
@@ -5202,23 +5203,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.streams.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteGpuTransfer,
-                                             iteration,
-                                             exeInfo.totalSubExecs,
-                                             exeInfo.subExecParamGpu,
-                                             exeInfo.streams[i],
-                                             cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
-                                             xccDim,
-                                             std::cref(cfg),
-                                             exeInfo.gfxKernelToUse,
-                                             std::ref(exeInfo.resources[i])));
+    if (cfg.gfx.useMultiStream) {
+      // Launch one thread per Transfer in separate streams
+      vector<std::future<ErrResult>> asyncTransfers;
+      for (int i = 0; i < exeInfo.streams.size(); i++) {
+        asyncTransfers.emplace_back(std::async(std::launch::async,
+                                               ExecuteGpuTransfer,
+                                               iteration,
+                                               exeInfo.totalSubExecs,
+                                               exeInfo.subExecParamGpu,
+                                               exeInfo.streams[i],
+                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                               xccDim,
+                                               std::cref(cfg),
+                                               exeInfo.gfxKernelToUse,
+                                               std::ref(exeInfo.resources[i])));
+      }
+      for (auto& asyncTransfer : asyncTransfers)
+        ERR_CHECK(asyncTransfer.get());
+    } else {
+      // Launch all Transfers in one kernel launch (avoid extra thread creation)
+      ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
+                         cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                         cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                         xccDim, cfg, exeInfo.gfxKernelToUse, exeInfo.resources[0]);
     }
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
 

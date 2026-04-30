@@ -109,8 +109,6 @@ int SchmooPreset(EnvVars&          ev,
     // Local Copy
     t.srcs = {{gpuMemType, localIdx}};
     t.dsts = {{gpuMemType, localIdx}};
-    t.srcs = {};
-    t.dsts = {{gpuMemType, localIdx}};
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
       return ERR_FATAL;
