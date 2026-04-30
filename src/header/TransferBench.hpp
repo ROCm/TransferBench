@@ -3847,7 +3847,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                               vector<Transfer> const&  transfers,
                               ExeInfo const&           exeInfo)
   {
-    // GpuReducKernel always works
+    // GpuReduceKernel always works
     if (gpuKernelIdx == GFX_KERNEL_REDUCE) return true;
 
     // CopyKernel works if all Transfers have at most one SRC / one DST with no warp subexecutors
