@@ -6,18 +6,18 @@
 ROCM_PATH ?= /opt/rocm
 CUDA_PATH ?= /usr/local/cuda
 MPI_PATH  ?= /usr/local/openmpi
+HIPCC     ?= $(ROCM_PATH)/bin/amdclang++
+NVCC      ?= $(CUDA_PATH)/bin/nvcc
+DEBUG     ?= 0
 
 # Optional features (set to 0 to disable, 1 to enable)
-# DISABLE_NIC_EXEC: Disable RDMA/NIC executor support (default: 0)
-# DISABLE_MPI_COMM: Disable MPI communicator support (default: 0)
-# DISABLE_DMA_BUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
-# DISABLE_AMD_SMI: Disable AMD-SMI pod membership checking support (default: 0)
-# DISABLE_NVML: Disable NVML pod membership detection for CUDA builds (default: 0)
-# DISABLE_POD_COMM: Disable pod communication support (default: 0)
-# DISABLE_CUMEM: Disable CUDA driver API (default: 0). On CUDA, POD_COMM_ENABLED requires CUMEM_ENABLED.
-
-HIPCC ?= $(ROCM_PATH)/bin/amdclang++
-NVCC ?= $(CUDA_PATH)/bin/nvcc
+# DISABLE_NIC_EXEC: Disable RDMA/NIC executor support                     (default: 0)
+# DISABLE_MPI_COMM: Disable MPI communicator support                      (default: 0)
+# DISABLE_DMA_BUF:  Disable DMA-BUF support for GPU Direct RDMA           (default: 1)
+# DISABLE_AMD_SMI:  Disable AMD-SMI pod membership checking support       (default: 0)
+# DISABLE_NVML:     Disable NVML pod membership detection for CUDA builds (default: 0)
+# DISABLE_POD_COMM: Disable pod communication support                     (default: 0)
+# DISABLE_CUMEM:    Disable CUDA driver API (also disables pod on CUDA)   (default: 0)
 
 # ROCm device libraries can live in different locations depending on packaging.
 # hipcc/clang needs to find the amdgcn bitcode directory at link time.
@@ -36,7 +36,6 @@ SINGLE_KERNEL ?= 0
 GPU_TARGETS ?= native
 
 EXE=TransferBench
-DEBUG ?= 0
 
 # Only perform this check if 'make clean' is not the target
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
