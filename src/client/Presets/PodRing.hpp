@@ -25,9 +25,9 @@ int PodRingPreset(EnvVars&          ev,
                   std::string const presetName,
                   bool        const bytesSpecified)
 {
-  // Check for homogenous ranks
+  // Check for homogeneous ranks
   if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] PodRing preset can only be run across ranks that are homogenous\n");
+    Utils::Print("[ERROR] PodRing preset can only be run across ranks that are homogeneous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return 1;
