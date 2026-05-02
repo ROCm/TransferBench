@@ -20,26 +20,26 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int PodRingPreset(EnvVars&          ev,
-                  size_t      const numBytesPerTransfer,
-                  std::string const presetName,
-                  bool        const bytesSpecified)
+int RingsPreset(EnvVars&          ev,
+                size_t      const numBytesPerTransfer,
+                std::string const presetName,
+                bool        const bytesSpecified)
 {
-  // Assuming single pod, for now
+  // Check for homogeneous ranks
   if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] PodRing preset can only be run across ranks that are homogenous\n");
+    Utils::Print("[ERROR] rings preset can only be run across ranks that are homogeneous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return 1;
   }
-  if (Utils::GetRankPerPodMap().empty()) {
+
+  // Check for pod support (if multi-node)
+  int numRanks = TransferBench::GetNumRanks();
+  if (numRanks > 1 && Utils::GetRankPerPodMap().empty()) {
     Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
     return 1;
   }
 
-  ev.gfxUnroll       = EnvVars::GetEnvVar("GFX_UNROLL", 2);
-
-  int numRanks       = TransferBench::GetNumRanks();
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
@@ -56,8 +56,8 @@ int PodRingPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return 1;
   }
-  if (groupSize < 2) {
-    Utils::Print("[ERROR] Group size must be at least 2 to form a ring\n");
+  if (groupSize <= 0) {
+    Utils::Print("[ERROR] Group size must be greater than 0\n");
     return 1;
   }
   if (numRanks * numGpus % groupSize) {
@@ -70,7 +70,7 @@ int PodRingPreset(EnvVars&          ev,
   bool nicDifference = false;
   for (int rank = 0; rank < numRanks; rank++) {
     if (numGpus > TransferBench::GetNumExecutors(EXE_GPU_GFX, rank)) {
-      Utils::Print("[ERROR] PodRing preset requires each rank to have the same number of GPUs\n");
+      Utils::Print("[ERROR] rings preset requires each rank to have the same number of GPUs\n");
       return 1;
     }
     if (numQueuePairs > 0 && numNics != TransferBench::GetNumExecutors(EXE_NIC, rank))
@@ -85,7 +85,7 @@ int PodRingPreset(EnvVars&          ev,
   if (Utils::RankDoesOutput()) {
     ev.DisplayEnvVars();
     if (!ev.hideEnv) {
-      if (!ev.outputToCsv) printf("[PodRing Related]\n");
+      if (!ev.outputToCsv) printf("[Rings Related]\n");
       ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
@@ -177,7 +177,7 @@ int PodRingPreset(EnvVars&          ev,
     }
 
     if (Utils::RankDoesOutput()) {
-      Utils::Print("\n--- Pod Ring Group %d ---\n", group);
+      Utils::Print("\n--- Ring Group %d ---\n", group);
 
       int const numHops   = groupSize;
       int const numRows   = 2 + numHops + 3;
