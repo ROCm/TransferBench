@@ -56,10 +56,10 @@ int PodRingPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return 1;
   }
-//  if (groupSize < 2) {
-//    Utils::Print("[ERROR] Group size must be at least 2 to form a ring\n");
-//    return 1;
-//  }
+  if (groupSize <= 0) {
+    Utils::Print("[ERROR] Group size must be greater than 0\n");
+    return 1;
+  }
   if (numRanks * numGpus % groupSize) {
     Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
                  groupSize, numRanks * numGpus, numRanks);
