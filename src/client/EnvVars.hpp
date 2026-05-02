@@ -38,6 +38,7 @@ THE SOFTWARE.
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <set>
 #include <numa.h>
 #include <random>
 #include <time.h>
@@ -109,6 +110,7 @@ public:
   int maxNumVarSubExec;              // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int outputToCsv;                   // Output in CSV format
   int samplingFactor;                // Affects how many different values of N are generated (when N set to 0)
+  std::vector<int> showPercentiles;  // Iteration-duration percentiles to print
 
   // NIC options
   int ibGidIndex;                    // GID Index for RoCE NICs
@@ -167,6 +169,7 @@ public:
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
+    showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
@@ -276,6 +279,16 @@ public:
 #endif
     }
 
+    // Check that percentiles are valid
+    std::sort(showPercentiles.begin(), showPercentiles.end());
+    showPercentiles.erase(std::unique(showPercentiles.begin(), showPercentiles.end()), showPercentiles.end());
+    for (int v : showPercentiles) {
+      if (v < 1 || v > 99) {
+        printf("[ERROR] SHOW_PERCENTILES: value %d out of range (allowed 1..99)\n", v);
+        exit(1);
+      }
+    }
+
     // Parse preferred XCC table (if provided)
     char const* prefXccRaw = getenv("XCC_PREF_TABLE");
     if (prefXccRaw) {
@@ -362,6 +375,7 @@ public:
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
+    printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
@@ -500,6 +514,8 @@ public:
     Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
+    Print("SHOW_PERCENTILES", showPercentiles.empty() ? 0 : 1, "%s",
+          showPercentiles.empty() ? "Disabled" : GetStr(showPercentiles).c_str());
     Print("USE_HIP_EVENTS", useHipEvents,
           "Using %s for GFX/DMA Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
@@ -677,7 +693,7 @@ public:
     cfg.general.numIterations      = numIterations;
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
-    cfg.general.recordPerIteration = showIterations;
+    cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
     cfg.general.useInteractive     = useInteractive;
 
     cfg.data.alwaysValidate        = alwaysValidate;
