@@ -21,13 +21,29 @@ THE SOFTWARE.
 */
 
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 #include <type_traits>
+#include "EnvVars.hpp"
 #include "TransferBench.hpp"
 
 namespace TransferBench::Utils
 {
+  // Linear interpolation on sorted samples (same ordering as common empirical quantiles with (n-1) indexing).
+  inline double PercentileDurationMsecFromSorted(std::vector<double> const& sortedAsc, int pct)
+  {
+    size_t const n = sortedAsc.size();
+    if (n == 0)
+      return 0.0;
+    double const pos = (static_cast<double>(pct) / 100.0) * static_cast<double>(n - 1);
+    size_t const lo = static_cast<size_t>(std::floor(pos));
+    size_t const hi = static_cast<size_t>(std::ceil(pos));
+    double const frac = pos - std::floor(pos);
+    return sortedAsc[lo] * (1.0 - frac) + sortedAsc[hi] * frac;
+  }
+
   // Helper class to help format tabular data / output to CSV
   class TableHelper
   {
@@ -538,10 +554,13 @@ namespace TransferBench::Utils
     for (auto const& exeInfoPair : results.exeResults) {
       ExeResult const& exeResult = exeInfoPair.second;
       numRows += 1 + exeResult.transferIdx.size();
+      if (!ev.showPercentiles.empty()) {
+        numRows += static_cast<int>(ev.showPercentiles.size()) * static_cast<int>(exeResult.transferIdx.size());
+      }
       if (ev.showIterations) {
         numRows += (numTimedIterations + 1) * exeResult.transferIdx.size();
-
-        // Check that per-iteration information exists
+      }
+      if (ev.showIterations || !ev.showPercentiles.empty()) {
         for (int idx : exeResult.transferIdx) {
           TransferResult const& r = results.tfrResults[idx];
           if (r.perIterMsec.size() != numTimedIterations) {
@@ -670,6 +689,24 @@ namespace TransferBench::Utils
           rowIdx++;
           table.DrawRowBorder(rowIdx);
         }
+
+        // Show percentiles
+        if (!ev.showPercentiles.empty()) {
+          std::vector<double> sortedDur = r.perIterMsec;
+          std::sort(sortedDur.begin(), sortedDur.end());
+          for (int pct : ev.showPercentiles) {
+            double dur = PercentileDurationMsecFromSorted(sortedDur, pct);
+            double bwGbs = dur > 0.0 ? (t.numBytes / 1.0E9) / dur * 1000.0 : 0.0;
+            table.Set(rowIdx, 0, "p%d ", pct);
+            table.Set(rowIdx, 1, "%8.3f GB/s ", bwGbs);
+            table.Set(rowIdx, 2, "%8.3f ms ", dur);
+            table.Set(rowIdx, 3, " ");
+            table.Set(rowIdx, 4, " ");
+            table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
+            rowIdx++;
+          }
+        }
+
       }
     }
     table.DrawRowBorder(rowIdx);
