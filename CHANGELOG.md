@@ -20,6 +20,7 @@ Documentation for TransferBench is available at
 - Added new "smoketest" preset that runs a variety of DMA/GFX tests for simple correctness tests
 - Added new "help" preset to show config file examples
 - Added new "presets" preset to show available presets and their descriptions
+- Added new "rings" preset that runs parallel rings of transfers (pod-capable)
 - Added new "envvars" preset to show environment variables that can change TransferBench behavior
 - Adding information on how to run multi-rank with TransferBench, when run with no args
 - Added new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)

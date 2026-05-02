@@ -44,7 +44,7 @@ THE SOFTWARE.
 #include "PeerToPeer.hpp"
 #include "PodAllToAll.hpp"
 #include "PodPeerToPeer.hpp"
-#include "PodRing.hpp"
+#include "Rings.hpp"
 #include "Scaling.hpp"
 #include "Schmoo.hpp"
 #include "SmokeTest.hpp"
@@ -80,7 +80,7 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"p2p"   ,      {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"poda2a",      {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},
   {"podp2p",      {PodPeerToPeerPreset, "Peer-to-peer transfers test among ranks within a pod"}},
-  {"podring",     {PodRingPreset,       "Ring transfers within subgroups of ranks in a pod"}},
+  {"rings",       {RingsPreset,         "Ring transfers within subgroups of ranks in a pod"}},
   {"rsweep",      {SweepPreset,         "Randomly sweep through sets of Transfers"}},
   {"scaling",     {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
