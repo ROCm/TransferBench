@@ -96,6 +96,11 @@ int WallClockPreset(EnvVars&          ev,
     Utils::Print("[ERROR] wallclock preset requires at least one GPU\n");
     return ERR_FATAL;
   }
+  // Timed/auto mode (numIterations <= 0) never runs timed iterations, so results would be undefined
+  if (ev.numIterations <= 0) {
+    Utils::Print("[ERROR] wallclock preset requires NUM_ITERATIONS > 0 (timed mode is not supported)\n");
+    return ERR_FATAL;
+  }
 
   // Collect local results
   int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
@@ -134,7 +139,7 @@ int WallClockPreset(EnvVars&          ev,
 
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
     {
-      HIP_CALL(hipMemset(readyFlag, 0, sizeof(int)));
+      HIP_CALL(hipMemset(readyFlag, 0, sizeof(*readyFlag)));
       HIP_CALL(hipDeviceSynchronize());
       GetXccTimestamps<<<dim3(numXccs,2,1), 1>>>(timestamps, readyFlag);
       HIP_CALL(hipDeviceSynchronize());

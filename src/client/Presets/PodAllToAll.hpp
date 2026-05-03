@@ -118,9 +118,14 @@ int PodAllToAllPreset(EnvVars&          ev,
     return ERR_FATAL;
   }
 
-  if (numRanks * numDetectedGpus % groupSize) {
-    Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n", groupSize, numRanks * numDetectedGpus, numRanks);
-    return ERR_FATAL;
+  // Validate per-pod: pods may have different rank counts so global check is insufficient
+  for (auto const& [pod, ranks] : Utils::GetRankPerPodMap()) {
+    int podDevices = (int)ranks.size() * numGpus;
+    if (podDevices % groupSize) {
+      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %d (%zu ranks).\n",
+                   groupSize, podDevices, pod, ranks.size());
+      return ERR_FATAL;
+    }
   }
 
   Utils::Print("GPU-%s IntraPod All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
