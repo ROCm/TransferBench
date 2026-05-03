@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 #include "Presets.hpp"
 #include "Topology.hpp"
+#include <algorithm>
 #include <fstream>
 
 void DisplayVersion();
@@ -152,7 +153,7 @@ int main(int argc, char **argv)
           }
           numVariableTransfers++;
           varTransferCount[t.exeDevice]++;
-          maxVarCount = max(maxVarCount, varTransferCount[t.exeDevice]);
+          maxVarCount = std::max(maxVarCount, varTransferCount[t.exeDevice]);
         }
       }
       if (numVariableTransfers > 0 && numVariableTransfers != transfers.size()) {
