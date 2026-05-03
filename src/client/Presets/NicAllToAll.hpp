@@ -270,6 +270,8 @@ int NicAllToAllPreset(EnvVars&                    ev,
   for (size_t i = 0; i < results.tfrResults.size(); i++) {
     int nicIdx  = results.tfrResults[i].exeDevice.exeIndex;
     int rankIdx = results.tfrResults[i].exeDevice.exeRank;
+    // Guard against remapped NIC indices from RunTransfers executor resolution
+    if (rankIdx < 0 || rankIdx >= numRanks || nicIdx < 0 || nicIdx >= numNicsPerRank) continue;
     bwByRankNic[rankIdx][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
   }
 
