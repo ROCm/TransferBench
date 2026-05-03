@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 #include "Presets.hpp"
 #include "Topology.hpp"
+#include <algorithm>
 #include <fstream>
 
 void DisplayVersion();
@@ -152,7 +153,7 @@ int main(int argc, char **argv)
           }
           numVariableTransfers++;
           varTransferCount[t.exeDevice]++;
-          maxVarCount = max(maxVarCount, varTransferCount[t.exeDevice]);
+          maxVarCount = std::max(maxVarCount, varTransferCount[t.exeDevice]);
         }
       }
       if (numVariableTransfers > 0 && numVariableTransfers != transfers.size()) {
@@ -224,18 +225,26 @@ int main(int argc, char **argv)
 
 void DisplayVersion()
 {
-  bool nicSupport = false, mpiSupport = false;
+  bool nicSupport = false, mpiSupport = false, podSupport = false;
 #if NIC_EXEC_ENABLED
   nicSupport = true;
 #endif
 #if MPI_COMM_ENABLED
   mpiSupport = true;
 #endif
+#if POD_COMM_ENABLED
+  podSupport = true;
+#endif
 
+  bool isFound = false;
   std::string support = "";
-  if (mpiSupport && nicSupport) support = " (with MPI+NIC support)";
-  else if (mpiSupport)          support = " (with MPI support)";
-  else if (nicSupport)          support = " (with NIC support)";
+  support += mpiSupport ? " (with MPI" : "";
+  isFound |= mpiSupport;
+  support += nicSupport ? (isFound ? "+NIC" : " (with NIC") : "";
+  isFound |= nicSupport;
+  support += podSupport ? (isFound ? "+POD" : " (with POD") : "";
+  isFound |= podSupport;
+  support += isFound ? " support)" : " (No extra feature support)";
 
   std::string multiNodeMode = "";
   switch (GetCommMode()) {
