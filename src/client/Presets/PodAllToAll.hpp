@@ -109,7 +109,7 @@ int PodAllToAllPreset(EnvVars&          ev,
     }
   }
   // Validate env vars
-  if (numGpus < 0 || numGpus > numDetectedGpus) {
+  if (numGpus <= 0 || numGpus > numDetectedGpus) {
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return ERR_FATAL;
   }
@@ -181,6 +181,7 @@ int PodAllToAllPreset(EnvVars&          ev,
           transfers.push_back(transfer);
         }
 
+        // NIC transfers are supplementary bandwidth; excluded from groupReIndex and bandwidth table
         if (numQueuePairs > 0) {
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;

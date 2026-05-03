@@ -32,7 +32,7 @@ __global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
     int xccId;
     GetXccId(xccId);
 
-    // All threadblocks wait for ready signal
+    // All threadblocks wait for ready signal (no timeout — assumes signaling block is live)
     while (*readyFlag == 0);
 
     // Collect timestamp and save to memory; guard against unexpected XCC IDs
