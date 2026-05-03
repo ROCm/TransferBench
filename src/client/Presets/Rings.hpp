@@ -224,6 +224,7 @@ int RingsPreset(EnvVars&          ev,
           table.Set(statRow+3, currCol+1+j, "%7.2f", ringSum[j][ringIdx]);
         }
         table.DrawRowBorder(statRow+3);
+        table.DrawRowBorder(statRow+4);
       }
     }
     table.PrintTable(ev.outputToCsv, ev.showBorders);
