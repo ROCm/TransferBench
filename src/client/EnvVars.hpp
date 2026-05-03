@@ -38,6 +38,7 @@ THE SOFTWARE.
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <numa.h>
 #include <random>
@@ -352,6 +353,7 @@ public:
     printf(" GFX_SINGLE_TEAM     - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER      - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
     printf(" GFX_WORD_SIZE       - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
+    printf(" GPU_MAX_HW_QUEUES   - Max hardware queues per GPU device (default = 4)\n");
     printf(" HIDE_ENV            - Hide environment variable value listing\n");
 #if NIC_EXEC_ENABLED
     printf(" IB_GID_INDEX        - Required for RoCE NICs (default=-1/auto)\n");
@@ -478,6 +480,9 @@ public:
     Print("GFX_WORD_SIZE", gfxWordSize,
           "Using GFX word size of %d (DWORDx%d)", gfxWordSize, gfxWordSize);
 
+    Print("GPU_MAX_HW_QUEUES", gpuMaxHwQueues,
+          "Max %d hardware queues per GPU device", gpuMaxHwQueues);
+
 #if NIC_EXEC_ENABLED
     Print("IP_ADDRESS_FAMILY", ipAddressFamily,
           "IP address family is set to IPv%d", ipAddressFamily);
@@ -562,68 +567,59 @@ public:
     return defaultValue;
   }
 
-  static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
+  // Returns comma-split tokens for varname, or an empty optional if unset/empty (use default).
+  static std::optional<std::vector<std::string>> GetEnvTokens(std::string const& varname)
   {
     char const* raw = getenv(varname.c_str());
-    if (raw) {
-      std::vector<int> values;
-      std::string copy(raw);
-      char* token = copy.empty() ? NULL : strtok(&copy[0], ",");
-      while (token) {
-        int val;
-        if (sscanf(token, "%d", &val) == 1) {
-          values.push_back(val);
-        } else {
-          printf("[ERROR] Unrecognized token [%s]\n", token);
-          exit(1);
-        }
-        token = strtok(NULL, ",");
+    if (!raw || raw[0] == '\0') return std::nullopt;
+    std::vector<std::string> tokens;
+    std::string copy(raw);
+    char* token = strtok(&copy[0], ",");
+    while (token) { tokens.push_back(token); token = strtok(NULL, ","); }
+    return tokens;
+  }
+
+  static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
+  {
+    auto tokens = GetEnvTokens(varname);
+    if (!tokens) return defaultValue;
+    std::vector<int> values;
+    for (auto const& tok : *tokens) {
+      int val;
+      if (sscanf(tok.c_str(), "%d", &val) == 1) {
+        values.push_back(val);
+      } else {
+        printf("[ERROR] Unrecognized token [%s]\n", tok.c_str());
+        exit(1);
       }
-      return values;
     }
-    return defaultValue;
+    return values;
   }
 
   static std::vector<std::string> GetEnvVarStrArray(std::string const& varname, std::vector<std::string> const& defaultValue)
   {
-    char const* raw = getenv(varname.c_str());
-    if (raw) {
-      std::vector<std::string> values;
-      std::string copy(raw);
-      char* token = copy.empty() ? NULL : strtok(&copy[0], ",");
-      while (token) {
-        values.push_back(token);
-        token = strtok(NULL, ",");
-      }
-      return values;
-    }
-    return defaultValue;
+    auto tokens = GetEnvTokens(varname);
+    if (!tokens) return defaultValue;
+    return *tokens;
   }
 
   static std::vector<int> GetEnvVarRangeArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
-    char const* raw = getenv(varname.c_str());
-    if (raw) {
-      std::string copy(raw);
-      std::set<int> values;
-      char* token = copy.empty() ? NULL : strtok(&copy[0], ",");
-      while (token) {
-        int start, end;
-        if (sscanf(token, "%d-%d", &start, &end) == 2) {
-          for (int i = start; i <= end; i++) values.insert(i);
-        } else if (sscanf(token, "%d", &start) == 1) {
-          values.insert(start);
-        } else {
-          printf("[ERROR] Unrecognized token [%s]\n", token);
-          exit(1);
-        }
-        token = strtok(NULL, ",");
+    auto tokens = GetEnvTokens(varname);
+    if (!tokens) return defaultValue;
+    std::set<int> values;
+    for (auto const& tok : *tokens) {
+      int start, end;
+      if (sscanf(tok.c_str(), "%d-%d", &start, &end) == 2) {
+        for (int i = start; i <= end; i++) values.insert(i);
+      } else if (sscanf(tok.c_str(), "%d", &start) == 1) {
+        values.insert(start);
+      } else {
+        printf("[ERROR] Unrecognized token [%s]\n", tok.c_str());
+        exit(1);
       }
-      std::vector<int> result;
-      for (auto v : values) result.push_back(v);
-      return result;
     }
-    return defaultValue;
+    return std::vector<int>(values.begin(), values.end());
   }
 
   static std::string GetEnvVar(std::string const& varname, std::string const& defaultValue)
@@ -673,8 +669,10 @@ public:
         }
       }
     }
-    if (inRun)
+    if (inRun) {
       curr.second = (cuMask.size() * 32) / numXccs - 1;
+      runs.push_back(curr);
+    }
 
     std::string result = "CUs used: (" + std::to_string(used) + ") ";
     for (int i = 0; i < runs.size(); i++)

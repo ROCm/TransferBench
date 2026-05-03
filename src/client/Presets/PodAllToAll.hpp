@@ -167,6 +167,7 @@ int PodAllToAllPreset(EnvVars&          ev,
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;
           for (int x = 0; x < numSrcs; x++) transfer.srcs.push_back(devices[i]);
+          // First dst is the remote peer (devices[j]); extra dsts are local (devices[i]) to stress-test src bandwidth
           if (numDsts) transfer.dsts.push_back(devices[j]);
           for (int x = 1; x < numDsts; x++) transfer.dsts.push_back(devices[i]);
           transfer.exeDevice = {exeType,

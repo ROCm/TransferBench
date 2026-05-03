@@ -35,9 +35,9 @@ __global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
     // All threadblocks wait for ready signal
     while (*readyFlag == 0);
 
-    // Collect timestamp and save to memory
+    // Collect timestamp and save to memory; guard against unexpected XCC IDs
     auto w = GetTimestamp();
-    timestamps[xccId] = w;
+    if (xccId >= 0 && xccId < (int)gridDim.x) timestamps[xccId] = w;
   } else if (blockIdx.x == 0) {
 
     // Sleep for some number of cycles to ensure that other threadblocks are active
@@ -103,7 +103,16 @@ int WallClockPreset(EnvVars&          ev,
   }
 
   // Collect local results
+  // Query XCC count per device; all must match since results are sized from GPU 0
   int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
+  for (int deviceId = 1; deviceId < numGpuDevices; deviceId++) {
+    int devXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, deviceId});
+    if (devXccs != numXccs) {
+      Utils::Print("[ERROR] GPU device %d has %d XCCs but GPU 0 has %d; heterogeneous XCC counts are not supported\n",
+                   deviceId, devXccs, numXccs);
+      return ERR_FATAL;
+    }
+  }
 
   // Compute wall clock rate (based on GPU 0)
   int wallClockKhz;
