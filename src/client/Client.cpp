@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 #include "Presets.hpp"
 #include "Topology.hpp"
+#include <algorithm>
 #include <fstream>
 
 void DisplayVersion();
