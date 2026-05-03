@@ -63,6 +63,11 @@ int RingsPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Ring size must be greater than 0\n");
     return ERR_FATAL;
   }
+  if (numQueuePairs < 0) {
+    Utils::Print("[ERROR] Num queue pairs must be non-negative\n");
+    return ERR_FATAL;
+  }
+
   int totalGpus = numRanks * numGpus;
   if (totalGpus % ringSize) {
     Utils::Print("[ERROR] Ring size %d must evenly divide the total number of GPUs %d\n", ringSize, totalGpus);
