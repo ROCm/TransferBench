@@ -20,6 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#include <numeric>
+
 int RingsPreset(EnvVars&          ev,
                 size_t      const numBytesPerTransfer,
                 std::string const presetName,
@@ -30,14 +32,14 @@ int RingsPreset(EnvVars&          ev,
     Utils::Print("[ERROR] rings preset can only be run across ranks that are homogeneous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Check for pod support (if multi-node)
   int numRanks = TransferBench::GetNumRanks();
-  if (numRanks > 1 && Utils::GetRankPerPodMap().empty()) {
-    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return 1;
+  if (numRanks > 1 && Utils::GetRankPerPodMap().size() != 1) {
+    Utils::Print("[ERROR] Multi-rank runs must be within a single pod.  Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return ERR_FATAL;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -50,36 +52,29 @@ int RingsPreset(EnvVars&          ev,
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
-  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numGpus);
+  int ringSize      = EnvVars::GetEnvVar("RING_SIZE"      , numRanks * numGpus);
+
 
   if (numGpus <= 0 || numGpus > numDetectedGpus) {
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    return 1;
+    return ERR_FATAL;
   }
-  if (groupSize <= 0) {
-    Utils::Print("[ERROR] Group size must be greater than 0\n");
-    return 1;
+  if (ringSize <= 0) {
+    Utils::Print("[ERROR] Ring size must be greater than 0\n");
+    return ERR_FATAL;
   }
-  if (numRanks * numGpus % groupSize) {
-    Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
-                 groupSize, numRanks * numGpus, numRanks);
-    return 1;
+  if (numQueuePairs < 0) {
+    Utils::Print("[ERROR] Num queue pairs must be non-negative\n");
+    return ERR_FATAL;
   }
 
-  int numNics = TransferBench::GetNumExecutors(EXE_NIC, 0);
-  bool nicDifference = false;
-  for (int rank = 0; rank < numRanks; rank++) {
-    if (numGpus > TransferBench::GetNumExecutors(EXE_GPU_GFX, rank)) {
-      Utils::Print("[ERROR] rings preset requires each rank to have the same number of GPUs\n");
-      return 1;
-    }
-    if (numQueuePairs > 0 && numNics != TransferBench::GetNumExecutors(EXE_NIC, rank))
-      nicDifference = true;
+  int totalGpus = numRanks * numGpus;
+  if (totalGpus % ringSize) {
+    Utils::Print("[ERROR] Ring size %d must evenly divide the total number of GPUs %d\n", ringSize, totalGpus);
+    return ERR_FATAL;
   }
-  if (nicDifference)
-    Utils::Print("[WARN] Not all ranks have the same number of NICs\n");
 
-  MemType memType = Utils::GetGpuMemType(memTypeIdx);
+  MemType memType           = Utils::GetGpuMemType(memTypeIdx);
   std::string devMemTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
 
   if (Utils::RankDoesOutput()) {
@@ -93,12 +88,12 @@ int RingsPreset(EnvVars&          ev,
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
-      ev.Print("GROUP_SIZE"     , groupSize    , "Dividing all devices into ring groups of %d", groupSize);
+      ev.Print("RING_SIZE"      , ringSize     , "Building rings of size %d", ringSize);
       printf("\n");
     }
   }
 
-  Utils::Print("GPU-%s IntraPod Ring benchmark:\n", useDmaExec ? "DMA" : "GFX");
+  Utils::Print("GPU-%s Rings benchmark:\n", useDmaExec ? "DMA" : "GFX");
   Utils::Print("==============================\n");
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
                numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs,
@@ -107,174 +102,142 @@ int RingsPreset(EnvVars&          ev,
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
-  int n = numRanks * numGpus;
-  int numGroups = n / groupSize;
+  int numRings = totalGpus / ringSize;
+  Utils::Print("Running %d parallel ring(s) each of %d devices.  All numbers in GB/s:\n", numRings, ringSize);
 
-  std::vector<int> indices(n);
-  for (int k = 0; k < n; k++) indices[k] = k;
+  // Determine ordering of GPUs for the rings based on stride
+  std::vector<int> indices(totalGpus);
+  std::iota(indices.begin(), indices.end(), 0);
   Utils::StrideGenerate(indices, stride);
 
-  std::vector<MemDevice> devices(n);
-  for (int i = 0; i < n; i++) {
-    int const globalIdx = indices[i];
-    int const rank      = globalIdx / numGpus;
-    int const devIdx    = globalIdx % numGpus;
-    devices[i] = {memType, devIdx, rank};
+  // Establish memory devices for all GPUs
+  std::vector<MemDevice> memDevices(totalGpus);
+  for (int i = 0; i < totalGpus; i++) {
+    memDevices[i] = {memType, indices[i] % numGpus, indices[i] / numGpus};
   }
 
-  Utils::Print("%d ring(s) of %d devices:\n", numGroups, groupSize);
-  for (int group = 0; group < numGroups; group++) {
-    int const groupBase = group * groupSize;
-    Utils::Print("  Ring %d: ", group);
-    for (int i = 0; i < groupSize; i++) {
-      Utils::Print("R%d:G%d -> ", devices[groupBase + i].memRank, devices[groupBase + i].memIndex);
-    }
-    Utils::Print("R%d:G%d\n", devices[groupBase].memRank, devices[groupBase].memIndex);
-  }
-  Utils::Print("\n");
+  // Build list of Transfers
+  std::vector<Transfer> transfers;
+  for (int ringIdx = 0; ringIdx < numRings; ringIdx++) {
+    int const ringBase = ringIdx * ringSize;
 
-  for (int group = 0; group < numGroups; group++) {
-    int const groupBase = group * groupSize;
-    std::vector<Transfer> transfers;
+    // Build GFX or DMA transfers for this ring
+    for (int i = 0; i < ringSize; i++) {
+      Transfer t;
+      int srcIdx    = ringBase + i;
+      int dstIdx    = ringBase + (i + 1) % ringSize;
+      int exeIdx    = useRemoteRead ? dstIdx : srcIdx;
+      t.numBytes    = numBytesPerTransfer;
+      t.srcs        = {memDevices[srcIdx]};
+      t.dsts        = {memDevices[dstIdx]};
+      t.exeDevice   = {exeType, memDevices[exeIdx].memIndex, memDevices[exeIdx].memRank};
+      t.numSubExecs = numSubExecs;
+      transfers.push_back(t);
 
-    for (int i = 0; i < groupSize; i++) {
-      int srcIdx = groupBase + i;
-      int dstIdx = groupBase + (i + 1) % groupSize;
-
-      TransferBench::Transfer transfer;
-      transfer.numBytes = numBytesPerTransfer;
-      transfer.srcs.push_back(devices[srcIdx]);
-      transfer.dsts.push_back(devices[dstIdx]);
-      transfer.exeDevice = {exeType,
-                           (int32_t)(useRemoteRead ? devices[dstIdx].memIndex : devices[srcIdx].memIndex),
-                           (int32_t)(useRemoteRead ? devices[dstIdx].memRank  : devices[srcIdx].memRank)};
-      transfer.exeSubIndex = -1;
-      transfer.numSubExecs = numSubExecs;
-      transfers.push_back(transfer);
-
+      // Build NIC transfers between these GPUs as well if requested
       if (numQueuePairs > 0) {
-        TransferBench::Transfer nicTransfer;
-        nicTransfer.numBytes = numBytesPerTransfer;
-        nicTransfer.srcs.push_back(devices[srcIdx]);
-        nicTransfer.dsts.push_back(devices[dstIdx]);
-        nicTransfer.exeDevice = {TransferBench::EXE_NIC_NEAREST,
-                                (int32_t)devices[srcIdx].memIndex, (int32_t)devices[srcIdx].memRank};
-        nicTransfer.exeSubIndex = devices[dstIdx].memIndex;
+        Transfer nicTransfer = t;
+        nicTransfer.exeDevice   = {EXE_NIC_NEAREST, memDevices[exeIdx].memIndex, memDevices[exeIdx].memRank};
+        nicTransfer.exeSubIndex = memDevices[useRemoteRead ? srcIdx : dstIdx].memIndex;
         nicTransfer.numSubExecs = numQueuePairs;
         transfers.push_back(nicTransfer);
       }
     }
+  }
 
-    TransferBench::TestResults results;
-    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-      for (auto const& err : results.errResults)
-        Utils::Print("%s\n", err.errMsg.c_str());
-      return 1;
-    }
-    if (showDetails) {
-      Utils::PrintResults(ev, 1, transfers, results);
-      Utils::Print("\n");
-    }
+  TransferBench::TestResults results;
+  if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+    for (auto const& err : results.errResults)
+      Utils::Print("%s\n", err.errMsg.c_str());
+    return ERR_FATAL;
+  }
+  if (showDetails) {
+    Utils::PrintResults(ev, 1, transfers, results);
+    Utils::Print("\n");
+  }
 
-    if (Utils::RankDoesOutput()) {
-      Utils::Print("\n--- Ring Group %d ---\n", group);
+  if (Utils::RankDoesOutput()) {
 
-      int const numHops   = groupSize;
-      int const numRows   = 2 + numHops + 3;
-      int const numCols   = 6;
-      int const precision = 2;
-      Utils::TableHelper table(numRows, numCols, precision);
+    // Limit the number of columns of output
+    int maxColumns   = 24;
+    int colsPerRing  = (numQueuePairs ? 3 : 2);
+    int ringsPerPage = maxColumns / colsPerRing;
+    int numPages     = (numRings + ringsPerPage - 1) / ringsPerPage;
 
-      table.DrawRowBorder(0);
-      table.DrawColBorder(0);
-      table.DrawColBorder(numCols);
-      table.DrawRowBorder(numRows);
 
-      table.Set(0, 0, " Src ");
-      table.Set(0, 1, " Src ");
-      table.Set(0, 2, " Dst ");
-      table.Set(0, 3, " Dst ");
-      table.Set(0, 4, " GFX BW ");
-      table.Set(1, 0, " Rank ");
-      table.Set(1, 1, " GPU ");
-      table.Set(1, 2, " Rank ");
-      table.Set(1, 3, " GPU ");
-      table.Set(1, 4, " (GB/s) ");
-      table.DrawColBorder(2);
-      table.DrawColBorder(4);
+    // Compute table size
+    int numRows = numPages * (2 + ringSize + 4);
+    int numCols = std::min(numRings, ringsPerPage) * colsPerRing;
+    Utils::TableHelper table(numRows, numCols);
 
-      if (numQueuePairs > 0) {
-        table.Set(0, 5, " NIC BW ");
-        table.Set(1, 5, " (GB/s) ");
-      } else {
-        table.Set(0, 5, " ");
-        table.Set(1, 5, " ");
-      }
+    std::vector<std::vector<double>> ringMin(numQueuePairs ? 2 : 1, std::vector<double>(numRings, std::numeric_limits<double>::max()));
+    std::vector<std::vector<double>> ringSum(numQueuePairs ? 2 : 1, std::vector<double>(numRings, 0.0));
+    std::vector<std::vector<double>> ringMax(numQueuePairs ? 2 : 1, std::vector<double>(numRings, 0.0));
 
-      table.DrawRowBorder(2);
+    for (int pageIdx = 0; pageIdx < numPages; pageIdx++) {
+      int headerRow = pageIdx * (2 + ringSize + 4);
 
-      double gfxMin = std::numeric_limits<double>::max();
-      double gfxAvg = 0.0;
-      double gfxMax = std::numeric_limits<double>::lowest();
-      double nicMin = std::numeric_limits<double>::max();
-      double nicAvg = 0.0;
-      double nicMax = std::numeric_limits<double>::lowest();
+      table.DrawRowBorder(headerRow);
+      table.DrawRowBorder(headerRow+2);
+      for (int r = 0; r < ringsPerPage; r++) {
+        int ringIdx = pageIdx * ringsPerPage + r;
+        if (ringIdx >= numRings) break;
+        int currCol = colsPerRing * r;
 
-      int tfrIdx = 0;
-      for (int i = 0; i < numHops; i++) {
-        int srcIdx = groupBase + i;
-        int dstIdx = groupBase + (i + 1) % groupSize;
-        int row    = 2 + i;
-
-        double gfxBw = results.tfrResults[tfrIdx].avgBandwidthGbPerSec;
-        tfrIdx++;
-
-        table.Set(row, 0, " %d ", devices[srcIdx].memRank);
-        table.Set(row, 1, " %d ", devices[srcIdx].memIndex);
-        table.Set(row, 2, " %d ", devices[dstIdx].memRank);
-        table.Set(row, 3, " %d ", devices[dstIdx].memIndex);
-        table.Set(row, 4, " %.2f ", gfxBw);
-
-        gfxMin = std::min(gfxMin, gfxBw);
-        gfxAvg += gfxBw;
-        gfxMax = std::max(gfxMax, gfxBw);
-
-        if (numQueuePairs > 0) {
-          double nicBw = results.tfrResults[tfrIdx].avgBandwidthGbPerSec;
-          tfrIdx++;
-          table.Set(row, 5, " %.2f ", nicBw);
-          nicMin = std::min(nicMin, nicBw);
-          nicAvg += nicBw;
-          nicMax = std::max(nicMax, nicBw);
+        // Set header for ring
+        table.DrawColBorder(currCol);
+        table.DrawColBorder(currCol + colsPerRing);
+        for (int i = 0; i < colsPerRing; i++)
+          table.Set(headerRow, currCol+i, "Ring%02d", ringIdx);
+        table.Set(headerRow+1, currCol, "Device");
+        table.Set(headerRow+1, currCol+1, "%s BW", useDmaExec ? "DMA" : "GFX");
+        if (numQueuePairs) {
+          table.Set(headerRow+1, currCol+2, "NIC BW");
         }
+
+        // Fill results for ring
+        int baseRow = headerRow + 2;
+        table.DrawRowBorder(baseRow);
+        for (int i = 0; i < ringSize; i++) {
+          int tfrIdx = (ringIdx * ringSize + i) * (colsPerRing - 1);
+          Transfer const& t = transfers[tfrIdx];
+          if (numRanks > 1) {
+            table.Set(baseRow + i, currCol, "R%02d:%d", t.srcs[0].memRank, t.srcs[0].memIndex);
+          } else {
+            table.Set(baseRow + i, currCol, "%d", t.srcs[0].memIndex);
+          }
+
+          for (int j = 0; j < colsPerRing - 1; j++) {
+            double bw = results.tfrResults[tfrIdx + j].avgBandwidthGbPerSec;
+            table.Set(baseRow + i, currCol+1+j, "%7.2f", bw);
+            ringMin[j][ringIdx] = std::min(ringMin[j][ringIdx], bw);
+            ringSum[j][ringIdx] += bw;
+            ringMax[j][ringIdx] = std::max(ringMax[j][ringIdx], bw);
+          }
+        }
+        int statRow = baseRow + ringSize;
+        table.DrawRowBorder(statRow);
+        table.Set(statRow  , currCol, "MIN");
+        table.Set(statRow+1, currCol, "AVG");
+        table.Set(statRow+2, currCol, "MAX");
+        table.Set(statRow+3, currCol, "SUM");
+
+        for (int j = 0; j < colsPerRing - 1; j++) {
+          table.Set(statRow  , currCol+1+j, "%7.2f", ringMin[j][ringIdx]);
+          table.Set(statRow+1, currCol+1+j, "%7.2f", ringSum[j][ringIdx] / ringSize);
+          table.Set(statRow+2, currCol+1+j, "%7.2f", ringMax[j][ringIdx]);
+          table.Set(statRow+3, currCol+1+j, "%7.2f", ringSum[j][ringIdx]);
+        }
+        table.DrawRowBorder(statRow+3);
+        table.DrawRowBorder(statRow+4);
       }
-
-      int summaryBase = 2 + numHops;
-      table.DrawRowBorder(summaryBase);
-      table.Set(summaryBase    , 1, " MAX ");
-      table.Set(summaryBase + 1, 1, " AVG ");
-      table.Set(summaryBase + 2, 1, " MIN ");
-      table.Set(summaryBase    , 4, " %.2f ", gfxMax);
-      table.Set(summaryBase + 1, 4, " %.2f ", gfxAvg / numHops);
-      table.Set(summaryBase + 2, 4, " %.2f ", gfxMin);
-
-      if (numQueuePairs > 0) {
-        table.Set(summaryBase    , 5, " %.2f ", nicMax);
-        table.Set(summaryBase + 1, 5, " %.2f ", nicAvg / numHops);
-        table.Set(summaryBase + 2, 5, " %.2f ", nicMin);
-      }
-
-      table.PrintTable(ev.outputToCsv, ev.showBorders);
-
-      Utils::Print("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
     }
+    table.PrintTable(ev.outputToCsv, ev.showBorders);
+    Utils::Print("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
+
+    if (Utils::HasDuplicateHostname())
+      Utils::Print("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
 
-  if (!Utils::RankDoesOutput()) return 0;
-
-  if (Utils::HasDuplicateHostname()) {
-    printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
-  }
-
-  return 0;
+  return ERR_NONE;
 }
