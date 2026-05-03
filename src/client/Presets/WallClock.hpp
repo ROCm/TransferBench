@@ -20,6 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#include <limits>
+
 __global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
 {
   // Only first thread does any work
@@ -92,13 +94,13 @@ int WallClockPreset(EnvVars&          ev,
   IS_UNIFORM(ev.numWarmups,     "NUM_WARMUPS");
   IS_UNIFORM(ev.showIterations, "SHOW_ITERATIONS");
 
-  if (numGpuDevices <= 0) {
-    Utils::Print("[ERROR] wallclock preset requires at least one GPU\n");
+  if (numGpuDevices <= 0 || numGpuDevices > numDetectedGpus) {
+    Utils::Print("[ERROR] wallclock preset requires 1 <= NUM_GPU_DEVICES <= %d (got %d)\n", numDetectedGpus, numGpuDevices);
     return ERR_FATAL;
   }
-  // Timed/auto mode (numIterations <= 0) never runs timed iterations, so results would be undefined
+  // Seconds-based (numIterations < 0) and infinite (numIterations == 0) modes are not supported
   if (ev.numIterations <= 0) {
-    Utils::Print("[ERROR] wallclock preset requires NUM_ITERATIONS > 0 (timed mode is not supported)\n");
+    Utils::Print("[ERROR] wallclock preset requires NUM_ITERATIONS > 0 (seconds-based and infinite modes are not supported)\n");
     return ERR_FATAL;
   }
 

@@ -118,12 +118,17 @@ int PodAllToAllPreset(EnvVars&          ev,
     return ERR_FATAL;
   }
 
+  if (groupSize < 1) {
+    Utils::Print("[ERROR] GROUP_SIZE must be >= 1 (got %d)\n", groupSize);
+    return ERR_FATAL;
+  }
+
   // Validate per-pod: pods may have different rank counts so global check is insufficient
   for (auto const& [pod, ranks] : Utils::GetRankPerPodMap()) {
     int podDevices = (int)ranks.size() * numGpus;
     if (podDevices % groupSize) {
-      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %d (%zu ranks).\n",
-                   groupSize, podDevices, pod, ranks.size());
+      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %ld (%zu ranks).\n",
+                   groupSize, podDevices, (long)pod, ranks.size());
       return ERR_FATAL;
     }
   }
