@@ -103,8 +103,15 @@ Quick smoke test from the repo root after a successful build:
 sudo mkdir -p /opt/rocm/extras-7
 sudo tar -xzf build/amdrocm7-transferbench-*.tar.gz -C /opt/rocm/extras-7 --strip-components=1
 export PATH=/opt/rocm/extras-7/bin:$PATH
-TransferBench --help
+# With no args, TransferBench prints version, usage, available presets,
+# and detected topology — a fast end-to-end check that the binary loads
+# its ROCm libs correctly.
+TransferBench
 ```
+
+> Once the `help` and `smoketest` presets land on `develop` (currently on
+> `candidate`), prefer `TransferBench help` for usage and `TransferBench
+> smoketest` for a real correctness check.
 
 ## S3 upload (OIDC)
 

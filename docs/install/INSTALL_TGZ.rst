@@ -104,10 +104,14 @@ Verify the install
 
 .. code-block:: bash
 
-  TransferBench --help
+  TransferBench
 
-You should see the TransferBench usage banner. If the binary fails to load a
-shared library, inspect:
+Run with no arguments, ``TransferBench`` prints its version, usage, the
+list of available preset benchmarks, and the detected GPU/CPU topology,
+then exits. Seeing that output confirms the binary loaded its ROCm
+libraries correctly.
+
+If the binary fails to load a shared library, inspect:
 
 .. code-block:: bash
 
