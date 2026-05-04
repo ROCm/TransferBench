@@ -53,7 +53,7 @@ int PodAllToAllPreset(EnvVars&          ev,
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
-  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numDetectedGpus);
+  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numGpus);
 
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
@@ -127,8 +127,8 @@ int PodAllToAllPreset(EnvVars&          ev,
   for (auto const& [pod, ranks] : Utils::GetRankPerPodMap()) {
     int podDevices = (int)ranks.size() * numGpus;
     if (podDevices % groupSize) {
-      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %ld (%zu ranks).\n",
-                   groupSize, podDevices, (long)pod, ranks.size());
+      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %lld (%zu ranks).\n",
+                   groupSize, podDevices, (long long)pod, ranks.size());
       return ERR_FATAL;
     }
   }

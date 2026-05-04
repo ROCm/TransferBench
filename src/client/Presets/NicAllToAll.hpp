@@ -271,7 +271,11 @@ int NicAllToAllPreset(EnvVars&                    ev,
     int nicIdx  = results.tfrResults[i].exeDevice.exeIndex;
     int rankIdx = results.tfrResults[i].exeDevice.exeRank;
     // Guard against remapped NIC indices from RunTransfers executor resolution
-    if (rankIdx < 0 || rankIdx >= numRanks || nicIdx < 0 || nicIdx >= numNicsPerRank) continue;
+    if (rankIdx < 0 || rankIdx >= numRanks || nicIdx < 0 || nicIdx >= numNicsPerRank) {
+      Utils::Print("[WARN] Skipping result %zu: executor (rank=%d, nic=%d) outside expected range [0,%d)[0,%d)\n",
+                   i, rankIdx, nicIdx, numRanks, numNicsPerRank);
+      continue;
+    }
     bwByRankNic[rankIdx][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
   }
 
