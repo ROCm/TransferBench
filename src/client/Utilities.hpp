@@ -24,6 +24,7 @@ THE SOFTWARE.
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <tuple>
 #include <unordered_map>
