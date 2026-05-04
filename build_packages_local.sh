@@ -167,17 +167,29 @@ printf -v ROCM_LIBPATCH_VERSION '%02d%02d' "${ROCM_MAJOR}" "${ROCM_MINOR}"
 export ROCM_MAJOR ROCM_MINOR ROCM_LIBPATCH_VERSION
 log "ROCm major=${ROCM_MAJOR} minor=${ROCM_MINOR} libpatch=${ROCM_LIBPATCH_VERSION}"
 
-# Package release string: branch.commit for dev, run_number for release branches
+# Package release string. Format mirrors the RVS reference flow:
+#   default (push/schedule/dispatch/local): r<libpatch>.<yyyymmdd>
+#   pull request:                           r<libpatch>.<yyyymmdd>.<src-branch>.<commit>
+#   release/* branch (non-PR):              ${GITHUB_RUN_NUMBER} (fallback 1)
 GIT_BRANCH="${GITHUB_REF_NAME:-$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
 GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [[ "${GIT_BRANCH}" == rel* ]] || [[ "${GIT_BRANCH}" == release/* ]]; then
-  PKG_RELEASE="${GITHUB_RUN_NUMBER}"
+BUILD_DATE_UTC="$(date -u +%Y%m%d)"
+
+# Collapse non-alphanumerics into single dots and trim — DEB/RPM release
+# fields reject most punctuation.
+sanitize_release() {
+  local s
+  s="$(printf '%s' "$1" | sed -E 's/[^[:alnum:]]+/./g; s/^\.+//; s/\.+$//')"
+  printf '%s' "${s:-unknown}"
+}
+
+if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+  PR_BRANCH="$(sanitize_release "${GITHUB_HEAD_REF:-${GIT_BRANCH}}")"
+  PKG_RELEASE="r${ROCM_LIBPATCH_VERSION}.${BUILD_DATE_UTC}.${PR_BRANCH}.${GIT_COMMIT}"
+elif [[ "${GIT_BRANCH}" == release/* ]]; then
+  PKG_RELEASE="${GITHUB_RUN_NUMBER:-1}"
 else
-  # Sanitize: DEB/RPM release fields disallow many punctuation chars.
-  # Collapse anything that's not [A-Za-z0-9] into a single dot, then trim.
-  SAFE_BRANCH="$(printf '%s' "${GIT_BRANCH}" | sed -E 's/[^[:alnum:]]+/./g; s/^\.+//; s/\.+$//')"
-  SAFE_BRANCH="${SAFE_BRANCH:-unknown}"
-  PKG_RELEASE="${SAFE_BRANCH}.${GIT_COMMIT}"
+  PKG_RELEASE="r${ROCM_LIBPATCH_VERSION}.${BUILD_DATE_UTC}"
 fi
 export CPACK_DEBIAN_PACKAGE_RELEASE="${CPACK_DEBIAN_PACKAGE_RELEASE:-$PKG_RELEASE}"
 export CPACK_RPM_PACKAGE_RELEASE="${CPACK_RPM_PACKAGE_RELEASE:-$PKG_RELEASE}"
@@ -185,11 +197,8 @@ log "Package release tag: ${PKG_RELEASE}"
 
 # -------- configure --------
 INSTALL_PREFIX="/opt/rocm/extras-${ROCM_MAJOR}"
-# Relocatable RPATH: $ORIGIN-relative + install prefix + the conventional
-# install-time ROCm locations. Do NOT embed ${ROCM_PATH} (the ephemeral
-# build-time SDK download path) — that would leak CI paths into the
-# packaged binary and break relocatability.
-RPATH_LIST="\$ORIGIN:\$ORIGIN/../lib:${INSTALL_PREFIX}/lib:/opt/rocm/lib:/opt/rocm/lib64"
+# Relocatable RPATH defaults live in CMakeLists.txt under
+# if(BUILD_RELOCATABLE_PACKAGE); enabling that option below activates them.
 
 log "Configuring CMake..."
 rm -rf "${BUILD_DIR}"
@@ -204,9 +213,6 @@ CMAKE_ARGS=(
   -DHIP_PLATFORM=amd
   -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}"
   -DCPACK_PACKAGING_INSTALL_PREFIX="${INSTALL_PREFIX}"
-  -DCMAKE_SKIP_RPATH=FALSE
-  -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=FALSE
-  -DCMAKE_INSTALL_RPATH="${RPATH_LIST}"
   -DCMAKE_VERBOSE_MAKEFILE=ON
   -DBUILD_RELOCATABLE_PACKAGE=ON
   -DBUILD_LOCAL_GPU_TARGET_ONLY=OFF

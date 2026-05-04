@@ -93,11 +93,17 @@ sudo rpm -i --replacefiles --nodeps build/amdrocm7-transferbench-*.rpm
 
 ### Any Linux (TGZ — relocatable install tree, requires ROCm runtime on target)
 
+End-user instructions (pre-install ROCm, runtime dependencies, extract,
+`PATH` / `LD_LIBRARY_PATH`, troubleshooting) live in the project docs at
+[docs/install/INSTALL_TGZ.rst](../../docs/install/INSTALL_TGZ.rst).
+
+Quick smoke test from the repo root after a successful build:
+
 ```bash
 sudo mkdir -p /opt/rocm/extras-7
 sudo tar -xzf build/amdrocm7-transferbench-*.tar.gz -C /opt/rocm/extras-7 --strip-components=1
 export PATH=/opt/rocm/extras-7/bin:$PATH
-TransferBench
+TransferBench --help
 ```
 
 ## S3 upload (OIDC)
