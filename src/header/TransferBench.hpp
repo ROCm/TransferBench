@@ -1470,10 +1470,11 @@ namespace {
       int numaIdx = (md.memType == MEM_CPU_CLOSEST)
                     ? GetClosestCpuNumaToGpu(md.memIndex, md.memRank)
                     : md.memIndex;
-      return std::to_string(numaIdx);
+      return (numaIdx >= 0) ? std::to_string(numaIdx) : "?";
     }
     if (IsGpuMemType(md.memType)) {
-      return std::to_string(GetClosestCpuNumaToGpu(md.memIndex, md.memRank));
+      int numaIdx = GetClosestCpuNumaToGpu(md.memIndex, md.memRank);
+      return (numaIdx >= 0) ? std::to_string(numaIdx) : "?";
     }
     return "?";
   }
@@ -5857,7 +5858,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
           int exeNuma = IsGpuExeType(exe.exeType)
                         ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
-                        : exe.exeIndex;
+                        : IsNicExeType(exe.exeType)
+                          ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
+                          : exe.exeIndex;
           System::Get().Log("Transfer %03d: EXE=%c%d Rank=%d NUMA=%d%s%s  %zu bytes\n",
                             i, ExeTypeStr[exe.exeType], exe.exeIndex, exe.exeRank, exeNuma,
                             exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
