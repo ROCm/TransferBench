@@ -4118,6 +4118,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     exeInfo.totalDurationMsec = 0.0;
     int const localRank = GetRank();
     bool const verbose  = System::Get().IsVerbose();
+    // Executor BDF and NUMA are constant across all transfers — compute once
+    std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
+    int exeNuma = IsGpuExeType(exeDevice.exeType)
+                  ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
+                  : IsNicExeType(exeDevice.exeType)
+                    ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
+                    : exeDevice.exeIndex;
     if (verbose) {
       System::Get().Log("[INFO] Rank %d preparing executor (R%d%c%d)\n",
                         localRank, exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
@@ -4131,13 +4138,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (verbose) {
         System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
                           localRank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
-        // Executor descriptor
-        std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
-        int exeNuma = IsGpuExeType(exeDevice.exeType)
-                      ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
-                      : IsNicExeType(exeDevice.exeType)
-                        ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
-                        : exeDevice.exeIndex;
         System::Get().Log("[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
                           exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
                           exeNuma,
@@ -7224,6 +7224,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.numExecutors[EXE_GPU_DMA] = numGpus;
     topo.numExecutors[EXE_GPU_BDMA] = numGpus;
 
+    std::vector<std::string> gpuArchNames(numGpus);
+
     for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
       int numDeviceCUs  = 0;
       int numXccs       = 0;
@@ -7238,6 +7240,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipDeviceProp_t props;
       if (hipGetDeviceProperties(&props, exeIndex) == hipSuccess) {
         gpuName = props.name;
+        std::string fullName = props.gcnArchName;
+        gpuArchNames[exeIndex] = fullName.substr(0, fullName.find(':'));
       }
       topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
@@ -7310,6 +7314,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.numExecutorSubIndices[{EXE_NIC_NEAREST, gpuIndex}] = 0;
     }
 
+    // Build GPU bus address list once — reused by NIC proximity loops and verbose output
+    std::vector<std::string> gpuAddressList;
+    for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+      char hipPciBusId[64];
+      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIdx);
+      gpuAddressList.push_back(err == hipSuccess ? std::string(hipPciBusId) : "");
+      if (err != hipSuccess)
+        Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIdx, hipGetErrorString(err));
+    }
+
     // Figure out closest NICs to GPUs
 #ifdef NIC_EXEC_ENABLED
 
@@ -7334,15 +7348,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Loop over each GPU to find the closest NIC(s) based on PCIe address
     for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
-      // Collect PCIe address for the GPU
-      char hipPciBusId[64];
-      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIndex);
-      if (err != hipSuccess) {
-#ifdef VERBS_DEBUG
-        Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
-#endif
-        continue;
-      }
+      if (gpuAddressList[gpuIndex].empty()) continue;
+      const char* hipPciBusId = gpuAddressList[gpuIndex].c_str();
 
       // Find closest NICs
       std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
@@ -7378,18 +7385,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Compute the reverse mapping: closest GPU(s) for each NIC
-    // Build list of GPU bus addresses
-    std::vector<std::string> gpuAddressList;
-    for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-      char hipPciBusId[64];
-      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIdx);
-      if (err == hipSuccess) {
-        gpuAddressList.push_back(std::string(hipPciBusId));
-      } else {
-        gpuAddressList.push_back("");
-      }
-    }
-
     // Loop over each NIC to find the closest GPU(s) based on PCIe address
     for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
       if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
@@ -7428,20 +7423,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        char gpuBdf[64] = "";
-        (void)hipDeviceGetPCIBusId(gpuBdf, sizeof(gpuBdf), exeIndex);
-        hipDeviceProp_t prop;
-        std::string archName = "";
-        if (hipGetDeviceProperties(&prop, exeIndex) == hipSuccess) {
-          std::string fullName = prop.gcnArchName;
-          archName = fullName.substr(0, fullName.find(':'));
-        }
+        const char* gpuBdf = gpuAddressList[exeIndex].c_str();
         int numXccs    = topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}];
         int numCus     = topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}];
         int numDmaEngs = topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}];
         Log("[INFO] Rank %03d: GPU [%02d/%02d] %03d CUs %d XCCs %d DMA-eng NUMA %d BDF %s (%s) Closest NICs:",
             rank, exeIndex, numGpus, numCus, numXccs, numDmaEngs,
-            topo.closestCpuNumaToGpu[exeIndex], gpuBdf, archName.c_str());
+            topo.closestCpuNumaToGpu[exeIndex], gpuBdf, gpuArchNames[exeIndex].c_str());
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
           Log(" none\n");
         } else {
