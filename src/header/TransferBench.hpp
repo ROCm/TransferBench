@@ -4119,8 +4119,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int const localRank = GetRank();
     bool const verbose  = System::Get().IsVerbose();
     if (verbose) {
-      System::Get().Log("[INFO] Rank %d preparing executor (%c%d on Rank %d)\n",
-                        localRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank);
+      System::Get().Log("[INFO] Rank %d preparing executor (R%d%c%d)\n",
+                        localRank, exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
     }
 
     // Loop over each transfer this executor is involved in
@@ -4138,8 +4138,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                       : IsNicExeType(exeDevice.exeType)
                         ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
                         : exeDevice.exeIndex;
-        System::Get().Log("[INFO]   EXE: %c%d (Rank %d) NUMA %d%s%s\n",
-                          ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank,
+        System::Get().Log("[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
+                          exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
                           exeNuma,
                           exeBdf.empty() ? "" : " BDF ",
                           exeBdf.c_str());
@@ -5861,8 +5861,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                         : IsNicExeType(exe.exeType)
                           ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
                           : exe.exeIndex;
-          System::Get().Log("Transfer %03d: EXE=%c%d Rank=%d NUMA=%d%s%s  %zu bytes\n",
-                            i, ExeTypeStr[exe.exeType], exe.exeIndex, exe.exeRank, exeNuma,
+          System::Get().Log("Transfer %03d: EXE=R%d%c%d NUMA=%d%s%s  %zu bytes\n",
+                            i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex, exeNuma,
                             exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
 
           for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
