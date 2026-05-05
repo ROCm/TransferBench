@@ -5132,10 +5132,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       TransferResources&   rss)
   {
     // Determine which kernel to launch
-    int const blockSizeIdx = GetGpuKernelBlocksizeIdx(cfg.gfx.blockSize);
-    int const unrollIdx    = GetGpuKernelUnrollIdx(cfg.gfx.unrollFactor);
-    int const wordSizeIdx  = GetGpuKernelWordsizeIdx(cfg.gfx.wordSize);
-    int const temporalIdx  = GetGpuKernelTemporalIdx(cfg.gfx.temporalMode);
+    [[maybe_unused]] int const blockSizeIdx = GetGpuKernelBlocksizeIdx(cfg.gfx.blockSize);
+    [[maybe_unused]] int const unrollIdx    = GetGpuKernelUnrollIdx(cfg.gfx.unrollFactor);
+    [[maybe_unused]] int const wordSizeIdx  = GetGpuKernelWordsizeIdx(cfg.gfx.wordSize);
+    [[maybe_unused]] int const temporalIdx  = GetGpuKernelTemporalIdx(cfg.gfx.temporalMode);
 
 #ifdef SINGLE_KERNEL
     auto gpuKernel = GpuReduceKernel<float4, 1024, 1, 0>;
