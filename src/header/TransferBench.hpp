@@ -3098,6 +3098,11 @@ namespace {
     // Persistent worker pool servicing this executor's Transfers/subexecutors across all
     // iterations.  Created in PrepareExecutor (NUMA-pinned), destroyed in TeardownExecutor.
     std::unique_ptr<ThreadPool> pool;
+
+    // For EXE_GPU_INITIATED_DMA (anvil)
+#ifdef ANVIL_EXEC_ENABLED
+    vector<sdma_ep::SdmaQueueInfo> anvilQueues; ///< One KFD SDMA queue per transfer
+#endif
   };
 
   // Structure to track PCIe topology
