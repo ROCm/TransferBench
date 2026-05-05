@@ -40,6 +40,8 @@ int RunTest(int                        testNum,
             MemType                    cpuMemType,
             MemType                    gpuMemType,
             size_t                     maxBytesPerSubExec,
+            bool                       isParallel,
+            int                        targetGpu,
             int                        totalGpus)
 {
   int numFail = 0;
@@ -52,6 +54,18 @@ int RunTest(int                        testNum,
   TestResults results;
   char transferStr[MAX_TRANSFER_STRLEN] = {};
 
+
+  static std::vector<pair<int, int>> gpuToDeviceMap;
+  if (gpuToDeviceMap.empty()) {
+    for (int r = 0; r < numRanks; r++) {
+      int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, r);
+      for (int g = 0; g < numGpus; g++) {
+        gpuToDeviceMap.push_back(std::make_pair(r, g));
+      }
+    }
+  }
+  int targetRank = gpuToDeviceMap[targetGpu].first;
+  int targetIdx  = gpuToDeviceMap[targetGpu].second;
 
   // Different test categories
   bool isH2D       = (testNum == 1 || testNum ==  8);
@@ -98,10 +112,12 @@ int RunTest(int                        testNum,
     bool allPass = true;
     allTransfers.clear();
 
-    // Combine transfers from each GPU and run them all in parallel
+    // Combine transfers from each GPU and run them all in parallel (unless isParallel=false)
     for (int rank = 0; allPass && rank < numRanks; rank++) {
+      if (!isParallel && rank != targetRank) continue;
       int numGpus = GetNumExecutors(exeType, rank);
       for (int gpuIdx = 0; allPass && gpuIdx < numGpus; gpuIdx++) {
+        if (!isParallel && gpuIdx != targetIdx) continue;
         if (isH2D || isD2H) {
           // Copy to/from closest CPU NUMA node for this GPU
           int cpuIdx = GetClosestCpuNumaToGpu(gpuIdx, rank);
@@ -200,14 +216,15 @@ int SmokeTestPreset(EnvVars&          ev,
   }
 
   // Modify defaults unless they were set
-  if (!getenv("ALWAYS_VALIDATE")) ev.alwaysValidate = 1;
-  if (!getenv("NUM_ITERATIONS" )) ev.numIterations  = 2;
-  if (!getenv("NUM_WARMUPS"    )) ev.numWarmups     = 0;
+  ev.alwaysValidate = EnvVars::GetEnvVar("ALWAYS_VALIDATE", 1);
+  ev.numIterations  = EnvVars::GetEnvVar("NUM_ITERATIONS",  2);
+  ev.numWarmups     = EnvVars::GetEnvVar("NUM_WARMUPS",     0);
 
   // Collect env vars
   int                 cpuMemTypeIdx = EnvVars::GetEnvVar          ("CPU_MEM_TYPE",                  0);
   int                 gpuMemTypeIdx = EnvVars::GetEnvVar          ("GPU_MEM_TYPE",                  0);
   vector<int>         gfxSesList    = EnvVars::GetEnvVarArray     ("GFX_SE_LIST",      {1,numSubExec});
+  int                 runParallel   = EnvVars::GetEnvVar          ("RUN_PARALLEL",                  1);
   std::string         seMaxBytesStr = EnvVars::GetEnvVar          ("SE_MAX_BYTES",             "128M");
   vector<std::string> sizeStrList   = EnvVars::GetEnvVarStrArray  ("SIZE_LIST",   {"1K","16M","256M"});
   vector<int>         testList      = EnvVars::GetEnvVarRangeArray("TEST_LIST",                    {});
@@ -255,6 +272,7 @@ int SmokeTestPreset(EnvVars&          ev,
       ev.Print("CPU_MEM_TYPE", cpuMemTypeIdx,      "Using %s (%s)", Utils::GetCpuMemTypeStr(cpuMemTypeIdx).c_str(), Utils::GetAllCpuMemTypeStr().c_str());
       ev.Print("GFX_SE_LIST" , gfxSesList.size(),  "Testing GFX with subexecutor counts: %s", EnvVars::ToStr(gfxSesList).c_str());
       ev.Print("GPU_MEM_TYPE", gpuMemTypeIdx,      "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
+      ev.Print("RUN_PARALLEL", runParallel,        "Running GPUs %s", runParallel ? "in parallel" : "serially");
       ev.Print("SIZE_LIST"   , sizeStrList.size(), "Transfer sizes tested: %s", ev.GetStr(sizeStrList).c_str());
       ev.Print("SE_MAX_BYTES", seMaxBytesStr,      "Each SubExecutor can work on at most %lu bytes", seMaxBytes);
       ev.Print("TEST_LIST"   , testsToRun.size(),  testList.empty() ? "Running all tests" : "Running Tests: %s", ev.GetStr(testList).c_str());
@@ -272,51 +290,71 @@ int SmokeTestPreset(EnvVars&          ev,
   std::string l2(lPad2Size, ' '), r2(rPad2Size, ' ');
 
   int testsFailed = 0;
-  auto test = [&](int x, int y) {
-    Utils::Print("  %02d  |%s", x, l2.c_str());
-    fflush(stdout);
-    testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, totalGpus);
-    Utils::Print("%s|  %02d  |", r2.c_str(), y);
-    for (auto numSubExec : gfxSesList) {
+  auto ExecuteTests = [&](std::string label, int x, int y, bool isParallel) {
+    int numLines = isParallel ? 1 : totalGpus;
+
+    for (int line = 0; line < numLines; line++) {
+      Utils::Print("| %25s |", line ? "" : label.c_str());
+      if (isParallel) {
+        Utils::Print(" ALL |");
+      } else {
+        Utils::Print(" %3d |", line);
+      }
+      if (line == 0) {
+        Utils::Print("  %02d  |", x);
+      } else {
+        Utils::Print("      |");
+      }
       Utils::Print("%s", l2.c_str());
       fflush(stdout);
-      testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, totalGpus);
+
+      testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus);
       Utils::Print("%s|", r2.c_str());
-    }
+      if (line == 0) {
+        Utils::Print("  %02d  |", y);
+      } else {
+        Utils::Print("      |");
+      }
+      for (auto numSubExec : gfxSesList) {
+        Utils::Print("%s", l2.c_str());
+        fflush(stdout);
+        testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus);
+        Utils::Print("%s|", r2.c_str());
+      }
+      Utils::Print("\n");
+      fflush(stdout);
+    };
+    Utils::Print("|---------------------------|-----|------|%s|------|", std::string(colSize, '-').c_str());
+    for ([[maybe_unused]] auto numSubExec : gfxSesList)
+      Utils::Print("%s|", std::string(colSize, '-').c_str());
     Utils::Print("\n");
-    fflush(stdout);
   };
 
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
   Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
 
   // Print headers
-  Utils::Print("                                    %s   %s       |", l1.c_str(), r1.c_str());
-  for ([[maybe_unused]] auto numSubExec : gfxSesList)
+  Utils::Print("                                          %s   %s       |", l1.c_str(), r1.c_str());
+  for ([[maybe_unused]]auto numSubExec : gfxSesList)
     Utils::Print("%sGFX%s|", l1.c_str(), r1.c_str());
   Utils::Print("\n");
-  Utils::Print("| Name                      | Test |%sDMA%s| Test |", l1.c_str(), r1.c_str());
+  Utils::Print("| Name                      | GPU | Test |%sDMA%s| Test |", l1.c_str(), r1.c_str());
   for (auto numSubExec : gfxSesList)
     Utils::Print("%s%03d%s|", l1.c_str(), numSubExec, r1.c_str());
   Utils::Print("\n");
-  Utils::Print("|---------------------------|------|%s|------|", std::string(colSize, '-').c_str());
-  for ([[maybe_unused]] auto numSubExec : gfxSesList)
+  Utils::Print("|---------------------------|-----|------|%s|------|", std::string(colSize, '-').c_str());
+  for ([[maybe_unused]]auto numSubExec : gfxSesList)
     Utils::Print("%s|", std::string(colSize, '-').c_str());
   Utils::Print("\n");
 
   // Print table / Run Tests
-  Utils::Print("| Copy (H2D)                |"); test(1, 8);
-  Utils::Print("| Copy (D2H)                |"); test(2, 9);
-  Utils::Print("| Copy (D2D) (Remote Write) |"); test(3,10);
-  Utils::Print("| Copy (D2D) (Remote Read ) |"); test(4,11);
-  Utils::Print("| Broadcast  (One to All)   |"); test(5,12);
-  Utils::Print("| Gather     (All to One)   |"); test(6,13);
-  Utils::Print("| All To All                |"); test(7,14);
-
-  Utils::Print("|---------------------------|------|%s|------|", std::string(colSize, '-').c_str());
-  for ([[maybe_unused]] auto numSubExec : gfxSesList)
-    Utils::Print("%s|", std::string(colSize, '-').c_str());
-  Utils::Print("\n\n");
+  ExecuteTests("Copy (H2D)               ", 1,  8, runParallel);
+  ExecuteTests("Copy (D2H)               ", 2,  9, runParallel);
+  ExecuteTests("Copy (D2D) (Remote Write)", 3, 10, runParallel);
+  ExecuteTests("Copy (D2D) (Remote Read )", 4, 11, runParallel);
+  ExecuteTests("Broadcast  (One to All)  ", 5, 12, runParallel);
+  ExecuteTests("Gather     (All to One)  ", 6, 13, runParallel);
+  ExecuteTests("All To All               ", 7, 14, true);
 
   // Show summary
   if (testsFailed) {
