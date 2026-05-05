@@ -42,9 +42,12 @@ int RunTest(int                        testNum,
             size_t                     maxBytesPerSubExec,
             bool                       isParallel,
             int                        targetGpu,
-            int                        totalGpus)
+            int                        totalGpus,
+            bool                       showPerf,
+            std::vector<double>&       bwResults)
 {
   int numFail = 0;
+  bwResults.clear();
 
   // Collect some topology information
   int numRanks = TransferBench::GetNumRanks();
@@ -92,20 +95,23 @@ int RunTest(int                        testNum,
 
   for (size_t numBytes : sizeList) {
 
-    // Print skip symbol for skipped tests
+    // Sentinel -1.0 = skip (distinguishable from 0.0 = fail when showPerf=1)
     if (!testsToRun.count(testNum)) {
-      Utils::Print("%s", skip.c_str()); fflush(stdout);
+      if (!showPerf) { Utils::Print("%s", skip.c_str()); fflush(stdout); }
+      bwResults.push_back(-1.0);
       continue;
     }
     if (exeType == EXE_GPU_GFX &&
         (numSubExec * cfg.data.blockBytes > numBytes ||
          numSubExec * maxBytesPerSubExec  < numBytes)) {
-      Utils::Print("%s", skip.c_str()); fflush(stdout);
+      if (!showPerf) { Utils::Print("%s", skip.c_str()); fflush(stdout); }
+      bwResults.push_back(-1.0);
       continue;
     }
     // Skip test that require pod
     if (numRanks > 1 && Utils::GetRankPerPodMap().size() != 1 && !(isH2D || isD2H)) {
-      Utils::Print("%s", skip.c_str()); fflush(stdout);
+      if (!showPerf) { Utils::Print("%s", skip.c_str()); fflush(stdout); }
+      bwResults.push_back(-1.0);
       continue;
     }
 
@@ -182,7 +188,11 @@ int RunTest(int                        testNum,
         allPass = false;
       }
     }
-    Utils::Print("%s", allPass ? pass.c_str() : fail.c_str()); fflush(stdout);
+    double bw = allPass ? results.avgTotalBandwidthGbPerSec : 0.0;
+    bwResults.push_back(bw);
+    if (!showPerf) {
+      Utils::Print("%s", allPass ? pass.c_str() : fail.c_str()); fflush(stdout);
+    }
     numFail += (allPass ? 0 : 1);
   }
   return numFail;
@@ -226,6 +236,7 @@ int SmokeTestPreset(EnvVars&          ev,
   vector<int>         gfxSesList    = EnvVars::GetEnvVarArray     ("GFX_SE_LIST",      {1,numSubExec});
   int                 runParallel   = EnvVars::GetEnvVar          ("RUN_PARALLEL",                  1);
   std::string         seMaxBytesStr = EnvVars::GetEnvVar          ("SE_MAX_BYTES",             "128M");
+  int                 showPerf      = EnvVars::GetEnvVar          ("SHOW_PERF",                     0);
   vector<std::string> sizeStrList   = EnvVars::GetEnvVarStrArray  ("SIZE_LIST",   {"1K","16M","256M"});
   vector<int>         testList      = EnvVars::GetEnvVarRangeArray("TEST_LIST",                    {});
 
@@ -273,14 +284,15 @@ int SmokeTestPreset(EnvVars&          ev,
       ev.Print("GFX_SE_LIST" , gfxSesList.size(),  "Testing GFX with subexecutor counts: %s", EnvVars::ToStr(gfxSesList).c_str());
       ev.Print("GPU_MEM_TYPE", gpuMemTypeIdx,      "Using %s (%s)", Utils::GetGpuMemTypeStr(gpuMemTypeIdx).c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("RUN_PARALLEL", runParallel,        "Running GPUs %s", runParallel ? "in parallel" : "serially");
-      ev.Print("SIZE_LIST"   , sizeStrList.size(), "Transfer sizes tested: %s", ev.GetStr(sizeStrList).c_str());
       ev.Print("SE_MAX_BYTES", seMaxBytesStr,      "Each SubExecutor can work on at most %lu bytes", seMaxBytes);
+      ev.Print("SHOW_PERF"   , showPerf,           "%s", showPerf ? "Reporting bandwidth (GB/s) per message size" : "Reporting pass/fail only");
+      ev.Print("SIZE_LIST"   , sizeStrList.size(), "Transfer sizes tested: %s", ev.GetStr(sizeStrList).c_str());
       ev.Print("TEST_LIST"   , testsToRun.size(),  testList.empty() ? "Running all tests" : "Running Tests: %s", ev.GetStr(testList).c_str());
       printf("\n");
     }
   }
 
-  // Calculate cell-spacing / padding
+  // Cell-spacing / padding for showPerf=0 (1 char per size, pass/fail symbols)
   int numSizes  = sizeList.size();
   int colSize   = std::max(5, 2 + numSizes);
   int lPad1Size = (colSize -        3) / 2, rPad1Size = colSize - lPad1Size - 3;
@@ -289,63 +301,158 @@ int SmokeTestPreset(EnvVars&          ev,
   std::string l1(lPad1Size, ' '), r1(rPad1Size, ' ');
   std::string l2(lPad2Size, ' '), r2(rPad2Size, ' ');
 
+  // Format size in bytes to human-readable string (e.g. 16777216 -> "16M")
+  auto sizeToStr = [](size_t bytes) -> std::string {
+    char buf[16];
+    if      (bytes % (1UL<<30) == 0) snprintf(buf, sizeof(buf), "%zuG", bytes >> 30);
+    else if (bytes % (1UL<<20) == 0) snprintf(buf, sizeof(buf), "%zuM", bytes >> 20);
+    else if (bytes % (1UL<<10) == 0) snprintf(buf, sizeof(buf), "%zuK", bytes >> 10);
+    else                             snprintf(buf, sizeof(buf), "%zu",  bytes);
+    return std::string(buf);
+  };
+
+  // Print one BW cell (11 chars: " %8.1f |" — caller already provided the opening |).
+  // bw < 0  -> skip, bw == 0 -> fail, bw > 0 -> GB/s value
+  auto printBwCell = [](double bw) {
+    if      (bw < 0.0)  Utils::Print(" %8s |", ".");
+    else if (bw == 0.0) Utils::Print(" %8s |", "F");
+    else                Utils::Print(" %8.1f |", bw);
+  };
+
   int testsFailed = 0;
+  std::vector<double> bwScratch;  // reused buffer for showPerf=0 path
+
   auto ExecuteTests = [&](std::string label, int x, int y, bool isParallel) {
     int numLines = isParallel ? 1 : totalGpus;
 
-    for (int line = 0; line < numLines; line++) {
-      Utils::Print("| %25s |", line ? "" : label.c_str());
-      if (isParallel) {
-        Utils::Print(" ALL |");
-      } else {
-        Utils::Print(" %3d |", line);
-      }
-      if (line == 0) {
-        Utils::Print("  %02d  |", x);
-      } else {
-        Utils::Print("      |");
-      }
-      Utils::Print("%s", l2.c_str());
-      fflush(stdout);
-
-      testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus);
-      Utils::Print("%s|", r2.c_str());
-      if (line == 0) {
-        Utils::Print("  %02d  |", y);
-      } else {
-        Utils::Print("      |");
-      }
-      for (auto numSubExec : gfxSesList) {
+    if (!showPerf) {
+      // Original layout: one row per GPU, all sizes inline as pass/fail chars
+      for (int line = 0; line < numLines; line++) {
+        Utils::Print("| %25s |", line ? "" : label.c_str());
+        if (isParallel) {
+          Utils::Print(" ALL |");
+        } else {
+          Utils::Print(" %3d |", line);
+        }
+        if (line == 0) {
+          Utils::Print("  %02d  |", x);
+        } else {
+          Utils::Print("      |");
+        }
         Utils::Print("%s", l2.c_str());
         fflush(stdout);
-        testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus);
+
+        testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus, showPerf, bwScratch);
         Utils::Print("%s|", r2.c_str());
+        if (line == 0) {
+          Utils::Print("  %02d  |", y);
+        } else {
+          Utils::Print("      |");
+        }
+        for (auto numSubExec : gfxSesList) {
+          Utils::Print("%s", l2.c_str());
+          fflush(stdout);
+          testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus, showPerf, bwScratch);
+          Utils::Print("%s|", r2.c_str());
+        }
+        Utils::Print("\n");
+        fflush(stdout);
       }
+      Utils::Print("|---------------------------|-----|------|%s|------|", std::string(colSize, '-').c_str());
+      for ([[maybe_unused]] auto numSubExec : gfxSesList)
+        Utils::Print("%s|", std::string(colSize, '-').c_str());
       Utils::Print("\n");
-      fflush(stdout);
-    };
-    Utils::Print("|---------------------------|-----|------|%s|------|", std::string(colSize, '-').c_str());
-    for ([[maybe_unused]] auto numSubExec : gfxSesList)
-      Utils::Print("%s|", std::string(colSize, '-').c_str());
-    Utils::Print("\n");
+    } else {
+      // SHOW_PERF=1 layout: collect BW silently, then print one row per message size
+      // (analogous to RUN_PARALLEL=0 which prints one row per GPU)
+      for (int line = 0; line < numLines; line++) {
+        // Collect BW for DMA test across all sizes
+        std::vector<double> bwDma;
+        testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus, showPerf, bwDma);
+
+        // Collect BW for each GFX SE-count across all sizes
+        std::vector<std::vector<double>> bwGfxAll;
+        for (auto numSubExec : gfxSesList) {
+          std::vector<double> bwGfx;
+          testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus, showPerf, bwGfx);
+          bwGfxAll.push_back(std::move(bwGfx));
+        }
+
+        // Print one row per message size
+        for (int sizeIdx = 0; sizeIdx < numSizes; sizeIdx++) {
+          bool firstSize = (sizeIdx == 0);
+
+          // Label: shown only on the first size of the first GPU/parallel line
+          Utils::Print("| %25s |", (line == 0 && firstSize) ? label.c_str() : "");
+
+          // GPU column: shown only on the first size row of each GPU line
+          if (firstSize) {
+            if (isParallel) Utils::Print(" ALL |");
+            else            Utils::Print(" %3d |", line);
+          } else {
+            Utils::Print("     |");
+          }
+
+          // Size column
+          Utils::Print(" %4s |", sizeToStr(sizeList[sizeIdx]).c_str());
+
+          // DMA: test number on first size row only, then BW cell
+          if (firstSize) Utils::Print("  %02d  |", x);
+          else           Utils::Print("      |");
+          printBwCell(bwDma[sizeIdx]);
+
+          // GFX columns: test number on first size row only, then BW cell per SE count
+          for (int seIdx = 0; seIdx < (int)gfxSesList.size(); seIdx++) {
+            if (firstSize) Utils::Print("  %02d  |", y);
+            else           Utils::Print("      |");
+            printBwCell(bwGfxAll[seIdx][sizeIdx]);
+          }
+          Utils::Print("\n");
+          fflush(stdout);
+        }
+      }
+      // Border: name(27) gpu(5) size(6) test(6) bw(10) [test(6) bw(10) ...]
+      Utils::Print("|---------------------------|-----|------|------|----------|");
+      for ([[maybe_unused]] auto numSubExec : gfxSesList)
+        Utils::Print("------|----------|");
+      Utils::Print("\n");
+    }
   };
 
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
-  Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
+  if (showPerf)
+    Utils::Print("Legend: X.X=BW(GB/s) %s=Skip %s=Fail\n", skip.c_str(), fail.c_str());
+  else
+    Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
 
   // Print headers
-  Utils::Print("                                          %s   %s       |", l1.c_str(), r1.c_str());
-  for ([[maybe_unused]]auto numSubExec : gfxSesList)
-    Utils::Print("%sGFX%s|", l1.c_str(), r1.c_str());
-  Utils::Print("\n");
-  Utils::Print("| Name                      | GPU | Test |%sDMA%s| Test |", l1.c_str(), r1.c_str());
-  for (auto numSubExec : gfxSesList)
-    Utils::Print("%s%03d%s|", l1.c_str(), numSubExec, r1.c_str());
-  Utils::Print("\n");
-  Utils::Print("|---------------------------|-----|------|%s|------|", std::string(colSize, '-').c_str());
-  for ([[maybe_unused]]auto numSubExec : gfxSesList)
-    Utils::Print("%s|", std::string(colSize, '-').c_str());
-  Utils::Print("\n");
+  if (!showPerf) {
+    Utils::Print("                                          %s   %s       |", l1.c_str(), r1.c_str());
+    for ([[maybe_unused]]auto numSubExec : gfxSesList)
+      Utils::Print("%sGFX%s|", l1.c_str(), r1.c_str());
+    Utils::Print("\n");
+    Utils::Print("| Name                      | GPU | Test |%sDMA%s| Test |", l1.c_str(), r1.c_str());
+    for (auto numSubExec : gfxSesList)
+      Utils::Print("%s%03d%s|", l1.c_str(), numSubExec, r1.c_str());
+    Utils::Print("\n");
+    Utils::Print("|---------------------------|-----|------|%s|------|", std::string(colSize, '-').c_str());
+    for ([[maybe_unused]]auto numSubExec : gfxSesList)
+      Utils::Print("%s|", std::string(colSize, '-').c_str());
+    Utils::Print("\n");
+  } else {
+    // SHOW_PERF=1: Size column + fixed-width BW column per test
+    // Each BW cell: " %8.1f |" = 11 chars (leading | comes from preceding test-num cell)
+    // Column layout widths (shared-border model): name(29)+gpu(6)+size(7)+test(7)+bw(11) = 60
+    // Per GFX SE: test(7)+bw(11) = 18
+    Utils::Print("| Name                      | GPU | Size | Test | DMA(G/s) |");
+    for (auto numSubExec : gfxSesList)
+      Utils::Print(" Test | GFX  %03d |", numSubExec);
+    Utils::Print("\n");
+    Utils::Print("|---------------------------|-----|------|------|----------|");
+    for ([[maybe_unused]] auto numSubExec : gfxSesList)
+      Utils::Print("------|----------|");
+    Utils::Print("\n");
+  }
 
   // Print table / Run Tests
   ExecuteTests("Copy (H2D)               ", 1,  8, runParallel);
