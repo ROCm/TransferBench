@@ -452,14 +452,24 @@ else()
   find_path(HSAKMT_INCLUDE_DIR hsakmt/hsakmt.h PATHS ${ROCM_PATH}/include NO_DEFAULT_PATH)
 
   if(HSAKMT_LIBRARY AND HSAKMT_INCLUDE_DIR)
-    add_library(hsakmt SHARED IMPORTED)
+    # hsakmt is typically a static archive; drm_amdgpu/drm are transitive deps
+    if(HSAKMT_LIBRARY MATCHES "\\.a$")
+      add_library(hsakmt STATIC IMPORTED)
+    else()
+      add_library(hsakmt SHARED IMPORTED)
+    endif()
+    find_library(DRM_AMDGPU_LIBRARY drm_amdgpu)
+    find_library(DRM_LIBRARY drm)
     set_target_properties(hsakmt PROPERTIES
       IMPORTED_LOCATION "${HSAKMT_LIBRARY}"
       INTERFACE_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}"
-      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}")
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${DRM_AMDGPU_LIBRARY};${DRM_LIBRARY}")
     set(ANVIL_EXEC_FOUND 1)
     message(STATUS "- Building with anvil GPU-initiated SDMA executor support")
     message(STATUS "  - hsakmt: ${HSAKMT_LIBRARY}")
+    message(STATUS "  - drm_amdgpu: ${DRM_AMDGPU_LIBRARY}")
+    message(STATUS "  - drm: ${DRM_LIBRARY}")
   else()
     if(NOT HSAKMT_LIBRARY)
       message(WARNING "- libhsakmt not found under ${ROCM_PATH}/lib or ${ROCM_PATH}/lib64")
