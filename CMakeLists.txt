@@ -203,6 +203,7 @@ option(ENABLE_MPI_COMM             "Enable MPI Communicator support"            
 option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"        OFF)
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
 option(BUILD_RELOCATABLE_PACKAGE   "Build with RVS-style relocatable RPATH and amdrocm<MAJOR>-transferbench package naming" OFF)
+option(ENABLE_ANVIL_EXEC           "Enable GPU-initiated SDMA executor via anvil (AMD MI300X only)" OFF)
 
 include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets, rocm_check_target_ids
 
@@ -440,6 +441,36 @@ else()
   endif()
 endif()
 
+## Check for anvil SDMA executor support
+if(NOT ENABLE_ANVIL_EXEC)
+  message(STATUS "For CMake builds, anvil GPU-initiated SDMA executor requires -DENABLE_ANVIL_EXEC=ON")
+  message(STATUS "- Disabling anvil executor support")
+else()
+  message(STATUS "Attempting to build with anvil GPU-initiated SDMA executor")
+
+  find_library(HSAKMT_LIBRARY hsakmt PATHS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64 NO_DEFAULT_PATH)
+  find_path(HSAKMT_INCLUDE_DIR hsakmt/hsakmt.h PATHS ${ROCM_PATH}/include NO_DEFAULT_PATH)
+
+  if(HSAKMT_LIBRARY AND HSAKMT_INCLUDE_DIR)
+    add_library(hsakmt SHARED IMPORTED)
+    set_target_properties(hsakmt PROPERTIES
+      IMPORTED_LOCATION "${HSAKMT_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}"
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}")
+    set(ANVIL_EXEC_FOUND 1)
+    message(STATUS "- Building with anvil GPU-initiated SDMA executor support")
+    message(STATUS "  - hsakmt: ${HSAKMT_LIBRARY}")
+  else()
+    if(NOT HSAKMT_LIBRARY)
+      message(WARNING "- libhsakmt not found under ${ROCM_PATH}/lib or ${ROCM_PATH}/lib64")
+    endif()
+    if(NOT HSAKMT_INCLUDE_DIR)
+      message(WARNING "- hsakmt/hsakmt.h not found under ${ROCM_PATH}/include")
+    endif()
+    message(WARNING "- Building without anvil executor support")
+  endif()
+endif()
+
 set(PACKAGE_NAME TB)
 set(LIBRARY_NAME TransferBench)
 
@@ -471,6 +502,12 @@ if(AMD_SMI_FOUND)
 endif()
 if(POD_COMM_FOUND)
   target_compile_definitions(TransferBench PRIVATE POD_COMM_ENABLED)
+endif()
+if(ANVIL_EXEC_FOUND)
+  target_sources(TransferBench PRIVATE src/anvil/anvil.cpp)
+  target_include_directories(TransferBench PRIVATE src/anvil)
+  target_compile_definitions(TransferBench PRIVATE ANVIL_EXEC_ENABLED)
+  target_link_libraries(TransferBench PRIVATE hsakmt)
 endif()
 
 target_compile_definitions(TransferBench PRIVATE
