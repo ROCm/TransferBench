@@ -52,78 +52,49 @@ int NicAllToAllPreset(EnvVars&                    ev,
     return 1;
   }
 
+  // Total NICs across all ranks (rank-major id: nicId = rank * numNicsPerRank + nic).
+  int const N = numRanks * numNicsPerRank;
+
+  int planeStride   = EnvVars::GetEnvVar("PLANE_STRIDE"   , 1);
+  int numPlanes     = EnvVars::GetEnvVar("NUM_PLANES"     , 1);
+  int groupStride   = EnvVars::GetEnvVar("GROUP_STRIDE"   , 1);
+  int numGroups     = EnvVars::GetEnvVar("NUM_GROUPS"     , 1);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
-  int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS", 0);
-  int useRdmaRead   = EnvVars::GetEnvVar("USE_RDMA_READ", 0);
-  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE", 0);
-  int stride        = EnvVars::GetEnvVar("STRIDE", 1);
+  int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
+  int useRdmaRead   = EnvVars::GetEnvVar("USE_RDMA_READ"  , 0);
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
+  int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
 
-  // Compute orbit structure before reading GROUP_SIZE so its default can be stride-aware.
-  // Stride orbits on devices (rank-major devLin = rank * numMemDevices + memIdx): same gcd structure as PodAllToAll's StrideGenerate,
-  // but NIC A2A does not use the permuted slot order for GROUP_SIZE — subgroups follow natural order within each orbit.
-  int const M         = numRanks * numMemDevices;
-  int const kNorm     = ((stride % M) + M) % M;
-  int const dCycles   = (kNorm == 0) ? 1 : std::gcd(kNorm, M);
-  int const orbitSize = M / dCycles;
+  if (numPlanes < 1) {
+    Utils::Print("[ERROR] NUM_PLANES must be >= 1 (got %d)\n", numPlanes);
+    return 1;
+  }
+  if (N % numPlanes) {
+    Utils::Print("[ERROR] NUM_PLANES (%d) must divide total NICs (%d = %d ranks * %d nics/rank).\n",
+                 numPlanes, N, numRanks, numNicsPerRank);
+    return 1;
+  }
+  int const planeSize = N / numPlanes;
 
-  int groupSize    = EnvVars::GetEnvVar("GROUP_SIZE", orbitSize);
-  int noSameRank   = EnvVars::GetEnvVar("NIC_A2A_NO_SAME_RANK", 1);
-  int numNicPlanes = EnvVars::GetEnvVar("NUM_NIC_PLANES", 1);
+  // NUM_GROUPS = groups per plane. Default 1 -> one group per plane (full a2a within each plane).
+  if (numGroups < 1) {
+    Utils::Print("[ERROR] NUM_GROUPS must be >= 1 (got %d)\n", numGroups);
+    return 1;
+  }
+  if (planeSize % numGroups) {
+    Utils::Print("[ERROR] NUM_GROUPS (%d) must divide plane size (%d = %d total NICs / %d planes).\n",
+                 numGroups, planeSize, N, numPlanes);
+    return 1;
+  }
+  int const groupSize = planeSize / numGroups;
 
   if (numQueuePairs < 1) {
     Utils::Print("[ERROR] NUM_QUEUE_PAIRS must be >= 1 (got %d)\n", numQueuePairs);
     return 1;
   }
-  if (groupSize < 1) {
-    Utils::Print("[ERROR] GROUP_SIZE must be >= 1 (got %d)\n", groupSize);
-    return 1;
-  }
-
-  bool scopeInter = false;
-  {
-    char const* scopeStr = getenv("NIC_A2A_SCOPE");
-    if (scopeStr && scopeStr[0]) {
-      if (!strcmp(scopeStr, "inter") || !strcmp(scopeStr, "INTER"))
-        scopeInter = true;
-      else if (strcmp(scopeStr, "intra") && strcmp(scopeStr, "INTRA")) {
-        Utils::Print("[ERROR] NIC_A2A_SCOPE must be \"intra\" or \"inter\"\n");
-        return 1;
-      }
-    }
-  }
 
   MemType memType        = Utils::GetMemType(memTypeIdx, useCpuMem);
   std::string memTypeStr = Utils::GetMemTypeStr(memTypeIdx, useCpuMem);
-
-  if (numNicPlanes < 1) {
-    Utils::Print("[ERROR] NUM_NIC_PLANES must be >= 1\n");
-    return 1;
-  }
-
-  // Same divisibility check as PodAllToAll (total devices = ranks × memory devices per rank).
-  if (M % groupSize) {
-    Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
-                 groupSize, M, numRanks);
-    return 1;
-  }
-
-  // Within each stride orbit, partition by natural rank-major device index: orbit lists devLin = r, r+d, r+2d, ...
-  // (r = devLin %% dCycles). Subgroup id = (index along that list) / GROUP_SIZE.
-  if (orbitSize % groupSize != 0) {
-    Utils::Print("[ERROR] GROUP_SIZE (%d) must divide stride-cycle size %d (devices M=%d, orbits=%d).\n",
-                 groupSize, orbitSize, M, dCycles);
-    Utils::Print("[ERROR] With STRIDE=%d there are %d disjoint cycles; use a GROUP_SIZE that divides each cycle's device count,\n",
-                 stride, dCycles);
-    Utils::Print("[ERROR] or use STRIDE=1 so the cycle size equals total devices (%d).\n", M);
-    return 1;
-  }
-
-  std::vector<int> deviceSubgroup(M);
-  for (int devLin = 0; devLin < M; devLin++) {
-    int const r = devLin % dCycles;
-    int const k = (devLin - r) / dCycles;  // 0 .. orbitSize-1 along natural order in this orbit
-    deviceSubgroup[devLin] = k / groupSize;
-  }
 
   if (Utils::RankDoesOutput()) {
     ev.DisplayEnvVars();
@@ -131,14 +102,11 @@ int NicAllToAllPreset(EnvVars&                    ev,
       if (!ev.outputToCsv) printf("[NIC A2A Related]\n");
       ev.Print("USE_CPU_MEM"         , useCpuMem     , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
       ev.Print("MEM_TYPE"            , memTypeIdx    , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllMemTypeStr(useCpuMem).c_str());
-      ev.Print("STRIDE"              , stride        , "Reordering devices by taking %d steps", stride);
-      ev.Print("GROUP_SIZE"          , groupSize     , "Dividing all devices into groups of %d for a2a", groupSize);
-      ev.Print("NUM_NIC_PLANES"      , numNicPlanes  , "Number of planes on scale-out");
-      if (scopeInter)
-        ev.Print("NIC_A2A_SCOPE"     , "inter"       , "Between-group transfers only. Other value: intra");
-      else
-        ev.Print("NIC_A2A_SCOPE"     , "intra"       , "Within-group transfers only. Other value: inter");
-      ev.Print("NIC_A2A_NO_SAME_RANK", noSameRank    , "%s transfers where src rank == dst rank", noSameRank ? "Excluding" : "Allowing");
+      ev.Print("PLANE_STRIDE"        , planeStride   , "Stride permutation on global NIC list before splitting into planes");
+      ev.Print("NUM_PLANES"         , numPlanes    , "Splitting %d total NICs into %d plane(s) of %d NICs each", N, numPlanes, planeSize);
+      ev.Print("GROUP_STRIDE"        , groupStride   , "Stride permutation within each plane before splitting into groups");
+      ev.Print("NUM_GROUPS"          , numGroups     , "Splitting each plane into %d group(s) of %d NICs each", numGroups, groupSize);
+      ev.Print("A2A_LOCAL"           , a2aLocal      , "%s local (same-rank) transfers", a2aLocal ? "Include" : "Exclude");
       ev.Print("NUM_QUEUE_PAIRS"     , numQueuePairs , "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("SHOW_DETAILS"        , showDetails   , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_RDMA_READ"       , useRdmaRead   , "Performing RDMA %s", useRdmaRead ? "reads" : "writes");
@@ -166,38 +134,50 @@ int NicAllToAllPreset(EnvVars&                    ev,
     }
   }
 
-  auto devLinOf = [&](int rank, int memIdx) -> int { return rank * numMemDevices + memIdx; };
+  // Build planes: take the rank-major NIC list [0..N), permute by PLANE_STRIDE, chunk consecutively.
+  // Within each plane: permute by GROUP_STRIDE, chunk consecutively into groups.
+  // Each group runs an internal all-to-all; all groups (across all planes) run concurrently.
+  std::vector<int> nicList(N);
+  std::iota(nicList.begin(), nicList.end(), 0);
+  Utils::StrideGenerate(nicList, planeStride);
 
-  // NIC plane: independent of STRIDE over memory devices. Global rank-major order over NIC endpoints, round-robin into P planes.
-  auto nicPlaneOf = [&](int rank, int nic) -> int {
-    int const L = rank * numNicsPerRank + nic;
-    return L % numNicPlanes;
+  struct GroupInfo {
+    int              planeIdx;
+    int              groupIdx;
+    std::vector<int> memberNicIds;   // global NIC ids in this group (post-stride order)
+    size_t           transferStart;  // first index into `transfers`
+    size_t           transferEnd;    // one past last index into `transfers`
   };
+  std::vector<std::vector<int>> planeMembers(numPlanes);
+  std::vector<GroupInfo>        allGroups;
+  allGroups.reserve((size_t)numPlanes * numGroups);
 
   std::vector<Transfer> transfers;
 
-  auto const acceptPair = [&](int srcRank, int srcNic, int dstRank, int dstNic) -> bool {
-    if (nicPlaneOf(srcRank, srcNic) != nicPlaneOf(dstRank, dstNic))
-      return false;
-    int srcDevLin = devLinOf(srcRank, nicToMem[srcRank][srcNic]);
-    int dstDevLin = devLinOf(dstRank, nicToMem[dstRank][dstNic]);
-    if ((srcDevLin % dCycles) != (dstDevLin % dCycles))
-      return false;
-    if (noSameRank && srcRank == dstRank)
-      return false;
-    if (scopeInter)
-      return deviceSubgroup[srcDevLin] != deviceSubgroup[dstDevLin];
-    return deviceSubgroup[srcDevLin] == deviceSubgroup[dstDevLin];
-  };
+  for (int p = 0; p < numPlanes; p++) {
+    std::vector<int> planeNics(nicList.begin() + (size_t)p * planeSize,
+                                nicList.begin() + (size_t)(p + 1) * planeSize);
+    planeMembers[p] = planeNics;  // pre-group-stride membership for display
+    Utils::StrideGenerate(planeNics, groupStride);
 
-  for (int srcRank = 0; srcRank < numRanks; srcRank++) {
-    for (int srcNic = 0; srcNic < numNicsPerRank; srcNic++) {
-      int srcMem = nicToMem[srcRank][srcNic];
-      for (int dstRank = 0; dstRank < numRanks; dstRank++) {
-        for (int dstNic = 0; dstNic < numNicsPerRank; dstNic++) {
-          if (!acceptPair(srcRank, srcNic, dstRank, dstNic)) continue;
+    for (int g = 0; g < numGroups; g++) {
+      GroupInfo gi;
+      gi.planeIdx = p;
+      gi.groupIdx = g;
+      gi.memberNicIds.assign(planeNics.begin() + (size_t)g * groupSize,
+                             planeNics.begin() + (size_t)(g + 1) * groupSize);
+      gi.transferStart = transfers.size();
 
-          int dstMem = nicToMem[dstRank][dstNic];
+      for (int srcId : gi.memberNicIds) {
+        int const srcRank = srcId / numNicsPerRank;
+        int const srcNic  = srcId % numNicsPerRank;
+        int const srcMem  = nicToMem[srcRank][srcNic];
+        for (int dstId : gi.memberNicIds) {
+          int const dstRank = dstId / numNicsPerRank;
+          int const dstNic  = dstId % numNicsPerRank;
+          if (!a2aLocal && srcId == dstId) continue;
+
+          int const dstMem = nicToMem[dstRank][dstNic];
 
           TransferBench::Transfer transfer;
           transfer.srcs.push_back({memType, srcMem, srcRank});
@@ -206,31 +186,61 @@ int NicAllToAllPreset(EnvVars&                    ev,
           transfer.exeSubIndex = useRdmaRead ? srcNic : dstNic;
           transfer.numSubExecs = numQueuePairs;
           transfer.numBytes    = numBytesPerTransfer;
-
           transfers.push_back(transfer);
         }
       }
+      gi.transferEnd = transfers.size();
+      allGroups.push_back(std::move(gi));
     }
   }
 
   Utils::Print("NIC All-To-All benchmark\n");
   Utils::Print("========================\n");
-  Utils::Print("%s traffic over NIC executors. %d rank-major devices; STRIDE sets gcd-orbits; GROUP_SIZE chunks each orbit in natural order.\n",
-               useCpuMem ? "CPU" : "GPU", M);
-  Utils::Print("NICs map to devices via closest %s;\n", useCpuMem ? "CPU NUMA node" : "GPU");
-  Utils::Print("NIC planes: %d , traffic only between NICs in the same plane. Stride: %d\n",
-               numNicPlanes, stride);
-  Utils::Print("Using closest %s per NIC endpoint and %s memory.\n",
-               useCpuMem ? "CPU NUMA node" : "GPU", memTypeStr.c_str());
-  Utils::Print("Visible NICs per rank: %d\n", numNicsPerRank);
-  Utils::Print("%d queue pairs per NIC.  %lu bytes per Transfer.  All numbers are GB/s\n",
-               numQueuePairs, numBytesPerTransfer);
-  Utils::Print("Total transfers: %lu\n\n", transfers.size());
+  Utils::Print("[%lu bytes per Transfer] [Total Transfers: %lu] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
+               numBytesPerTransfer, transfers.size(), memTypeStr.c_str(), numQueuePairs, numRanks);
+  Utils::Print("Running %d parallel a2a group(s) each of %d devices.  All numbers in GB/s:\n", numGroups, groupSize);
+  Utils::Print("%d total NICs (rank-major) split into %d plane(s) of %d NICs (PLANE_STRIDE=%d).\n",
+               N, numPlanes, planeSize, planeStride);
+  Utils::Print("Each plane split into %d group(s) of %d NICs (GROUP_STRIDE=%d).\n",
+               numGroups, groupSize, groupStride);
+  
 
   if (transfers.empty()) {
     Utils::Print("[WARN] No transfers were generated for this preset.\n");
     return 0;
   }
+
+  // Print the plane / group breakdown up-front (before running) so the user can
+  // see the rank-by-rank NIC layout that's about to be tested.
+  Utils::Print("[Plane / Group breakdown]\n");
+  {
+    size_t groupCursor = 0;
+    for (int p = 0; p < numPlanes; p++) {
+      Utils::Print("Plane %02d (%d NICs):\n", p, (int)planeMembers[p].size());
+      for (int g = 0; g < numGroups; g++, groupCursor++) {
+        auto const& gi = allGroups[groupCursor];
+        Utils::Print("  Group %02d (%d NICs): -> %lu transfers\n",
+                     g, (int)gi.memberNicIds.size(),
+                     gi.transferEnd - gi.transferStart);
+
+        std::map<int, std::vector<int>> ranksToLocals;
+        for (int id : gi.memberNicIds)
+          ranksToLocals[id / numNicsPerRank].push_back(id % numNicsPerRank);
+        for (auto& kv : ranksToLocals)
+          std::sort(kv.second.begin(), kv.second.end());
+
+        for (auto const& [rank, locals] : ranksToLocals) {
+          std::string names;
+          for (size_t k = 0; k < locals.size(); k++) {
+            if (k) names += ", ";
+            names += TransferBench::GetExecutorName({EXE_NIC, locals[k], rank});
+          }
+          Utils::Print("    Rank %02d: %s\n", rank, names.c_str());
+        }
+      }
+    }
+  }
+  Utils::Print("\n");
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
@@ -245,124 +255,197 @@ int NicAllToAllPreset(EnvVars&                    ev,
 
   if (!Utils::RankDoesOutput()) return 0;
 
-  int numRows = 6 + numRanks;
-  int numCols = 3 + numNicsPerRank;
-  Utils::TableHelper table(numRows, numCols);
+  // Per-group SRC->DST bandwidth matrix (one table per group), styled to match
+  // the PodAllToAll preset: outer columns/rows are ranks, with each rank's NICs
+  // packed as fixed-width sub-cells inside one cell.
+  size_t groupCursor = 0;
+  for (int p = 0; p < numPlanes; p++) {
+    for (int g = 0; g < numGroups; g++, groupCursor++) {
+      auto const& gi = allGroups[groupCursor];
 
-  table.Set(2, 0, " Rank ");
-  table.Set(2, 1, " Name ");
-  table.Set(1, numCols - 1, " TOTAL ");
-  table.Set(2, numCols - 1, " (GB/s) ");
-  table.SetColAlignment(1, Utils::TableHelper::ALIGN_LEFT);
-  for (int rank = 0; rank < numRanks; rank++) {
-    table.Set(3 + rank, 0, " %d ", rank);
-    table.Set(3 + rank, 1, " %s ", TransferBench::GetHostname(rank).c_str());
-  }
-  table.Set(numRows - 3, 1, " MAX (GB/s) ");
-  table.Set(numRows - 2, 1, " AVG (GB/s) ");
-  table.Set(numRows - 1, 1, " MIN (GB/s) ");
-  for (int row = numRows - 3; row < numRows; row++)
-    table.SetCellAlignment(row, 1, Utils::TableHelper::ALIGN_RIGHT);
-  table.DrawRowBorder(3);
-  table.DrawRowBorder(numRows - 3);
-
-  std::vector<std::vector<double>> bwByRankNic(numRanks, std::vector<double>(numNicsPerRank, 0.0));
-  for (size_t i = 0; i < results.tfrResults.size(); i++) {
-    int nicIdx  = results.tfrResults[i].exeDevice.exeIndex;
-    int rankIdx = results.tfrResults[i].exeDevice.exeRank;
-    bwByRankNic[rankIdx][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
-  }
-
-  std::vector<bool> nicHasMixedMemMapping(numNicsPerRank, false);
-  bool hasMixedMemMapping = false;
-  for (int nic = 0; nic < numNicsPerRank; nic++) {
-    int refMem = nicToMem[0][nic];
-    for (int rank = 1; rank < numRanks; rank++) {
-      if (nicToMem[rank][nic] != refMem) {
-        nicHasMixedMemMapping[nic] = true;
-        hasMixedMemMapping = true;
-        break;
+      // Rebuild (srcId,dstId) -> transfer index lookup using the same iteration
+      // order used when transfers were generated above.
+      std::map<std::pair<int,int>, size_t> pairIdx;
+      {
+        size_t idx = gi.transferStart;
+        for (int srcId : gi.memberNicIds) {
+          for (int dstId : gi.memberNicIds) {
+            if (!a2aLocal && srcId == dstId) continue;
+            pairIdx[std::make_pair(srcId, dstId)] = idx++;
+          }
+        }
       }
+
+      // Group the member NICs by rank, sorted by local NIC index within each rank.
+      std::map<int, std::vector<int>> ranksToLocals;
+      for (int id : gi.memberNicIds) {
+        ranksToLocals[id / numNicsPerRank].push_back(id % numNicsPerRank);
+      }
+      std::vector<int> rankOrder;
+      rankOrder.reserve(ranksToLocals.size());
+      for (auto& kv : ranksToLocals) {
+        std::sort(kv.second.begin(), kv.second.end());
+        rankOrder.push_back(kv.first);
+      }
+
+      int const M = (int)gi.memberNicIds.size();
+      // Header layout: row 0 (and col 0) is logically a single "outer" row/col
+      // but rendered as two TableHelper rows/cols with no border between them so
+      // the rank label and the GPU/CPU backing-device sub-labels can sit
+      // alongside each other.
+      //   Rows 0,1 / Cols 0,1: doubled outer header block
+      //     - Row 0: " Rank XX " in the first NIC col of each rank (others blank)
+      //     - Row 1: " GPU XX " (or CPU) per src NIC col
+      //     - Col 0: " Rank XX " on first row of each rank's group
+      //     - Col 1: " GPU XX " (or CPU) per src NIC row
+      //   Row 2 / Col 2: NIC sub-labels (the original "row 1 / col 1"), with
+      //                  the SRC+EXE\DST corner at (2,2).
+      //   Row 3+ / Col 3+: one cell per (src NIC, dst NIC) pair, with NIC cols
+      //                    grouped by rank using selective column borders.
+      //   Trailing 2 cols: STotal (per-src-row sum) and Actual (transferCount *
+      //                    rowMinBw); trailing row: RTotal (per-dst-col sum).
+      int const sTotalCol  = 3 + M;
+      int const actualCol  = 3 + M + 1;
+      int const rTotalRow  = 3 + M;
+      int const numTblRows = 3 + M + 1;
+      int const numTblCols = 3 + M + 2;
+      int const precision  = 2;
+      Utils::TableHelper tbl(numTblRows, numTblCols, precision);
+
+      // Build the destination-NIC ordering used for data columns: same as the
+      // source-NIC ordering (group by rank, sorted local NIC index within rank).
+      // Also remember where each rank-group of columns starts so we can place
+      // the row-0 "Rank XX" headers and rank-boundary col borders in the right
+      // places.
+      std::vector<int> dstNicIds;
+      dstNicIds.reserve(M);
+      std::vector<int> rankColStart;
+      rankColStart.reserve(rankOrder.size());
+      {
+        int colCursor = 3;
+        for (int rank : rankOrder) {
+          rankColStart.push_back(colCursor);
+          for (int nicLocal : ranksToLocals[rank]) {
+            dstNicIds.push_back(rank * numNicsPerRank + nicLocal);
+            colCursor++;
+          }
+        }
+      }
+
+      tbl.DrawRowBorder(0);
+      tbl.DrawRowBorder(2);
+      tbl.DrawRowBorder(3);
+      tbl.DrawRowBorder(rTotalRow);
+      tbl.DrawRowBorder(numTblRows);
+      tbl.DrawColBorder(0);
+      tbl.DrawColBorder(2);
+      // Col borders only at rank-group boundaries (and at the right edge).
+      // Col 3 is the start of the first rank-group, which also serves as the
+      // separator between the NIC sub-label column and the data section.
+      // The last rank boundary at col (3+M) doubles as the separator before
+      // the trailing STotal column.
+      {
+        int colCursor = 3;
+        tbl.DrawColBorder(colCursor);
+        for (int rank : rankOrder) {
+          colCursor += (int)ranksToLocals[rank].size();
+          tbl.DrawColBorder(colCursor);
+        }
+      }
+      tbl.DrawColBorder(actualCol);
+      tbl.DrawColBorder(numTblCols);
+
+      tbl.Set(0, 0, " Mem Device ");
+      tbl.SetCellAlignment(0, 0, Utils::TableHelper::ALIGN_CENTER);
+      tbl.Set(2, 2, useRdmaRead ? " SRC\\DST+EXE " : " SRC+EXE\\DST ");
+      tbl.SetCellAlignment(2, 2, Utils::TableHelper::ALIGN_CENTER);
+      tbl.Set(2, sTotalCol, " STotal ");
+      tbl.SetCellAlignment(2, sTotalCol, Utils::TableHelper::ALIGN_CENTER);
+      tbl.Set(2, actualCol, " Actual ");
+      tbl.SetCellAlignment(2, actualCol, Utils::TableHelper::ALIGN_CENTER);
+      tbl.Set(rTotalRow, 2, " RTotal ");
+      tbl.SetCellAlignment(rTotalRow, 2, Utils::TableHelper::ALIGN_CENTER);
+
+      char const* memDevPrefix = useCpuMem ? "CPU" : "GPU";
+
+      Utils::Print("\n--- NIC AllToAll Plane %02d Group %02d (%d NICs) ---\n", p, g, M);
+
+      // Row-0 outer rank header: place " Rank XX " in the first NIC col of each
+      // rank-group; the other NIC cols in row 0 stay empty.
+      for (size_t c = 0; c < rankOrder.size(); c++)
+        tbl.Set(0, rankColStart[c], " Rank %02d ", rankOrder[c]);
+
+      // Rows 1 and 2: per-NIC GPU/CPU sub-header and NIC name sub-header.
+      for (int j = 0; j < M; j++) {
+        int const dstId   = dstNicIds[j];
+        int const dstRank = dstId / numNicsPerRank;
+        int const dstNic  = dstId % numNicsPerRank;
+        int const colIdx  = 3 + j;
+        tbl.Set(1, colIdx, " %s %02d ", memDevPrefix, nicToMem[dstRank][dstNic]);
+        tbl.Set(2, colIdx, " %s ",
+                TransferBench::GetExecutorName({EXE_NIC, dstNic, dstRank}).c_str());
+      }
+
+      // Data rows (M rows, one per src NIC). The outer-row "Rank XX" label only
+      // appears on the first row of each rank's group; per-row sub-labels carry
+      // the GPU/CPU backing device and NIC name. Track per-row and per-col
+      // running totals for STotal/RTotal/Actual.
+      std::vector<double> colTotal(M, 0.0);
+      double sTotalGrand = 0.0;
+      double actualGrand = 0.0;
+      int rowDisp = 0;
+      for (int srcRank : rankOrder) {
+        bool firstInRank = true;
+        for (int srcLocal : ranksToLocals[srcRank]) {
+          int const rowIdx = 3 + rowDisp;
+          if (firstInRank) {
+            tbl.DrawRowBorder(rowIdx);
+            tbl.Set(rowIdx, 0, " Rank %02d ", srcRank);
+            firstInRank = false;
+          }
+          tbl.Set(rowIdx, 1, " %s %02d ", memDevPrefix, nicToMem[srcRank][srcLocal]);
+          tbl.Set(rowIdx, 2, " %s ",
+                  TransferBench::GetExecutorName({EXE_NIC, srcLocal, srcRank}).c_str());
+
+          int const srcId = srcRank * numNicsPerRank + srcLocal;
+          double rowSum   = 0.0;
+          double rowMinBw = std::numeric_limits<double>::max();
+          int    rowCount = 0;
+          for (int j = 0; j < M; j++) {
+            int const dstId  = dstNicIds[j];
+            int const colIdx = 3 + j;
+            if (!a2aLocal && srcId == dstId) {
+              tbl.Set(rowIdx, colIdx, " N/A ");
+            } else {
+              double const bw = results.tfrResults[pairIdx[std::make_pair(srcId, dstId)]]
+                                  .avgBandwidthGbPerSec;
+              tbl.Set(rowIdx, colIdx, " %.2f ", bw);
+              rowSum      += bw;
+              colTotal[j] += bw;
+              rowMinBw     = std::min(rowMinBw, bw);
+              rowCount++;
+            }
+          }
+          double const rowActual = (rowCount > 0) ? rowCount * rowMinBw : 0.0;
+          tbl.Set(rowIdx, sTotalCol, " %.2f ", rowSum);
+          tbl.Set(rowIdx, actualCol, " %.2f ", rowActual);
+          sTotalGrand += rowSum;
+          actualGrand += rowActual;
+          rowDisp++;
+        }
+      }
+
+      // RTotal row: per-dst-col sums plus grand totals for STotal/Actual.
+      for (int j = 0; j < M; j++)
+        tbl.Set(rTotalRow, 3 + j, " %.2f ", colTotal[j]);
+      tbl.Set(rTotalRow, sTotalCol, " %.2f ", sTotalGrand);
+      tbl.Set(rTotalRow, actualCol, " %.2f ", actualGrand);
+
+      tbl.PrintTable(ev.outputToCsv, ev.showBorders);
     }
   }
-
-  std::vector<double> rankTotal(numRanks, 0.0);
-  int colIdx = 2;
-  table.DrawColBorder(colIdx);
-  for (int nic = 0; nic < numNicsPerRank; nic++) {
-    table.Set(0, colIdx, " NIC %02d ", nic);
-    if (nicHasMixedMemMapping[nic]) {
-      table.Set(1, colIdx, " MIXED ");
-    } else if (useCpuMem) {
-      table.Set(1, colIdx, " CPU %02d ", nicToMem[0][nic]);
-    } else {
-      table.Set(1, colIdx, " GPU %02d ", nicToMem[0][nic]);
-    }
-    table.Set(2, colIdx, " %s ", TransferBench::GetExecutorName({EXE_NIC, nic}).c_str());
-
-    double nicMin = std::numeric_limits<double>::max();
-    double nicAvg = 0.0;
-    double nicMax = std::numeric_limits<double>::lowest();
-    for (int rank = 0; rank < numRanks; rank++) {
-      double bw = bwByRankNic[rank][nic];
-      table.Set(3 + rank, colIdx, " %.2f ", bw);
-      nicMin = std::min(nicMin, bw);
-      nicAvg += bw;
-      nicMax = std::max(nicMax, bw);
-      rankTotal[rank] += bw;
-    }
-
-    table.Set(numRows - 3, colIdx, " %.2f ", nicMax);
-    table.Set(numRows - 2, colIdx, " %.2f ", nicAvg / numRanks);
-    table.Set(numRows - 1, colIdx, " %.2f ", nicMin);
-    colIdx++;
-  }
-  table.DrawColBorder(colIdx);
-
-  double rankMin = std::numeric_limits<double>::max();
-  double rankAvg = 0.0;
-  double rankMax = std::numeric_limits<double>::lowest();
-  for (int rank = 0; rank < numRanks; rank++) {
-    table.Set(3 + rank, numCols - 1, " %.2f ", rankTotal[rank]);
-    rankMin = std::min(rankMin, rankTotal[rank]);
-    rankAvg += rankTotal[rank];
-    rankMax = std::max(rankMax, rankTotal[rank]);
-  }
-  table.Set(numRows - 3, numCols - 1, " %.2f ", rankMax);
-  table.Set(numRows - 2, numCols - 1, " %.2f ", rankAvg / numRanks);
-  table.Set(numRows - 1, numCols - 1, " %.2f ", rankMin);
-
-  table.PrintTable(ev.outputToCsv, ev.showBorders);
   Utils::Print("\n");
-  if (hasMixedMemMapping) {
-    Utils::Print("[WARN] NIC-to-%s mapping differs across ranks. 'MIXED' columns are detailed below.\n",
-                 useCpuMem ? "CPU" : "GPU");
 
-    int mapRows = 2 + numRanks;
-    int mapCols = 2 + numNicsPerRank;
-    Utils::TableHelper mapTable(mapRows, mapCols);
-    mapTable.Set(0, 0, " Rank ");
-    mapTable.Set(0, 1, " Name ");
-    mapTable.SetColAlignment(1, Utils::TableHelper::ALIGN_LEFT);
-    for (int nic = 0; nic < numNicsPerRank; nic++) {
-      mapTable.Set(0, 2 + nic, " NIC %02d ", nic);
-      mapTable.SetCellAlignment(0, 2 + nic, Utils::TableHelper::ALIGN_CENTER);
-    }
-    mapTable.DrawRowBorder(1);
-    mapTable.DrawColBorder(2);
-
-    for (int rank = 0; rank < numRanks; rank++) {
-      int rowIdx = 1 + rank;
-      mapTable.Set(rowIdx, 0, " %d ", rank);
-      mapTable.Set(rowIdx, 1, " %s ", TransferBench::GetHostname(rank).c_str());
-      for (int nic = 0; nic < numNicsPerRank; nic++) {
-        mapTable.Set(rowIdx, 2 + nic, " %s %02d ", useCpuMem ? "CPU" : "GPU", nicToMem[rank][nic]);
-      }
-    }
-
-    mapTable.PrintTable(ev.outputToCsv, ev.showBorders);
-    Utils::Print("\n");
-  }
   Utils::Print("Aggregate bandwidth (CPU Timed): %8.3f GB/s\n", results.avgTotalBandwidthGbPerSec);
   Utils::PrintErrors(results.errResults);
 

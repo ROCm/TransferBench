@@ -4214,6 +4214,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #else
       ERR_CHECK(hipDeviceGetAttribute(&exeInfo.wallClockRate, hipDeviceAttributeWallClockRate,
                                       exeDevice.exeIndex));
+      // Check that GPU wallclock rate is non-zero
+      if (exeInfo.wallClockRate == 0) {
+        if (getenv("TB_WALLCLOCK_RATE")) {
+          exeInfo.wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
+          return {ERR_WARN,
+            "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
+            exeDevice.exeIndex, exeInfo.wallClockRate};
+        } else {
+          exeInfo.wallClockRate = 100000;
+          return {ERR_WARN,
+            "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
+            exeDevice.exeIndex, exeInfo.wallClockRate};
+        }
+      }
 #endif
       int transferOffset = 0;
       if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
@@ -4278,21 +4292,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #else
       return {ERR_FATAL, "RDMA executor is not supported"};
 #endif
-    }
-
-    // Check that GPU wallclock rate is non-zero
-    if (exeDevice.exeType == EXE_GPU_GFX && exeInfo.wallClockRate == 0) {
-      if (getenv("TB_WALLCLOCK_RATE")) {
-        exeInfo.wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
-        return {ERR_WARN,
-          "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
-          exeDevice.exeIndex, exeInfo.wallClockRate};
-      } else {
-        exeInfo.wallClockRate = 100000;
-        return {ERR_WARN,
-          "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
-          exeDevice.exeIndex, exeInfo.wallClockRate};
-      }
     }
 
     return ERR_NONE;
