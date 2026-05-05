@@ -159,7 +159,7 @@ int GfxSweepPreset(EnvVars&          ev,
               Utils::Print("  %1d  %c  %1d  %c  %1d  %c %4d %c %2d  %c  %1d  ",
                            waveOrder, sep, wordSize, sep,  temporalMode, sep,
                            blockSize, sep, unroll, sep, kernelIdx, sep);
-
+              fflush(stdout);
               for (auto s = 0; s < numSesList.size(); s++) {
                 int numSubExec = numSesList[s];
                 for (Transfer& t : transfers) t.numSubExecs = numSubExec;
