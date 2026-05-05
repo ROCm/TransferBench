@@ -3853,8 +3853,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         vector<float>&                    outputBuffer)
   {
     float* output;
-    bool const verbose = System::Get().IsVerbose();
-    size_t initOffset = cfg.data.byteOffset / sizeof(float);
+    bool const verbose  = System::Get().IsVerbose();
+    size_t initOffset   = cfg.data.byteOffset / sizeof(float);
+    ErrResult firstErr  = ERR_NONE;
 
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
@@ -3862,7 +3863,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       size_t N = t.numBytes / sizeof(float);
 
       float const* expected = dstReference[t.srcs.size()].data();
-      for (int dstIdx = 0; dstIdx < rss->dstMem.size(); dstIdx++) {
+      for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
         if (t.dsts[dstIdx].memRank != GetRank()) continue;
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
@@ -3888,20 +3889,34 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           output = outputBuffer.data();
         }
 
+        ErrResult dstErr = ERR_NONE;
         if (memcmp(output, expected, t.numBytes)) {
           // Difference found - find first error
           for (size_t i = 0; i < N; i++) {
             if (output[i] != expected[i]) {
-              return {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
+              dstErr = {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
                 transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
+              break;
             }
           }
-          // memcmp found a difference but float != didn't (e.g. +0.0f vs -0.0f bit pattern)
-          return {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
+          if (dstErr.errType == ERR_NONE)
+            // memcmp found a difference but float != didn't (e.g. +0.0f vs -0.0f bit pattern)
+            dstErr = {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
+        }
+
+        if (verbose)
+          System::Get().Log("[INFO] Validation: transfer %d DST[%d] %s%d — %s\n",
+                            transferIdx, dstIdx,
+                            GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                            dstErr.errType == ERR_NONE ? "PASS" : "FAIL");
+
+        if (dstErr.errType != ERR_NONE) {
+          if (!verbose) return dstErr;
+          if (firstErr.errType == ERR_NONE) firstErr = dstErr;
         }
       }
     }
-    return ERR_NONE;
+    return firstErr;
   }
 
   // Determine eligibility requirements for a particular GFX kernel
