@@ -3896,6 +3896,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                 transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
             }
           }
+          // memcmp found a difference but float != didn't (e.g. +0.0f vs -0.0f bit pattern)
           return {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
         }
       }
