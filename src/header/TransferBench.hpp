@@ -5984,8 +5984,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
               size_t firstErr = 0;
               for (; firstErr < N; firstErr++)
                 if (output[firstErr] != expected[firstErr]) break;
-              System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
-                                dstIdx, firstErr, expected[firstErr], output[firstErr]);
+              if (firstErr < N)
+                System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
+                                  dstIdx, firstErr, expected[firstErr], output[firstErr]);
+              else
+                System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
+                                  dstIdx);
               transferOk = false;
             }
           }
