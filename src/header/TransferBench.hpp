@@ -80,7 +80,9 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
-
+#ifdef ANVIL_EXEC_ENABLED
+#include "anvil.hpp"
+#endif
 #endif
 
 #include "tdmCopy.h"
@@ -114,10 +116,17 @@ namespace TransferBench
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
     EXE_GPU_TDM      = 6,                       ///<  GPU TDM executor          (subExecutor = threadblock/CU)
+    EXE_GPU_INITIATED_DMA = 7,                  ///<  GPU-initiated SDMA Executor (anvil/KFD, AMD only)
   };
-  char const ExeTypeStr[8] = "CGDINBT";
+  char const ExeTypeStr[9] = "CGDINBTS";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM; }
+  inline bool IsGpuExeType(ExeType e){
+    return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM
+#ifdef ANVIL_EXEC_ENABLED
+        || e == EXE_GPU_INITIATED_DMA
+#endif
+    ;
+  }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
