@@ -7273,13 +7273,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
 
-      if (verbose) {
-        char gpuBdf[64] = "";
-        (void)hipDeviceGetPCIBusId(gpuBdf, sizeof(gpuBdf), exeIndex);
-        Log("[INFO] Rank %03d: GPU [%02d/%02d] %03d CUs %d XCCs %d DMA-eng NUMA %d BDF %s (%s)\n",
-            rank, exeIndex, numGpus, numDeviceCUs, numXccs, numDmaEngines,
-            closestNuma, gpuBdf, gpuName.c_str());
-      }
     }
 
     // NIC Executor
@@ -7431,12 +7424,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        Log("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
-            topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
-            topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
-            topo.closestCpuNumaToGpu[exeIndex]);
+        char gpuBdf[64] = "";
+        (void)hipDeviceGetPCIBusId(gpuBdf, sizeof(gpuBdf), exeIndex);
+        hipDeviceProp_t prop;
+        std::string archName = "";
+        if (hipGetDeviceProperties(&prop, exeIndex) == hipSuccess) {
+          std::string fullName = prop.gcnArchName;
+          archName = fullName.substr(0, fullName.find(':'));
+        }
+        int numXccs    = topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}];
+        int numCus     = topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}];
+        int numDmaEngs = topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}];
+        Log("[INFO] Rank %03d: GPU [%02d/%02d] %03d CUs %d XCCs %d DMA-eng NUMA %d BDF %s (%s) Closest NICs:",
+            rank, exeIndex, numGpus, numCus, numXccs, numDmaEngs,
+            topo.closestCpuNumaToGpu[exeIndex], gpuBdf, archName.c_str());
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
-          Log(" none");
+          Log(" none\n");
         } else {
           for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
             Log(" %d", nicIndex);
