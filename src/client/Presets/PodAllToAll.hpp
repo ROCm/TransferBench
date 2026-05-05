@@ -43,6 +43,12 @@ int PodAllToAllPreset(EnvVars&          ev,
   int numRanks = TransferBench::GetNumRanks();
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
+  // Restrict to single-pod runs; multi-pod support is not yet implemented
+  if (Utils::GetRankPerPodMap().size() != 1) {
+    Utils::Print("[ERROR] PodAllToAll preset currently requires all ranks to be in a single pod. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return ERR_FATAL;
+  }
+
   // Collect env vars for this preset
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
