@@ -2700,6 +2700,52 @@ namespace {
         hasFatalError = true;
       }
       break;
+#ifdef ANVIL_EXEC_ENABLED
+      case EXE_GPU_INITIATED_DMA:
+        if (t.srcs.size() != 1) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: EXE_GPU_INITIATED_DMA requires exactly 1 source, got %zu",
+              i, t.srcs.size()});
+          hasFatalError = true;
+          break;
+        }
+        if (t.dsts.size() < 1) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: EXE_GPU_INITIATED_DMA requires at least 1 destination",
+              i});
+          hasFatalError = true;
+          break;
+        }
+        if (!IsGpuMemType(t.srcs[0].memType)) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: EXE_GPU_INITIATED_DMA source must be GPU memory",
+              i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: EXE_GPU_INITIATED_DMA executor GPU (%d) must match source GPU (%d)",
+              i, t.exeDevice.exeIndex, t.srcs[0].memIndex});
+          hasFatalError = true;
+          break;
+        }
+        if (t.srcs[0].memRank != t.exeDevice.exeRank || t.dsts[0].memRank != t.exeDevice.exeRank) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: EXE_GPU_INITIATED_DMA does not support cross-rank transfers",
+              i});
+          hasFatalError = true;
+          break;
+        }
+        break;
+#else
+      case EXE_GPU_INITIATED_DMA:
+        errors.push_back({ERR_FATAL,
+            "Transfer %d: EXE_GPU_INITIATED_DMA requires -DENABLE_ANVIL_EXEC=ON at build time",
+            i});
+        hasFatalError = true;
+        break;
+#endif
       }
 
       // Skip further tests if fatal error detected
