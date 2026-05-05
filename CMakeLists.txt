@@ -9,7 +9,41 @@ if (NOT CMAKE_TOOLCHAIN_FILE)
   message(STATUS "CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
 
-set(VERSION_STRING "1.66.02")
+set(TRANSFERBENCH_VERSION_MAJOR 1)
+set(TRANSFERBENCH_VERSION_MINOR 66)
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "02")
+
+# Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
+# Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,
+# this is not a git checkout, or no matching tag exists. Mirrors the RVS flow.
+set(TRANSFERBENCH_VERSION_PATCH "${TRANSFERBENCH_VERSION_PATCH_FALLBACK}")
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0 --match
+            "v${TRANSFERBENCH_VERSION_MAJOR}.${TRANSFERBENCH_VERSION_MINOR}.*"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE _tb_last_tag
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _tb_describe_rc
+    ERROR_QUIET)
+  if(_tb_describe_rc EQUAL 0 AND _tb_last_tag)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-list --count "${_tb_last_tag}..HEAD"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE _tb_commit_count
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _tb_count_rc
+      ERROR_QUIET)
+    if(_tb_count_rc EQUAL 0 AND _tb_commit_count MATCHES "^[0-9]+$")
+      set(TRANSFERBENCH_VERSION_PATCH "${_tb_commit_count}")
+    endif()
+  endif()
+endif()
+
+set(VERSION_STRING
+    "${TRANSFERBENCH_VERSION_MAJOR}.${TRANSFERBENCH_VERSION_MINOR}.${TRANSFERBENCH_VERSION_PATCH}")
+message(STATUS "TransferBench version: ${VERSION_STRING}")
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
 ## Load CMake modules
@@ -270,6 +304,22 @@ if(BUILD_RELOCATABLE_PACKAGE)
   # set by the caller (build_packages_local.sh) are honored.
   if(NOT DEFINED ROCM_MAJOR_VERSION)
     set(ROCM_MAJOR_VERSION "7")
+  endif()
+
+  # Relocatable RPATH (matches the RVS reference flow). Mirrors what
+  # build_packages_local.sh used to inject via -DCMAKE_INSTALL_RPATH=, so
+  # plain `cmake -DBUILD_RELOCATABLE_PACKAGE=ON ..` now produces the same
+  # RPATH as a CI/packaged build.
+  set(CMAKE_SKIP_RPATH FALSE)
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
+  set(CMAKE_INSTALL_RPATH
+      "\$ORIGIN:\$ORIGIN/../lib:/opt/rocm/extras-${ROCM_MAJOR_VERSION}/lib:/opt/rocm/lib:/opt/rocm/lib/llvm/lib:/opt/rocm/core-${ROCM_MAJOR_VERSION}/lib:/opt/rocm/core-${ROCM_MAJOR_VERSION}/lib/llvm/lib")
+  set(CMAKE_BUILD_RPATH "${CMAKE_INSTALL_RPATH}")
+  # Strip implicit SDK-from-build-host paths on install so the ephemeral
+  # $HOME/rocm-sdk/install path the CI script uses does not leak into the
+  # packaged binary's RPATH.
+  if(NOT CMAKE_VERSION VERSION_LESS "3.16")
+    set(CMAKE_INSTALL_REMOVE_ENVIRONMENT_RPATH TRUE)
   endif()
 
   install(TARGETS TransferBench RUNTIME DESTINATION bin COMPONENT devel)
