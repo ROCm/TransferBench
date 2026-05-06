@@ -297,9 +297,11 @@ COMMON_FLAGS  += -DTB_GIT_BRANCH='"$(TB_GIT_BRANCH)"' -DTB_GIT_COMMIT='"$(TB_GIT
       else
         ANVIL_ENABLED = 1
         COMMON_FLAGS += -DANVIL_EXEC_ENABLED -I./src/anvil
-        # Link hsakmt; static archive needs transitive drm deps
+        # Link hsakmt; use -Wl, to pass the static archive directly to the
+        # linker — without it, -x hip causes the compiler to parse the .a
+        # as source and emit "expected unqualified-id" / UTF-8 errors.
         ifeq ($(suffix $(HSAKMT_LIB)),.a)
-          LDFLAGS += $(HSAKMT_LIB) -ldrm_amdgpu -ldrm
+          LDFLAGS += -Wl,$(HSAKMT_LIB) -ldrm_amdgpu -ldrm
         else
           LDFLAGS += -lhsakmt
         endif
