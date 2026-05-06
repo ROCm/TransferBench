@@ -107,6 +107,10 @@ int WallClockPreset(EnvVars&          ev,
   // Collect local results
   // Query XCC count per device; all must match since results are sized from GPU 0
   int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
+  if (numXccs <= 0) {
+    Utils::Print("[ERROR] wallclock preset requires at least one XCC (GPU 0 reports 0); topology data may be missing\n");
+    return ERR_FATAL;
+  }
   for (int deviceId = 1; deviceId < numGpuDevices; deviceId++) {
     int devXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, deviceId});
     if (devXccs != numXccs) {
@@ -150,6 +154,7 @@ int WallClockPreset(EnvVars&          ev,
 
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
     {
+      memset(timestamps, 0, numXccs * sizeof(uint64_t));
       HIP_CALL(hipMemset(readyFlag, 0, sizeof(*readyFlag)));
       HIP_CALL(hipDeviceSynchronize());
       GetXccTimestamps<<<dim3(numXccs,2,1), 1>>>(timestamps, readyFlag);
