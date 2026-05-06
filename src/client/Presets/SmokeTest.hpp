@@ -420,9 +420,10 @@ int SmokeTestPreset(EnvVars&          ev,
   };
 
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
-  if (showPerf)
-    Utils::Print("Legend: X.X=BW(GB/s) %s=Skip %s=Fail\n", skip.c_str(), fail.c_str());
-  else
+  if (showPerf) {
+    Utils::Print("Legend: X.X=BW(GB/s) %s=Skip %s=Fail", skip.c_str(), fail.c_str());
+    Utils::Print(" | Timing: %s\n", ev.useHipEvents ? "GPU-Event-Timed" : "CPU-Timed");
+  } else
     Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
 
   // Print headers
