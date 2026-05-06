@@ -43,6 +43,11 @@ int PodAllToAllPreset(EnvVars&          ev,
   int numRanks = TransferBench::GetNumRanks();
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
+  // When pod detection fails (e.g. amd-smi unavailable), the map is empty
+  if (Utils::GetRankPerPodMap().empty()) {
+    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return ERR_FATAL;
+  }
   // Restrict to single-pod runs; multi-pod support is not yet implemented
   if (Utils::GetRankPerPodMap().size() != 1) {
     Utils::Print("[ERROR] PodAllToAll preset currently requires all ranks to be in a single pod. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
@@ -129,7 +134,7 @@ int PodAllToAllPreset(EnvVars&          ev,
     return ERR_FATAL;
   }
 
-  // Validate per-pod: pods may have different rank counts so global check is insufficient
+  // Validate group size divides the single pod's total device count
   for (auto const& [pod, ranks] : Utils::GetRankPerPodMap()) {
     int podDevices = (int)ranks.size() * numGpus;
     if (podDevices % groupSize) {
@@ -149,10 +154,6 @@ int PodAllToAllPreset(EnvVars&          ev,
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
-  if (rankToPod.empty()) {
-    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return ERR_FATAL;
-  }
   for (auto const& [pod, ranks] : rankToPod) {
     int n = ranks.size() * numGpus;
     int numGroups = n / groupSize;
