@@ -422,7 +422,7 @@ int SmokeTestPreset(EnvVars&          ev,
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
   if (showPerf) {
     Utils::Print("Legend: X.X=BW(GB/s) %s=Skip %s=Fail", skip.c_str(), fail.c_str());
-    Utils::Print(" | Timing: %s\n", ev.useHipEvents ? "GPU-Event-Timed" : "CPU-Timed");
+    Utils::Print(" | %s (GB/s)\n", ev.useHipEvents ? "GPU-Event-Timed" : "CPU-Timed");
   } else
     Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
 
@@ -445,7 +445,7 @@ int SmokeTestPreset(EnvVars&          ev,
     // Each BW cell: " %8.1f |" = 11 chars (leading | comes from preceding test-num cell)
     // Column layout widths (shared-border model): name(29)+gpu(6)+size(7)+test(7)+bw(11) = 60
     // Per GFX SE: test(7)+bw(11) = 18
-    Utils::Print("| Name                      | GPU | Size | Test | DMA(G/s) |");
+    Utils::Print("| Name                      | GPU | Size | Test |   DMA    |");
     for (auto numSubExec : gfxSesList)
       Utils::Print(" Test | GFX  %03d |", numSubExec);
     Utils::Print("\n");
