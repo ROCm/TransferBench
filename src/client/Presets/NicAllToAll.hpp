@@ -106,7 +106,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
       ev.Print("NUM_PLANES"         , numPlanes    , "Splitting %d total NICs into %d plane(s) of %d NICs each", N, numPlanes, planeSize);
       ev.Print("GROUP_STRIDE"        , groupStride   , "Stride permutation within each plane before splitting into groups");
       ev.Print("NUM_GROUPS"          , numGroups     , "Splitting each plane into %d group(s) of %d NICs each", numGroups, groupSize);
-      ev.Print("A2A_LOCAL"           , a2aLocal      , "%s local (same-rank) transfers", a2aLocal ? "Include" : "Exclude");
+      ev.Print("A2A_LOCAL"           , a2aLocal      , "%s self NIC endpoint transfers", a2aLocal ? "Include" : "Exclude");
       ev.Print("NUM_QUEUE_PAIRS"     , numQueuePairs , "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("SHOW_DETAILS"        , showDetails   , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_RDMA_READ"       , useRdmaRead   , "Performing RDMA %s", useRdmaRead ? "reads" : "writes");
