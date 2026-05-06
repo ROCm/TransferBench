@@ -79,7 +79,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   endif
 
   ifeq ($(DEBUG), 0)
-    COMMON_FLAGS += -O3
+    COMMON_FLAGS += -O3 -g
   else
     COMMON_FLAGS += -O0 -g -ggdb3
   endif

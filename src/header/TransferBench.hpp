@@ -1436,6 +1436,49 @@ namespace {
   }
 #endif
 
+  // Returns a human-readable label for a MemType (e.g. "CPU_PINNED", "GPU", "GPU_FINE")
+  static char const* GetMemTypeName(MemType m)
+  {
+    switch (m) {
+    case MEM_CPU:             return "CPU_PINNED";
+    case MEM_CPU_CLOSEST:     return "CPU_PINNED_CLOSEST";
+    case MEM_CPU_COHERENT:    return "CPU_COHERENT";
+    case MEM_CPU_NONCOHERENT: return "CPU_NONCOHERENT";
+    case MEM_CPU_UNCACHED:    return "CPU_UNCACHED";
+    case MEM_CPU_UNPINNED:    return "CPU_UNPINNED";
+    case MEM_GPU:             return "GPU";
+    case MEM_GPU_FINE:        return "GPU_FINE";
+    case MEM_GPU_UNCACHED:    return "GPU_UNCACHED";
+    case MEM_MANAGED:         return "GPU_MANAGED";
+    case MEM_NULL:            return "NULL";
+    default:                  return "UNKNOWN";
+    }
+  }
+
+  // Returns BDF string for a GPU index, or "" on failure
+  static std::string GetGpuBdf(int gpuIndex)
+  {
+    char buf[64] = "";
+    if (hipDeviceGetPCIBusId(buf, sizeof(buf), gpuIndex) != hipSuccess) return "";
+    return std::string(buf);
+  }
+
+  // Returns closest CPU NUMA node for a MemDevice as a string (or "?" if unknown)
+  static std::string GetMemDeviceNuma(MemDevice const& md)
+  {
+    if (IsCpuMemType(md.memType)) {
+      int numaIdx = (md.memType == MEM_CPU_CLOSEST)
+                    ? GetClosestCpuNumaToGpu(md.memIndex, md.memRank)
+                    : md.memIndex;
+      return (numaIdx >= 0) ? std::to_string(numaIdx) : "?";
+    }
+    if (IsGpuMemType(md.memType)) {
+      int numaIdx = GetClosestCpuNumaToGpu(md.memIndex, md.memRank);
+      return (numaIdx >= 0) ? std::to_string(numaIdx) : "?";
+    }
+    return "?";
+  }
+
   // Allocate memory
   static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr,
                                   size_t* actualBytes = NULL,
@@ -3810,7 +3853,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         vector<float>&                    outputBuffer)
   {
     float* output;
-    size_t initOffset = cfg.data.byteOffset / sizeof(float);
+    bool const verbose  = System::Get().IsVerbose();
+    size_t initOffset   = cfg.data.byteOffset / sizeof(float);
+    ErrResult firstErr  = ERR_NONE;
 
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
@@ -3818,31 +3863,60 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       size_t N = t.numBytes / sizeof(float);
 
       float const* expected = dstReference[t.srcs.size()].data();
-      for (int dstIdx = 0; dstIdx < rss->dstMem.size(); dstIdx++) {
+      for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
         if (t.dsts[dstIdx].memRank != GetRank()) continue;
         if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
           output = (rss->dstMem[dstIdx]) + initOffset;
+          if (verbose) {
+            System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
+                              transferIdx, dstIdx,
+                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                              t.numBytes, output);
+          }
         } else {
           ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
+          if (verbose) {
+            System::Get().Log("[INFO] Validation memcpy: transfer %d DST[%d] %s%d->host  %zu bytes  src=%p dst=%p\n",
+                              transferIdx, dstIdx,
+                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                              t.numBytes,
+                              (rss->dstMem[dstIdx]) + initOffset,
+                              outputBuffer.data());
+          }
           ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
           ERR_CHECK(hipDeviceSynchronize());
           output = outputBuffer.data();
         }
 
+        ErrResult dstErr = ERR_NONE;
         if (memcmp(output, expected, t.numBytes)) {
           // Difference found - find first error
           for (size_t i = 0; i < N; i++) {
             if (output[i] != expected[i]) {
-              return {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
+              dstErr = {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
                 transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
+              break;
             }
           }
-          return {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
+          if (dstErr.errType == ERR_NONE)
+            // memcmp found a difference but float != didn't (e.g. +0.0f vs -0.0f bit pattern)
+            dstErr = {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
+        }
+
+        if (verbose)
+          System::Get().Log("[INFO] Validation: transfer %d DST[%d] %s%d — %s\n",
+                            transferIdx, dstIdx,
+                            GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                            dstErr.errType == ERR_NONE ? "PASS" : "FAIL");
+
+        if (dstErr.errType != ERR_NONE) {
+          if (!verbose) return dstErr;
+          if (firstErr.errType == ERR_NONE) firstErr = dstErr;
         }
       }
     }
-    return ERR_NONE;
+    return firstErr;
   }
 
   // Determine eligibility requirements for a particular GFX kernel
@@ -4059,9 +4133,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     exeInfo.totalDurationMsec = 0.0;
     int const localRank = GetRank();
-    if (System::Get().IsVerbose()) {
-      System::Get().Log("[INFO] Rank %d preparing executor (%c%d on Rank %d)\n",
-                        localRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex, exeDevice.exeRank);
+    bool const verbose  = System::Get().IsVerbose();
+    // Executor BDF and NUMA are constant across all transfers — compute once
+    std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
+    int exeNuma = IsGpuExeType(exeDevice.exeType)
+                  ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
+                  : IsNicExeType(exeDevice.exeType)
+                    ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
+                    : exeDevice.exeIndex;
+    if (verbose) {
+      System::Get().Log("[INFO] Rank %d preparing executor (R%d%c%d)\n",
+                        localRank, exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
     }
 
     // Loop over each transfer this executor is involved in
@@ -4069,9 +4151,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       Transfer const& t = transfers[rss.transferIdx];
       rss.numBytes = t.numBytes;
 
-      if (System::Get().IsVerbose()) {
-        System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST)\n",
-                          localRank, rss.transferIdx, t.srcs.size(), t.dsts.size());
+      if (verbose) {
+        System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
+                          localRank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
+        System::Get().Log("[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
+                          exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
+                          exeNuma,
+                          exeBdf.empty() ? "" : " BDF ",
+                          exeBdf.c_str());
       }
 
       // Allocate source memory
@@ -4088,14 +4175,30 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             srcMemDevice.memRank == localRank  &&
             exeDevice.exeRank    == localRank  &&
             srcMemDevice.memIndex != exeDevice.exeIndex) {
+          if (verbose) {
+            System::Get().Log("[INFO]   Enabling peer access: GPU %d -> GPU %d\n",
+                              exeDevice.exeIndex, srcMemDevice.memIndex);
+          }
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, srcMemDevice.memIndex));
         }
 
         // Allocate source memory (on the correct rank)
         bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (srcMemDevice.memRank == localRank) {
+          if (verbose) {
+            std::string bdf = IsGpuMemType(srcMemDevice.memType) ? GetGpuBdf(srcMemDevice.memIndex) : "";
+            System::Get().Log("[INFO]   SRC[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
+                              iSrc, GetMemTypeName(srcMemDevice.memType), srcMemDevice.memIndex,
+                              GetMemDeviceNuma(srcMemDevice).c_str(),
+                              bdf.empty() ? "" : " BDF ", bdf.c_str(),
+                              srcMemDevice.memRank, t.numBytes + cfg.data.byteOffset,
+                              requiresFabricHandle ? " [fabric-exportable]" : "");
+          }
           ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
                                    &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : nullptr));
+          if (verbose) {
+            System::Get().Log("[INFO]   SRC[%d]: allocated at %p\n", iSrc, rss.srcMem[iSrc]);
+          }
         }
 
         // Exchange memory pointer across ranks
@@ -4116,14 +4219,30 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             dstMemDevice.memRank == localRank  &&
             exeDevice.exeRank    == localRank  &&
             dstMemDevice.memIndex != exeDevice.exeIndex) {
+          if (verbose) {
+            System::Get().Log("[INFO]   Enabling peer access: GPU %d -> GPU %d\n",
+                              exeDevice.exeIndex, dstMemDevice.memIndex);
+          }
           ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, dstMemDevice.memIndex));
         }
 
         // Allocate destination memory (on the correct rank)
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
+          if (verbose) {
+            std::string bdf = IsGpuMemType(dstMemDevice.memType) ? GetGpuBdf(dstMemDevice.memIndex) : "";
+            System::Get().Log("[INFO]   DST[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
+                              iDst, GetMemTypeName(dstMemDevice.memType), dstMemDevice.memIndex,
+                              GetMemDeviceNuma(dstMemDevice).c_str(),
+                              bdf.empty() ? "" : " BDF ", bdf.c_str(),
+                              dstMemDevice.memRank, t.numBytes + cfg.data.byteOffset,
+                              requiresFabricHandle ? " [fabric-exportable]" : "");
+          }
           ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
+          if (verbose) {
+            System::Get().Log("[INFO]   DST[%d]: allocated at %p\n", iDst, rss.dstMem[iDst]);
+          }
         }
 
         // Exchange memory pointer across ranks
@@ -4275,6 +4394,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // Copy sub executor parameters to GPU
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+      if (verbose) {
+        System::Get().Log("[INFO] SubExecParam upload: GPU%d  %zu bytes (%zu params)  host=%p dev=%p\n",
+                          exeDevice.exeIndex,
+                          exeInfo.totalSubExecs * sizeof(SubExecParam),
+                          exeInfo.totalSubExecs,
+                          exeInfo.subExecParamCpu.data(),
+                          exeInfo.subExecParamGpu);
+      }
       ERR_CHECK(hipMemcpy(exeInfo.subExecParamGpu,
                           exeInfo.subExecParamCpu.data(),
                           exeInfo.totalSubExecs * sizeof(SubExecParam),
@@ -4307,18 +4434,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                     ExeInfo&                exeInfo)
   {
     int const localRank = GetRank();
+    bool const verbose  = System::Get().IsVerbose();
 
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
 
+      if (verbose) {
+        System::Get().Log("[INFO] Rank %d tearing down transfer %d\n", localRank, rss.transferIdx);
+      }
+
       // Deallocate source memory
       for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
         if (t.srcs[iSrc].memRank == localRank) {
+          if (verbose) {
+            System::Get().Log("[INFO]   Free SRC[%d]: %s idx=%d %p (%zu bytes)\n",
+                              iSrc, GetMemTypeName(t.srcs[iSrc].memType),
+                              t.srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
+          }
           ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
         } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
+          if (verbose) {
+            System::Get().Log("[INFO]   Unmap remote SRC[%d]: %p (%zu bytes) from Rank %d\n",
+                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], t.srcs[iSrc].memRank);
+          }
 #ifdef POD_COMM_ENABLED
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
           ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
@@ -4330,10 +4471,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Deallocate destination memory
       for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
         if (t.dsts[iDst].memRank == localRank) {
+          if (verbose) {
+            System::Get().Log("[INFO]   Free DST[%d]: %s idx=%d %p (%zu bytes)\n",
+                              iDst, GetMemTypeName(t.dsts[iDst].memType),
+                              t.dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
+          }
           ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
         } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
+          if (verbose) {
+            System::Get().Log("[INFO]   Unmap remote DST[%d]: %p (%zu bytes) from Rank %d\n",
+                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], t.dsts[iDst].memRank);
+          }
 #ifdef POD_COMM_ENABLED
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
           ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
@@ -5686,12 +5836,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         dstReference[numSrcs].clear();
 
       // Initialize all src memory buffers (if on local rank)
+      bool const verbose = System::Get().IsVerbose();
       for (auto resource : transferResources) {
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
             if (IsGpuMemType(t.srcs[srcIdx].memType)) {
               ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
+            }
+            if (verbose) {
+              MemDevice const& md = t.srcs[srcIdx];
+              System::Get().Log("[INFO] Data prep memcpy: transfer %d SRC[%d] host->%s%d  %zu bytes  dst=%p src=%p\n",
+                                resource->transferIdx, srcIdx,
+                                GetMemTypeName(md.memType), md.memIndex,
+                                resource->numBytes,
+                                resource->srcMem[srcIdx] + initOffset,
+                                srcReference[srcIdx].data());
             }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
@@ -5706,11 +5866,38 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         System::Get().Log("Memory prepared:\n");
 
         for (int i = 0; i < transfers.size(); i++) {
-          System::Get().Log("Transfer %03d:\n", i);
-          for (int iSrc = 0; iSrc < transfers[i].srcs.size(); ++iSrc)
-            System::Get().Log("  SRC %0d: %p\n", iSrc, transferResources[i]->srcMem[iSrc]);
-          for (int iDst = 0; iDst < transfers[i].dsts.size(); ++iDst)
-            System::Get().Log("  DST %0d: %p\n", iDst, transferResources[i]->dstMem[iDst]);
+          Transfer const& t     = transfers[i];
+          ExeDevice const& exe  = t.exeDevice;
+
+          // Executor info
+          std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
+          int exeNuma = IsGpuExeType(exe.exeType)
+                        ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
+                        : IsNicExeType(exe.exeType)
+                          ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
+                          : exe.exeIndex;
+          System::Get().Log("Transfer %03d: EXE=R%d%c%d NUMA=%d%s%s  %zu bytes\n",
+                            i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex, exeNuma,
+                            exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
+
+          for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
+            MemDevice const& md = t.srcs[iSrc];
+            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+            System::Get().Log("  SRC[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
+                              iSrc, transferResources[i]->srcMem[iSrc],
+                              GetMemTypeName(md.memType), md.memIndex,
+                              GetMemDeviceNuma(md).c_str(), md.memRank,
+                              bdf.empty() ? "" : " BDF=", bdf.c_str());
+          }
+          for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
+            MemDevice const& md = t.dsts[iDst];
+            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+            System::Get().Log("  DST[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
+                              iDst, transferResources[i]->dstMem[iDst],
+                              GetMemTypeName(md.memType), md.memIndex,
+                              GetMemDeviceNuma(md).c_str(), md.memRank,
+                              bdf.empty() ? "" : " BDF=", bdf.c_str());
+          }
         }
         System::Get().Log("Hit <Enter> to continue: ");
         fflush(stdout);
@@ -5774,10 +5961,59 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Pause for interactive mode
+    // Pause for interactive mode - run validation and show per-transfer result before prompt
     if (cfg.general.useInteractive) {
       if (localRank == 0) {
-        System::Get().Log("Transfers complete. Hit <Enter> to continue: ");
+        System::Get().Log("Transfers complete. Validation results:\n");
+
+        size_t initOffset = cfg.data.byteOffset / sizeof(float);
+        int numPass = 0, numFail = 0;
+        for (auto rss : transferResources) {
+          int transferIdx = rss->transferIdx;
+          Transfer const& t = transfers[transferIdx];
+          size_t N = t.numBytes / sizeof(float);
+          float const* expected = dstReference[t.srcs.size()].data();
+          bool transferOk = true;
+          bool anyLocalDst = false;
+
+          System::Get().Log("  Transfer %03d:", transferIdx);
+          for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
+            if (t.dsts[dstIdx].memRank != GetRank()) {
+              System::Get().Log("  DST[%d]=SKIP(remote)", dstIdx);
+              continue;
+            }
+            anyLocalDst = true;
+            float* output;
+            if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+              output = rss->dstMem[dstIdx] + initOffset;
+            } else {
+              (void)hipSetDevice(t.dsts[dstIdx].memIndex);
+              (void)hipMemcpy(outputBuffer.data(), rss->dstMem[dstIdx] + initOffset, t.numBytes, hipMemcpyDefault);
+              (void)hipDeviceSynchronize();
+              output = outputBuffer.data();
+            }
+
+            if (memcmp(output, expected, t.numBytes) == 0) {
+              System::Get().Log("  DST[%d]=PASS", dstIdx);
+            } else {
+              size_t firstErr = 0;
+              for (; firstErr < N; firstErr++)
+                if (output[firstErr] != expected[firstErr]) break;
+              if (firstErr < N)
+                System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
+                                  dstIdx, firstErr, expected[firstErr], output[firstErr]);
+              else
+                System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
+                                  dstIdx);
+              transferOk = false;
+            }
+          }
+          System::Get().Log("\n");
+          if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
+        }
+        System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
+        System::Get().Log("Hit <Enter> to continue: ");
+        fflush(stdout);
         if (scanf("%*c") != 0)  {
           System::Get().Log("[ERROR] Unexpected input\n");
           exit(1);
@@ -7003,6 +7239,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.numExecutors[EXE_GPU_DMA] = numGpus;
     topo.numExecutors[EXE_GPU_BDMA] = numGpus;
 
+    std::vector<std::string> gpuArchNames(numGpus);
+
     for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
       int numDeviceCUs  = 0;
       int numXccs       = 0;
@@ -7017,6 +7255,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipDeviceProp_t props;
       if (hipGetDeviceProperties(&props, exeIndex) == hipSuccess) {
         gpuName = props.name;
+        std::string fullName = props.gcnArchName;
+        gpuArchNames[exeIndex] = fullName.substr(0, fullName.find(':'));
       }
       topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
@@ -7055,6 +7295,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.numSubExecutors[{EXE_GPU_BDMA, exeIndex}] = numDmaEngines;
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
+
     }
 
     // NIC Executor
@@ -7066,7 +7307,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
       topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
       if (verbose) {
-        Log("[INFO] Rank %03d: NIC [%02d/%02d] on CPU NUMA %d\n", rank, exeIndex, numNics, topo.closestCpuNumaToNic[exeIndex]);
+        auto const& nic = GetIbvDeviceList()[exeIndex];
+        Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s\n",
+            rank, exeIndex, numNics, nic.name.c_str(),
+            nic.busId.empty() ? "?" : nic.busId.c_str(),
+            topo.closestCpuNumaToNic[exeIndex],
+            nic.hasActivePort ? "yes" : "no");
       }
     }
 #endif
@@ -7081,6 +7327,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
       topo.numSubExecutors[{EXE_NIC_NEAREST, gpuIndex}] = 0;
       topo.numExecutorSubIndices[{EXE_NIC_NEAREST, gpuIndex}] = 0;
+    }
+
+    // Build GPU bus address list once — reused by NIC proximity loops and verbose output
+    std::vector<std::string> gpuAddressList;
+    for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+      char hipPciBusId[64];
+      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIdx);
+      gpuAddressList.push_back(err == hipSuccess ? std::string(hipPciBusId) : "");
+      if (err != hipSuccess)
+        Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIdx, hipGetErrorString(err));
     }
 
     // Figure out closest NICs to GPUs
@@ -7107,15 +7363,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Loop over each GPU to find the closest NIC(s) based on PCIe address
     for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
-      // Collect PCIe address for the GPU
-      char hipPciBusId[64];
-      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIndex);
-      if (err != hipSuccess) {
-#ifdef VERBS_DEBUG
-        Log("Failed to get PCI Bus ID for HIP device %d: %s\n", gpuIndex, hipGetErrorString(err));
-#endif
-        continue;
-      }
+      if (gpuAddressList[gpuIndex].empty()) continue;
+      const char* hipPciBusId = gpuAddressList[gpuIndex].c_str();
 
       // Find closest NICs
       std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
@@ -7151,18 +7400,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Compute the reverse mapping: closest GPU(s) for each NIC
-    // Build list of GPU bus addresses
-    std::vector<std::string> gpuAddressList;
-    for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-      char hipPciBusId[64];
-      hipError_t err = hipDeviceGetPCIBusId(hipPciBusId, sizeof(hipPciBusId), gpuIdx);
-      if (err == hipSuccess) {
-        gpuAddressList.push_back(std::string(hipPciBusId));
-      } else {
-        gpuAddressList.push_back("");
-      }
-    }
-
     // Loop over each NIC to find the closest GPU(s) based on PCIe address
     for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
       if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
@@ -7201,12 +7438,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
-        Log("[INFO] Rank %03d: GPU [%02d/%02d] %d XCCs %03d CUs on CPU NUMA %d Closests NICs:", rank, exeIndex, numGpus,
-            topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}],
-            topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}],
-            topo.closestCpuNumaToGpu[exeIndex]);
+        const char* gpuBdf = gpuAddressList[exeIndex].c_str();
+        int numXccs    = topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}];
+        int numCus     = topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}];
+        int numDmaEngs = topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}];
+        Log("[INFO] Rank %03d: GPU [%02d/%02d] %03d CUs %d XCCs %d DMA-eng NUMA %d BDF %s (%s) Closest NICs:",
+            rank, exeIndex, numGpus, numCus, numXccs, numDmaEngs,
+            topo.closestCpuNumaToGpu[exeIndex], gpuBdf, gpuArchNames[exeIndex].c_str());
         if (topo.closestNicsToGpu[exeIndex].size() == 0) {
-          Log(" none");
+          Log(" none\n");
         } else {
           for (auto nicIndex : topo.closestNicsToGpu[exeIndex]) {
             Log(" %d", nicIndex);
