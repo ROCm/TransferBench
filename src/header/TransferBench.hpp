@@ -6017,15 +6017,11 @@ namespace {
   // Single-thread kernel: writes one SDMA linear-copy packet to the KFD ring buffer
   // via the SdmaQueue device handle, then spin-polls until the SDMA engine completes.
   // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
-  // NOTE: gfx1250 uses a different s_waitcnt encoding; the body is a no-op for that
-  // target to avoid "Cannot select: intrinsic %llvm.amdgcn.s.waitcnt" at codegen.
   __global__ void AnvilTransferKernel(anvil::SdmaQueueDeviceHandle* handlePtr,
                                       void* dst, void const* src, size_t numBytes)
   {
-#ifndef __gfx1250__
     anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
     anvil::quiet(*handlePtr);
-#endif
   }
 #endif // ANVIL_EXEC_ENABLED
 

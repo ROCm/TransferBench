@@ -26,6 +26,16 @@
 
 #include "sdma_pkt_struct.h"
 
+// gfx1250+ (RDNA4) replaced the legacy s_waitcnt encoding with separate
+// s_wait_loadcnt / s_wait_storecnt instructions. Use inline asm on that
+// target; fall back to the builtin on all older AMD GPU architectures.
+#if defined(__gfx1250__)
+#define SDMA_EP_S_WAITCNT() \
+  asm volatile("s_wait_loadcnt 0x0\n\ts_wait_storecnt 0x0" ::: "memory")
+#else
+#define SDMA_EP_S_WAITCNT() __builtin_amdgcn_s_waitcnt(0)
+#endif
+
 namespace xio {
 
 struct XioEndpointConfig;
@@ -421,17 +431,17 @@ struct SdmaQueueHandle {
         }
       }
     }
-    __builtin_amdgcn_s_waitcnt(0);
+    SDMA_EP_S_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(wptr, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
-    __builtin_amdgcn_s_waitcnt(0);
+    SDMA_EP_S_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(doorbell, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_SYSTEM);
-    __builtin_amdgcn_s_waitcnt(0);
+    SDMA_EP_S_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(committedWptr, pendingWptr, __ATOMIC_RELAXED,
@@ -542,7 +552,7 @@ struct SdmaQueueSingleProducerHandle : SdmaQueueHandle {
   __device__ __forceinline__ void submitPacket(uint64_t base,
                                                uint64_t pendingWptr) {
     *wptr = pendingWptr;
-    __builtin_amdgcn_s_waitcnt(0);
+    SDMA_EP_S_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     *doorbell = pendingWptr;
