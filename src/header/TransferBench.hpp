@@ -6013,6 +6013,22 @@ namespace {
     return ERR_NONE;
   }
 
+#ifdef ANVIL_EXEC_ENABLED
+  // Single-thread kernel: writes one SDMA linear-copy packet to the KFD ring buffer
+  // via the SdmaQueue device handle, then spin-polls until the SDMA engine completes.
+  // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
+  // NOTE: gfx1250 uses a different s_waitcnt encoding; the body is a no-op for that
+  // target to avoid "Cannot select: intrinsic %llvm.amdgcn.s.waitcnt" at codegen.
+  __global__ void AnvilTransferKernel(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                      void* dst, void const* src, size_t numBytes)
+  {
+#ifndef __gfx1250__
+    anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
+    anvil::quiet(*handlePtr);
+#endif
+  }
+#endif // ANVIL_EXEC_ENABLED
+
   // Execute a single DMA executor
   static ErrResult RunDmaExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
@@ -6331,6 +6347,49 @@ namespace {
     return ERR_NONE;
   }
 
+#ifdef ANVIL_EXEC_ENABLED
+  static ErrResult RunAnvilExecutor(int           const  iteration,
+                                    ConfigOptions const& cfg,
+                                    int           const  deviceIdx,
+                                    ExeInfo&             exeInfo)
+  {
+    ERR_CHECK(hipSetDevice(deviceIdx));
+
+    ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], exeInfo.streams[0]));
+
+    for (int i = 0; i < (int)exeInfo.resources.size(); ++i) {
+      TransferResources const& rss = exeInfo.resources[i];
+      sdma_ep::SdmaQueueInfo const& qi = exeInfo.anvilQueues[i];
+
+      anvil::SdmaQueueDeviceHandle* handle =
+        reinterpret_cast<anvil::SdmaQueueDeviceHandle*>(qi.deviceHandle);
+
+      void*       dst    = rss.dstMem[0];
+      void const* src    = rss.srcMem[0];
+      size_t      nbytes = rss.numBytes;
+
+      hipLaunchKernelGGL(AnvilTransferKernel,
+                         dim3(1), dim3(1), 0, exeInfo.streams[0],
+                         handle, dst, const_cast<void*>(src), nbytes);
+      ERR_CHECK(hipGetLastError());
+    }
+
+    ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], exeInfo.streams[0]));
+    ERR_CHECK(hipStreamSynchronize(exeInfo.streams[0]));
+
+    float deltaMsec = 0.0f;
+    ERR_CHECK(hipEventElapsedTime(&deltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+
+    if (iteration >= 0) {
+      exeInfo.totalDurationMsec += deltaMsec;
+      for (auto& rss : exeInfo.resources)
+        rss.totalDurationMsec += deltaMsec / exeInfo.resources.size();
+    }
+
+    return ERR_NONE;
+  }
+#endif
+
 // Executor-related functions
 //========================================================================================
   static ErrResult RunExecutor(int           const  iteration,
@@ -6346,6 +6405,9 @@ namespace {
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+#endif
+#ifdef ANVIL_EXEC_ENABLED
+    case EXE_GPU_INITIATED_DMA: return RunAnvilExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
     default:            return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
@@ -7074,6 +7136,9 @@ namespace {
         wc.exe.exeSubIndices[0] = -2;
         return result;
       case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
+#ifdef ANVIL_EXEC_ENABLED
+      case EXE_GPU_INITIATED_DMA:
+#endif
       {
         // Iterate over all available subindices
         ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
@@ -8534,6 +8599,9 @@ namespace {
       agent = cpuAgents[exeDevice.exeIndex];
       break;
     case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_TDM:
+#ifdef ANVIL_EXEC_ENABLED
+    case EXE_GPU_INITIATED_DMA:
+#endif
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
