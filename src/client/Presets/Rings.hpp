@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#include <limits>
 #include <numeric>
 
 int RingsPreset(EnvVars&          ev,
@@ -111,6 +112,7 @@ int RingsPreset(EnvVars&          ev,
   Utils::StrideGenerate(indices, stride);
 
   // Establish memory devices for all GPUs
+  // Assumes ranks are numbered 0..numRanks-1 and each has exactly numGpus devices
   std::vector<MemDevice> memDevices(totalGpus);
   for (int i = 0; i < totalGpus; i++) {
     memDevices[i] = {memType, indices[i] % numGpus, indices[i] / numGpus};

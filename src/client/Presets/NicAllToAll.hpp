@@ -34,14 +34,14 @@ int NicAllToAllPreset(EnvVars&                    ev,
     Utils::Print("[ERROR] NIC all-to-all preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility to scale-out NICs\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numRanks = TransferBench::GetNumRanks();
   int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
   if (numNicsPerRank == 0) {
     Utils::Print("[ERROR] No NIC detected. This preset requires NIC executors.\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int useCpuMem = EnvVars::GetEnvVar("USE_CPU_MEM", 0);
@@ -49,7 +49,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
   int numMemDevices = TransferBench::GetNumExecutors(useCpuMem ? EXE_CPU : EXE_GPU_GFX);
   if (numMemDevices == 0) {
     Utils::Print("[ERROR] No %s executors detected for NIC all-to-all.\n", useCpuMem ? "CPU" : "GPU GFX");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Total NICs across all ranks (rank-major id: nicId = rank * numNicsPerRank + nic).
@@ -90,7 +90,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
 
   if (numQueuePairs < 1) {
     Utils::Print("[ERROR] NUM_QUEUE_PAIRS must be >= 1 (got %d)\n", numQueuePairs);
-    return 1;
+    return ERR_FATAL;
   }
 
   MemType memType        = Utils::GetMemType(memTypeIdx, useCpuMem);
@@ -123,12 +123,12 @@ int NicAllToAllPreset(EnvVars&                    ev,
       if (memIdx < 0) {
         Utils::Print("[ERROR] Failed to identify closest %s for Rank %d NIC %d\n",
                      useCpuMem ? "CPU NUMA node" : "GPU", rank, nic);
-        return 1;
+        return ERR_FATAL;
       }
       if (memIdx >= numMemDevices) {
         Utils::Print("[ERROR] Closest %s index %d for Rank %d NIC %d is out of range [0,%d)\n",
                      useCpuMem ? "CPU" : "GPU", memIdx, rank, nic, numMemDevices);
-        return 1;
+        return ERR_FATAL;
       }
       nicToMem[rank][nic] = memIdx;
     }
@@ -247,7 +247,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
       Utils::Print("%s\n", err.errMsg.c_str());
-    return 1;
+    return ERR_FATAL;
   } else if (showDetails) {
     Utils::PrintResults(ev, 1, transfers, results);
     Utils::Print("\n");

@@ -45,6 +45,17 @@ int PodAllToAllPreset(EnvVars&          ev,
   int numRanks = TransferBench::GetNumRanks();
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
+  // When pod detection fails (e.g. amd-smi unavailable), the map is empty
+  if (Utils::GetRankPerPodMap().empty()) {
+    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return ERR_FATAL;
+  }
+  // Restrict to single-pod runs; multi-pod support is not yet implemented
+  if (Utils::GetRankPerPodMap().size() != 1) {
+    Utils::Print("[ERROR] PodAllToAll preset currently requires all ranks to be in a single pod. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
+    return ERR_FATAL;
+  }
+
   // Collect env vars for this preset
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
@@ -111,7 +122,7 @@ int PodAllToAllPreset(EnvVars&          ev,
     }
   }
   // Validate env vars
-  if (numGpus < 0 || numGpus > numDetectedGpus) {
+  if (numGpus <= 0 || numGpus > numDetectedGpus) {
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return ERR_FATAL;
   }
@@ -135,10 +146,6 @@ int PodAllToAllPreset(EnvVars&          ev,
   ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
-  if (rankToPod.empty()) {
-    Utils::Print("[ERROR] No pods detected. Set TB_FORCE_SINGLE_POD=1 to treat all ranks as a single pod.\n");
-    return ERR_FATAL;
-  }
   for (auto const& [pod, ranks] : rankToPod) {
     int n = ranks.size() * numGpus;
     if (n % numGroups) {
@@ -177,6 +184,7 @@ int PodAllToAllPreset(EnvVars&          ev,
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;
           for (int x = 0; x < numSrcs; x++) transfer.srcs.push_back(devices[i]);
+          // First dst is the remote peer (devices[j]); extra dsts are local (devices[i]) to stress-test src bandwidth
           if (numDsts) transfer.dsts.push_back(devices[j]);
           for (int x = 1; x < numDsts; x++) transfer.dsts.push_back(devices[i]);
           transfer.exeDevice = {exeType,
@@ -191,6 +199,7 @@ int PodAllToAllPreset(EnvVars&          ev,
           podTransfers.push_back(transfer);
         }
 
+        // NIC transfers are supplementary bandwidth; excluded from groupReIndex and bandwidth table
         if (numQueuePairs > 0) {
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;
