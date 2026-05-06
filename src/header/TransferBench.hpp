@@ -123,10 +123,7 @@ namespace TransferBench
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
   inline bool IsGpuExeType(ExeType e){
     return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM
-#ifdef ANVIL_EXEC_ENABLED
-        || e == EXE_GPU_INITIATED_DMA
-#endif
-    ;
+        || e == EXE_GPU_INITIATED_DMA;
   }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
@@ -4706,11 +4703,7 @@ namespace {
         }
       }
 
-      if (cfg.general.useHipEvents
-#ifdef ANVIL_EXEC_ENABLED
-          || exeDevice.exeType == EXE_GPU_INITIATED_DMA
-#endif
-      ) {
+      if (cfg.general.useHipEvents || exeDevice.exeType == EXE_GPU_INITIATED_DMA) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
