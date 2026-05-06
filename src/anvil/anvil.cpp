@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -7,6 +8,13 @@
 #include <hip/hip_ext.h>
 
 namespace anvil {
+
+static bool AnvilVerbose() {
+  static bool v = (getenv("TB_VERBOSE") && atoi(getenv("TB_VERBOSE")) > 0);
+  return v;
+}
+
+#define ANVIL_LOG(...) do { if (AnvilVerbose()) { printf("[ANVIL] " __VA_ARGS__); fflush(stdout); } } while(0)
 
 [[maybe_unused]] auto checkHsaError = [](hsa_status_t s, const char* msg,
                                          const char* file, int line) {
@@ -199,12 +207,8 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
     // return status;
   }
 
-  // std::cout << "Allocating queue for engine " << engineId << " on device " <<
-  // localDeviceId << " to device "
-  //           << remoteDeviceId << std::endl;
-  // std::cout << "original device id: " << originalDeviceId << " local " <<
-  // localDeviceId << " remote " << remoteDeviceId
-  //           << " local node " << localNodeId << std::endl;
+  ANVIL_LOG("SdmaQueue ctor: GPU %d -> GPU %d  engine %u  node %u\n",
+            localDeviceId, remoteDeviceId, engineId, localNodeId);
 
   // Allocate SDMA queue buffer on device side, requires ExecuteAccess
   HsaMemFlags memFlags = {};
@@ -214,17 +218,18 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
   memFlags.ui32.NoNUMABind = 1;
   memFlags.ui32.ExecuteAccess = 1;
   memFlags.ui32.Uncached = 1;
-  // std::cout << "Allocating SDMA Queue Buffer for device: " << localNodeId <<
-  // std::endl << std::flush;
   CHECK_HSAKMT_SUCCESS(hsaKmtAllocMemory(localNodeId, SDMA_QUEUE_SIZE, memFlags,
                                          &queueBuffer_),
                        "Failed");
+  ANVIL_LOG("  hsaKmtAllocMemory:   queueBuffer_=%p  size=%zu bytes\n",
+            queueBuffer_, (size_t)SDMA_QUEUE_SIZE);
   CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_, SDMA_QUEUE_SIZE,
                                             NULL),
                        "Failed");
+  ANVIL_LOG("  hsaKmtMapMemoryToGPU: queueBuffer_=%p mapped to GPU node %u\n",
+            queueBuffer_, localNodeId);
 
   // Create SDMA Queue
-  // TODO needed here?
   std::memset(&queue_, 0, sizeof(HsaQueueResource));
 
   CHECK_HSAKMT_SUCCESS(
@@ -232,18 +237,26 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                          DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
                          queueBuffer_, SDMA_QUEUE_SIZE, nullptr, &queue_),
     "Failed");
+  ANVIL_LOG("  hsaKmtCreateQueueExt: QueueId=%lu  rptr=%p  wptr=%p  doorbell=%p\n",
+            queue_.QueueId,
+            queue_.Queue_read_ptr_aql,
+            queue_.Queue_write_ptr_aql,
+            queue_.Queue_DoorBell_aql);
 
-  // Populate Device Handle
-  // TODO uncached
+  // Populate Device Handle (GPU-accessible pointers, allocated uncached)
   {
     if (hipMalloc((void**)&deviceHandle_, sizeof(SdmaQueueDeviceHandle)) != hipSuccess)
       throw std::runtime_error("hipMalloc(deviceHandle_) failed");
+    ANVIL_LOG("  hipMalloc:           deviceHandle_=%p  size=%zu bytes\n",
+              (void*)deviceHandle_, sizeof(SdmaQueueDeviceHandle));
     if (hipExtMallocWithFlags((void**)&cachedWptr_, sizeof(uint64_t),
                               hipDeviceMallocUncached) != hipSuccess)
       throw std::runtime_error("hipExtMallocWithFlags(cachedWptr_) failed");
+    ANVIL_LOG("  hipExtMalloc(UC):    cachedWptr_=%p\n", (void*)cachedWptr_);
     if (hipExtMallocWithFlags((void**)&committedWptr_, sizeof(uint64_t),
                               hipDeviceMallocUncached) != hipSuccess)
       throw std::runtime_error("hipExtMallocWithFlags(committedWptr_) failed");
+    ANVIL_LOG("  hipExtMalloc(UC):    committedWptr_=%p\n", (void*)committedWptr_);
   }
 
   uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
@@ -272,15 +285,23 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
 }
 
 SdmaQueue::~SdmaQueue() {
-  // TODO catch exception?
+  ANVIL_LOG("SdmaQueue dtor: QueueId=%lu  queueBuffer_=%p\n",
+            queue_.QueueId, queueBuffer_);
   CHECK_HSAKMT_SUCCESS(hsaKmtDestroyQueue(queue_.QueueId),
                        "Failed to destroy queue.");
+  ANVIL_LOG("  hsaKmtDestroyQueue:  QueueId=%lu done\n", queue_.QueueId);
   hipFree(deviceHandle_);
+  ANVIL_LOG("  hipFree:             deviceHandle_=%p\n", (void*)deviceHandle_);
   hipFree(cachedWptr_);
+  ANVIL_LOG("  hipFree:             cachedWptr_=%p\n", (void*)cachedWptr_);
   hipFree(committedWptr_);
+  ANVIL_LOG("  hipFree:             committedWptr_=%p\n", (void*)committedWptr_);
   CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
+  ANVIL_LOG("  hsaKmtUnmapMemoryToGPU: queueBuffer_=%p done\n", queueBuffer_);
   CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_, SDMA_QUEUE_SIZE),
                        "Failed");
+  ANVIL_LOG("  hsaKmtFreeMemory:    queueBuffer_=%p  size=%zu bytes done\n",
+            queueBuffer_, (size_t)SDMA_QUEUE_SIZE);
 }
 
 SdmaQueueDeviceHandle* SdmaQueue::deviceHandle() const {
