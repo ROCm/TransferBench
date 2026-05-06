@@ -82,6 +82,7 @@ THE SOFTWARE.
 #endif
 #ifdef ANVIL_EXEC_ENABLED
 #include "anvil.hpp"
+#include "sdma-ep.h"
 #endif
 #endif
 
@@ -4475,6 +4476,57 @@ namespace {
     return ERR_NONE;
   }
 
+#ifdef ANVIL_EXEC_ENABLED
+  // Initialize anvil SDMA queues for EXE_GPU_INITIATED_DMA executor.
+  // Uses AnvilLib singleton: init (idempotent), connect, createSdmaQueue.
+  // Stores SdmaQueueInfo (deviceHandle, src/dst device IDs, channelIdx) per resource.
+  // The SdmaQueue objects are owned by AnvilLib and live for the process lifetime.
+  static ErrResult PrepareAnvilExecutor(ConfigOptions    const& cfg,
+                                        vector<Transfer> const& transfers,
+                                        ExeDevice        const& exeDevice,
+                                        ExeInfo&                exeInfo)
+  {
+    int const srcDeviceId = exeDevice.exeIndex;
+    ERR_CHECK(hipSetDevice(srcDeviceId));
+
+    try {
+      // Initialize the AnvilLib singleton (idempotent via std::call_once)
+      anvil::AnvilLib& anvilLib = anvil::AnvilLib::getInstance();
+      anvilLib.init();
+
+      int const numResources = exeInfo.resources.size();
+      exeInfo.anvilQueues.resize(numResources);
+
+      for (int i = 0; i < numResources; ++i) {
+        Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
+        int const dstDeviceId = t.dsts[0].memIndex;
+
+        // Enable peer access and resolve XGMI-optimal SDMA engine; create queue
+        int channelIdx = -1;
+        anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
+        uint32_t const engineId = static_cast<uint32_t>(
+          anvilLib.getSdmaEngineId(srcDeviceId, dstDeviceId));
+        anvil::SdmaQueue* queue = anvilLib.createSdmaQueue(
+          srcDeviceId, dstDeviceId, engineId, &channelIdx);
+        if (!queue) {
+          return {ERR_FATAL,
+                  "PrepareAnvilExecutor: createSdmaQueue failed for src=%d dst=%d",
+                  srcDeviceId, dstDeviceId};
+        }
+
+        // Populate SdmaQueueInfo from the created SdmaQueue
+        exeInfo.anvilQueues[i].deviceHandle = queue->deviceHandle();
+        exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
+        exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
+        exeInfo.anvilQueues[i].channelIdx   = channelIdx;
+      }
+    } catch (std::exception const& ex) {
+      return {ERR_FATAL, "PrepareAnvilExecutor: exception: %s", ex.what()};
+    }
+    return ERR_NONE;
+  }
+#endif
+
   // Prepare each executor
   // Allocates memory for src/dst, prepares subexecutors, executor-specific data structures
   static ErrResult PrepareExecutor(ConfigOptions    const& cfg,
@@ -4654,7 +4706,11 @@ namespace {
         }
       }
 
-      if (cfg.general.useHipEvents) {
+      if (cfg.general.useHipEvents
+#ifdef ANVIL_EXEC_ENABLED
+          || exeDevice.exeType == EXE_GPU_INITIATED_DMA
+#endif
+      ) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4675,6 +4731,12 @@ namespace {
         }
       }
     }
+
+#ifdef ANVIL_EXEC_ENABLED
+    if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+      ERR_CHECK(PrepareAnvilExecutor(cfg, transfers, exeDevice, exeInfo));
+    }
+#endif
 
     // Prepare for GPU GFX / TDM executor (both consume SubExecParam from GPU memory)
     if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
@@ -4905,6 +4967,14 @@ namespace {
       for (auto event : exeInfo.stopEvents)
         ERR_CHECK(hipEventDestroy(event));
     }
+
+#ifdef ANVIL_EXEC_ENABLED
+    if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+      // SdmaQueue objects are owned by the AnvilLib singleton and are destroyed
+      // at process exit. Clear the info vector to drop our references.
+      exeInfo.anvilQueues.clear();
+    }
+#endif
 
     if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
         exeDevice.exeRank == localRank) {
