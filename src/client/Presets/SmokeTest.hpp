@@ -188,7 +188,17 @@ int RunTest(int                        testNum,
         allPass = false;
       }
     }
-    double bw = allPass ? results.avgTotalBandwidthGbPerSec : 0.0;
+    double bw = 0.0;
+    if (allPass) {
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+        bw = std::numeric_limits<double>::max();
+        for (auto const& [exeDev, exeRes] : results.exeResults)
+          bw = std::min(bw, exeRes.avgBandwidthGbPerSec);
+        if (results.exeResults.empty()) bw = 0.0;
+      } else {
+        bw = results.avgTotalBandwidthGbPerSec;
+      }
+    }
     bwResults.push_back(bw);
     if (!showPerf) {
       Utils::Print("%s", allPass ? pass.c_str() : fail.c_str()); fflush(stdout);
@@ -422,7 +432,7 @@ int SmokeTestPreset(EnvVars&          ev,
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
   if (showPerf) {
     Utils::Print("Legend: X.X=BW(GB/s) %s=Skip %s=Fail", skip.c_str(), fail.c_str());
-    Utils::Print(" | %s (GB/s)\n", ev.useHipEvents ? "GPU-Event-Timed" : "CPU-Timed");
+    Utils::Print(" | %s (GB/s)\n", ev.useHipEvents ? "GPU-Event-Timed (min)" : "CPU-Timed");
   } else
     Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
 
