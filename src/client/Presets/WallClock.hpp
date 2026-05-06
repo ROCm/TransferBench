@@ -20,6 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#include <limits>
+
 __global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
 {
   // Only first thread does any work
@@ -32,12 +34,12 @@ __global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
     int xccId;
     GetXccId(xccId);
 
-    // All threadblocks wait for ready signal
+    // All threadblocks wait for ready signal (no timeout — assumes signaling block is live)
     while (*readyFlag == 0);
 
-    // Collect timestamp and save to memory
+    // Collect timestamp and save to memory; guard against unexpected XCC IDs
     auto w = GetTimestamp();
-    timestamps[xccId] = w;
+    if (xccId >= 0 && xccId < (int)gridDim.x) timestamps[xccId] = w;
   } else if (blockIdx.x == 0) {
 
     // Sleep for some number of cycles to ensure that other threadblocks are active
@@ -92,13 +94,31 @@ int WallClockPreset(EnvVars&          ev,
   IS_UNIFORM(ev.numWarmups,     "NUM_WARMUPS");
   IS_UNIFORM(ev.showIterations, "SHOW_ITERATIONS");
 
-  if (numGpuDevices <= 0) {
-    Utils::Print("[ERROR] wallclock preset requires at least one GPU\n");
+  if (numGpuDevices <= 0 || numGpuDevices > numDetectedGpus) {
+    Utils::Print("[ERROR] wallclock preset requires 1 <= NUM_GPU_DEVICES <= %d (got %d)\n", numDetectedGpus, numGpuDevices);
+    return ERR_FATAL;
+  }
+  // Seconds-based (numIterations < 0) and infinite (numIterations == 0) modes are not supported
+  if (ev.numIterations <= 0) {
+    Utils::Print("[ERROR] wallclock preset requires NUM_ITERATIONS > 0 (seconds-based and infinite modes are not supported)\n");
     return ERR_FATAL;
   }
 
   // Collect local results
+  // Query XCC count per device; all must match since results are sized from GPU 0
   int numXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
+  if (numXccs <= 0) {
+    Utils::Print("[ERROR] wallclock preset requires at least one XCC (GPU 0 reports 0); topology data may be missing\n");
+    return ERR_FATAL;
+  }
+  for (int deviceId = 1; deviceId < numGpuDevices; deviceId++) {
+    int devXccs = GetNumExecutorSubIndices({EXE_GPU_GFX, deviceId});
+    if (devXccs != numXccs) {
+      Utils::Print("[ERROR] GPU device %d has %d XCCs but GPU 0 has %d; heterogeneous XCC counts are not supported\n",
+                   deviceId, devXccs, numXccs);
+      return ERR_FATAL;
+    }
+  }
 
   // Compute wall clock rate (based on GPU 0)
   int wallClockKhz;
@@ -134,7 +154,8 @@ int WallClockPreset(EnvVars&          ev,
 
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
     {
-      HIP_CALL(hipMemset(readyFlag, 0, sizeof(int)));
+      memset(timestamps, 0, numXccs * sizeof(uint64_t));
+      HIP_CALL(hipMemset(readyFlag, 0, sizeof(*readyFlag)));
       HIP_CALL(hipDeviceSynchronize());
       GetXccTimestamps<<<dim3(numXccs,2,1), 1>>>(timestamps, readyFlag);
       HIP_CALL(hipDeviceSynchronize());

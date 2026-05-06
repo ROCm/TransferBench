@@ -34,14 +34,14 @@ int NicAllToAllPreset(EnvVars&                    ev,
     Utils::Print("[ERROR] NIC all-to-all preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility to scale-out NICs\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numRanks = TransferBench::GetNumRanks();
   int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
   if (numNicsPerRank == 0) {
     Utils::Print("[ERROR] No NIC detected. This preset requires NIC executors.\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int useCpuMem = EnvVars::GetEnvVar("USE_CPU_MEM", 0);
@@ -49,7 +49,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
   int numMemDevices = TransferBench::GetNumExecutors(useCpuMem ? EXE_CPU : EXE_GPU_GFX);
   if (numMemDevices == 0) {
     Utils::Print("[ERROR] No %s executors detected for NIC all-to-all.\n", useCpuMem ? "CPU" : "GPU GFX");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
@@ -72,11 +72,11 @@ int NicAllToAllPreset(EnvVars&                    ev,
 
   if (numQueuePairs < 1) {
     Utils::Print("[ERROR] NUM_QUEUE_PAIRS must be >= 1 (got %d)\n", numQueuePairs);
-    return 1;
+    return ERR_FATAL;
   }
   if (groupSize < 1) {
     Utils::Print("[ERROR] GROUP_SIZE must be >= 1 (got %d)\n", groupSize);
-    return 1;
+    return ERR_FATAL;
   }
 
   bool scopeInter = false;
@@ -87,7 +87,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
         scopeInter = true;
       else if (strcmp(scopeStr, "intra") && strcmp(scopeStr, "INTRA")) {
         Utils::Print("[ERROR] NIC_A2A_SCOPE must be \"intra\" or \"inter\"\n");
-        return 1;
+        return ERR_FATAL;
       }
     }
   }
@@ -97,14 +97,14 @@ int NicAllToAllPreset(EnvVars&                    ev,
 
   if (numNicPlanes < 1) {
     Utils::Print("[ERROR] NUM_NIC_PLANES must be >= 1\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Same divisibility check as PodAllToAll (total devices = ranks × memory devices per rank).
   if (M % groupSize) {
     Utils::Print("[ERROR] Group size %d cannot evenly divide %d total devices from %d ranks.\n",
                  groupSize, M, numRanks);
-    return 1;
+    return ERR_FATAL;
   }
 
   // Within each stride orbit, partition by natural rank-major device index: orbit lists devLin = r, r+d, r+2d, ...
@@ -115,7 +115,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
     Utils::Print("[ERROR] With STRIDE=%d there are %d disjoint cycles; use a GROUP_SIZE that divides each cycle's device count,\n",
                  stride, dCycles);
     Utils::Print("[ERROR] or use STRIDE=1 so the cycle size equals total devices (%d).\n", M);
-    return 1;
+    return ERR_FATAL;
   }
 
   std::vector<int> deviceSubgroup(M);
@@ -155,12 +155,12 @@ int NicAllToAllPreset(EnvVars&                    ev,
       if (memIdx < 0) {
         Utils::Print("[ERROR] Failed to identify closest %s for Rank %d NIC %d\n",
                      useCpuMem ? "CPU NUMA node" : "GPU", rank, nic);
-        return 1;
+        return ERR_FATAL;
       }
       if (memIdx >= numMemDevices) {
         Utils::Print("[ERROR] Closest %s index %d for Rank %d NIC %d is out of range [0,%d)\n",
                      useCpuMem ? "CPU" : "GPU", memIdx, rank, nic, numMemDevices);
-        return 1;
+        return ERR_FATAL;
       }
       nicToMem[rank][nic] = memIdx;
     }
@@ -237,7 +237,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
       Utils::Print("%s\n", err.errMsg.c_str());
-    return 1;
+    return ERR_FATAL;
   } else if (showDetails) {
     Utils::PrintResults(ev, 1, transfers, results);
     Utils::Print("\n");
@@ -270,6 +270,12 @@ int NicAllToAllPreset(EnvVars&                    ev,
   for (size_t i = 0; i < results.tfrResults.size(); i++) {
     int nicIdx  = results.tfrResults[i].exeDevice.exeIndex;
     int rankIdx = results.tfrResults[i].exeDevice.exeRank;
+    // Guard against remapped NIC indices from RunTransfers executor resolution
+    if (rankIdx < 0 || rankIdx >= numRanks || nicIdx < 0 || nicIdx >= numNicsPerRank) {
+      Utils::Print("[WARN] Skipping result %zu: executor (rank=%d, nic=%d) outside expected range rank:[0,%d), nic:[0,%d)\n",
+                   i, rankIdx, nicIdx, numRanks, numNicsPerRank);
+      continue;
+    }
     bwByRankNic[rankIdx][nicIdx] += results.tfrResults[i].avgBandwidthGbPerSec;
   }
 
