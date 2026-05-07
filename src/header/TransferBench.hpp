@@ -8614,9 +8614,7 @@ namespace {
       agent = cpuAgents[exeDevice.exeIndex];
       break;
     case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_TDM:
-#ifdef ANVIL_EXEC_ENABLED
     case EXE_GPU_INITIATED_DMA:
-#endif
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
