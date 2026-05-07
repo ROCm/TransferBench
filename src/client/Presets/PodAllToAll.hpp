@@ -20,6 +20,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#include <limits>
+
 int PodAllToAllPreset(EnvVars&          ev,
                       size_t      const numBytesPerTransfer,
                       std::string const presetName,
@@ -63,8 +65,8 @@ int PodAllToAllPreset(EnvVars&          ev,
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
-  int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
-  int groupSize     = EnvVars::GetEnvVar("GROUP_SIZE"     , numRanks * numGpus);
+  int groupStride   = EnvVars::GetEnvVar("GROUP_STRIDE"   , 1);
+  int numGroups     = EnvVars::GetEnvVar("NUM_GROUPS"     , 1);
 
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
@@ -114,8 +116,8 @@ int PodAllToAllPreset(EnvVars&          ev,
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
-      ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
-      ev.Print("GROUP_SIZE"     , groupSize    , "Dividing all devices into groups of %d for a2a", groupSize);
+      ev.Print("GROUP_STRIDE"   , groupStride  , "Stride permutation on device list before splitting into groups");
+      ev.Print("NUM_GROUPS"     , numGroups    , "Splitting each pod into %d group(s) for a2a", numGroups);
       printf("\n");
     }
   }
@@ -129,19 +131,9 @@ int PodAllToAllPreset(EnvVars&          ev,
     return ERR_FATAL;
   }
 
-  if (groupSize < 1) {
-    Utils::Print("[ERROR] GROUP_SIZE must be >= 1 (got %d)\n", groupSize);
+  if (numGroups < 1) {
+    Utils::Print("[ERROR] NUM_GROUPS must be >= 1 (got %d)\n", numGroups);
     return ERR_FATAL;
-  }
-
-  // Validate group size divides the single pod's total device count
-  for (auto const& [pod, ranks] : Utils::GetRankPerPodMap()) {
-    int podDevices = (int)ranks.size() * numGpus;
-    if (podDevices % groupSize) {
-      Utils::Print("[ERROR] Group size %d cannot evenly divide %d devices in pod %lld (%zu ranks).\n",
-                   groupSize, podDevices, (long long)pod, ranks.size());
-      return ERR_FATAL;
-    }
   }
 
   Utils::Print("GPU-%s IntraPod All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
@@ -156,11 +148,16 @@ int PodAllToAllPreset(EnvVars&          ev,
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   for (auto const& [pod, ranks] : rankToPod) {
     int n = ranks.size() * numGpus;
-    int numGroups = n / groupSize;
+    if (n % numGroups) {
+      Utils::Print("[ERROR] NUM_GROUPS (%d) must divide pod device count (%d = %d ranks * %d gpus/rank)\n",
+                   numGroups, n, (int)ranks.size(), numGpus);
+      return ERR_FATAL;
+    }
+    int groupSize = n / numGroups;
     std::vector<MemDevice> devices(n);
     std::vector<int> indices(n);
     for (int k = 0; k < n; k++) indices[k] = k;
-    Utils::StrideGenerate(indices, stride);
+    Utils::StrideGenerate(indices, groupStride);
     int idx = 0;
     for (int rank : ranks) {
       for (int devIdx = 0; devIdx < numGpus; devIdx++) {
@@ -168,9 +165,17 @@ int PodAllToAllPreset(EnvVars&          ev,
       }
     }
 
+    // Build transfers for every group, then run once per pod so all groups share the same
+    // timed iterations (traffic across groups is concurrent within RunTransfers).
+    std::vector<Transfer> podTransfers;
+    std::vector<size_t> groupTransferBase(numGroups);
+    std::vector<std::vector<std::vector<int>>> groupReIndexes(numGroups);
+
     for (int group = 0; group < numGroups; group++) {
-      std::vector<std::vector<int>> groupReIndex(groupSize, std::vector<int>(groupSize, -1));
-      std::vector<Transfer> transfers;
+      groupTransferBase[group] = podTransfers.size();
+      groupReIndexes[group].assign(groupSize, std::vector<int>(groupSize, -1));
+      std::vector<std::vector<int>>& groupReIndex = groupReIndexes[group];
+
       for (int i = group * groupSize; i < (group + 1) * groupSize; i++) {
         for (int j = group * groupSize; j < (group + 1) * groupSize; j++) {
           if (i == j) {
@@ -189,8 +194,9 @@ int PodAllToAllPreset(EnvVars&          ev,
           transfer.numSubExecs = numSubExecs;
           int const localI = i - group * groupSize;
           int const localJ = j - group * groupSize;
-          groupReIndex[localI][localJ] = (int)transfers.size();
-          transfers.push_back(transfer);
+          groupReIndex[localI][localJ] =
+              (int)(podTransfers.size() - groupTransferBase[group]);
+          podTransfers.push_back(transfer);
         }
 
         // NIC transfers are supplementary bandwidth; excluded from groupReIndex and bandwidth table
@@ -204,19 +210,47 @@ int PodAllToAllPreset(EnvVars&          ev,
                                (int32_t)devices[i].memIndex, (int32_t)devices[i].memRank};
           transfer.exeSubIndex = devices[next].memIndex;
           transfer.numSubExecs = numQueuePairs;
-          transfers.push_back(transfer);
+          podTransfers.push_back(transfer);
         }
       }
-      TransferBench::TestResults results;
-      if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-        for (auto const& err : results.errResults)
-          Utils::Print("%s\n", err.errMsg.c_str());
-        return ERR_FATAL;
-      }
-      if (showDetails) {
-        Utils::PrintResults(ev, 1, transfers, results);
+    }
+
+    if (Utils::RankDoesOutput()) {
+      for (int g = 0; g < numGroups; g++) {
+        int const gb = g * groupSize;
+        Utils::Print("A2A group %d:", g);
+        std::vector<int> ord(groupSize);
+        for (int i = 0; i < groupSize; i++) ord[i] = i;
+        std::sort(ord.begin(), ord.end(), [&](int a, int b) {
+          MemDevice const& da = devices[gb + a];
+          MemDevice const& db = devices[gb + b];
+          if (da.memRank != db.memRank) return da.memRank < db.memRank;
+          return da.memIndex < db.memIndex;
+        });
+        for (size_t si = 0; si < ord.size(); si++) {
+          MemDevice const& d = devices[gb + ord[si]];
+          Utils::Print("%s R%d:G%d", si ? "," : "", d.memRank, d.memIndex);
+        }
         Utils::Print("\n");
       }
+    }
+
+    TransferBench::TestResults results;
+    if (!TransferBench::RunTransfers(cfg, podTransfers, results)) {
+      for (auto const& err : results.errResults)
+        Utils::Print("%s\n", err.errMsg.c_str());
+      return ERR_FATAL;
+    }
+    if (showDetails) {
+      if (Utils::RankDoesOutput())
+        Utils::Print("\n--- Pod AllToAll (all %d groups concurrent) ---\n", numGroups);
+      Utils::PrintResults(ev, 1, podTransfers, results);
+      Utils::Print("\n");
+    }
+
+    for (int group = 0; group < numGroups; group++) {
+      std::vector<std::vector<int>> const& groupReIndex = groupReIndexes[group];
+      size_t const tfrBase = groupTransferBase[group];
 
       // Per-group bandwidth table
       std::vector<std::vector<double>> groupBw(groupSize, std::vector<double>(groupSize, -1.0));
@@ -224,56 +258,155 @@ int PodAllToAllPreset(EnvVars&          ev,
         for (int localJ = 0; localJ < groupSize; localJ++) {
           int const k = groupReIndex[localI][localJ];
           if (k >= 0)
-            groupBw[localI][localJ] = results.tfrResults[k].avgBandwidthGbPerSec;
+            groupBw[localI][localJ] = results.tfrResults[tfrBase + k].avgBandwidthGbPerSec;
         }
       }
       if (Utils::RankDoesOutput()) {
         Utils::Print("\n--- Pod AllToAll Group %d ---\n", group);
         int const groupBase = group * groupSize;
-        int const numRows = 2 + groupSize;
-        int const numCols = 2 + groupSize;
+
+        // Display order: group devices by MPI rank, then GPU index (stride only affects execution order).
+        std::vector<int> order(groupSize);
+        for (int i = 0; i < groupSize; i++) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+          MemDevice const& da = devices[groupBase + a];
+          MemDevice const& db = devices[groupBase + b];
+          if (da.memRank != db.memRank) return da.memRank < db.memRank;
+          return da.memIndex < db.memIndex;
+        });
+        std::vector<int> colRanks;
+        for (int slot : order) {
+          int const r = devices[groupBase + slot].memRank;
+          if (colRanks.empty() || colRanks.back() != r) colRanks.push_back(r);
+        }
+        std::vector<std::vector<int>> localsPerCol;
+        localsPerCol.reserve(colRanks.size());
+        for (int dr : colRanks) {
+          std::vector<int> loc;
+          for (int li = 0; li < groupSize; li++) {
+            if (devices[groupBase + li].memRank == dr) loc.push_back(li);
+          }
+          std::sort(loc.begin(), loc.end(), [&](int a, int b) {
+            return devices[groupBase + a].memIndex < devices[groupBase + b].memIndex;
+          });
+          localsPerCol.push_back(std::move(loc));
+        }
+
+        // Two trailing scalar columns (STotal, Actual) and a trailing RTotal row
+        // matching the a2a/nica2a layouts.
+        int const sTotalCol = 2 + (int)colRanks.size();
+        int const actualCol = sTotalCol + 1;
+        int const rTotalRow = 2 + groupSize;
+        int const numRows = 2 + groupSize + 1;
+        int const numCols = 2 + (int)colRanks.size() + 2;
         int const precision = 2;
         Utils::TableHelper table(numRows, numCols, precision);
         table.DrawRowBorder(0);
         table.DrawColBorder(0);
         table.DrawColBorder(numCols);
         table.DrawRowBorder(numRows);
+        table.DrawRowBorder(rTotalRow);
         table.Set(0, 0, useRemoteRead ? " SRC\\DST+EXE " : " SRC+EXE\\DST ");
         table.DrawRowBorder(1);
         table.DrawColBorder(1);
         table.Set(1, 1, " Mem Device ");
 
-        // Column headers
-        int colPrevRank = -1;
-        for (int j = 0; j < groupSize; j++) {
-          int colIdx = 2 + j;
-          int r = devices[groupBase + j].memRank;
-          if (r != colPrevRank) {
-            table.DrawColBorder(colIdx);
-            table.Set(0, colIdx, " Rank %02d ", r);
-            colPrevRank = r;
+        for (size_t c = 0; c < colRanks.size(); c++) {
+          int const colIdx = 2 + (int)c;
+          table.DrawColBorder(colIdx);
+          table.Set(0, colIdx, " Rank %02d ", colRanks[c]);
+          std::string gpuHdr;
+          for (int li : localsPerCol[c]) {
+            char t[24];
+            snprintf(t, sizeof(t), "  GPU %02d", devices[groupBase + li].memIndex);
+            gpuHdr += t;
           }
-          table.Set(1, colIdx, " GPU %02d ", devices[groupBase + j].memIndex);
+          gpuHdr += " ";
+          table.Set(1, colIdx, "%s", gpuHdr.c_str());
+          table.SetColAlignment((int)c + 2, Utils::TableHelper::ALIGN_LEFT);
         }
 
-        // Row headers and data
+        // STotal / Actual column headers (centered, single-cell). Row 1 stays
+        // blank for these cols since they are scalar columns, not GPU groups.
+        table.DrawColBorder(sTotalCol);
+        table.DrawColBorder(actualCol);
+        table.Set(0, sTotalCol, " STotal ");
+        table.SetCellAlignment(0, sTotalCol, Utils::TableHelper::ALIGN_CENTER);
+        table.Set(0, actualCol, " Actual ");
+        table.SetCellAlignment(0, actualCol, Utils::TableHelper::ALIGN_CENTER);
+        table.Set(rTotalRow, 1, " RTotal ");
+        table.SetCellAlignment(rTotalRow, 1, Utils::TableHelper::ALIGN_CENTER);
+
+        // Per-(rank-col, dst-GPU-within-rank) running sums for the RTotal row.
+        std::vector<std::vector<double>> colTotal(colRanks.size());
+        for (size_t c = 0; c < colRanks.size(); c++)
+          colTotal[c].assign(localsPerCol[c].size(), 0.0);
+        double sTotalGrand = 0.0;
+        double actualGrand = 0.0;
+
         int rowPrevRank = -1;
-        for (int localI = 0; localI < groupSize; localI++) {
-          int rowIdx = 2 + localI;
-          int r = devices[groupBase + localI].memRank;
+        for (int disp = 0; disp < groupSize; disp++) {
+          int const localI = order[disp];
+          int const rowIdx = 2 + disp;
+          int const r = devices[groupBase + localI].memRank;
           if (r != rowPrevRank) {
             table.DrawRowBorder(rowIdx);
             table.Set(rowIdx, 0, " Rank %02d ", r);
             rowPrevRank = r;
+          } else {
+            table.Set(rowIdx, 0, " ");
           }
           table.Set(rowIdx, 1, " GPU %02d ", devices[groupBase + localI].memIndex);
-          for (int localJ = 0; localJ < groupSize; localJ++) {
-            if (groupBw[localI][localJ] >= 0)
-              table.Set(rowIdx, 2 + localJ, " %.2f ", groupBw[localI][localJ]);
-            else
-              table.Set(rowIdx, 2 + localJ, " N/A ");
+
+          double rowSum   = 0.0;
+          double rowMinBw = std::numeric_limits<double>::max();
+          int    rowCount = 0;
+          for (size_t c = 0; c < colRanks.size(); c++) {
+            std::string cell;
+            for (size_t k = 0; k < localsPerCol[c].size(); k++) {
+              int const localJ = localsPerCol[c][k];
+              char t[16];
+              if (groupBw[localI][localJ] >= 0) {
+                double const bw = groupBw[localI][localJ];
+                snprintf(t, sizeof(t), " %7.2f", bw);
+                rowSum         += bw;
+                colTotal[c][k] += bw;
+                rowMinBw        = std::min(rowMinBw, bw);
+                rowCount++;
+              } else {
+                snprintf(t, sizeof(t), " %7s", "N/A");
+              }
+              cell += t;
+            }
+            cell += " ";
+            int const colIdx = 2 + (int)c;
+            table.Set(rowIdx, colIdx, "%s", cell.c_str());
+            table.SetCellAlignment(rowIdx, colIdx, Utils::TableHelper::ALIGN_LEFT);
           }
+          double const rowActual = (rowCount > 0) ? rowCount * rowMinBw : 0.0;
+          table.Set(rowIdx, sTotalCol, " %.2f ", rowSum);
+          table.Set(rowIdx, actualCol, " %.2f ", rowActual);
+          sTotalGrand += rowSum;
+          actualGrand += rowActual;
         }
+
+        // RTotal row: per-dst-GPU column sums (packed per rank-col), plus grand
+        // totals under STotal / Actual.
+        for (size_t c = 0; c < colRanks.size(); c++) {
+          std::string cell;
+          for (size_t k = 0; k < localsPerCol[c].size(); k++) {
+            char t[16];
+            snprintf(t, sizeof(t), " %7.2f", colTotal[c][k]);
+            cell += t;
+          }
+          cell += " ";
+          int const colIdx = 2 + (int)c;
+          table.Set(rTotalRow, colIdx, "%s", cell.c_str());
+          table.SetCellAlignment(rTotalRow, colIdx, Utils::TableHelper::ALIGN_LEFT);
+        }
+        table.Set(rTotalRow, sTotalCol, " %.2f ", sTotalGrand);
+        table.Set(rTotalRow, actualCol, " %.2f ", actualGrand);
+
         table.PrintTable(ev.outputToCsv, ev.showBorders);
       }
     }
