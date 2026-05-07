@@ -103,7 +103,7 @@ int NicAllToAllPreset(EnvVars&                    ev,
       ev.Print("USE_CPU_MEM"         , useCpuMem     , "Using closest %s memory", useCpuMem ? "CPU" : "GPU");
       ev.Print("MEM_TYPE"            , memTypeIdx    , "Using %s memory (%s)", memTypeStr.c_str(), Utils::GetAllMemTypeStr(useCpuMem).c_str());
       ev.Print("PLANE_STRIDE"        , planeStride   , "Stride permutation on global NIC list before splitting into planes");
-      ev.Print("NUM_PLANES"         , numPlanes    , "Splitting %d total NICs into %d plane(s) of %d NICs each", N, numPlanes, planeSize);
+      ev.Print("NUM_PLANES"          , numPlanes     , "Splitting %d total NICs into %d plane(s) of %d NICs each", N, numPlanes, planeSize);
       ev.Print("GROUP_STRIDE"        , groupStride   , "Stride permutation within each plane before splitting into groups");
       ev.Print("NUM_GROUPS"          , numGroups     , "Splitting each plane into %d group(s) of %d NICs each", numGroups, groupSize);
       ev.Print("A2A_LOCAL"           , a2aLocal      , "%s self NIC endpoint transfers", a2aLocal ? "Include" : "Exclude");
@@ -203,7 +203,6 @@ int NicAllToAllPreset(EnvVars&                    ev,
                N, numPlanes, planeSize, planeStride);
   Utils::Print("Each plane split into %d group(s) of %d NICs (GROUP_STRIDE=%d).\n",
                numGroups, groupSize, groupStride);
-  
 
   if (transfers.empty()) {
     Utils::Print("[WARN] No transfers were generated for this preset.\n");
