@@ -227,12 +227,12 @@ void DisplaySingleRankTopology(bool outputToCsv)
         if (preferredMask != 0) {
           int prefEngine = __builtin_ctz(preferredMask);
           if (preferredMask != availMask)
-            printf(" %2d[%02x] %c", prefEngine, availMask, sep);
+            printf("%2d[%04x]%c", prefEngine, availMask, sep);
           else
             printf("     %2d %c", prefEngine, sep);
         } else {
           // No preferred engine; show available mask only
-          printf("  [%04x] %c", availMask, sep);
+          printf(" [%04x] %c", availMask, sep);
         }
       }
       printf("\n");
