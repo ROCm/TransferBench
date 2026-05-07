@@ -67,24 +67,24 @@ int NicAllToAllPreset(EnvVars&                    ev,
 
   if (numPlanes < 1) {
     Utils::Print("[ERROR] NUM_PLANES must be >= 1 (got %d)\n", numPlanes);
-    return 1;
+    return ERR_FATAL;
   }
   if (N % numPlanes) {
     Utils::Print("[ERROR] NUM_PLANES (%d) must divide total NICs (%d = %d ranks * %d nics/rank).\n",
                  numPlanes, N, numRanks, numNicsPerRank);
-    return 1;
+    return ERR_FATAL;
   }
   int const planeSize = N / numPlanes;
 
   // NUM_GROUPS = groups per plane. Default 1 -> one group per plane (full a2a within each plane).
   if (numGroups < 1) {
     Utils::Print("[ERROR] NUM_GROUPS must be >= 1 (got %d)\n", numGroups);
-    return 1;
+    return ERR_FATAL;
   }
   if (planeSize % numGroups) {
     Utils::Print("[ERROR] NUM_GROUPS (%d) must divide plane size (%d = %d total NICs / %d planes).\n",
                  numGroups, planeSize, N, numPlanes);
-    return 1;
+    return ERR_FATAL;
   }
   int const groupSize = planeSize / numGroups;
 

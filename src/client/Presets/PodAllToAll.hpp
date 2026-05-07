@@ -239,7 +239,7 @@ int PodAllToAllPreset(EnvVars&          ev,
     if (!TransferBench::RunTransfers(cfg, podTransfers, results)) {
       for (auto const& err : results.errResults)
         Utils::Print("%s\n", err.errMsg.c_str());
-      return 1;
+      return ERR_FATAL;
     }
     if (showDetails) {
       if (Utils::RankDoesOutput())
