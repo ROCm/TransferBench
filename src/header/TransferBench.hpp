@@ -565,6 +565,22 @@ namespace TransferBench
    */
   void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1);
 
+#if !defined(__NVCC__)
+  /**
+   * Returns the SDMA engine availability and preference bitmasks for a GPU pair.
+   *
+   * @param[in]  srcGpu          Source GPU index
+   * @param[in]  dstGpu          Destination GPU index
+   * @param[out] availMask       Bitmask of all SDMA engines that can service this pair
+   *                             (from hsa_amd_memory_copy_engine_status)
+   * @param[out] preferredMask   Bitmask of SDMA engines recommended for max bandwidth
+   *                             (from hsa_amd_memory_get_preferred_copy_engine); 0 = no preference
+   * @returns true on success, false if HSA query failed
+   */
+  bool GetSdmaAffinityMask(int srcGpu, int dstGpu,
+                           uint32_t& availMask, uint32_t& preferredMask);
+#endif
+
   /**
    * @returns 0-indexed rank for this process
    */
@@ -8936,6 +8952,21 @@ namespace {
       }
     }
   }
+
+#if !defined(__NVCC__)
+  bool GetSdmaAffinityMask(int srcGpu, int dstGpu,
+                           uint32_t& availMask, uint32_t& preferredMask)
+  {
+    hsa_agent_t srcAgent, dstAgent;
+    if (System::Get().GetHsaAgent({EXE_GPU_GFX, srcGpu}, srcAgent).errType != ERR_NONE) return false;
+    if (System::Get().GetHsaAgent({EXE_GPU_GFX, dstGpu}, dstAgent).errType != ERR_NONE) return false;
+    if (hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &availMask)
+        != HSA_STATUS_SUCCESS) return false;
+    if (hsa_amd_memory_get_preferred_copy_engine(dstAgent, srcAgent, &preferredMask)
+        != HSA_STATUS_SUCCESS) preferredMask = 0;
+    return true;
+  }
+#endif
 
   int GetRank()
   {

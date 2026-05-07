@@ -195,6 +195,48 @@ void DisplaySingleRankTopology(bool outputToCsv)
              TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}), sep,
              TransferBench::GetClosestNicToGpu(i));
     }
+
+    // Print SDMA engine affinity table (preferred + available per GPU pair)
+    printf("\n");
+    if (!outputToCsv) {
+      printf("GPU-SDMA Affinity (SRC \\ DST):\n");
+      printf("  Preferred engine index shown; [avail mask] in parentheses if different\n");
+      printf("  N/A = same GPU  |  '?' = HSA query failed\n");
+    }
+    printf("        %c", sep);
+    for (int j = 0; j < numGpus; j++)
+      printf(" GPU %02d %c", j, sep);
+    printf("\n");
+    if (!outputToCsv) {
+      for (int j = 0; j <= numGpus; j++)
+        printf("--------+");
+      printf("\n");
+    }
+    for (int i = 0; i < numGpus; i++) {
+      printf(" GPU %02d %c", i, sep);
+      for (int j = 0; j < numGpus; j++) {
+        if (i == j) {
+          printf("    N/A %c", sep);
+          continue;
+        }
+        uint32_t availMask = 0, preferredMask = 0;
+        if (!TransferBench::GetSdmaAffinityMask(i, j, availMask, preferredMask)) {
+          printf("      ? %c", sep);
+          continue;
+        }
+        if (preferredMask != 0) {
+          int prefEngine = __builtin_ctz(preferredMask);
+          if (preferredMask != availMask)
+            printf(" %2d[%02x] %c", prefEngine, availMask, sep);
+          else
+            printf("     %2d %c", prefEngine, sep);
+        } else {
+          // No preferred engine; show available mask only
+          printf("  [%04x] %c", availMask, sep);
+        }
+      }
+      printf("\n");
+    }
   }
 #endif
 }

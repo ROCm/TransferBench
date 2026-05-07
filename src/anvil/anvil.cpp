@@ -485,10 +485,30 @@ int AnvilLib::getOamId(int deviceId) {
 }
 
 int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+  // ANVIL_USE_HSA_ENGINE=1 (default): query hsa_amd_memory_get_preferred_copy_engine
+  // for the src->dst pair and return the lowest-set-bit engine index.
+  // ANVIL_USE_HSA_ENGINE=0: use the hardcoded MI300X OAM lookup table.
+  static bool useHsaEngine = [] {
+    char const* v = getenv("ANVIL_USE_HSA_ENGINE");
+    return !v || atoi(v) != 0;
+  }();
+
+  if (useHsaEngine) {
+    uint32_t mask = 0;
+    hsa_status_t status = hsa_amd_memory_get_preferred_copy_engine(
+      gpuAgents_[dstDeviceId], gpuAgents_[srcDeviceId], &mask);
+    if (status == HSA_STATUS_SUCCESS && mask != 0) {
+      // Return the index of the lowest set bit (engine 0..15)
+      return __builtin_ctz(mask);
+    }
+    ANVIL_LOG("getSdmaEngineId: HSA preferred engine query failed or returned 0 "
+              "(src=%d dst=%d status=%u mask=%u), falling back to OAM map\n",
+              srcDeviceId, dstDeviceId, (unsigned)status, mask);
+  }
+
+  // Hardcoded MI300X OAM map fallback (even engines only)
   int srcOamId = getOamId(srcDeviceId);
   int dstOamId = getOamId(dstDeviceId);
-
-  // Use even engines only
   return mi300xOamMap[srcOamId][dstOamId] * 2;
 }
 
