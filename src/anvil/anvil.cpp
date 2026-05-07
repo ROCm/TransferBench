@@ -290,11 +290,11 @@ SdmaQueue::~SdmaQueue() {
   CHECK_HSAKMT_SUCCESS(hsaKmtDestroyQueue(queue_.QueueId),
                        "Failed to destroy queue.");
   ANVIL_LOG("  hsaKmtDestroyQueue:  QueueId=%lu done\n", queue_.QueueId);
-  hipFree(deviceHandle_);
+  (void)hipFree(deviceHandle_);
   ANVIL_LOG("  hipFree:             deviceHandle_=%p\n", (void*)deviceHandle_);
-  hipFree(cachedWptr_);
+  (void)hipFree(cachedWptr_);
   ANVIL_LOG("  hipFree:             cachedWptr_=%p\n", (void*)cachedWptr_);
-  hipFree(committedWptr_);
+  (void)hipFree(committedWptr_);
   ANVIL_LOG("  hipFree:             committedWptr_=%p\n", (void*)committedWptr_);
   CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
   ANVIL_LOG("  hsaKmtUnmapMemoryToGPU: queueBuffer_=%p done\n", queueBuffer_);
