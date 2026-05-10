@@ -66,7 +66,7 @@ hosts_input="$1"
 shift
 
 if [[ -z "$hosts_input" ]]; then
-    echo "ERROR: No hosts specified"
+    echo "ERROR: No hosts specified" >&2
     show_usage
     exit 1
 fi
@@ -78,12 +78,12 @@ for host in "${hosts_raw[@]}"; do
     # Trim leading and trailing whitespace
     host=$(echo "$host" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [[ -z "$host" ]]; then
-        echo "ERROR: Empty hostname found in host list"
+        echo "ERROR: Empty hostname found in host list" >&2
         exit 1
     fi
     # Check for remaining whitespace in hostname
     if [[ "$host" =~ [[:space:]] ]]; then
-        echo "ERROR: Hostname '$host' contains whitespace"
+        echo "ERROR: Hostname '$host' contains whitespace" >&2
         exit 1
     fi
     hosts+=("$host")
@@ -91,8 +91,8 @@ done
 num_ranks=${#hosts[@]}
 
 if [[ $num_ranks -lt 2 ]]; then
-    echo "ERROR: At least 2 hosts are required for multi-rank execution"
-    echo "For single-node execution, run TransferBench directly without this script"
+    echo "ERROR: At least 2 hosts are required for multi-rank execution" >&2
+    echo "For single-node execution, run TransferBench directly without this script" >&2
     exit 1
 fi
 
@@ -116,8 +116,8 @@ while [[ $# -gt 0 ]]; do
     elif [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
         env_vars+=("$1")
     else
-        echo "ERROR: Invalid environment variable format: $1"
-        echo "Environment variables should be in KEY=VALUE format"
+        echo "ERROR: Invalid environment variable format: $1" >&2
+        echo "Environment variables should be in KEY=VALUE format" >&2
         exit 1
     fi
     shift
@@ -139,13 +139,7 @@ echo
 # Build properly escaped environment variable string
 env_string=""
 for env_var in "${env_vars[@]}"; do
-    # Validate that env_var is in KEY=VALUE format
-    if [[ ! "$env_var" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
-        echo "ERROR: Invalid environment variable format: $env_var" >&2
-        exit 1
-    fi
-
-    # Split into key and value
+    # Split into key and value (validation already done during parsing)
     key="${env_var%%=*}"
     value="${env_var#*=}"
 
@@ -156,42 +150,42 @@ done
 
 # Cleanup function for interruption
 cleanup() {
-    echo
+    echo >&2
     echo "Interrupted! Cleaning up worker processes..." >&2
 
-    # Kill remote TransferBench processes first (only our own processes)
-    for ((i=0; i<${#worker_hosts[@]}; i++)); do
-        host="${worker_hosts[$i]}"
-        echo "Killing TransferBench on $host..." >&2
-        # Kill only TransferBench processes owned by the current user
-        ssh -q -o LogLevel=ERROR -o ConnectTimeout=2 "$host" "pkill -u \$(whoami) -f TransferBench 2>/dev/null || true" 2>/dev/null &
-    done
+    # First kill local SSH processes to stop remote TransferBench
+    if [[ ${#worker_pids[@]} -gt 0 ]]; then
+        for pid in "${worker_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done
 
-    # Wait a moment for remote kills to take effect
-    sleep 2
+        # Give SSH processes a moment to terminate and clean up remote processes
+        sleep 2
 
-    # Now kill local SSH processes
-    for pid in "${worker_pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -TERM "$pid" 2>/dev/null || true
-        fi
-    done
+        # Force kill any remaining local SSH processes
+        for pid in "${worker_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "Force killing SSH PID $pid..." >&2
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
 
-    # Give local processes a moment to terminate
-    sleep 1
+        # Brief wait for cleanup, but don't hang
+        for pid in "${worker_pids[@]}"; do
+            # Wait with timeout - if process doesn't exit in 1 second, move on
+            timeout 1 bash -c "wait $pid" 2>/dev/null || true
+        done
+    fi
 
-    # Force kill any remaining local SSH processes
-    for pid in "${worker_pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "Force killing local SSH PID $pid..." >&2
-            kill -KILL "$pid" 2>/dev/null || true
-        fi
-    done
-
-    # Wait for all local processes to actually terminate
-    for pid in "${worker_pids[@]}"; do
-        wait "$pid" 2>/dev/null || true
-    done
+    # Final cleanup: kill any remaining TransferBench processes on all hosts
+    if [[ ${#worker_hosts[@]} -gt 0 ]]; then
+        for host in "${worker_hosts[@]}"; do
+            ssh -q -o LogLevel=ERROR -o ConnectTimeout=1 "$host" "pkill -u \$(whoami) -f TransferBench 2>/dev/null || true" 2>/dev/null || true &
+        done
+        # Don't wait for these - let them complete in background
+    fi
 
     echo "Cleanup complete" >&2
     exit 130
