@@ -1,6 +1,8 @@
 #!/bin/bash
+
 # Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
+#
 # LaunchTransferBench - Multi-rank TransferBench Socket Execution Script
 #
 # This script simplifies the execution of socket-based multi-rank TransferBench
@@ -55,7 +57,6 @@ EOF
 
 # Parse command line arguments
 if [[ $# -lt 1 ]]; then
-    echo
     show_usage
     exit 1
 fi
@@ -70,8 +71,23 @@ if [[ -z "$hosts_input" ]]; then
     exit 1
 fi
 
-# Convert comma-separated hosts to array
-IFS=',' read -ra hosts <<< "$hosts_input"
+# Convert comma-separated hosts to array and trim whitespace
+IFS=',' read -ra hosts_raw <<< "$hosts_input"
+hosts=()
+for host in "${hosts_raw[@]}"; do
+    # Trim leading and trailing whitespace
+    host=$(echo "$host" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -z "$host" ]]; then
+        echo "ERROR: Empty hostname found in host list"
+        exit 1
+    fi
+    # Check for remaining whitespace in hostname
+    if [[ "$host" =~ [[:space:]] ]]; then
+        echo "ERROR: Hostname '$host' contains whitespace"
+        exit 1
+    fi
+    hosts+=("$host")
+done
 num_ranks=${#hosts[@]}
 
 if [[ $num_ranks -lt 2 ]]; then
@@ -164,6 +180,8 @@ done
 master_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=0 TB_SINGLE_LOG=1 $env_string '$transferbench_path'$tb_args_escaped"
 if ! ssh -q -o LogLevel=ERROR "$master_host" "$master_cmd"; then
     echo "ERROR: Master rank failed on $master_host" >&2
+    # Clean up worker processes before exiting
+    cleanup
     exit 1
 fi
 
