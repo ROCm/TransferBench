@@ -5602,7 +5602,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
-      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
+      if (!resources.srcMem.empty() && !useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
         deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
