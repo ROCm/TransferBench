@@ -26,6 +26,7 @@ Documentation for TransferBench is available at
 - Added new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)
 - Added new GFX_KERNEL to allow experimenting with copy-only GFX kernel.  Currently this is opt-in only
 - Added `SHOW_PERCENTILES` (e.g. `50,75,90,95,99`) to show empirical percentiles of per-iteration duration
+- Adding new LaunchTransferBench.sh script to simplify launching TransferBench across multiple nodes (via socket)
 
 ### Modified
 - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options

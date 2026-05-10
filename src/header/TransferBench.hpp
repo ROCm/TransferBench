@@ -4408,7 +4408,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Check that GPU wallclock rate is non-zero
-    if (exeDevice.exeType == EXE_GPU_GFX && exeInfo.wallClockRate == 0) {
+    if (exeDevice.exeType == EXE_GPU_GFX && exeInfo.wallClockRate == 0 && exeDevice.exeRank == localRank) {
       if (getenv("TB_WALLCLOCK_RATE")) {
         exeInfo.wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
         return {ERR_WARN,
