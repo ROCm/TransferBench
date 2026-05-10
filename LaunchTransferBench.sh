@@ -136,21 +136,64 @@ transferbench_path="$script_dir/TransferBench"
 
 echo
 
-# Build environment variable string
+# Build properly escaped environment variable string
 env_string=""
 for env_var in "${env_vars[@]}"; do
-    env_string="$env_string $env_var"
+    # Validate that env_var is in KEY=VALUE format
+    if [[ ! "$env_var" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+        echo "ERROR: Invalid environment variable format: $env_var" >&2
+        exit 1
+    fi
+
+    # Split into key and value
+    key="${env_var%%=*}"
+    value="${env_var#*=}"
+
+    # Escape the value and rebuild the env var
+    escaped_value=$(printf '%q' "$value")
+    env_string="$env_string $key=$escaped_value"
 done
 
 # Cleanup function for interruption
 cleanup() {
     echo
     echo "Interrupted! Cleaning up worker processes..." >&2
+
+    # Kill remote TransferBench processes first (only our own processes)
+    for ((i=0; i<${#worker_hosts[@]}; i++)); do
+        host="${worker_hosts[$i]}"
+        echo "Killing TransferBench on $host..." >&2
+        # Kill only TransferBench processes owned by the current user
+        ssh -q -o LogLevel=ERROR -o ConnectTimeout=2 "$host" "pkill -u \$(whoami) -f TransferBench 2>/dev/null || true" 2>/dev/null &
+    done
+
+    # Wait a moment for remote kills to take effect
+    sleep 2
+
+    # Now kill local SSH processes
     for pid in "${worker_pids[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
         fi
     done
+
+    # Give local processes a moment to terminate
+    sleep 1
+
+    # Force kill any remaining local SSH processes
+    for pid in "${worker_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Force killing local SSH PID $pid..." >&2
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for all local processes to actually terminate
+    for pid in "${worker_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    echo "Cleanup complete" >&2
     exit 130
 }
 
