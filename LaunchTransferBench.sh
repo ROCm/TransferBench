@@ -1,6 +1,6 @@
 #!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 
-#
 # LaunchTransferBench - Multi-rank TransferBench Socket Execution Script
 #
 # This script simplifies the execution of socket-based multi-rank TransferBench
