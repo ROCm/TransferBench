@@ -400,6 +400,18 @@ int HbmBandwidthPreset(EnvVars&          ev,
       wallClockRate = 1000000;
 #else
       HIP_CALL(hipDeviceGetAttribute(&wallClockRate, hipDeviceAttributeWallClockRate, gpuIdx));
+      // Check that GPU wallclock rate is non-zero
+      if (wallClockRate == 0) {
+        if (getenv("TB_WALLCLOCK_RATE")) {
+          wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
+          Utils::Print("GPU d wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
+                       gpuIdx, wallClockRate);
+        } else {
+          wallClockRate = 100000;
+          Utils::Print("GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
+                       gpuIdx, wallClockRate);
+        }
+      }
 #endif
       if (Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&minStartCycle) ||
           Utils::AllocateMemory({MEM_CPU_CLOSEST, gpuIdx, myRank}, sizeof(int64_t), (void**)&maxStopCycle)) {
