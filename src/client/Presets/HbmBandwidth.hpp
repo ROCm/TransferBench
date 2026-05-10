@@ -404,7 +404,7 @@ int HbmBandwidthPreset(EnvVars&          ev,
       if (wallClockRate == 0) {
         if (getenv("TB_WALLCLOCK_RATE")) {
           wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
-          Utils::Print("GPU d wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
+          Utils::Print("GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
                        gpuIdx, wallClockRate);
         } else {
           wallClockRate = 100000;
