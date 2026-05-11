@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include "AllToAllN.hpp"
 #include "AllToAllSweep.hpp"
 #include "BmaSweep.hpp"
+#include "EmptyKernel.hpp"
 #include "EnvVarsList.hpp"
 #include "GfxSweep.hpp"
 #include "HbmBandwidth.hpp"
@@ -68,6 +69,7 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"a2a_n",       {AllToAllRdmaPreset,  "Tests parallel transfers between all pairs of GPU devices using Nearest NIC RDMA transfers"}},
   {"a2asweep",    {AllToAllSweepPreset, "Test GFX-based all-to-all transfers swept across different CU and GFX unroll counts"}},
   {"bmasweep",    {BmaSweepPreset,      "Test and compare batched DMA executor for multi destination copies"}},
+  {"empty",       {EmptyKernelPreset,   "Empty GFX kernel launch latency"}},
   {"envvars",     {EnvVarsPreset,       "Show list of environment variables that can be used to modify behavior"}},
   {"gfxsweep",    {GfxSweepPreset,      "Sweep over various GFX kernel options for a given GFX Transfer"}},
   {"hbm",         {HbmBandwidthPreset,  "Tests HBM bandwidth"}},
