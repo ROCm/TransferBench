@@ -181,6 +181,9 @@ Here is the list of preset configurations that can be used instead of configurat
      - Lists the set of transfers to be executed as provided from the command line
      - This is useful when using wildcards to ensure correctness
 
+   * - ``empty``
+     - EmptyKernel preset: empty GFX kernel launch latency sweep (``BATCHSIZES``, ``GRIDSIZES``, ``BLOCKSIZES``)
+
    * - ``healthcheck``
      - Simple health check (supported on AMD Instinct MI300 series only)
 

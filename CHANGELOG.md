@@ -27,6 +27,7 @@ Documentation for TransferBench is available at
 - Added new GFX_KERNEL to allow experimenting with copy-only GFX kernel.  Currently this is opt-in only
 - Added `SHOW_PERCENTILES` (e.g. `50,75,90,95,99`) to show empirical percentiles of per-iteration duration
 - Adding new LaunchTransferBench.sh script to simplify launching TransferBench across multiple nodes (via socket)
+- New `empty` preset (EmptyKernel) to measure empty-kernel launch latency with BATCHSIZES/GRIDSIZES/BLOCKSIZES sweeps
 
 ### Modified
 - DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
