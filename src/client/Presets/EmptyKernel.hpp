@@ -247,10 +247,12 @@ int EmptyKernelPreset(EnvVars&          ev,
         }
 
         // Broadcast results to ranks that output
+        std::vector<double> data(2 * numIterations);
         for (int rank = 0; rank < numRanks; rank++) {
           for (int gpu = 0; gpu < numGpuDevices; gpu++) {
-            std::vector<double> data(2*numIterations);
-            if (rank == myRank) data = results[gpu];
+            if (rank == myRank) {
+              std::copy(results[gpu].begin(), results[gpu].end(), data.begin());
+            }
             TransferBench::System::Get().Broadcast(rank, data.size()*sizeof(double), data.data());
 
             if (Utils::RankDoesOutput()) {
