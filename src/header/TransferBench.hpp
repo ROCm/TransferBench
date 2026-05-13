@@ -7215,7 +7215,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // CPU Executor — limit to NUMA nodes that have real memory backing.
     // Phantom nodes (e.g. MNNVL fabric nodes) are present in numa_num_configured_nodes()
     // but have no memory, causing set_mempolicy EINVAL when probed.
-    int numCpusConfigured = numa_num_configured_nodes();
     int numCpus = numa_bitmask_weight(numa_get_mems_allowed());
     topo.numExecutors[EXE_CPU] = numCpus;
 
