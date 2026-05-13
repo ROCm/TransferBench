@@ -40,6 +40,14 @@ BUILD_DIR="${REPO_ROOT}/build"
 SDK_DIR="${HOME}/rocm-sdk"
 ROCM_PATH="${SDK_DIR}/install"
 
+# Containerized builds (e.g. manylinux on a host-mounted workspace) hit git's
+# "dubious ownership" guard because the checkout is host-UID-owned but we run
+# as root. Without this, `git describe` in CMakeLists.txt silently fails and
+# TRANSFERBENCH_VERSION_PATCH falls back to its hard-coded default.
+if command -v git >/dev/null 2>&1; then
+  git config --global --add safe.directory "${REPO_ROOT}" || true
+fi
+
 # Default GPU targets baked into every package, regardless of GPU_FAMILY tarball.
 DEFAULT_GPU_TARGETS="gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
 GPU_TARGETS="${GPU_TARGETS:-$DEFAULT_GPU_TARGETS}"

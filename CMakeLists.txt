@@ -331,6 +331,15 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "TransferBench: benchmark simultaneous transfers between CPU/GPU/NIC")
   set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
 
+  # Resolve the per-build release tag (set by build_packages_local.sh via env)
+  # so it can be threaded into both DEB/RPM metadata AND the TGZ filename.
+  set(_tb_pkg_release "")
+  if(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
+    set(_tb_pkg_release "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
+  elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
+    set(_tb_pkg_release "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
+  endif()
+
   # DEB
   set(CPACK_DEBIAN_PACKAGE_NAME       "${CPACK_PACKAGE_NAME}")
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
@@ -339,6 +348,8 @@ if(BUILD_RELOCATABLE_PACKAGE)
   if(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
     set(CPACK_DEBIAN_PACKAGE_RELEASE "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
   endif()
+  # Canonical filename: <name>_<version>-<release>_<arch>.deb
+  set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
 
   # RPM
   set(CPACK_RPM_PACKAGE_NAME    "${CPACK_PACKAGE_NAME}")
@@ -348,6 +359,8 @@ if(BUILD_RELOCATABLE_PACKAGE)
   if(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
     set(CPACK_RPM_PACKAGE_RELEASE "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
   endif()
+  # Canonical filename: <name>-<version>-<release>.<arch>.rpm
+  set(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
   # Use the actual install prefix (caller-controlled in relocatable mode)
   # rather than hard-coded /opt/... paths.
   if(DEFINED CPACK_PACKAGING_INSTALL_PREFIX)
@@ -360,8 +373,12 @@ if(BUILD_RELOCATABLE_PACKAGE)
         "${_rpm_exclude_prefix}"
         "${_rpm_exclude_prefix}/bin")
 
-  # TGZ
-  set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
+  # TGZ — embed release tag so successive runs do not collide on the same key.
+  if(_tb_pkg_release STREQUAL "")
+    set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
+  else()
+    set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${_tb_pkg_release}-Linux")
+  endif()
 
   set(CPACK_GENERATOR "DEB;RPM;TGZ")
   include(CPack)
