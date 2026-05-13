@@ -1548,10 +1548,7 @@ namespace {
     if (IsCpuMemType(memType)) {
 
       // Set NUMA policy prior to call to hipHostMalloc
-      // Skip memory-less NUMA nodes to avoid set_mempolicy EINVAL
-      if (deviceIdx < 0 || numa_bitmask_isbitset(numa_get_mems_allowed(), deviceIdx)) {
-        numa_set_preferred(deviceIdx);
-      }
+      numa_set_preferred(deviceIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       int flags = 0;
