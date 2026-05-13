@@ -342,10 +342,6 @@ if(BUILD_RELOCATABLE_PACKAGE)
   elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE} AND NOT "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}" STREQUAL "")
     set(_tb_pkg_release "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
   endif()
-  message(STATUS "TB_DEBUG resolved _tb_pkg_release=[${_tb_pkg_release}]")
-  message(STATUS "TB_DEBUG TRANSFERBENCH_PACKAGE_RELEASE=[${TRANSFERBENCH_PACKAGE_RELEASE}] defined=[${TRANSFERBENCH_PACKAGE_RELEASE-UNDEF}]")
-  message(STATUS "TB_DEBUG ENV CPACK_RPM_PACKAGE_RELEASE=[$ENV{CPACK_RPM_PACKAGE_RELEASE}]")
-  message(STATUS "TB_DEBUG ENV CPACK_DEBIAN_PACKAGE_RELEASE=[$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}]")
 
   # DEB
   set(CPACK_DEBIAN_PACKAGE_NAME       "${CPACK_PACKAGE_NAME}")
@@ -385,11 +381,17 @@ if(BUILD_RELOCATABLE_PACKAGE)
         "${_rpm_exclude_prefix}/bin")
 
   # TGZ — embed release tag so successive runs do not collide on the same key.
+  # CMake 3.13+ honors CPACK_ARCHIVE_FILE_NAME for archive generators, but
+  # CMake 3.22 (Ubuntu 22.04) falls back to CPACK_PACKAGE_FILE_NAME for TGZ.
+  # Set both to the same suffixed value. DEB/RPM are unaffected because they
+  # use the explicit DEB-DEFAULT / RPM-DEFAULT canonical-naming tokens above.
   if(_tb_pkg_release STREQUAL "")
-    set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
+    set(_tb_archive_name "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
   else()
-    set(CPACK_ARCHIVE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${_tb_pkg_release}-Linux")
+    set(_tb_archive_name "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${_tb_pkg_release}-Linux")
   endif()
+  set(CPACK_ARCHIVE_FILE_NAME "${_tb_archive_name}")
+  set(CPACK_PACKAGE_FILE_NAME "${_tb_archive_name}")
 
   set(CPACK_GENERATOR "DEB;RPM;TGZ")
   include(CPack)

@@ -237,10 +237,6 @@ fi
 "${CMAKE_BIN}" "${CMAKE_ARGS[@]}"
 ok "CMake configured"
 
-echo "===== TB_DEBUG dump of CPACK_*_FILE_NAME from CPackConfig.cmake ====="
-grep -nE "CPACK_(ARCHIVE|PACKAGE|DEBIAN|RPM)_FILE_NAME|CPACK_(DEBIAN|RPM)_PACKAGE_RELEASE|TRANSFERBENCH_PACKAGE_RELEASE" "${BUILD_DIR}/CPackConfig.cmake" || true
-echo "===== END TB_DEBUG ====="
-
 # -------- build --------
 log "Building TransferBench (-j$(nproc))..."
 "${CMAKE_BIN}" --build "${BUILD_DIR}" -- -j"$(nproc)"
