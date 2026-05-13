@@ -331,12 +331,15 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "TransferBench: benchmark simultaneous transfers between CPU/GPU/NIC")
   set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
 
-  # Resolve the per-build release tag (set by build_packages_local.sh via env)
-  # so it can be threaded into both DEB/RPM metadata AND the TGZ filename.
+  # Per-build release tag, threaded into DEB/RPM metadata AND the TGZ filename.
+  # Prefer the explicit -D from build_packages_local.sh; fall back to the env
+  # vars CPack itself reads (so direct cmake invocations still work).
   set(_tb_pkg_release "")
-  if(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
+  if(DEFINED TRANSFERBENCH_PACKAGE_RELEASE AND NOT TRANSFERBENCH_PACKAGE_RELEASE STREQUAL "")
+    set(_tb_pkg_release "${TRANSFERBENCH_PACKAGE_RELEASE}")
+  elseif(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE} AND NOT "$ENV{CPACK_RPM_PACKAGE_RELEASE}" STREQUAL "")
     set(_tb_pkg_release "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
-  elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
+  elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE} AND NOT "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}" STREQUAL "")
     set(_tb_pkg_release "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
   endif()
 
@@ -345,7 +348,9 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
   set(CPACK_DEBIAN_PACKAGE_DEPENDS    "numactl, libnuma1, hsa-rocr")
   set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
-  if(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
+  if(NOT _tb_pkg_release STREQUAL "")
+    set(CPACK_DEBIAN_PACKAGE_RELEASE "${_tb_pkg_release}")
+  elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
     set(CPACK_DEBIAN_PACKAGE_RELEASE "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
   endif()
   # Canonical filename: <name>_<version>-<release>_<arch>.deb
@@ -356,7 +361,9 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_RPM_PACKAGE_LICENSE "MIT")
   set(CPACK_RPM_PACKAGE_REQUIRES "numactl, hsa-rocr")
   set(CPACK_RPM_PACKAGE_VENDOR  "${CPACK_PACKAGE_VENDOR}")
-  if(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
+  if(NOT _tb_pkg_release STREQUAL "")
+    set(CPACK_RPM_PACKAGE_RELEASE "${_tb_pkg_release}")
+  elseif(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
     set(CPACK_RPM_PACKAGE_RELEASE "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
   endif()
   # Canonical filename: <name>-<version>-<release>.<arch>.rpm
