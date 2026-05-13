@@ -22,25 +22,38 @@ THE SOFTWARE.
 
 #include <limits>
 
-__global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
+__global__ void GetXccTimestamps(uint64_t* timestamps,
+                                 int       useBarrier,
+                                 uint32_t  xccMask,
+                                 volatile int* readyFlag)
 {
   // Only first thread does any work
   if (threadIdx.x != 0) return;
 
   // Threadblocks in first "row" handle timestamps
   if (blockIdx.y == 0) {
+    auto start = GetTimestamp();
 
     // Collect XCD for this
     int xccId;
     GetXccId(xccId);
+    if (xccMask & (1U << xccId)) {
+      timestamps[xccId] = 0;
+      return;
+    }
 
     // All threadblocks wait for ready signal (no timeout — assumes signaling block is live)
-    while (*readyFlag == 0);
+    if (useBarrier) {
+      while (*readyFlag == 0);
+    } else {
+      timestamps[xccId] = start;
+      return;
+    }
 
     // Collect timestamp and save to memory; guard against unexpected XCC IDs
     auto w = GetTimestamp();
     if (xccId >= 0 && xccId < (int)gridDim.x) timestamps[xccId] = w;
-  } else if (blockIdx.x == 0) {
+  } else if (blockIdx.x == 0 && useBarrier) {
 
     // Sleep for some number of cycles to ensure that other threadblocks are active
     auto w = GetTimestamp();
@@ -76,6 +89,8 @@ int WallClockPreset(EnvVars&          ev,
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   int numGpuDevices   = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
+  int useBarrier      = EnvVars::GetEnvVar("USE_BARRIER", 1);
+  int xccMask         = EnvVars::GetEnvVar("XCC_MASK", 0);
 
   // Print off env vars
   if (Utils::RankDoesOutput()) {
@@ -85,6 +100,8 @@ int WallClockPreset(EnvVars&          ev,
       ev.Print("NUM_ITERATIONS" , ev.numIterations,  "Number of iterations");
       ev.Print("NUM_WARMUPS"    , ev.numWarmups,     "Number of warmup iterations");
       ev.Print("SHOW_ITERATIONS", ev.showIterations, "Showing per iteration details. Set to 2 to see raw wallclock values");
+      ev.Print("USE_BARRIER"    , useBarrier,        useBarrier ? "Using barrier before timestamp" : "No barrier before timestamp");
+      ev.Print("XCC_MASK"       , xccMask,           "Mask for disabling XCCs");
     }
   }
 
@@ -93,6 +110,8 @@ int WallClockPreset(EnvVars&          ev,
   IS_UNIFORM(ev.numIterations,  "NUM_ITERATIONS");
   IS_UNIFORM(ev.numWarmups,     "NUM_WARMUPS");
   IS_UNIFORM(ev.showIterations, "SHOW_ITERATIONS");
+  IS_UNIFORM(useBarrier,        "USE_BARRIER");
+  IS_UNIFORM(xccMask          , "XCC_MASK");
 
   if (numGpuDevices <= 0 || numGpuDevices > numDetectedGpus) {
     Utils::Print("[ERROR] wallclock preset requires 1 <= NUM_GPU_DEVICES <= %d (got %d)\n", numDetectedGpus, numGpuDevices);
@@ -157,7 +176,7 @@ int WallClockPreset(EnvVars&          ev,
       memset(timestamps, 0, numXccs * sizeof(uint64_t));
       HIP_CALL(hipMemset(readyFlag, 0, sizeof(*readyFlag)));
       HIP_CALL(hipDeviceSynchronize());
-      GetXccTimestamps<<<dim3(numXccs,2,1), 1>>>(timestamps, readyFlag);
+      GetXccTimestamps<<<dim3(numXccs,2,1), 1>>>(timestamps, useBarrier, xccMask, readyFlag);
       HIP_CALL(hipDeviceSynchronize());
       if (i >= 0) {
         memcpy(results[deviceId][i].data(), timestamps, numXccs * sizeof(uint64_t));
@@ -205,9 +224,16 @@ int WallClockPreset(EnvVars&          ev,
         if (rank == myRank) timestamps = results[deviceId][iteration];
         TransferBench::System::Get().Broadcast(rank, numXccs * sizeof(uint64_t), timestamps.data());
 
-        const auto [min,max] = std::minmax_element(timestamps.begin(), timestamps.end());
+        uint64_t minCycle = std::numeric_limits<uint64_t>::max();
+        uint64_t maxCycle = 0;
+        for (auto x : timestamps) {
+          if (x) {
+            minCycle = std::min(minCycle, x);
+            maxCycle = std::max(maxCycle, x);
+          }
+        }
 
-        uint64_t cycles = (*max - *min);
+        uint64_t cycles = (maxCycle - minCycle);
         totalCycles += cycles;
 
         if (ev.showIterations) {
@@ -218,7 +244,11 @@ int WallClockPreset(EnvVars&          ev,
           table.Set(currRow, currCol++, "%lu", cycles);
           table.Set(currRow, currCol++, "%.2f", cycles * uSecPerCycle);
           for (int i = 0; i < numXccs; i++) {
-            table.Set(currRow, currCol++, "%lu", timestamps[i] - (ev.showIterations > 1 ? 0 : *min));
+            if (timestamps[i]) {
+              table.Set(currRow, currCol++, "%lu", timestamps[i] - (ev.showIterations > 1 ? 0 : minCycle));
+            } else {
+              table.Set(currRow, currCol++, "SKIP");
+            }
           }
           currRow++;
         }
