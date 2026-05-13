@@ -86,7 +86,13 @@ void DisplaySingleRankTopology(bool outputToCsv)
   } else {
     printf("\nDetected Topology:\n");
     printf("==================\n");
-    printf("  %d configured CPU NUMA node(s) [%d total]\n", numCpus, numa_max_node() + 1);
+    int numCpusTotal = numa_max_node() + 1;
+    int numPhantom   = numCpusTotal - numCpus;
+    if (numPhantom > 0)
+      printf("  %d configured CPU NUMA node(s) [%d total; detected %d phantom NUMA node(s) with no memory/CPU]\n",
+             numCpus, numCpusTotal, numPhantom);
+    else
+      printf("  %d configured CPU NUMA node(s) [%d total]\n", numCpus, numCpusTotal);
     printf("  %d GPU device(s)\n", numGpus);
     printf("  %d Supported NIC device(s)\n", numNics);
   }

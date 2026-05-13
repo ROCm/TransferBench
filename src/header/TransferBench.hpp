@@ -7219,11 +7219,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int numCpus = numa_bitmask_weight(numa_get_mems_allowed());
     topo.numExecutors[EXE_CPU] = numCpus;
 
-    if (numCpus < numCpusConfigured)
-      printf("[INFO] Detected %d phantom NUMA node(s) with no memory/CPU; "
-             "limiting CPU executors to %d node(s) with memory\n",
-             numCpusConfigured - numCpus, numCpus);
-
     std::string cpuName = GetCpuName();
 
     for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
