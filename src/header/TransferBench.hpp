@@ -7212,9 +7212,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Collect Pod membership
     CollectPodMembership(topo.ppodId, topo.vpodId);
 
-    // CPU Executor
-    int numCpus = numa_num_configured_nodes();
+    // CPU Executor — limit to NUMA nodes that have real memory backing.
+    // Phantom nodes (e.g. MNNVL fabric nodes) are present in numa_num_configured_nodes()
+    // but have no memory, causing set_mempolicy EINVAL when probed.
+    int numCpusConfigured = numa_num_configured_nodes();
+    int numCpus = numa_bitmask_weight(numa_get_mems_allowed());
     topo.numExecutors[EXE_CPU] = numCpus;
+
+    if (numCpus < numCpusConfigured)
+      printf("[INFO] Detected %d phantom NUMA node(s) with no memory/CPU; "
+             "limiting CPU executors to %d node(s) with memory\n",
+             numCpusConfigured - numCpus, numCpus);
 
     std::string cpuName = GetCpuName();
 
@@ -7224,7 +7232,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     for (int cpuCore = 0; cpuCore < numa_num_configured_cpus(); cpuCore++) {
-      topo.numSubExecutors[{EXE_CPU, numa_node_of_cpu(cpuCore)}]++;
+      int node = numa_node_of_cpu(cpuCore);
+      if (numa_bitmask_isbitset(numa_get_mems_allowed(), node))
+        topo.numSubExecutors[{EXE_CPU, node}]++;
     }
 
     if (verbose) {
@@ -7753,11 +7763,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ErrResult err;
       int32_t* tempBuffer;
 
-      // Index CPU agents
+      // Index CPU agents — only probe NUMA nodes with real memory backing
       cpuAgents.clear();
-      int numCpus = numa_num_configured_nodes();
-      for (int i = 0; i < numCpus; i++) {
-        AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer);
+      for (int node = 0; node <= numa_max_node(); node++) {
+        if (!numa_bitmask_isbitset(numa_get_mems_allowed(), node)) continue;
+        AllocateMemory({MEM_CPU, node}, 1024, (void**)&tempBuffer);
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
         cpuAgents.push_back(info.agentOwner);
         DeallocateMemory(MEM_CPU, tempBuffer, 1024);
