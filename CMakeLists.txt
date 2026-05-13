@@ -302,6 +302,18 @@ if(BUILD_RELOCATABLE_PACKAGE)
   # RVS-style relocatable packaging: bypass rocm_install/rocm_create_package and
   # drive CPack directly so CMAKE_INSTALL_PREFIX / CPACK_PACKAGING_INSTALL_PREFIX
   # set by the caller (build_packages_local.sh) are honored.
+  #
+  # The CPack flow below uses CPACK_ARCHIVE_FILE_NAME (3.13+) and the
+  # DEB-DEFAULT / RPM-DEFAULT canonical-naming sentinels (3.6+). The
+  # project-wide cmake_minimum_required is 3.5 for the non-packaging build, so
+  # gate the relocatable path locally to avoid silently producing a literal
+  # "DEB-DEFAULT" filename on a too-old CMake.
+  if(CMAKE_VERSION VERSION_LESS 3.13)
+    message(FATAL_ERROR
+      "BUILD_RELOCATABLE_PACKAGE requires CMake >= 3.13 "
+      "(found ${CMAKE_VERSION}); needed for CPACK_ARCHIVE_FILE_NAME and "
+      "the DEB-DEFAULT / RPM-DEFAULT canonical-naming sentinels.")
+  endif()
   if(NOT DEFINED ROCM_MAJOR_VERSION)
     set(ROCM_MAJOR_VERSION "7")
   endif()
@@ -334,12 +346,14 @@ if(BUILD_RELOCATABLE_PACKAGE)
   # Per-build release tag, threaded into DEB/RPM metadata AND the TGZ filename.
   # Prefer the explicit -D from build_packages_local.sh; fall back to the env
   # vars CPack itself reads (so direct cmake invocations still work).
+  # Quote variable references throughout so the comparison is unambiguous
+  # under any CMP0054 setting.
   set(_tb_pkg_release "")
-  if(DEFINED TRANSFERBENCH_PACKAGE_RELEASE AND NOT TRANSFERBENCH_PACKAGE_RELEASE STREQUAL "")
+  if(NOT "${TRANSFERBENCH_PACKAGE_RELEASE}" STREQUAL "")
     set(_tb_pkg_release "${TRANSFERBENCH_PACKAGE_RELEASE}")
-  elseif(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE} AND NOT "$ENV{CPACK_RPM_PACKAGE_RELEASE}" STREQUAL "")
+  elseif(NOT "$ENV{CPACK_RPM_PACKAGE_RELEASE}" STREQUAL "")
     set(_tb_pkg_release "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
-  elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE} AND NOT "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}" STREQUAL "")
+  elseif(NOT "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}" STREQUAL "")
     set(_tb_pkg_release "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
   endif()
 
@@ -348,7 +362,7 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
   set(CPACK_DEBIAN_PACKAGE_DEPENDS    "numactl, libnuma1, hsa-rocr")
   set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
-  if(NOT _tb_pkg_release STREQUAL "")
+  if(NOT "${_tb_pkg_release}" STREQUAL "")
     set(CPACK_DEBIAN_PACKAGE_RELEASE "${_tb_pkg_release}")
   elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
     set(CPACK_DEBIAN_PACKAGE_RELEASE "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
@@ -361,7 +375,7 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_RPM_PACKAGE_LICENSE "MIT")
   set(CPACK_RPM_PACKAGE_REQUIRES "numactl, hsa-rocr")
   set(CPACK_RPM_PACKAGE_VENDOR  "${CPACK_PACKAGE_VENDOR}")
-  if(NOT _tb_pkg_release STREQUAL "")
+  if(NOT "${_tb_pkg_release}" STREQUAL "")
     set(CPACK_RPM_PACKAGE_RELEASE "${_tb_pkg_release}")
   elseif(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
     set(CPACK_RPM_PACKAGE_RELEASE "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
@@ -385,7 +399,7 @@ if(BUILD_RELOCATABLE_PACKAGE)
   # CMake 3.22 (Ubuntu 22.04) falls back to CPACK_PACKAGE_FILE_NAME for TGZ.
   # Set both to the same suffixed value. DEB/RPM are unaffected because they
   # use the explicit DEB-DEFAULT / RPM-DEFAULT canonical-naming tokens above.
-  if(_tb_pkg_release STREQUAL "")
+  if("${_tb_pkg_release}" STREQUAL "")
     set(_tb_archive_name "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
   else()
     set(_tb_archive_name "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${_tb_pkg_release}-Linux")

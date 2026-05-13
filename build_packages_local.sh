@@ -44,9 +44,14 @@ ROCM_PATH="${SDK_DIR}/install"
 # "dubious ownership" guard because the checkout is host-UID-owned but we run
 # as root. Without this, `git describe` in CMakeLists.txt silently fails and
 # TRANSFERBENCH_VERSION_PATCH falls back to its hard-coded default.
-if command -v git >/dev/null 2>&1; then
-  git config --global --add safe.directory "${REPO_ROOT}" || true
-fi
+#
+# Use GIT_CONFIG_* env vars (git >= 2.31) so the scoped safe.directory entry
+# is inherited by CMake's `execute_process(git …)` children without touching
+# the user's persistent ~/.gitconfig (especially harmful under sudo, where
+# the modification would land in root's global config).
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0="safe.directory"
+export GIT_CONFIG_VALUE_0="${REPO_ROOT}"
 
 # Default GPU targets baked into every package, regardless of GPU_FAMILY tarball.
 DEFAULT_GPU_TARGETS="gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
