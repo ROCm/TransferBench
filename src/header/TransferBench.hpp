@@ -4094,7 +4094,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipError_t exportErr = hipSuccess;
       const char* exportStep = "hipSetDevice";
       if (memDevice.memRank == GetRank()) {
-        exportErr = hipSetDevice(memDevice.memIndex);
+        if (IsGpuMemType(memDevice.memType)) {
+          exportErr = hipSetDevice(memDevice.memIndex);
+        }
         if (exportErr == hipSuccess) {
           exportStep = "hipMemExportToShareableHandle";
           exportErr = hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0);
