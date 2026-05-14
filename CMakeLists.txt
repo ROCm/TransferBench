@@ -360,7 +360,7 @@ if(BUILD_RELOCATABLE_PACKAGE)
   # DEB
   set(CPACK_DEBIAN_PACKAGE_NAME       "${CPACK_PACKAGE_NAME}")
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS    "numactl, libnuma1, hsa-rocr")
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS    "numactl, libnuma1")
   set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
   if(NOT "${_tb_pkg_release}" STREQUAL "")
     set(CPACK_DEBIAN_PACKAGE_RELEASE "${_tb_pkg_release}")
@@ -373,7 +373,7 @@ if(BUILD_RELOCATABLE_PACKAGE)
   # RPM
   set(CPACK_RPM_PACKAGE_NAME    "${CPACK_PACKAGE_NAME}")
   set(CPACK_RPM_PACKAGE_LICENSE "MIT")
-  set(CPACK_RPM_PACKAGE_REQUIRES "numactl, hsa-rocr")
+  set(CPACK_RPM_PACKAGE_REQUIRES "numactl")
   set(CPACK_RPM_PACKAGE_VENDOR  "${CPACK_PACKAGE_VENDOR}")
   if(NOT "${_tb_pkg_release}" STREQUAL "")
     set(CPACK_RPM_PACKAGE_RELEASE "${_tb_pkg_release}")
@@ -393,6 +393,17 @@ if(BUILD_RELOCATABLE_PACKAGE)
         "/opt" "/opt/rocm"
         "${_rpm_exclude_prefix}"
         "${_rpm_exclude_prefix}/bin")
+
+  # Advisory install-time check for libhsa-runtime64.so.1. The package declares
+  # no hard ROCm dep so it can install on TheRock-tarball systems where no ROCm
+  # component is tracked by apt/dpkg; the postinst warns (never fails) when the
+  # HSA runtime is not discoverable, so a missing runtime surfaces at install
+  # time instead of as a dynamic-linker error on first invocation.
+  set(_tb_postinst_src "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst-check-hsa.sh")
+  set(_tb_postinst_deb "${CMAKE_BINARY_DIR}/packaging/postinst")
+  configure_file("${_tb_postinst_src}" "${_tb_postinst_deb}" COPYONLY)
+  set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${_tb_postinst_deb}")
+  set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${_tb_postinst_src}")
 
   # TGZ — embed release tag so successive runs do not collide on the same key.
   # CMake 3.13+ honors CPACK_ARCHIVE_FILE_NAME for archive generators, but
@@ -414,7 +425,7 @@ else()
   rocm_setup_version(VERSION ${VERSION_STRING})
 
   # Package specific CPACK vars
-  rocm_package_add_dependencies(DEPENDS "numactl" "hsa-rocr")
+  rocm_package_add_dependencies(DEPENDS "numactl")
 
   set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
   set(CPACK_RPM_PACKAGE_LICENSE "MIT")
