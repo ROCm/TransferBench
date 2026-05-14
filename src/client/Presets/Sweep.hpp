@@ -347,7 +347,8 @@ int SweepPreset(EnvVars&          ev,
 
     // Check for test limit
     if (numTestsRun == sweepTestLimit) {
-      printf("Sweep Test limit reached\n");
+      printf("Sweep Test limit reached: ran %d of %d configured tests (SWEEP_TEST_LIMIT=%d), terminated with no error.\n",
+             numTestsRun, sweepTestLimit, sweepTestLimit);
       break;
     }
 
@@ -355,7 +356,8 @@ int SweepPreset(EnvVars&          ev,
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double totalCpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
     if (sweepTimeLimit && totalCpuTime > sweepTimeLimit) {
-      printf("Sweep Time limit exceeded\n");
+      printf("Sweep Time limit exceeded: elapsed %.2f s > %d s configured (SWEEP_TIME_LIMIT=%d), after %d test(s), terminated with no error.\n",
+             totalCpuTime, sweepTimeLimit, sweepTimeLimit, numTestsRun);
       break;
     }
 
