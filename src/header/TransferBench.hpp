@@ -1874,6 +1874,18 @@ namespace {
       }
       return ERR_NONE;
     }
+
+    // Make sure CPU NUMA node can allocate memory
+    if (IsCpuMemType(memDevice.memType) && GetRank() == memDevice.memRank) {
+      int numaIdx = (memDevice.memType == MEM_CPU_CLOSEST) ?
+        GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) :
+        memDevice.memIndex;
+
+      if (!numa_bitmask_isbitset(numa_get_mems_allowed(), numaIdx)) {
+        return {ERR_FATAL, "CPU %d is not equipped to be able to allocate memory", numaIdx};
+      }
+    }
+
     return {ERR_FATAL, "Unsupported memory type (%d)", memDevice.memType};
   }
 
@@ -7747,17 +7759,42 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hsa_amd_pointer_info_t info;
       info.size = sizeof(info);
 
-      ErrResult err;
-      int32_t* tempBuffer;
+      // Callback to process each agent
+      auto cpuAgentCallback = [](hsa_agent_t agent, void* data) -> hsa_status_t {
+        std::map<int, hsa_agent_t>* agents = static_cast<std::map<int, hsa_agent_t>*>(data);
+
+        hsa_device_type_t deviceType;
+        hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &deviceType);
+
+        if (deviceType == HSA_DEVICE_TYPE_CPU) {
+          uint32_t nodeId;
+          hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NODE, &nodeId);
+          if (status == HSA_STATUS_SUCCESS) {
+            (*agents)[nodeId] = agent;
+          }
+        }
+        return HSA_STATUS_SUCCESS;
+      };
 
       // Index CPU agents
+      hsa_init();
+      std::map<int, hsa_agent_t> cpuAgentMap;
+      hsa_status_t s = hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
+      if (s != HSA_STATUS_SUCCESS) {
+        const char *errString = NULL;
+        hsa_status_string(s, &errString);
+        printf("FAIL %s\n",errString );
+      }
+      hsa_shut_down();
+
+
       cpuAgents.clear();
       int numCpus = numa_num_configured_nodes();
+      cpuAgents.resize(numCpus);
       for (int i = 0; i < numCpus; i++) {
-        AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer);
-        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
-        cpuAgents.push_back(info.agentOwner);
-        DeallocateMemory(MEM_CPU, tempBuffer, 1024);
+        if (cpuAgentMap.count(i)) {
+          cpuAgents[i] = cpuAgentMap[i];
+        }
       }
 
       // Index GPU agents
@@ -7765,6 +7802,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipError_t status = hipGetDeviceCount(&numGpus);
       if (status != hipSuccess) numGpus = 0;
       gpuAgents.clear();
+      char *tempBuffer;
       for (int i = 0; i < numGpus; i++) {
         AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
