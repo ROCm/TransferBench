@@ -1859,6 +1859,10 @@ namespace {
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numCpus)
         return {ERR_FATAL,
                 "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
+
+      if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), memDevice.memIndex)) {
+        return {ERR_FATAL, "CPU %d on rank %d is not equipped to be able to allocate memory", memDevice.memIndex, memDevice.memRank};
+      }
       return ERR_NONE;
     }
 
@@ -1868,24 +1872,15 @@ namespace {
         return {ERR_FATAL,
                 "GPU index must be between 0 and %d (instead of %d) on rank %d", numGpus - 1, memDevice.memIndex, memDevice.memRank};
       if (memDevice.memType == MEM_CPU_CLOSEST) {
-        if (GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) == -1) {
+        int actualNumaIdx = GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank);
+        if (actualNumaIdx == -1) {
           return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
+        if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), actualNumaIdx))
+          return {ERR_FATAL, "CPU %d on rank %d is not equipped to be able to allocate memory", actualNumaIdx, memDevice.memRank};
       }
       return ERR_NONE;
     }
-
-    // Make sure CPU NUMA node can allocate memory
-    if (IsCpuMemType(memDevice.memType) && GetRank() == memDevice.memRank) {
-      int numaIdx = (memDevice.memType == MEM_CPU_CLOSEST) ?
-        GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) :
-        memDevice.memIndex;
-
-      if (!numa_bitmask_isbitset(numa_get_mems_allowed(), numaIdx)) {
-        return {ERR_FATAL, "CPU %d is not equipped to be able to allocate memory", numaIdx};
-      }
-    }
-
     return {ERR_FATAL, "Unsupported memory type (%d)", memDevice.memType};
   }
 
