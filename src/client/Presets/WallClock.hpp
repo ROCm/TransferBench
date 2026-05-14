@@ -46,9 +46,7 @@ __global__ void GetTimestamps(uint64_t*     timestamps,
 
     // All threadblocks wait for ready signal (no timeout — assumes signaling block is live)
     if (useBarrier) {
-      while (*readyFlag == 0) {
-        __builtin_amdgcn_s_sleep(1);
-      };
+      while (*readyFlag == 0);
     } else {
       timestamps[idx] = start;
       return;
@@ -61,9 +59,7 @@ __global__ void GetTimestamps(uint64_t*     timestamps,
 
     // Sleep for some number of cycles to ensure that other threadblocks are active
     auto w = GetTimestamp();
-    while (GetTimestamp() - w < 10000) {
-      __builtin_amdgcn_s_sleep(10);
-    }
+    while (GetTimestamp() - w < 10000);
 
     // Signal start to the other threadblocks
     *readyFlag = 1;
@@ -169,11 +165,10 @@ int WallClockPreset(EnvVars&          ev,
 #endif
 
   double uSecPerCycle = 1000.0 / wallClockKhz;
-
-  Utils::Print("\nRunning %d iterations.  Detected wall clock rate of %dKhz = %.2f usec per cycle\n\n",
-               ev.numIterations, wallClockKhz, uSecPerCycle);
-
   int numItems = (useBlockCount ? useBlockCount : numXccs);
+
+  Utils::Print("\nRunning %d iterations on %d items.  Detected wall clock rate of %dKhz = %.2f usec per cycle\n\n",
+               ev.numIterations, numItems, wallClockKhz, uSecPerCycle);
 
   std::vector<std::vector<std::vector<uint64_t>>> results(numGpuDevices,
                                                           std::vector<std::vector<uint64_t>>(ev.numIterations,
@@ -256,7 +251,6 @@ int WallClockPreset(EnvVars&          ev,
             maxCycle = std::max(maxCycle, x);
           }
         }
-
         uint64_t cycles = (maxCycle - minCycle);
         totalCycles += cycles;
 
