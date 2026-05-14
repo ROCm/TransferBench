@@ -22,25 +22,40 @@ THE SOFTWARE.
 
 #include <limits>
 
-__global__ void GetXccTimestamps(uint64_t* timestamps, volatile int* readyFlag)
+__global__ void GetTimestamps(uint64_t*     timestamps,
+                              int           useBarrier,
+                              int           indexType,
+                              uint32_t      xccMask,
+                              volatile int* readyFlag)
 {
   // Only first thread does any work
   if (threadIdx.x != 0) return;
 
   // Threadblocks in first "row" handle timestamps
   if (blockIdx.y == 0) {
+    auto start = GetTimestamp();
 
     // Collect XCD for this
     int xccId;
     GetXccId(xccId);
+    int idx = (indexType == 0) ? xccId : blockIdx.x;
+    if (xccMask & (1U << xccId)) {
+      timestamps[idx] = 0;
+      return;
+    }
 
     // All threadblocks wait for ready signal (no timeout — assumes signaling block is live)
-    while (*readyFlag == 0);
+    if (useBarrier) {
+      while (*readyFlag == 0);
+    } else {
+      timestamps[idx] = start;
+      return;
+    }
 
-    // Collect timestamp and save to memory; guard against unexpected XCC IDs
+    // Collect timestamp and save to memory
     auto w = GetTimestamp();
-    if (xccId >= 0 && xccId < (int)gridDim.x) timestamps[xccId] = w;
-  } else if (blockIdx.x == 0) {
+    timestamps[idx] = w;
+  } else if (blockIdx.x == 0 && useBarrier) {
 
     // Sleep for some number of cycles to ensure that other threadblocks are active
     auto w = GetTimestamp();
@@ -76,6 +91,9 @@ int WallClockPreset(EnvVars&          ev,
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   int numGpuDevices   = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
+  int useBarrier      = EnvVars::GetEnvVar("USE_BARRIER", 1);
+  int useBlockCount   = EnvVars::GetEnvVar("USE_BLOCKCOUNT", 0);
+  int xccMask         = EnvVars::GetEnvVar("XCC_MASK", 0);
 
   // Print off env vars
   if (Utils::RankDoesOutput()) {
@@ -85,6 +103,9 @@ int WallClockPreset(EnvVars&          ev,
       ev.Print("NUM_ITERATIONS" , ev.numIterations,  "Number of iterations");
       ev.Print("NUM_WARMUPS"    , ev.numWarmups,     "Number of warmup iterations");
       ev.Print("SHOW_ITERATIONS", ev.showIterations, "Showing per iteration details. Set to 2 to see raw wallclock values");
+      ev.Print("USE_BARRIER"    , useBarrier,        useBarrier ? "Using barrier before timestamp" : "No barrier before timestamp");
+      ev.Print("USE_BLOCKCOUNT" , useBlockCount,     "If set to non-zero will launch this many blocks instead");
+      ev.Print("XCC_MASK"       , xccMask,           "Mask for disabling XCCs");
     }
   }
 
@@ -93,6 +114,9 @@ int WallClockPreset(EnvVars&          ev,
   IS_UNIFORM(ev.numIterations,  "NUM_ITERATIONS");
   IS_UNIFORM(ev.numWarmups,     "NUM_WARMUPS");
   IS_UNIFORM(ev.showIterations, "SHOW_ITERATIONS");
+  IS_UNIFORM(useBarrier,        "USE_BARRIER");
+  IS_UNIFORM(useBlockCount,     "USE_BLOCKCOUNT");
+  IS_UNIFORM(xccMask,           "XCC_MASK");
 
   if (numGpuDevices <= 0 || numGpuDevices > numDetectedGpus) {
     Utils::Print("[ERROR] wallclock preset requires 1 <= NUM_GPU_DEVICES <= %d (got %d)\n", numDetectedGpus, numGpuDevices);
@@ -126,23 +150,36 @@ int WallClockPreset(EnvVars&          ev,
   wallClockKhz = 1000000;
 #else
   HIP_CALL(hipDeviceGetAttribute(&wallClockKhz, hipDeviceAttributeWallClockRate, 0));
+  // Check that GPU wallclock rate is non-zero
+  if (wallClockKhz == 0) {
+    if (getenv("TB_WALLCLOCK_RATE")) {
+      wallClockKhz = atoi(getenv("TB_WALLCLOCK_RATE"));
+      Utils::Print("GPU 0 wallclock rate query returned 0 unexpectedly.  Setting to %d instead as specified by TB_WALLCLOCK_RATE",
+                   wallClockKhz);
+    } else {
+      wallClockKhz = 100000;
+      Utils::Print("GPU 0 wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
+                   wallClockKhz);
+    }
+  }
 #endif
-  if (wallClockKhz == 0) wallClockKhz = 100000;
-  double uSecPerCycle = 1000.0 / wallClockKhz;
 
-  Utils::Print("\nRunning %d iterations.  Detected wall clock rate of %dKhz = %.2f usec per cycle\n\n",
-               ev.numIterations, wallClockKhz, uSecPerCycle);
+  double uSecPerCycle = 1000.0 / wallClockKhz;
+  int numItems = (useBlockCount ? useBlockCount : numXccs);
+
+  Utils::Print("\nRunning %d iterations on %d items.  Detected wall clock rate of %dKhz = %.2f usec per cycle\n\n",
+               ev.numIterations, numItems, wallClockKhz, uSecPerCycle);
 
   std::vector<std::vector<std::vector<uint64_t>>> results(numGpuDevices,
                                                           std::vector<std::vector<uint64_t>>(ev.numIterations,
-                                                                                             std::vector<uint64_t>(numXccs, 0)));
+                                                                                             std::vector<uint64_t>(numItems, 0)));
   for (int deviceId = 0; deviceId < numGpuDevices; deviceId++) {
     HIP_CALL(hipSetDevice(deviceId));
 
     uint64_t* timestamps;
     int32_t* readyFlag;
 
-    if (Utils::AllocateMemory({MEM_CPU_CLOSEST, deviceId}, numXccs * sizeof(uint64_t), (void**)&timestamps)) {
+    if (Utils::AllocateMemory({MEM_CPU_CLOSEST, deviceId}, numItems * sizeof(uint64_t), (void**)&timestamps)) {
       Utils::Print("[ERROR] Unable to allocate pinned host memory for storing timestamps for GPU device %d on rank %d\n",
                    deviceId, myRank);
       return ERR_FATAL;
@@ -154,23 +191,23 @@ int WallClockPreset(EnvVars&          ev,
 
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
     {
-      memset(timestamps, 0, numXccs * sizeof(uint64_t));
+      memset(timestamps, 0, numItems * sizeof(uint64_t));
       HIP_CALL(hipMemset(readyFlag, 0, sizeof(*readyFlag)));
       HIP_CALL(hipDeviceSynchronize());
-      GetXccTimestamps<<<dim3(numXccs,2,1), 1>>>(timestamps, readyFlag);
+      GetTimestamps<<<dim3(numItems,2,1), 1>>>(timestamps, useBarrier, useBlockCount, xccMask, readyFlag);
       HIP_CALL(hipDeviceSynchronize());
       if (i >= 0) {
-        memcpy(results[deviceId][i].data(), timestamps, numXccs * sizeof(uint64_t));
+        memcpy(results[deviceId][i].data(), timestamps, numItems * sizeof(uint64_t));
       }
     }
 
-    Utils::DeallocateMemory(MEM_CPU_CLOSEST, timestamps, numXccs * sizeof(uint64_t));
+    Utils::DeallocateMemory(MEM_CPU_CLOSEST, timestamps, numItems * sizeof(uint64_t));
     Utils::DeallocateMemory(MEM_GPU, readyFlag, sizeof(int32_t));
   }
 
   // Prepare table of results
-  int numRows   = 1 + numRanks * numGpuDevices * (ev.showIterations ? (ev.numIterations+1) : 1);
-  int numCols   = 5 + (ev.showIterations ? numXccs : 0);
+  int numRows = 1 + numRanks * numGpuDevices * ((ev.showIterations && !useBlockCount) ? (ev.numIterations+1) : 1);
+  int numCols = 5 + (ev.showIterations && !useBlockCount ?  numXccs : 0);
   Utils::TableHelper table(numRows, numCols);
 
   for (int i = 0; i < numCols; i++) {
@@ -185,9 +222,10 @@ int WallClockPreset(EnvVars&          ev,
   table.Set(currRow, currCol++, "Iter");
   table.Set(currRow, currCol++, "Delta(cycles)");
   table.Set(currRow, currCol++, "Delta(usec)");
-  if (ev.showIterations) {
+
+  if (ev.showIterations && !useBlockCount) {
     for (int i = 0; i < numXccs; i++) {
-      table.Set(currRow, currCol++, " XCC %d ", i);
+      table.Set(currRow, currCol++, " %s %d ", useBlockCount ? "BLK" : "XCC", i);
     }
   }
   currRow++;
@@ -199,18 +237,24 @@ int WallClockPreset(EnvVars&          ev,
     table.DrawRowBorder(currRow);
     for (int deviceId = 0; deviceId < numGpuDevices; deviceId++) {
       size_t totalCycles = 0;
-      std::vector<uint64_t> timestamps(numXccs, 0);
+      std::vector<uint64_t> timestamps(useBlockCount ? useBlockCount : numXccs, 0);
 
       for (int iteration = 0; iteration < ev.numIterations; iteration++) {
         if (rank == myRank) timestamps = results[deviceId][iteration];
-        TransferBench::System::Get().Broadcast(rank, numXccs * sizeof(uint64_t), timestamps.data());
+        TransferBench::System::Get().Broadcast(rank, numItems * sizeof(uint64_t), timestamps.data());
 
-        const auto [min,max] = std::minmax_element(timestamps.begin(), timestamps.end());
-
-        uint64_t cycles = (*max - *min);
+        uint64_t minCycle = std::numeric_limits<uint64_t>::max();
+        uint64_t maxCycle = 0;
+        for (auto x : timestamps) {
+          if (x) {
+            minCycle = std::min(minCycle, x);
+            maxCycle = std::max(maxCycle, x);
+          }
+        }
+        uint64_t cycles = (maxCycle - minCycle);
         totalCycles += cycles;
 
-        if (ev.showIterations) {
+        if (ev.showIterations && !useBlockCount) {
           currCol = 0;
           table.Set(currRow, currCol++, "%d", rank);
           table.Set(currRow, currCol++, "%d", deviceId);
@@ -218,7 +262,11 @@ int WallClockPreset(EnvVars&          ev,
           table.Set(currRow, currCol++, "%lu", cycles);
           table.Set(currRow, currCol++, "%.2f", cycles * uSecPerCycle);
           for (int i = 0; i < numXccs; i++) {
-            table.Set(currRow, currCol++, "%lu", timestamps[i] - (ev.showIterations > 1 ? 0 : *min));
+            if (timestamps[i]) {
+              table.Set(currRow, currCol++, "%lu", timestamps[i] - (ev.showIterations > 1 ? 0 : minCycle));
+            } else {
+              table.Set(currRow, currCol++, "SKIP");
+            }
           }
           currRow++;
         }
