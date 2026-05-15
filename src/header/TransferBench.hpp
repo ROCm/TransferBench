@@ -1861,7 +1861,8 @@ namespace {
                 "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
 
       if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), memDevice.memIndex)) {
-        return {ERR_FATAL, "CPU %d on rank %d is not equipped to be able to allocate memory", memDevice.memIndex, memDevice.memRank};
+        return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
+          memDevice.memIndex, memDevice.memRank};
       }
       return ERR_NONE;
     }
@@ -1877,7 +1878,8 @@ namespace {
           return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
         if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), actualNumaIdx))
-          return {ERR_FATAL, "CPU %d on rank %d is not equipped to be able to allocate memory", actualNumaIdx, memDevice.memRank};
+          return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
+            memDevice.memIndex, memDevice.memRank};
       }
       return ERR_NONE;
     }
@@ -7759,13 +7761,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         std::map<int, hsa_agent_t>* agents = static_cast<std::map<int, hsa_agent_t>*>(data);
 
         hsa_device_type_t deviceType;
-        hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &deviceType);
+        hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &deviceType);
+        if (status != HSA_STATUS_SUCCESS) return status;
 
         if (deviceType == HSA_DEVICE_TYPE_CPU) {
           uint32_t nodeId;
-          hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NODE, &nodeId);
+          status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NODE, &nodeId);
           if (status == HSA_STATUS_SUCCESS) {
             (*agents)[nodeId] = agent;
+          } else {
+            return status;
           }
         }
         return HSA_STATUS_SUCCESS;
@@ -7774,14 +7779,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Index CPU agents
       hsa_init();
       std::map<int, hsa_agent_t> cpuAgentMap;
-      hsa_status_t s = hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
-      if (s != HSA_STATUS_SUCCESS) {
-        const char *errString = NULL;
-        hsa_status_string(s, &errString);
-        printf("FAIL %s\n",errString );
-      }
+      hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
       hsa_shut_down();
-
 
       cpuAgents.clear();
       int numCpus = numa_num_configured_nodes();
