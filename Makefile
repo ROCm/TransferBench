@@ -6,7 +6,15 @@
 ROCM_PATH ?= /opt/rocm
 CUDA_PATH ?= /usr/local/cuda
 MPI_PATH  ?= /usr/local/openmpi
+# pip ROCm wheels ship bin/amdclang++ but often omit bin/amdllvm (which that stub execs).
+# Default to llvm/bin when bin/amdllvm is absent so HIP builds work without extra flags.
+ifeq ("$(shell test -e $(ROCM_PATH)/bin/amdllvm && echo found)", "found")
 HIPCC     ?= $(ROCM_PATH)/bin/amdclang++
+else ifeq ("$(shell test -e $(ROCM_PATH)/llvm/bin/amdclang++ && echo found)", "found")
+HIPCC     ?= $(ROCM_PATH)/llvm/bin/amdclang++
+else
+HIPCC     ?= $(ROCM_PATH)/bin/amdclang++
+endif
 NVCC      ?= $(CUDA_PATH)/bin/nvcc
 DEBUG     ?= 0
 

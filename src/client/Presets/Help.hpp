@@ -37,13 +37,15 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                SRC 1 -> Executor -> DST 1\n");
   printf("#                SRC X                DST Y\n");
   printf("\n");
-  printf("# Five Executors are supported by TransferBench\n");
+  printf("# Seven Executors are supported by TransferBench\n");
   printf("#   Executor:        SubExecutor:\n");
   printf("#   1) CPU           CPU thread\n");
   printf("#   2) GPU           GPU threadblock/Compute Unit (CU)\n");
   printf("#   3) DMA           N/A.                                 (Must have single SRC, at least one DST)\n");
   printf("#   4) NIC           Queue Pair\n");
   printf("#   5) Batched-DMA   Batch item                           (Must have single SRC, at least one DST)\n");
+  printf("#   6) T: async GPU  Placeholder WMMA/tensor-style kernel (1 SRC, 1 DST; stream async + sync per iter)\n");
+  printf("#   7) L: async GPU  Placeholder explicit load/store kernel (1 SRC, 1 DST; same)\n");
   printf("\n");
   printf("# Each single line in the configuration file defines a set of Transfers (a Test) to run in parallel\n");
   printf("\n");
@@ -71,6 +73,8 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                 - B:    Batched-DMA-executor  (Indexed from 0 to # GPUs - 1)\n");
   printf("#                 - I#.#: NIC executor          (Indexed from 0 to # NICs - 1)\n");
   printf("#                 - N#.#: Nearest NIC executor  (Indexed from 0 to # GPUs - 1)\n");
+  printf("#                 - T:    Async GPU kernel (tensor-op stub) (Indexed from 0 to # GPUs - 1; 1 SRC 1 DST)\n");
+  printf("#                 - L:    Async GPU kernel (load/store stub) (Indexed from 0 to # GPUs - 1; 1 SRC 1 DST)\n");
   printf("#   dstMemL   :   Destination memory locations (Where the data is to be written to)\n");
   printf("#   bytesL    :   Number of bytes to copy (0 means use command-line specified size)\n");
   printf("#                 Must be a multiple of 4 and may be suffixed with ('K','M', or 'G')\n");
@@ -107,6 +111,10 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("\n");
   printf("## Single DMA executed Transfer between GPUs 0 and 1\n");
   printf("1 1 (G0->D0->G1)\n");
+  printf("\n");
+  printf("## Async GPU kernel stubs: T = tensor-op path, L = load/store path (replace kernels in TransferBench.hpp)\n");
+  printf("1 1 (G0->T0->G1)\n");
+  printf("1 1 (G0->L0->G1)\n");
   printf("\n");
   printf("## Copy 1Mb from GPU0 to GPU1 with 4 CUs, and 2Mb from GPU1 to GPU0 with 8 CUs\n");
   printf("-2 (G0->G0->G1 4 1M) (G1->G1->G0 8 2M)\n");
