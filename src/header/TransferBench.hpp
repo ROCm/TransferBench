@@ -1859,6 +1859,11 @@ namespace {
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numCpus)
         return {ERR_FATAL,
                 "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
+
+      if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), memDevice.memIndex)) {
+        return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
+          memDevice.memIndex, memDevice.memRank};
+      }
       return ERR_NONE;
     }
 
@@ -1868,9 +1873,13 @@ namespace {
         return {ERR_FATAL,
                 "GPU index must be between 0 and %d (instead of %d) on rank %d", numGpus - 1, memDevice.memIndex, memDevice.memRank};
       if (memDevice.memType == MEM_CPU_CLOSEST) {
-        if (GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) == -1) {
+        int actualNumaIdx = GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank);
+        if (actualNumaIdx == -1) {
           return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
+        if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), actualNumaIdx))
+          return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
+            memDevice.memIndex, memDevice.memRank};
       }
       return ERR_NONE;
     }
@@ -7747,17 +7756,39 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hsa_amd_pointer_info_t info;
       info.size = sizeof(info);
 
-      ErrResult err;
-      int32_t* tempBuffer;
+      // Callback to process each agent
+      auto cpuAgentCallback = [](hsa_agent_t agent, void* data) -> hsa_status_t {
+        std::map<int, hsa_agent_t>* agents = static_cast<std::map<int, hsa_agent_t>*>(data);
+
+        hsa_device_type_t deviceType;
+        hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &deviceType);
+        if (status != HSA_STATUS_SUCCESS) return status;
+
+        if (deviceType == HSA_DEVICE_TYPE_CPU) {
+          uint32_t nodeId;
+          status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NODE, &nodeId);
+          if (status == HSA_STATUS_SUCCESS) {
+            (*agents)[nodeId] = agent;
+          } else {
+            return status;
+          }
+        }
+        return HSA_STATUS_SUCCESS;
+      };
 
       // Index CPU agents
+      hsa_init();
+      std::map<int, hsa_agent_t> cpuAgentMap;
+      hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
+      hsa_shut_down();
+
       cpuAgents.clear();
       int numCpus = numa_num_configured_nodes();
+      cpuAgents.resize(numCpus);
       for (int i = 0; i < numCpus; i++) {
-        AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer);
-        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
-        cpuAgents.push_back(info.agentOwner);
-        DeallocateMemory(MEM_CPU, tempBuffer, 1024);
+        if (cpuAgentMap.count(i)) {
+          cpuAgents[i] = cpuAgentMap[i];
+        }
       }
 
       // Index GPU agents
@@ -7765,6 +7796,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipError_t status = hipGetDeviceCount(&numGpus);
       if (status != hipSuccess) numGpus = 0;
       gpuAgents.clear();
+      char *tempBuffer;
       for (int i = 0; i < numGpus; i++) {
         AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
