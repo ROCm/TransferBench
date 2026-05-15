@@ -32,9 +32,13 @@ static int RemappedCpuIndex(int origIdx)
   // Build CPU remapping on first use
   // Skip numa nodes that are not configured
   if (remappingCpu.empty()) {
-    for (int node = 0; node <= numa_max_node(); node++)
+    for (int node = 0; node <= numa_max_node(); node++) {
       if (numa_bitmask_isbitset(numa_get_mems_allowed(), node))
         remappingCpu.push_back(node);
+      else {
+        remappingCpu.push_back(-1);
+      }
+    }
   }
   return remappingCpu[origIdx];
 }
