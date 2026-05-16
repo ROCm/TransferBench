@@ -5567,6 +5567,7 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
                                                  hipEvent_t    const  startEvent,
                                                  hipEvent_t    const  stopEvent,
                                                  bool          const  tensorFlavor,
+                                                 int           const  numSubExecs,
                                                  TransferResources&   rss)
   {
     ERR_CHECK(hipSetDevice(exeIndex));
@@ -5575,9 +5576,8 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
     float const* __restrict__ src = rss.srcMem[0] + initOffset;
     float* __restrict__ dst       = rss.dstMem[0] + initOffset;
 
-    constexpr int threads = 256;
-    int           blocks  = (int)((numFloats + threads - 1) / threads);
-    if (blocks < 1) blocks = 1;
+    int const threads = cfg.gfx.blockSize;
+    int const blocks = numSubExecs;
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
@@ -5595,7 +5595,6 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
         if (rss.numBytes % sizeof(float) != 0)
           return {ERR_FATAL, "Async tensor executor (TDM): numBytes (%zu) must be a multiple of %zu", rss.numBytes,
                   sizeof(float)};
-        size_t const numElements = rss.numBytes / sizeof(float);
 
         hipDeviceProp_t props{};
         ERR_CHECK(hipGetDeviceProperties(&props, exeIndex));
@@ -5603,12 +5602,12 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
         int maxShmem = 0;
         ERR_CHECK(hipDeviceGetAttribute(&maxShmem, hipDeviceAttributeMaxSharedMemoryPerBlock, exeIndex));
         int kWavesPerWorkgroup = threads / warpSize;
-        int numElementsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup));
-        unsigned int shmemBytes = numElementsPerTile * kWavesPerWorkgroup * sizeof(float);
+        int numFloatsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup));
+        unsigned int shmemBytes = numFloatsPerTile * kWavesPerWorkgroup * sizeof(float);
 
         hipLaunchKernelGGL(GpuAsyncTensorOpsKernel, dim3(blocks), dim3(threads),
-                           shmemBytes, stream, src, dst, numElements,
-                           numElementsPerTile);
+                           shmemBytes, stream, src, dst, numFloats,
+                           numFloatsPerTile);
       } else {
         hipLaunchKernelGGL(GpuAsyncLoadStoreStubKernel, dim3(blocks), dim3(threads), 0, stream, src, dst, numFloats);
       }
@@ -5649,6 +5648,8 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
     for (size_t i = 0; i < exeInfo.resources.size(); i++) {
       hipEvent_t startEv = (!exeInfo.startEvents.empty()) ? exeInfo.startEvents[i] : nullptr;
       hipEvent_t stopEv  = (!exeInfo.stopEvents.empty()) ? exeInfo.stopEvents[i] : nullptr;
+      int const numSubExecs =
+        static_cast<int>(exeInfo.resources[i].subExecParamCpu.size());
       asyncTransfers.emplace_back(std::async(std::launch::async,
                                                ExecuteGpuAsyncKernelTransfer,
                                                iteration,
@@ -5658,6 +5659,7 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
                                                startEv,
                                                stopEv,
                                                tensorFlavor,
+                                               numSubExecs,
                                                std::ref(exeInfo.resources[i])));
     }
     for (auto& asyncTransfer : asyncTransfers)
