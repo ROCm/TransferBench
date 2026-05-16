@@ -26,6 +26,8 @@ THE SOFTWARE.
 #include <arpa/inet.h>
 #include <atomic>
 #include <barrier>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -78,9 +80,9 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
+#include "tdm.h"
 #endif
 /// @endcond
-
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
 #if (defined(HIP_VERSION) && (HIP_VERSION >= 70100000)) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12080))
 #define BMA_EXEC_ENABLED
@@ -792,7 +794,7 @@ namespace TransferBench
   } while (0)
 #endif
 
-namespace TransferBench
+namespace TransferBench 
 {
 
 /// @cond
@@ -4904,17 +4906,71 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   //----------------------------------------------------------------------------
-  // Async GPU kernel executors (stub): replace bodies with WMMA/tensor vs tuned LD/ST.
+#if defined(__NVCC__)
   __global__ void GpuAsyncTensorOpsStubKernel(float const* __restrict__ src,
                                                float* __restrict__ dst,
                                                size_t numFloats)
   {
-    printf("GpuAsyncTensorOpsStubKernel\n");
     size_t const gid = blockIdx.x * blockDim.x + threadIdx.x;
     size_t const stride = gridDim.x * blockDim.x;
     for (size_t i = gid; i < numFloats; i += stride)
       dst[i] = src[i];
   }
+#else
+// The TDM API does not have a function to set the transfer size, so we need to do it manually.
+__device__ void SetTransferSize(gfx1250_TDM_GROUP1& group1, int numElements){
+  group1.tensorDim0(numElements);
+  group1.tensorDim0Stride(numElements);
+  group1.tileDim0(numElements);
+}
+
+// numElementsPerTile is the number of elements to process per tile.  Its maximum value is the shared memory size / number of waves per workgroup.
+__global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numElements, int numElementsPerTile){
+  constexpr bool verbose = false; // Turn off to disable debug prints.
+  extern __shared__ float shmem[];
+  int waveId = threadIdx.x / warpSize;
+  int numWavesPerBlock = blockDim.x / warpSize;
+  size_t itemsProcessedPerGridIteration = numElementsPerTile * numWavesPerBlock * gridDim.x;
+
+  float* shmemPtr = static_cast<float*>(shmem) + numElementsPerTile * waveId;
+  // Local per-wave source and destination pointers
+  const float* srcPtr = src + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+  float* dstPtr = dst + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+
+  gfx1250_TDM_GROUP0 group0;
+
+  group0.ldsAddr((uintptr_t)shmemPtr);
+
+  gfx1250_TDM_GROUP1 group1;
+  group1.dataSize(2); // Log2 of the element size in bytes, so 2 for float
+  SetTransferSize(group1, numElementsPerTile);
+
+  constexpr __hip_uint32x4 empty_x4{};
+  constexpr __hip_uint32x8 empty_x8{};
+  size_t elementsToProcess = numElementsPerTile;
+  while(srcPtr < src + numElements){
+    // Handle the last tile of the block, which may be less than num_elements_per_tile.
+    if(src + numElements - srcPtr < numElementsPerTile){
+      size_t remainingElements = src + numElements - srcPtr;
+      SetTransferSize(group1, remainingElements);
+      if constexpr(verbose) elementsToProcess = remainingElements;
+    }
+    // Copy from global memory to LDS
+    group0.globalAddr((uintptr_t)srcPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Loading %zu elements from %p to shared memory at %p\n", blockIdx.x, waveId, elementsToProcess, srcPtr, shmemPtr);
+    __builtin_amdgcn_tensor_load_to_lds(group0.m_bitfield, group1.m_bitfield, empty_x4, empty_x4, empty_x8, 0);
+    __builtin_amdgcn_s_wait_tensorcnt(0);
+
+    // write back from LDS to global
+    group0.globalAddr((uintptr_t)dstPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Storing %zu elements from shared memory at %p to %p\n", blockIdx.x, waveId, elementsToProcess, shmemPtr, dstPtr);
+    __builtin_amdgcn_tensor_store_from_lds(group0.m_bitfield, group1.m_bitfield, empty_x4, empty_x4, empty_x8, 0);
+    __builtin_amdgcn_s_wait_tensorcnt(0);
+    srcPtr += itemsProcessedPerGridIteration;
+    dstPtr += itemsProcessedPerGridIteration;
+  }
+}
+#endif
 
   __global__ void GpuAsyncLoadStoreStubKernel(float const* __restrict__ src,
                                                float* __restrict__ dst,
@@ -5535,10 +5591,27 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       else
         GpuAsyncLoadStoreStubKernel<<<dim3(blocks), dim3(threads), 0, stream>>>(src, dst, numFloats);
 #else
-      if (tensorFlavor)
-        hipLaunchKernelGGL(GpuAsyncTensorOpsStubKernel, dim3(blocks), dim3(threads), 0, stream, src, dst, numFloats);
-      else
+      if (tensorFlavor) {
+        if (rss.numBytes % sizeof(float) != 0)
+          return {ERR_FATAL, "Async tensor executor (TDM): numBytes (%zu) must be a multiple of %zu", rss.numBytes,
+                  sizeof(float)};
+        size_t const numElements = rss.numBytes / sizeof(float);
+
+        hipDeviceProp_t props{};
+        ERR_CHECK(hipGetDeviceProperties(&props, exeIndex));
+        int const warpSize = props.warpSize;
+        int maxShmem = 0;
+        ERR_CHECK(hipDeviceGetAttribute(&maxShmem, hipDeviceAttributeMaxSharedMemoryPerBlock, exeIndex));
+        int kWavesPerWorkgroup = threads / warpSize;
+        int numElementsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup));
+        unsigned int shmemBytes = numElementsPerTile * kWavesPerWorkgroup * sizeof(float);
+
+        hipLaunchKernelGGL(GpuAsyncTensorOpsKernel, dim3(blocks), dim3(threads),
+                           shmemBytes, stream, src, dst, numElements,
+                           numElementsPerTile);
+      } else {
         hipLaunchKernelGGL(GpuAsyncLoadStoreStubKernel, dim3(blocks), dim3(threads), 0, stream, src, dst, numFloats);
+      }
 #endif
       ERR_CHECK(hipGetLastError());
       if (stopEvent)
