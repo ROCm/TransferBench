@@ -5017,11 +5017,12 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
   TileMover tileMovers[pipelineDepth]{};
   unsigned int slot = 0;
   tileMovers[slot].LoadTile(shmemPtr, srcPtr, dstPtr, numElementsToProcess);
-  while(srcPtr < src + numElements){
+  while(srcPtr + (slot ^ 1) * numElementsPerSubtile < src + numElements){
     slot ^= 1;
     // Handle the last tile of the block, which may be less than num_elements_per_tile.
-    if(src + numElements - srcPtr < numElementsPerSubtile){
-      numElementsToProcess = src + numElements - srcPtr;
+    if(src + numElements - (srcPtr + slot * numElementsPerSubtile) < numElementsPerSubtile){
+      numElementsToProcess = src + numElements - (srcPtr + slot * numElementsPerSubtile);
+      if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Num Elements To Process: %d\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess);
     }
     // Copy from global memory to LDS
     tileMovers[slot].LoadTile(shmemPtr + slot * numElementsPerSubtile, srcPtr + slot * numElementsPerSubtile, dstPtr + slot * numElementsPerSubtile, numElementsToProcess);
