@@ -287,7 +287,7 @@ int SmokeTestPreset(EnvVars&          ev,
       ev.Print("SE_MAX_BYTES", seMaxBytesStr,      "Each SubExecutor can work on at most %lu bytes", seMaxBytes);
       ev.Print("TEST_LIST"   , testsToRun.size(),  testList.empty() ? "Running all tests (can also filter with 'dma','gfx','fast')"
                : "Running Tests: %s", ev.GetStr(testList).c_str());
-      ev.Print("USE_BMDA"    , useBdma,            "Using %s dma executor", useBdma ? "batched" : "standard");
+      ev.Print("USE_BDMA"    , useBdma,            "Using %s dma executor", useBdma ? "batched" : "standard");
       printf("\n");
     }
   }
