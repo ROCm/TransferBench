@@ -1028,6 +1028,10 @@ namespace {
     void BroadcastString(int root, std::string& string) const;
     void BroadcastExeResult(int root, ExeResult& exeResult) const;
     void BroadcastTfrResult(int root, TransferResult& tfrResult) const;
+    void AllGatherLog(std::string& localLog) const;
+    void AllGatherVerboseLogs(std::vector<Transfer> const& transfers,
+                              std::map<ExeDevice, ExeInfo> const& executorMap,
+                              ConfigOptions const& cfg) const;
 
 
   private:
@@ -4066,8 +4070,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t* pActualBytes,
-                                  float** memPtr, hipMemGenericAllocationHandle_t* memHandle)
+                                  float** memPtr, hipMemGenericAllocationHandle_t* memHandle,
+                                  std::string& verboseLog)
   {
+    bool const verbose = System::Get().IsVerbose();
+    char _vbuf[512];
+
     // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
     // NOTE: This will be overwritten on executor rank if pod communication is required
     System::Get().Broadcast(memDevice.memRank, sizeof(*memPtr), memPtr);
@@ -4078,16 +4086,52 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
+      if (verbose) {
+        snprintf(_vbuf, sizeof(_vbuf),
+                 "[INFO] Rank %d fabric exchange: mem=R%dG%d (%s) -> exe=R%dG%d (%s) %zu bytes ptr=%p\n",
+                 GetRank(),
+                 memDevice.memRank, memDevice.memIndex, GetGpuBdf(memDevice.memIndex).c_str(),
+                 exeDevice.exeRank, exeDevice.exeIndex, GetGpuBdf(exeDevice.exeIndex).c_str(),
+                 *pActualBytes, *memPtr);
+        verboseLog += _vbuf;
+      }
+
       // mem rank exports to shareable fabric handle; broadcast handle + status so all
       // ranks fail together instead of hanging on the next collective if export fails
       hipMemFabricHandle_t fabricHandle = {};
       hipError_t exportErr = hipSuccess;
       const char* exportStep = "hipSetDevice";
       if (memDevice.memRank == GetRank()) {
+        if (verbose) {
+          snprintf(_vbuf, sizeof(_vbuf), "[INFO] Rank %d [EXPORTER] hipSetDevice(%d) (GPU BDF %s)\n",
+                   GetRank(), memDevice.memIndex, GetGpuBdf(memDevice.memIndex).c_str());
+          verboseLog += _vbuf;
+        }
         exportErr = hipSetDevice(memDevice.memIndex);
         if (exportErr == hipSuccess) {
+          int activeDevice = -1;
+          hipGetDevice(&activeDevice);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [EXPORTER] active device after hipSetDevice: %d (expected %d) %s\n",
+                     GetRank(), activeDevice, memDevice.memIndex,
+                     activeDevice == memDevice.memIndex ? "OK" : "MISMATCH");
+            verboseLog += _vbuf;
+          }
           exportStep = "hipMemExportToShareableHandle";
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [EXPORTER] hipMemExportToShareableHandle handle=%p\n",
+                     GetRank(), (void*)*memHandle);
+            verboseLog += _vbuf;
+          }
           exportErr = hipMemExportToShareableHandle(&fabricHandle, *memHandle, hipMemHandleTypeFabric, 0);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [EXPORTER] hipMemExportToShareableHandle: %s\n",
+                     GetRank(), hipGetErrorString(exportErr));
+            verboseLog += _vbuf;
+          }
         }
       }
 
@@ -4101,30 +4145,94 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hipError_t importErr = hipSuccess;
       const char* importStep = "hipSetDevice";
       if (exeDevice.exeRank == GetRank()) {
+        if (verbose) {
+          snprintf(_vbuf, sizeof(_vbuf), "[INFO] Rank %d [IMPORTER] hipSetDevice(%d) (GPU BDF %s)\n",
+                   GetRank(), exeDevice.exeIndex, GetGpuBdf(exeDevice.exeIndex).c_str());
+          verboseLog += _vbuf;
+        }
         importErr = hipSetDevice(exeDevice.exeIndex);
         if (importErr == hipSuccess) {
+          int activeDevice = -1;
+          hipGetDevice(&activeDevice);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] active device after hipSetDevice: %d (expected %d) %s\n",
+                     GetRank(), activeDevice, exeDevice.exeIndex,
+                     activeDevice == exeDevice.exeIndex ? "OK" : "MISMATCH");
+            verboseLog += _vbuf;
+          }
           importStep = "hipMemImportFromShareableHandle";
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] hipMemImportFromShareableHandle\n", GetRank());
+            verboseLog += _vbuf;
+          }
           importErr = hipMemImportFromShareableHandle(memHandle, (void*)&fabricHandle, hipMemHandleTypeFabric);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] hipMemImportFromShareableHandle: %s\n",
+                     GetRank(), hipGetErrorString(importErr));
+            verboseLog += _vbuf;
+          }
         }
         if (importErr == hipSuccess) {
           importStep = "hipMemAddressReserve";
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] hipMemAddressReserve %zu bytes\n",
+                     GetRank(), *pActualBytes);
+            verboseLog += _vbuf;
+          }
           importErr = hipMemAddressReserve((gpu_device_ptr*)memPtr, *pActualBytes, 0, 0, 0);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] hipMemAddressReserve: %s ptr=%p\n",
+                     GetRank(), hipGetErrorString(importErr), *memPtr);
+            verboseLog += _vbuf;
+          }
         }
         if (importErr == hipSuccess) {
           importStep = "hipMemMap";
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] hipMemMap ptr=%p size=%zu handle=%p\n",
+                     GetRank(), *memPtr, *pActualBytes, (void*)*memHandle);
+            verboseLog += _vbuf;
+          }
           importErr = hipMemMap((gpu_device_ptr)*memPtr, *pActualBytes, 0, *memHandle, 0);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf), "[INFO] Rank %d [IMPORTER] hipMemMap: %s\n",
+                     GetRank(), hipGetErrorString(importErr));
+            verboseLog += _vbuf;
+          }
         }
         if (importErr == hipSuccess) {
           importStep = "hipMemSetAccess";
           hipMemAccessDesc desc;
           desc.location = {hipMemLocationTypeDevice, exeDevice.exeIndex};
           desc.flags = hipMemAccessFlagsProtReadWrite;
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf),
+                     "[INFO] Rank %d [IMPORTER] hipMemSetAccess ptr=%p size=%zu device=%d\n",
+                     GetRank(), *memPtr, *pActualBytes, exeDevice.exeIndex);
+            verboseLog += _vbuf;
+          }
           importErr = hipMemSetAccess((gpu_device_ptr)*memPtr, *pActualBytes, &desc, 1);
+          if (verbose) {
+            snprintf(_vbuf, sizeof(_vbuf), "[INFO] Rank %d [IMPORTER] hipMemSetAccess: %s\n",
+                     GetRank(), hipGetErrorString(importErr));
+            verboseLog += _vbuf;
+          }
         }
       }
       System::Get().Broadcast(exeDevice.exeRank, sizeof(hipError_t), &importErr);
       if (importErr != hipSuccess) {
         return {ERR_FATAL, "HIP Error in %s during fabric handle import: %s", importStep, hipGetErrorString(importErr)};
+      }
+      if (verbose) {
+        snprintf(_vbuf, sizeof(_vbuf),
+                 "[INFO] Rank %d fabric exchange complete: imported ptr=%p\n", GetRank(), *memPtr);
+        verboseLog += _vbuf;
       }
 #else
       return {ERR_FATAL, "Unable to export/import fabric handle without compiling with pod communication support"};
@@ -4138,7 +4246,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   static ErrResult PrepareExecutor(ConfigOptions    const& cfg,
                                    vector<Transfer> const& transfers,
                                    ExeDevice        const& exeDevice,
-                                   ExeInfo&                exeInfo)
+                                   ExeInfo&                exeInfo,
+                                   std::string&            verboseLog)
   {
     exeInfo.totalDurationMsec = 0.0;
     int const localRank = GetRank();
@@ -4212,7 +4321,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         // Exchange memory pointer across ranks
         ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, &rss.srcActualBytes[iSrc],
-                                 &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
+                                 &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc], verboseLog));
       }
 
       // Allocate destination memory
@@ -4256,7 +4365,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
         // Exchange memory pointer across ranks
         ERR_CHECK(ExchangeMemory(dstMemDevice, exeDevice, &rss.dstActualBytes[iDst],
-                                 &rss.dstMem[iDst], &rss.dstMemHandle[iDst]));
+                                 &rss.dstMem[iDst], &rss.dstMemHandle[iDst], verboseLog));
       }
 
       // Prepare HSA DMA copy specific resources
@@ -5807,10 +5916,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int const localRank = GetRank();
     vector<ExeDevice> localExecutors;
     vector<TransferResources*> transferResources;
+    std::string fabricVerboseLog;
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
-      ERR_APPEND(PrepareExecutor(cfg, transfers, exeDevice, exeInfo), errResults);
+      ERR_APPEND(PrepareExecutor(cfg, transfers, exeDevice, exeInfo, fabricVerboseLog), errResults);
 
       for (auto& resource : exeInfo.resources) {
         transferResources.push_back(&resource);
@@ -5824,6 +5934,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (exeDevice.exeType == EXE_GPU_GFX) {
         ERR_APPEND(SelectGfxKernel(cfg, transfers, exeInfo), errResults);
       }
+    }
+
+    // In multi-rank runs, gather each rank's verbose SRC/DST/EXE info to rank 0 for printing
+    if (System::Get().IsVerbose() && System::Get().GetNumRanks() > 1) {
+      System::Get().AllGatherVerboseLogs(transfers, executorMap, cfg);
+      System::Get().AllGatherLog(fabricVerboseLog);
     }
 
     // Prepare reference src/dst arrays - only once for largest size
@@ -7706,6 +7822,92 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         errResults.push_back(errResult);
       }
     }
+  }
+
+  void System::AllGatherLog(std::string& localLog) const
+  {
+    if (commMode == COMM_NONE) return;
+    for (int i = 0; i < numRanks; i++) {
+      std::string peerLog = (rank == i) ? localLog : std::string{};
+      BroadcastString(i, peerLog);
+      if (rank == 0 && !peerLog.empty()) {
+        printf("%s", peerLog.c_str());
+      }
+    }
+  }
+
+  void System::AllGatherVerboseLogs(std::vector<Transfer> const& transfers,
+                                    std::map<ExeDevice, ExeInfo> const& executorMap,
+                                    ConfigOptions const& cfg) const
+  {
+    if (commMode == COMM_NONE) return;
+
+    // Build this rank's log string covering all transfers it owns
+    std::string localLog;
+    char buf[512];
+
+    for (auto const& [exeDevice, exeInfo] : executorMap) {
+      if (exeDevice.exeRank != rank) continue;
+
+      std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
+      int exeNuma = IsGpuExeType(exeDevice.exeType)
+                    ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
+                    : IsNicExeType(exeDevice.exeType)
+                      ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
+                      : exeDevice.exeIndex;
+
+      snprintf(buf, sizeof(buf), "[INFO] Rank %d preparing executor (R%d%c%d)\n",
+               rank, exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
+      localLog += buf;
+
+      for (auto const& rss : exeInfo.resources) {
+        Transfer const& t = transfers[rss.transferIdx];
+
+        snprintf(buf, sizeof(buf),
+                 "[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
+                 rank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
+        localLog += buf;
+
+        snprintf(buf, sizeof(buf), "[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
+                 exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
+                 exeNuma,
+                 exeBdf.empty() ? "" : " BDF ",
+                 exeBdf.c_str());
+        localLog += buf;
+
+        for (int iSrc = 0; iSrc < (int)t.srcs.size(); ++iSrc) {
+          MemDevice const& md = t.srcs[iSrc];
+          if (md.memRank != rank) continue;
+          bool requiresFabricHandle = (md.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
+          std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+          snprintf(buf, sizeof(buf),
+                   "[INFO]   SRC[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
+                   iSrc, GetMemTypeName(md.memType), md.memIndex,
+                   GetMemDeviceNuma(md).c_str(),
+                   bdf.empty() ? "" : " BDF ", bdf.c_str(),
+                   md.memRank, t.numBytes + cfg.data.byteOffset,
+                   requiresFabricHandle ? " [fabric-exportable]" : "");
+          localLog += buf;
+        }
+
+        for (int iDst = 0; iDst < (int)t.dsts.size(); ++iDst) {
+          MemDevice const& md = t.dsts[iDst];
+          if (md.memRank != rank) continue;
+          bool requiresFabricHandle = (md.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
+          std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+          snprintf(buf, sizeof(buf),
+                   "[INFO]   DST[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
+                   iDst, GetMemTypeName(md.memType), md.memIndex,
+                   GetMemDeviceNuma(md).c_str(),
+                   bdf.empty() ? "" : " BDF ", bdf.c_str(),
+                   md.memRank, t.numBytes + cfg.data.byteOffset,
+                   requiresFabricHandle ? " [fabric-exportable]" : "");
+          localLog += buf;
+        }
+      }
+    }
+
+    AllGatherLog(localLog);
   }
 
 #if !defined(__NVCC__)
