@@ -24,7 +24,7 @@ THE SOFTWARE.
 
 namespace  {
 
-#define NUM_SMOKE_TESTS 14
+#define NUM_SMOKE_TESTS 16
 #define MAX_TRANSFER_STRLEN 128
 
 // What to print on pass/fail/skip
@@ -41,6 +41,7 @@ int RunTest(int                        testNum,
             MemType                    gpuMemType,
             size_t                     maxBytesPerSubExec,
             bool                       isParallel,
+            bool                       useBdma,
             int                        targetGpu,
             int                        totalGpus)
 {
@@ -53,7 +54,6 @@ int RunTest(int                        testNum,
   std::vector<Transfer> allTransfers;
   TestResults results;
   char transferStr[MAX_TRANSFER_STRLEN] = {};
-
 
   static std::vector<pair<int, int>> gpuToDeviceMap;
   if (gpuToDeviceMap.empty()) {
@@ -68,26 +68,27 @@ int RunTest(int                        testNum,
   int targetIdx  = gpuToDeviceMap[targetGpu].second;
 
   // Different test categories
-  bool isH2D       = (testNum == 1 || testNum ==  8);
-  bool isD2H       = (testNum == 2 || testNum ==  9);
-  bool isD2D_RW    = (testNum == 3 || testNum == 10);
-  bool isD2D_RR    = (testNum == 4 || testNum == 11);
-  bool isBroadcast = (testNum == 5 || testNum == 12);
-  bool isGather    = (testNum == 6 || testNum == 13);
-  bool isAllToAll  = (testNum == 7 || testNum == 14);
+  bool isH2D        = (testNum == 1 || testNum ==  9);
+  bool isD2H        = (testNum == 2 || testNum == 10);
+  bool isD2D_RW     = (testNum == 3 || testNum == 11);
+  bool isD2D_RR     = (testNum == 4 || testNum == 12);
+  bool isBroadcast  = (testNum == 5 || testNum == 13);
+  bool isGather     = (testNum == 6 || testNum == 14);
+  bool isAllToAllRw = (testNum == 7 || testNum == 15);
+  bool isAllToAllRr = (testNum == 8 || testNum == 16);
 
   // Determine executor type
   ExeType exeType;
-  if      (1 <= testNum && testNum <= 7)  exeType = EXE_GPU_DMA;
-  else if (8 <= testNum && testNum <= 14) exeType = EXE_GPU_GFX;
+  if      (1 <= testNum && testNum <= 8)  exeType = useBdma ? EXE_GPU_BDMA: EXE_GPU_DMA;
+  else if (9 <= testNum && testNum <= 16) exeType = EXE_GPU_GFX;
   else {
     Utils::Print("[ERROR] Unsupported test number %d\n", testNum);
     exit(1);
   }
 
   // Adjust number of subexecutors per transfer if performing multiple transfers
-  int numSubExec = exeType == EXE_GPU_DMA ? 1 : numSubExecPerGpu;
-  if (exeType == EXE_GPU_GFX && (isBroadcast || isGather || isAllToAll))
+  int numSubExec = (exeType == EXE_GPU_GFX) ? numSubExecPerGpu : 1;
+  if (exeType == EXE_GPU_GFX && (isBroadcast || isGather || isAllToAllRw || isAllToAllRr))
     numSubExec = std::max(1, numSubExecPerGpu / totalGpus);
 
   for (size_t numBytes : sizeList) {
@@ -138,26 +139,19 @@ int RunTest(int                        testNum,
                    isD2D_RW ? rank : dstRank, ExeTypeStr[exeType], isD2D_RW ? gpuIdx : dstGpuIdx,
                    dstRank, MemTypeStr[gpuMemType], dstGpuIdx,
                    numSubExec, numBytes);
-        } else if (isBroadcast) {
+        } else if (isBroadcast || isAllToAllRw) {
           // Split up the number of CUs across all Transfers
           snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R%d%c%d R%d%c%d R*%c* %d %lu)",
                    rank, MemTypeStr[gpuMemType], gpuIdx,
                    rank, ExeTypeStr[exeType], gpuIdx,
                    MemTypeStr[gpuMemType],
                    numSubExec, numBytes);
-        } else if (isGather) {
+        } else if (isGather || isAllToAllRr) {
           // Split up the number of CUs across all Transfers
           snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R*%c* R%d%c%d R%d%c%d %d %lu)",
                    MemTypeStr[gpuMemType],
                    rank, ExeTypeStr[exeType], gpuIdx,
                    rank, MemTypeStr[gpuMemType], gpuIdx,
-                   numSubExec, numBytes);
-        } else if (isAllToAll) {
-          // Split up the number of CUs across all Transfers
-          snprintf(transferStr, MAX_TRANSFER_STRLEN, "-1 (R%d%c%d R%d%c%d R*%c* %d %lu)",
-                   rank, MemTypeStr[gpuMemType], gpuIdx,
-                   rank, ExeTypeStr[exeType], gpuIdx,
-                   MemTypeStr[gpuMemType],
                    numSubExec, numBytes);
         }
 
@@ -167,12 +161,13 @@ int RunTest(int                        testNum,
           exit(1);
         }
 
+        // Only Broadcast/Gather are run "per-GPU"
         if (isBroadcast || isGather) {
           if (!RunTransfers(cfg, transfers, results)) {
             allPass = false;
             break;
           }
-        } else {
+        } else { // Otherwise accumulate the transfers to run in parallel
           allTransfers.insert(allTransfers.end(), transfers.begin(), transfers.end());
         }
       }
@@ -221,13 +216,28 @@ int SmokeTestPreset(EnvVars&          ev,
   ev.numWarmups     = EnvVars::GetEnvVar("NUM_WARMUPS",     0);
 
   // Collect env vars
-  int                 cpuMemTypeIdx = EnvVars::GetEnvVar          ("CPU_MEM_TYPE",                  0);
-  int                 gpuMemTypeIdx = EnvVars::GetEnvVar          ("GPU_MEM_TYPE",                  0);
-  vector<int>         gfxSesList    = EnvVars::GetEnvVarArray     ("GFX_SE_LIST",      {1,numSubExec});
-  int                 runParallel   = EnvVars::GetEnvVar          ("RUN_PARALLEL",                  1);
-  std::string         seMaxBytesStr = EnvVars::GetEnvVar          ("SE_MAX_BYTES",             "128M");
-  vector<std::string> sizeStrList   = EnvVars::GetEnvVarStrArray  ("SIZE_LIST",   {"1K","16M","256M"});
-  vector<int>         testList      = EnvVars::GetEnvVarRangeArray("TEST_LIST",                    {});
+  int                 cpuMemTypeIdx = EnvVars::GetEnvVar        ("CPU_MEM_TYPE",                  0);
+  int                 gpuMemTypeIdx = EnvVars::GetEnvVar        ("GPU_MEM_TYPE",                  0);
+  vector<int>         gfxSesList    = EnvVars::GetEnvVarArray   ("GFX_SE_LIST",      {1,numSubExec});
+  int                 runParallel   = EnvVars::GetEnvVar        ("RUN_PARALLEL",                  1);
+  std::string         seMaxBytesStr = EnvVars::GetEnvVar        ("SE_MAX_BYTES",             "128M");
+  vector<std::string> sizeStrList   = EnvVars::GetEnvVarStrArray("SIZE_LIST",   {"1K","16M","256M"});
+  int                 useBdma       = EnvVars::GetEnvVar        ("USE_BDMA",                      0);
+
+  // Handle TEST_LIST differently to allow for "dma" and "gfx" as targets
+  vector<int> testList;
+  char* testListStr = getenv("TEST_LIST");
+  if (testListStr) {
+    if (!strcmp(testListStr, "dma")) {         // Only DMA tests
+      for (int i = 1; i <= 8; i++) testList.push_back(i);
+    } else if (!strcmp(testListStr, "gfx")) {  // Only GFX tests
+      for (int i = 9; i <= 16; i++) testList.push_back(i);
+    } else if (!strcmp(testListStr, "fast")) { // Only non-overlapping tests (H<->D + A2As)
+      testList = {1,2,7,8,9,10,15,16};
+    } else {
+      testList = EnvVars::GetEnvVarRangeArray("TEST_LIST", {});
+    }
+  }
 
   MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
   MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
@@ -275,7 +285,9 @@ int SmokeTestPreset(EnvVars&          ev,
       ev.Print("RUN_PARALLEL", runParallel,        "Running GPUs %s", runParallel ? "in parallel" : "serially");
       ev.Print("SIZE_LIST"   , sizeStrList.size(), "Transfer sizes tested: %s", ev.GetStr(sizeStrList).c_str());
       ev.Print("SE_MAX_BYTES", seMaxBytesStr,      "Each SubExecutor can work on at most %lu bytes", seMaxBytes);
-      ev.Print("TEST_LIST"   , testsToRun.size(),  testList.empty() ? "Running all tests" : "Running Tests: %s", ev.GetStr(testList).c_str());
+      ev.Print("TEST_LIST"   , testsToRun.size(),  testList.empty() ? "Running all tests (can also filter with 'dma','gfx','fast')"
+               : "Running Tests: %s", ev.GetStr(testList).c_str());
+      ev.Print("USE_BMDA"    , useBdma,            "Using %s dma executor", useBdma ? "batched" : "standard");
       printf("\n");
     }
   }
@@ -308,7 +320,7 @@ int SmokeTestPreset(EnvVars&          ev,
       Utils::Print("%s", l2.c_str());
       fflush(stdout);
 
-      testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus);
+      testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, useBdma, line, totalGpus);
       Utils::Print("%s|", r2.c_str());
       if (line == 0) {
         Utils::Print("  %02d  |", y);
@@ -318,7 +330,7 @@ int SmokeTestPreset(EnvVars&          ev,
       for (auto numSubExec : gfxSesList) {
         Utils::Print("%s", l2.c_str());
         fflush(stdout);
-        testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, line, totalGpus);
+        testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, useBdma, line, totalGpus);
         Utils::Print("%s|", r2.c_str());
       }
       Utils::Print("\n");
@@ -348,13 +360,14 @@ int SmokeTestPreset(EnvVars&          ev,
   Utils::Print("\n");
 
   // Print table / Run Tests
-  ExecuteTests("Copy (H2D)               ", 1,  8, runParallel);
-  ExecuteTests("Copy (D2H)               ", 2,  9, runParallel);
-  ExecuteTests("Copy (D2D) (Remote Write)", 3, 10, runParallel);
-  ExecuteTests("Copy (D2D) (Remote Read )", 4, 11, runParallel);
-  ExecuteTests("Broadcast  (One to All)  ", 5, 12, runParallel);
-  ExecuteTests("Gather     (All to One)  ", 6, 13, runParallel);
-  ExecuteTests("All To All               ", 7, 14, true);
+  ExecuteTests("Copy (H2D)               ", 1,  9, runParallel);
+  ExecuteTests("Copy (D2H)               ", 2, 10, runParallel);
+  ExecuteTests("Copy (D2D) (Remote Write)", 3, 11, runParallel);
+  ExecuteTests("Copy (D2D) (Remote Read )", 4, 12, runParallel);
+  ExecuteTests("Broadcast  (One to All)  ", 5, 13, runParallel);
+  ExecuteTests("Gather     (All to One)  ", 6, 14, runParallel);
+  ExecuteTests("All To All (Remote Write)", 7, 15, true);
+  ExecuteTests("All To All (Remote Read) ", 8, 16, true);
 
   // Show summary
   if (testsFailed) {
