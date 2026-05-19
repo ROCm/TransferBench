@@ -239,6 +239,14 @@ int SmokeTestPreset(EnvVars&          ev,
     }
   }
 
+  // Check for BDMA support
+#ifndef BMA_EXEC_ENABLED
+   if (useBdma) {
+     Utils::Print("[ERROR] USE_BDMA=1 requires BDMA/BMA executor support, but this build was compiled without BMA_EXEC_ENABLED\n");
+     return ERR_FATAL;
+   }
+ #endif
+
   MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
   MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
   std::set<int> testsToRun(testList.begin(), testList.end());
