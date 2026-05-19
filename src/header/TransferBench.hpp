@@ -7756,39 +7756,36 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       hsa_amd_pointer_info_t info;
       info.size = sizeof(info);
 
-      // Callback to process each agent
-      auto cpuAgentCallback = [](hsa_agent_t agent, void* data) -> hsa_status_t {
-        std::map<int, hsa_agent_t>* agents = static_cast<std::map<int, hsa_agent_t>*>(data);
-
-        hsa_device_type_t deviceType;
-        hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &deviceType);
-        if (status != HSA_STATUS_SUCCESS) return status;
-
-        if (deviceType == HSA_DEVICE_TYPE_CPU) {
-          uint32_t nodeId;
-          status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NODE, &nodeId);
-          if (status == HSA_STATUS_SUCCESS) {
-            (*agents)[nodeId] = agent;
-          } else {
-            return status;
-          }
-        }
-        return HSA_STATUS_SUCCESS;
-      };
-
-      // Index CPU agents
-      hsa_init();
-      std::map<int, hsa_agent_t> cpuAgentMap;
-      hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
-      hsa_shut_down();
-
+      // Index CPU agents by Linux NUMA node.
+      //
+      // AllocateMemory({MEM_CPU, i}, ...) yields a buffer pinned on NUMA i, whose
+      // hsa_amd_pointer_info::agentOwner is the HSA CPU agent for that NUMA. This
+      // preserves the invariant `cpuAgents[i] == "agent for Linux NUMA i"` that the
+      // closest-NUMA-to-GPU detection below depends on.
+      //
+      // The previous hsa_iterate_agents + HSA_AGENT_INFO_NODE approach indexed by the
+      // HSA/KFD topology node id, which is *not* guaranteed to equal the Linux NUMA
+      // index (e.g. on systems with GPU agents enumerated before CPU agents). When
+      // they diverge, cpuAgents[i] is left default-initialised (handle=0) and the
+      // GPU-to-closest-CPU lookup fails, returning -1 for every GPU.
+      //
+      // NUMA nodes restricted by the process's cpuset / mempolicy are skipped here
+      // (AllocateMemory rejects them since #303) without aborting the whole topology
+      // scan; cpuAgents[i] simply stays zero-initialised for restricted nodes, which
+      // is fine because those NUMAs cannot be used for transfers anyway.
       cpuAgents.clear();
       int numCpus = numa_num_configured_nodes();
       cpuAgents.resize(numCpus);
       for (int i = 0; i < numCpus; i++) {
-        if (cpuAgentMap.count(i)) {
-          cpuAgents[i] = cpuAgentMap[i];
+        int32_t* tempBuffer = nullptr;
+        if (AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer).errType != ERR_NONE
+            || tempBuffer == nullptr) {
+          continue;
         }
+        if (hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL) == HSA_STATUS_SUCCESS) {
+          cpuAgents[i] = info.agentOwner;
+        }
+        DeallocateMemory(MEM_CPU, tempBuffer, 1024);
       }
 
       // Index GPU agents
