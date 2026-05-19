@@ -7776,21 +7776,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         return HSA_STATUS_SUCCESS;
       };
 
-      // Index CPU agents
-      hsa_init();
-      std::map<int, hsa_agent_t> cpuAgentMap;
-      hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
-      hsa_shut_down();
-
-      cpuAgents.clear();
-      int numCpus = numa_num_configured_nodes();
-      cpuAgents.resize(numCpus);
-      for (int i = 0; i < numCpus; i++) {
-        if (cpuAgentMap.count(i)) {
-          cpuAgents[i] = cpuAgentMap[i];
-        }
-      }
-
       // Index GPU agents
       int numGpus = 0;
       hipError_t status = hipGetDeviceCount(&numGpus);
@@ -7802,6 +7787,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
         gpuAgents.push_back(info.agentOwner);
         DeallocateMemory(MEM_GPU, tempBuffer, 1024);
+      }
+
+      // Index CPU agents (done after HIP initialization)
+      std::map<int, hsa_agent_t> cpuAgentMap;
+      hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
+
+      cpuAgents.clear();
+      int numCpus = numa_num_configured_nodes();
+      cpuAgents.resize(numCpus);
+      for (int i = 0; i < numCpus; i++) {
+        if (cpuAgentMap.count(i)) {
+          cpuAgents[i] = cpuAgentMap[i];
+        }
       }
     }
 #endif
