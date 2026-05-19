@@ -26,6 +26,7 @@ THE SOFTWARE.
 #include <arpa/inet.h>
 #include <atomic>
 #include <barrier>
+#include <cassert>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
@@ -4970,6 +4971,71 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
     dstPtr += itemsProcessedPerGridIteration;
   }
 }
+
+struct TileMover {
+  gfx1250_TDM_GROUP0 group0;
+  gfx1250_TDM_GROUP1 group1;
+  float* dstPtr{nullptr};
+
+  __device__ void LoadTile(float* shmemPtr, const float* srcPtr, float* dstPtr, size_t numElementsToProcess) {
+    group0.ldsAddr((uintptr_t)shmemPtr);
+    group0.globalAddr((uintptr_t)srcPtr);
+    group1.dataSize(2);
+    SetTransferSize(group1, numElementsToProcess);
+    this -> dstPtr = dstPtr;
+    __builtin_amdgcn_tensor_load_to_lds(group0.m_bitfield, group1.m_bitfield, __hip_uint32x4{}, __hip_uint32x4{}, __hip_uint32x8{}, 0);
+  }
+  __device__ void StoreTile() {
+    assert(dstPtr != nullptr);
+    group0.globalAddr((uintptr_t)dstPtr);
+    __builtin_amdgcn_tensor_store_from_lds(group0.m_bitfield, group1.m_bitfield, __hip_uint32x4{}, __hip_uint32x4{}, __hip_uint32x8{}, 0);
+  }
+};
+
+// numElementsPerTile is the number of elements to process per tile.  Its maximum value is the shared memory size / number of waves per workgroup.
+__global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numElements, int numElementsPerSubtile){
+  constexpr bool verbose = false; // Turn off to disable debug prints.
+  extern __shared__ float shmem[];
+  int waveId = threadIdx.x / warpSize;
+  int numWavesPerBlock = blockDim.x / warpSize; // This only works because the blockDim.x is fixed.
+  constexpr int pipelineDepth = 2;
+  
+  int numElementsPerTile = pipelineDepth * numElementsPerSubtile;
+  size_t itemsProcessedPerGridIteration = numElementsPerTile * numWavesPerBlock * gridDim.x;
+
+  float* shmemPtr = static_cast<float*>(shmem) + numElementsPerTile * waveId;
+  // Local per-wave source and destination pointers
+  const float* srcPtr = src + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+  float* dstPtr = dst + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+  
+   // Log2 of the element size in bytes, so 2 for float
+  int numElementsToProcess = std::min(numElementsPerSubtile, (int)(src + numElements - srcPtr));
+  TileMover tileMovers[pipelineDepth]{};
+  int slot = 0;
+  tileMovers[slot].LoadTile(shmemPtr, srcPtr, dstPtr, numElementsToProcess);
+  while(srcPtr < src + numElements){
+    slot ^= 1;
+    // Handle the last tile of the block, which may be less than num_elements_per_tile.
+    if(src + numElements - srcPtr < numElementsPerSubtile){
+      numElementsToProcess = src + numElements - srcPtr;
+    }
+    // Copy from global memory to LDS
+    tileMovers[slot].LoadTile(shmemPtr, srcPtr + slot * numElementsPerSubtile, dstPtr + slot * numElementsPerSubtile, numElementsToProcess);
+
+   // if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Loading %zu elements from %p to shared memory at %p\n", blockIdx.x, waveId, numElementsToProcess, srcPtr, shmemPtr);
+    __builtin_amdgcn_s_wait_tensorcnt(1);
+
+    // write back from LDS to global
+    tileMovers[slot^1].StoreTile();
+    //if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Storing %zu elements from shared memory at %p to %p\n", blockIdx.x, waveId, numElementsToProcess, shmemPtr, dstPtr);
+    __builtin_amdgcn_s_wait_tensorcnt(1);
+    srcPtr += itemsProcessedPerGridIteration * (slot ^ 1);
+    dstPtr += itemsProcessedPerGridIteration * (slot ^ 1);
+  }
+  __builtin_amdgcn_s_wait_tensorcnt(0);
+  tileMovers[slot].StoreTile();
+  __builtin_amdgcn_s_wait_tensorcnt(0);
+}
 #endif
 
   __global__ void GpuAsyncLoadStoreStubKernel(float const* __restrict__ src,
@@ -5596,16 +5662,18 @@ __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* _
           return {ERR_FATAL, "Async tensor executor (TDM): numBytes (%zu) must be a multiple of %zu", rss.numBytes,
                   sizeof(float)};
 
+        bool usePipelinedTensorOps = 1;
         hipDeviceProp_t props{};
         ERR_CHECK(hipGetDeviceProperties(&props, exeIndex));
         int const warpSize = props.warpSize;
         int maxShmem = 0;
         ERR_CHECK(hipDeviceGetAttribute(&maxShmem, hipDeviceAttributeMaxSharedMemoryPerBlock, exeIndex));
         int kWavesPerWorkgroup = threads / warpSize;
-        int numFloatsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup));
+        int pipelineDepth = usePipelinedTensorOps ? 2 : 1;
+        int numFloatsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup * pipelineDepth));
         unsigned int shmemBytes = numFloatsPerTile * kWavesPerWorkgroup * sizeof(float);
-
-        hipLaunchKernelGGL(GpuAsyncTensorOpsKernel, dim3(blocks), dim3(threads),
+        auto gpuKernel = usePipelinedTensorOps ? GpuAsyncPipelinedTensorOpsKernel : GpuAsyncTensorOpsKernel;
+        hipLaunchKernelGGL(gpuKernel, dim3(blocks), dim3(threads),
                            shmemBytes, stream, src, dst, numFloats,
                            numFloatsPerTile);
       } else {
