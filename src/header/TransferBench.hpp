@@ -1029,9 +1029,6 @@ namespace {
     void BroadcastExeResult(int root, ExeResult& exeResult) const;
     void BroadcastTfrResult(int root, TransferResult& tfrResult) const;
     void AllGatherLog(std::string& localLog) const;
-    void AllGatherVerboseLogs(std::vector<Transfer> const& transfers,
-                              std::map<ExeDevice, ExeInfo> const& executorMap,
-                              ConfigOptions const& cfg) const;
 
 
   private:
@@ -4073,9 +4070,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                   float** memPtr, hipMemGenericAllocationHandle_t* memHandle,
                                   std::string& verboseLog)
   {
-    bool const verbose = System::Get().IsVerbose();
-    char _vbuf[512];
-
     // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
     // NOTE: This will be overwritten on executor rank if pod communication is required
     System::Get().Broadcast(memDevice.memRank, sizeof(*memPtr), memPtr);
@@ -4086,6 +4080,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // If pod communication is required, export/import fabric handle
     if (memDevice.memRank != exeDevice.exeRank && IsGpuExeType(exeDevice.exeType)) {
 #ifdef POD_COMM_ENABLED
+      bool const verbose = System::Get().IsVerbose();
+      char _vbuf[512];
       if (verbose) {
         snprintf(_vbuf, sizeof(_vbuf),
                  "[INFO] Rank %d fabric exchange: mem=R%dG%d (%s) -> exe=R%dG%d (%s) %zu bytes ptr=%p\n",
@@ -5938,7 +5934,58 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // In multi-rank runs, gather each rank's verbose SRC/DST/EXE info to rank 0 for printing
     if (System::Get().IsVerbose() && System::Get().GetNumRanks() > 1) {
-      System::Get().AllGatherVerboseLogs(transfers, executorMap, cfg);
+      std::string prepVerboseLog;
+      char _buf[512];
+      for (auto const& [exeDevice, exeInfo] : executorMap) {
+        if (exeDevice.exeRank != localRank) continue;
+        std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
+        int exeNuma = IsGpuExeType(exeDevice.exeType)
+                      ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
+                      : IsNicExeType(exeDevice.exeType)
+                        ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
+                        : exeDevice.exeIndex;
+        snprintf(_buf, sizeof(_buf), "[INFO] Rank %d preparing executor (R%d%c%d)\n",
+                 localRank, exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
+        prepVerboseLog += _buf;
+        for (auto const& rss : exeInfo.resources) {
+          Transfer const& t = transfers[rss.transferIdx];
+          snprintf(_buf, sizeof(_buf),
+                   "[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
+                   localRank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
+          prepVerboseLog += _buf;
+          snprintf(_buf, sizeof(_buf), "[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
+                   exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
+                   exeNuma, exeBdf.empty() ? "" : " BDF ", exeBdf.c_str());
+          prepVerboseLog += _buf;
+          for (int iSrc = 0; iSrc < (int)t.srcs.size(); ++iSrc) {
+            MemDevice const& md = t.srcs[iSrc];
+            if (md.memRank != localRank) continue;
+            bool requiresFabricHandle = (md.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
+            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+            snprintf(_buf, sizeof(_buf),
+                     "[INFO]   SRC[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
+                     iSrc, GetMemTypeName(md.memType), md.memIndex,
+                     GetMemDeviceNuma(md).c_str(), bdf.empty() ? "" : " BDF ", bdf.c_str(),
+                     md.memRank, t.numBytes + cfg.data.byteOffset,
+                     requiresFabricHandle ? " [fabric-exportable]" : "");
+            prepVerboseLog += _buf;
+          }
+          for (int iDst = 0; iDst < (int)t.dsts.size(); ++iDst) {
+            MemDevice const& md = t.dsts[iDst];
+            if (md.memRank != localRank) continue;
+            bool requiresFabricHandle = (md.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
+            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+            snprintf(_buf, sizeof(_buf),
+                     "[INFO]   DST[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
+                     iDst, GetMemTypeName(md.memType), md.memIndex,
+                     GetMemDeviceNuma(md).c_str(), bdf.empty() ? "" : " BDF ", bdf.c_str(),
+                     md.memRank, t.numBytes + cfg.data.byteOffset,
+                     requiresFabricHandle ? " [fabric-exportable]" : "");
+            prepVerboseLog += _buf;
+          }
+        }
+      }
+      System::Get().AllGatherLog(prepVerboseLog);
       System::Get().AllGatherLog(fabricVerboseLog);
     }
 
@@ -7836,79 +7883,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
   }
 
-  void System::AllGatherVerboseLogs(std::vector<Transfer> const& transfers,
-                                    std::map<ExeDevice, ExeInfo> const& executorMap,
-                                    ConfigOptions const& cfg) const
-  {
-    if (commMode == COMM_NONE) return;
-
-    // Build this rank's log string covering all transfers it owns
-    std::string localLog;
-    char buf[512];
-
-    for (auto const& [exeDevice, exeInfo] : executorMap) {
-      if (exeDevice.exeRank != rank) continue;
-
-      std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
-      int exeNuma = IsGpuExeType(exeDevice.exeType)
-                    ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
-                    : IsNicExeType(exeDevice.exeType)
-                      ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
-                      : exeDevice.exeIndex;
-
-      snprintf(buf, sizeof(buf), "[INFO] Rank %d preparing executor (R%d%c%d)\n",
-               rank, exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
-      localLog += buf;
-
-      for (auto const& rss : exeInfo.resources) {
-        Transfer const& t = transfers[rss.transferIdx];
-
-        snprintf(buf, sizeof(buf),
-                 "[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
-                 rank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
-        localLog += buf;
-
-        snprintf(buf, sizeof(buf), "[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
-                 exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
-                 exeNuma,
-                 exeBdf.empty() ? "" : " BDF ",
-                 exeBdf.c_str());
-        localLog += buf;
-
-        for (int iSrc = 0; iSrc < (int)t.srcs.size(); ++iSrc) {
-          MemDevice const& md = t.srcs[iSrc];
-          if (md.memRank != rank) continue;
-          bool requiresFabricHandle = (md.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
-          std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
-          snprintf(buf, sizeof(buf),
-                   "[INFO]   SRC[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
-                   iSrc, GetMemTypeName(md.memType), md.memIndex,
-                   GetMemDeviceNuma(md).c_str(),
-                   bdf.empty() ? "" : " BDF ", bdf.c_str(),
-                   md.memRank, t.numBytes + cfg.data.byteOffset,
-                   requiresFabricHandle ? " [fabric-exportable]" : "");
-          localLog += buf;
-        }
-
-        for (int iDst = 0; iDst < (int)t.dsts.size(); ++iDst) {
-          MemDevice const& md = t.dsts[iDst];
-          if (md.memRank != rank) continue;
-          bool requiresFabricHandle = (md.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
-          std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
-          snprintf(buf, sizeof(buf),
-                   "[INFO]   DST[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
-                   iDst, GetMemTypeName(md.memType), md.memIndex,
-                   GetMemDeviceNuma(md).c_str(),
-                   bdf.empty() ? "" : " BDF ", bdf.c_str(),
-                   md.memRank, t.numBytes + cfg.data.byteOffset,
-                   requiresFabricHandle ? " [fabric-exportable]" : "");
-          localLog += buf;
-        }
-      }
-    }
-
-    AllGatherLog(localLog);
-  }
 
 #if !defined(__NVCC__)
   // Get the hsa_agent_t associated with a ExeDevice
