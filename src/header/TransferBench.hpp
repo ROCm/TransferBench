@@ -1496,6 +1496,14 @@ namespace {
       deviceIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
     }
 
+    if (IsCpuMemType(memType)) {
+      // Set NUMA policy prior to call to hipHostMalloc
+      numa_set_preferred(deviceIdx);
+    } else if (IsGpuMemType(memType)) {
+      // Switch to the appropriate GPU
+      ERR_CHECK(hipSetDevice(deviceIdx));
+    }
+
     // If memHandle is provided, allocate sharable memory
     if (memHandle != NULL) {
 #ifdef POD_COMM_ENABLED
@@ -1533,6 +1541,7 @@ namespace {
         memset(*memPtr, 0, roundedUpBytes);
         // Check that the allocated pages are actually on the correct NUMA node
         ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
+        numa_set_preferred(-1);
       } else if (IsGpuMemType(memType)) {
         ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
@@ -1547,9 +1556,6 @@ namespace {
     }
 
     if (IsCpuMemType(memType)) {
-
-      // Set NUMA policy prior to call to hipHostMalloc
-      numa_set_preferred(deviceIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       int flags = 0;
@@ -1591,8 +1597,6 @@ namespace {
       // Reset to default numa mem policy
       numa_set_preferred(-1);
     } else if (IsGpuMemType(memType)) {
-      // Switch to the appropriate GPU
-      ERR_CHECK(hipSetDevice(memDevice.memIndex));
 
       if (memType == MEM_GPU) {
         // Allocate GPU memory on appropriate device
