@@ -4924,7 +4924,9 @@ __device__ void SetTransferSize(gfx1250_TDM_GROUP1& group1, int numElements){
   group1.tensorDim0Stride(numElements);
   group1.tileDim0(numElements);
 }
-__constant__ constexpr bool verbose = true; // Turn off to disable debug prints.
+namespace {
+  __constant__ constexpr bool verbose = false; // Turn off to disable debug prints.
+}
 
 // numElementsPerTile is the number of elements to process per tile.  Its maximum value is the shared memory size / number of waves per workgroup.
 __global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numElements, int numElementsPerTile){
@@ -4984,15 +4986,14 @@ struct TileMover {
     group0.globalAddr((uintptr_t)srcPtr);
     group1.dataSize(2);
     SetTransferSize(group1, numElementsToProcess);
-    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Src Ptr: %llu, Dst Ptr: %llu, Shmem Ptr: %llu, Num Elements To Process: %d\n", srcPtr, dstPtr, shmemPtr, numElementsToProcess);
     this -> dstPtr = dstPtr;  this -> shmemPtr = shmemPtr; this -> numElementsToProcess = numElementsToProcess;
-    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Loading %d elements from %llu to %llu\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess, srcPtr, shmemPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Loading %d elements from %p to %p\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess, srcPtr, shmemPtr);
     __builtin_amdgcn_tensor_load_to_lds(group0.m_bitfield, group1.m_bitfield, __hip_uint32x4{}, __hip_uint32x4{}, __hip_uint32x8{}, 0);
   }
   __device__ void StoreTile() {
     assert(dstPtr != nullptr);
     group0.globalAddr((uintptr_t)dstPtr);
-    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Storing %d elements from %llu to %llu\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess, shmemPtr, dstPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Storing %d elements from %p to %p\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess, shmemPtr, dstPtr);
     __builtin_amdgcn_tensor_store_from_lds(group0.m_bitfield, group1.m_bitfield, __hip_uint32x4{}, __hip_uint32x4{}, __hip_uint32x8{}, 0);
   }
 };
@@ -5011,7 +5012,13 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
   // Local per-wave source and destination pointers
   const float* srcPtr = src + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
   float* dstPtr = dst + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
-  
+
+  // Skip waves whose initial position is already past the end of the buffer.
+  if (srcPtr >= src + numElements){
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Skipping wave %d\n", threadIdx.x / warpSize, blockIdx.x, waveId);
+    return;
+  }
+
    // Log2 of the element size in bytes, so 2 for float
   int numElementsToProcess = std::min(numElementsPerSubtile, (int)(src + numElements - srcPtr));
   TileMover tileMovers[pipelineDepth]{};
@@ -5022,7 +5029,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     // Handle the last tile of the block, which may be less than num_elements_per_tile.
     if(src + numElements - (srcPtr + slot * numElementsPerSubtile) < numElementsPerSubtile){
       numElementsToProcess = src + numElements - (srcPtr + slot * numElementsPerSubtile);
-      if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Num Elements To Process: %d\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess);
+      if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Small Subtile: Warp %d Block %d: Num Elements To Process: %d\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess);
     }
     // Copy from global memory to LDS
     tileMovers[slot].LoadTile(shmemPtr + slot * numElementsPerSubtile, srcPtr + slot * numElementsPerSubtile, dstPtr + slot * numElementsPerSubtile, numElementsToProcess);
@@ -5030,7 +5037,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
    // if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Loading %zu elements from %p to shared memory at %p\n", blockIdx.x, waveId, numElementsToProcess, srcPtr, shmemPtr);
     __builtin_amdgcn_s_wait_tensorcnt(1);
 
-    // write back from LDS to global
+    // write back from LDS to global for the other slot
     tileMovers[slot^1].StoreTile();
     //if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Storing %zu elements from shared memory at %p to %p\n", blockIdx.x, waveId, numElementsToProcess, shmemPtr, dstPtr);
     __builtin_amdgcn_s_wait_tensorcnt(1);
