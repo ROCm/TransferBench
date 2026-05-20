@@ -1499,8 +1499,9 @@ namespace {
       // Set NUMA policy prior to call to hipHostMalloc
       numa_set_preferred(deviceIdx);
     } else if (IsGpuMemType(memType)) {
-      // Switch to the appropriate GPU
-      ERR_CHECK(hipSetDevice(deviceIdx));
+      // Switch to the appropriate GPU — use memDevice.memIndex directly since
+      // the MEM_CPU_CLOSEST NUMA remapping above only applies to CPU types
+      ERR_CHECK(hipSetDevice(memDevice.memIndex));
     }
 
     // If memHandle is provided, allocate sharable memory
@@ -1542,12 +1543,12 @@ namespace {
         ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
         numa_set_preferred(-1);
       } else if (IsGpuMemType(memType)) {
-        ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
         ERR_CHECK(hipDeviceSynchronize());
       }
       return ERR_NONE;
 #else
+      if (IsCpuMemType(memType)) numa_set_preferred(-1);
       return {ERR_FATAL, "Unable to allocate sharable memory if not compiled with pod communication support"};
 #endif
     } else {
@@ -7787,6 +7788,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       gpuAgents.clear();
       char *tempBuffer;
       for (int i = 0; i < numGpus; i++) {
+        if (hipSetDevice(i) != hipSuccess) continue;
         AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
         gpuAgents.push_back(info.agentOwner);
