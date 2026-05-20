@@ -22,6 +22,24 @@ THE SOFTWARE.
 
 #include <limits>
 
+__global__ void GetTimestampCost(int numTimestamps, uint64_t* cycleCount)
+{
+  // Only first thread does any work
+  if (threadIdx.x != 0) return;
+  auto start = GetTimestamp();
+
+  uint64_t temp;
+  for (int i = 0; i < numTimestamps; i++) {
+    temp = GetTimestamp();
+  }
+  auto stop = GetTimestamp();
+
+  // temp will never be 0, but query to ensure that compiler doesn't optimize out the loop
+  if (temp != 0) {
+    cycleCount[blockIdx.x] = (stop - start);
+  }
+}
+
 __global__ void GetTimestamps(uint64_t*     timestamps,
                               int           useBarrier,
                               int           indexType,
@@ -91,6 +109,8 @@ int WallClockPreset(EnvVars&          ev,
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   int numGpuDevices   = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
+  int numTimestamps   = EnvVars::GetEnvVar("NUM_TIMESTAMPS", 10000);
+
   int useBarrier      = EnvVars::GetEnvVar("USE_BARRIER", 1);
   int useBlockCount   = EnvVars::GetEnvVar("USE_BLOCKCOUNT", 0);
   int xccMask         = EnvVars::GetEnvVar("XCC_MASK", 0);
@@ -101,6 +121,7 @@ int WallClockPreset(EnvVars&          ev,
       if (!ev.outputToCsv) printf("[WallClock Related]\n");
       ev.Print("NUM_GPU_DEVICES", numGpuDevices,     "Limit to using %d GPUs (per rank)", numGpuDevices);
       ev.Print("NUM_ITERATIONS" , ev.numIterations,  "Number of iterations");
+      ev.Print("NUM_TIMESTAMPS" , numTimestamps,     "Number of timestamps to collect in a loop for cost analysis");
       ev.Print("NUM_WARMUPS"    , ev.numWarmups,     "Number of warmup iterations");
       ev.Print("SHOW_ITERATIONS", ev.showIterations, "Showing per iteration details. Set to 2 to see raw wallclock values");
       ev.Print("USE_BARRIER"    , useBarrier,        useBarrier ? "Using barrier before timestamp" : "No barrier before timestamp");
@@ -112,6 +133,7 @@ int WallClockPreset(EnvVars&          ev,
   // Check for env var consistency across ranks
   IS_UNIFORM(numGpuDevices,     "NUM_GPU_DEVICES");
   IS_UNIFORM(ev.numIterations,  "NUM_ITERATIONS");
+  IS_UNIFORM(numTimestamps,     "NUM_TIMESTAMPS");
   IS_UNIFORM(ev.numWarmups,     "NUM_WARMUPS");
   IS_UNIFORM(ev.showIterations, "SHOW_ITERATIONS");
   IS_UNIFORM(useBarrier,        "USE_BARRIER");
@@ -125,6 +147,10 @@ int WallClockPreset(EnvVars&          ev,
   // Seconds-based (numIterations < 0) and infinite (numIterations == 0) modes are not supported
   if (ev.numIterations <= 0) {
     Utils::Print("[ERROR] wallclock preset requires NUM_ITERATIONS > 0 (seconds-based and infinite modes are not supported)\n");
+    return ERR_FATAL;
+  }
+  if (numTimestamps < 0) {
+    Utils::Print("[ERROR] NUM_TIMESTAMPS must be non-negative\n");
     return ERR_FATAL;
   }
 
@@ -173,6 +199,9 @@ int WallClockPreset(EnvVars&          ev,
   std::vector<std::vector<std::vector<uint64_t>>> results(numGpuDevices,
                                                           std::vector<std::vector<uint64_t>>(ev.numIterations,
                                                                                              std::vector<uint64_t>(numItems, 0)));
+  std::vector<std::vector<std::vector<uint64_t>>> costs(numGpuDevices,
+                                                        std::vector<std::vector<uint64_t>>(ev.numIterations,
+                                                                                           std::vector<uint64_t>(numItems, 0)));
   for (int deviceId = 0; deviceId < numGpuDevices; deviceId++) {
     HIP_CALL(hipSetDevice(deviceId));
 
@@ -189,6 +218,7 @@ int WallClockPreset(EnvVars&          ev,
       return ERR_FATAL;
     }
 
+    // Run timestamp collection kernel
     for (int i = -ev.numWarmups; i < ev.numIterations; i++)
     {
       memset(timestamps, 0, numItems * sizeof(uint64_t));
@@ -201,13 +231,23 @@ int WallClockPreset(EnvVars&          ev,
       }
     }
 
+    // Run timestamp cost kernel
+    for (int i = -ev.numWarmups; i < ev.numIterations; i++)
+    {
+      GetTimestampCost<<<numItems, 1>>>(numTimestamps, timestamps);
+      HIP_CALL(hipDeviceSynchronize());
+      if (i >= 0) {
+        memcpy(costs[deviceId][i].data(), timestamps, numItems * sizeof(uint64_t));
+      }
+    }
+
     Utils::DeallocateMemory(MEM_CPU_CLOSEST, timestamps, numItems * sizeof(uint64_t));
     Utils::DeallocateMemory(MEM_GPU, readyFlag, sizeof(int32_t));
   }
 
   // Prepare table of results
   int numRows = 1 + numRanks * numGpuDevices * ((ev.showIterations && !useBlockCount) ? (ev.numIterations+1) : 1);
-  int numCols = 5 + (ev.showIterations && !useBlockCount ?  numXccs : 0);
+  int numCols = 5 + (ev.showIterations && !useBlockCount ?  numXccs : 0) + 1;
   Utils::TableHelper table(numRows, numCols);
 
   for (int i = 0; i < numCols; i++) {
@@ -228,6 +268,7 @@ int WallClockPreset(EnvVars&          ev,
       table.Set(currRow, currCol++, " %s %d ", useBlockCount ? "BLK" : "XCC", i);
     }
   }
+  table.Set(currRow, currCol++, "TS cost(usec)");
   currRow++;
 
   double minDelta = std::numeric_limits<double>::max();
@@ -238,10 +279,18 @@ int WallClockPreset(EnvVars&          ev,
     for (int deviceId = 0; deviceId < numGpuDevices; deviceId++) {
       size_t totalCycles = 0;
       std::vector<uint64_t> timestamps(useBlockCount ? useBlockCount : numXccs, 0);
+      std::vector<uint64_t> cost(useBlockCount ? useBlockCount : numXccs, 0);
+
+      double overallAvgUsecPerTimestamp = 0;
 
       for (int iteration = 0; iteration < ev.numIterations; iteration++) {
-        if (rank == myRank) timestamps = results[deviceId][iteration];
+        if (rank == myRank) {
+          timestamps = results[deviceId][iteration];
+          cost       = costs[deviceId][iteration];
+        }
+
         TransferBench::System::Get().Broadcast(rank, numItems * sizeof(uint64_t), timestamps.data());
+        TransferBench::System::Get().Broadcast(rank, numItems * sizeof(uint64_t), cost.data());
 
         uint64_t minCycle = std::numeric_limits<uint64_t>::max();
         uint64_t maxCycle = 0;
@@ -253,6 +302,14 @@ int WallClockPreset(EnvVars&          ev,
         }
         uint64_t cycles = (maxCycle - minCycle);
         totalCycles += cycles;
+
+        uint64_t costSum = 0;
+        for (auto x : cost) {
+          costSum += x;
+        }
+        // Include the cost of the "stop" timestamp
+        double avgUsecPerTimestamp = (costSum / (1.0 * cost.size())) / (numTimestamps + 1) * uSecPerCycle;
+        overallAvgUsecPerTimestamp += avgUsecPerTimestamp;
 
         if (ev.showIterations && !useBlockCount) {
           currCol = 0;
@@ -268,11 +325,14 @@ int WallClockPreset(EnvVars&          ev,
               table.Set(currRow, currCol++, "SKIP");
             }
           }
+          table.Set(currRow, currCol++, "%.4f", avgUsecPerTimestamp);
           currRow++;
         }
       }
 
       double avgCycles = totalCycles * 1.0 / ev.numIterations;
+      overallAvgUsecPerTimestamp /= ev.numIterations;
+
       minDelta = std::min(minDelta, avgCycles);
       maxDelta = std::max(maxDelta, avgCycles);
       currCol = 0;
@@ -281,6 +341,7 @@ int WallClockPreset(EnvVars&          ev,
       table.Set(currRow, currCol++, "AVG");
       table.Set(currRow, currCol++, "%.2f", avgCycles);
       table.Set(currRow, currCol++, "%.2f", avgCycles * uSecPerCycle);
+      table.Set(currRow, currCol++, "%.4f", overallAvgUsecPerTimestamp);
       currRow++;
     }
   }
