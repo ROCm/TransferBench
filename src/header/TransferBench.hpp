@@ -1499,9 +1499,9 @@ namespace {
       // Set NUMA policy prior to call to hipHostMalloc
       numa_set_preferred(deviceIdx);
     } else if (IsGpuMemType(memType)) {
-      // Switch to the appropriate GPU — use memDevice.memIndex directly since
-      // the MEM_CPU_CLOSEST NUMA remapping above only applies to CPU types
-      ERR_CHECK(hipSetDevice(memDevice.memIndex));
+      // Switch to the appropriate GPU
+      // IMP: if the remapping above changes, remember to modify this!
+      ERR_CHECK(hipSetDevice(deviceIdx));
     }
 
     // If memHandle is provided, allocate sharable memory
@@ -7788,7 +7788,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       gpuAgents.clear();
       char *tempBuffer;
       for (int i = 0; i < numGpus; i++) {
-        if (hipSetDevice(i) != hipSuccess) continue;
         AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
         gpuAgents.push_back(info.agentOwner);
