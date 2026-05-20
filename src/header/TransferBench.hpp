@@ -4564,53 +4564,53 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         System::Get().Log("[INFO] Rank %d tearing down transfer %d\n", localRank, rss.transferIdx);
       }
 
-      // Deallocate source memory
-      for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        if (t.srcs[iSrc].memRank == localRank) {
-          if (verbose) {
-            System::Get().Log("[INFO]   Free SRC[%d]: %s idx=%d %p (%zu bytes)\n",
-                              iSrc, GetMemTypeName(t.srcs[iSrc].memType),
-                              t.srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
-          }
-          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
-                                     rss.srcActualBytes[iSrc],
-                                     &rss.srcMemHandle[iSrc]));
-        } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
-          if (verbose) {
-            System::Get().Log("[INFO]   Unmap remote SRC[%d]: %p (%zu bytes) from Rank %d\n",
-                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], t.srcs[iSrc].memRank);
-          }
-#ifdef POD_COMM_ENABLED
-          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
-          ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
-          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
-#endif
-        }
-      }
-
-      // Deallocate destination memory
-      for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        if (t.dsts[iDst].memRank == localRank) {
-          if (verbose) {
-            System::Get().Log("[INFO]   Free DST[%d]: %s idx=%d %p (%zu bytes)\n",
-                              iDst, GetMemTypeName(t.dsts[iDst].memType),
-                              t.dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
-          }
-          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
-                                     rss.dstActualBytes[iDst],
-                                     &rss.dstMemHandle[iDst]));
-        } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
-          if (verbose) {
-            System::Get().Log("[INFO]   Unmap remote DST[%d]: %p (%zu bytes) from Rank %d\n",
-                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], t.dsts[iDst].memRank);
-          }
-#ifdef POD_COMM_ENABLED
-          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
-          ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
-          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
-#endif
-        }
-      }
+//      // Deallocate source memory
+//      for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
+//        if (t.srcs[iSrc].memRank == localRank) {
+//          if (verbose) {
+//            System::Get().Log("[INFO]   Free SRC[%d]: %s idx=%d %p (%zu bytes)\n",
+//                              iSrc, GetMemTypeName(t.srcs[iSrc].memType),
+//                              t.srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
+//          }
+//          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
+//                                     rss.srcActualBytes[iSrc],
+//                                     &rss.srcMemHandle[iSrc]));
+//        } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
+//          if (verbose) {
+//            System::Get().Log("[INFO]   Unmap remote SRC[%d]: %p (%zu bytes) from Rank %d\n",
+//                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], t.srcs[iSrc].memRank);
+//          }
+//#ifdef POD_COMM_ENABLED
+//          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
+//          ERR_CHECK(hipMemRelease(rss.srcMemHandle[iSrc]));
+//          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
+//#endif
+//        }
+//      }
+//
+//      // Deallocate destination memory
+//      for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
+//        if (t.dsts[iDst].memRank == localRank) {
+//          if (verbose) {
+//            System::Get().Log("[INFO]   Free DST[%d]: %s idx=%d %p (%zu bytes)\n",
+//                              iDst, GetMemTypeName(t.dsts[iDst].memType),
+//                              t.dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
+//          }
+//          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
+//                                     rss.dstActualBytes[iDst],
+//                                     &rss.dstMemHandle[iDst]));
+//        } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
+//          if (verbose) {
+//            System::Get().Log("[INFO]   Unmap remote DST[%d]: %p (%zu bytes) from Rank %d\n",
+//                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], t.dsts[iDst].memRank);
+//          }
+//#ifdef POD_COMM_ENABLED
+//          ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
+//          ERR_CHECK(hipMemRelease(rss.dstMemHandle[iDst]));
+//          ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
+//#endif
+//        }
+//      }
 
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
@@ -4640,14 +4640,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
-#if !defined(__NVCC__)
-      MemType memType = MEM_GPU;
-#else
-      MemType memType = MEM_MANAGED;
-#endif
-      ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
-    }
+//    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
+//#if !defined(__NVCC__)
+//      MemType memType = MEM_GPU;
+//#else
+//      MemType memType = MEM_MANAGED;
+//#endif
+//      ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
+//    }
 
     return ERR_NONE;
   }
@@ -6088,184 +6088,184 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       System::Get().Barrier();
     }
 
-    // Perform iterations
-    size_t numTimedIterations = 0;
-    double totalCpuTimeSec = 0.0;
-    for (int iteration = -cfg.general.numWarmups; ; iteration++) {
-      // Stop if number of iterations/seconds has reached limit
-      if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
-
-      // NOTE: Time-based limit is based on first rank to avoid any skew issues
-      bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
-      System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
-      if (shouldStop) break;
-
-      // Wait for all ranks before starting any timing
-      System::Get().Barrier();
-
-      // Start CPU timing for this iteration
-      auto cpuStart = std::chrono::high_resolution_clock::now();
-
-      // Execute all Transfers in parallel
-      std::vector<std::future<ErrResult>> asyncExecutors;
-      for (auto const& exeDevice : localExecutors) {
-        asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
-                                               iteration,
-                                               std::cref(cfg),
-                                               std::cref(exeDevice),
-                                               std::ref(executorMap[exeDevice])));
-      }
-
-      // Wait for all threads to finish
-      for (auto& asyncExecutor : asyncExecutors) {
-        ERR_APPEND(asyncExecutor.get(), errResults);
-      }
-
-      // Wait for all ranks to finish
-      System::Get().Barrier();
-
-      // Stop CPU timing for this iteration
-      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-      double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
-
-      if (cfg.data.alwaysValidate) {
-        ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
-                   errResults);
-      }
-
-      if (iteration >= 0) {
-        ++numTimedIterations;
-        totalCpuTimeSec += deltaSec;
-      }
-    }
-
-    // Pause for interactive mode - run validation and show per-transfer result before prompt
-    if (cfg.general.useInteractive) {
-      if (localRank == 0) {
-        System::Get().Log("Transfers complete. Validation results:\n");
-
-        size_t initOffset = cfg.data.byteOffset / sizeof(float);
-        int numPass = 0, numFail = 0;
-        for (auto rss : transferResources) {
-          int transferIdx = rss->transferIdx;
-          Transfer const& t = transfers[transferIdx];
-          size_t N = t.numBytes / sizeof(float);
-          float const* expected = dstReference[t.srcs.size()].data();
-          bool transferOk = true;
-          bool anyLocalDst = false;
-
-          System::Get().Log("  Transfer %03d:", transferIdx);
-          for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
-            if (t.dsts[dstIdx].memRank != GetRank()) {
-              System::Get().Log("  DST[%d]=SKIP(remote)", dstIdx);
-              continue;
-            }
-            anyLocalDst = true;
-            float* output;
-            if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
-              output = rss->dstMem[dstIdx] + initOffset;
-            } else {
-              (void)hipSetDevice(t.dsts[dstIdx].memIndex);
-              (void)hipMemcpy(outputBuffer.data(), rss->dstMem[dstIdx] + initOffset, t.numBytes, hipMemcpyDefault);
-              (void)hipDeviceSynchronize();
-              output = outputBuffer.data();
-            }
-
-            if (memcmp(output, expected, t.numBytes) == 0) {
-              System::Get().Log("  DST[%d]=PASS", dstIdx);
-            } else {
-              size_t firstErr = 0;
-              for (; firstErr < N; firstErr++)
-                if (output[firstErr] != expected[firstErr]) break;
-              if (firstErr < N)
-                System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
-                                  dstIdx, firstErr, expected[firstErr], output[firstErr]);
-              else
-                System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
-                                  dstIdx);
-              transferOk = false;
-            }
-          }
-          System::Get().Log("\n");
-          if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
-        }
-        System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
-        System::Get().Log("Hit <Enter> to continue: ");
-        fflush(stdout);
-        if (scanf("%*c") != 0)  {
-          System::Get().Log("[ERROR] Unexpected input\n");
-          exit(1);
-        }
-        System::Get().Log("\n");
-        fflush(stdout);
-      }
-      System::Get().Barrier();
-    }
-
-    // Validate results
-    if (!cfg.data.alwaysValidate) {
-      ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
-                 errResults);
-    }
-
-    // Prepare results
-    results.exeResults.clear();
-    results.tfrResults.clear();
-    results.tfrResults.resize(transfers.size());
-    results.numTimedIterations = numTimedIterations;
-    results.totalBytesTransferred = 0;
-    results.avgTotalDurationMsec = (totalCpuTimeSec * 1000.0) / numTimedIterations;
-    results.overheadMsec = results.avgTotalDurationMsec;
-    for (auto& exeInfoPair : executorMap) {
-      ExeDevice const& exeDevice = exeInfoPair.first;
-      ExeInfo&         exeInfo   = exeInfoPair.second;
-
-      results.totalBytesTransferred += exeInfo.totalBytes;
-
-      // Copy over executor results
-      ExeResult exeResult;
-      if (exeDevice.exeRank == localRank) {
-        // Local executor collects results
-        exeResult.numBytes             = exeInfo.totalBytes;
-        exeResult.avgDurationMsec      = exeInfo.totalDurationMsec / numTimedIterations;
-        exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
-        exeResult.sumBandwidthGbPerSec = 0.0;
-        exeResult.transferIdx.clear();
-
-        // Copy over transfer results
-        for (auto const& rss : exeInfo.resources) {
-          int const transferIdx = rss.transferIdx;
-          exeResult.transferIdx.push_back(transferIdx);
-
-          TransferResult& tfrResult      = results.tfrResults[transferIdx];
-          tfrResult.exeDevice            = exeDevice;
-#ifdef NIC_EXEC_ENABLED
-          tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-#else
-          tfrResult.exeDstDevice         = exeDevice;
-#endif
-          tfrResult.numBytes             = rss.numBytes;
-          tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
-          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
-          if (cfg.general.recordPerIteration) {
-            tfrResult.perIterMsec = rss.perIterMsec;
-            tfrResult.perIterCUs  = rss.perIterCUs;
-          }
-          exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
-        }
-      }
-
-      // Send executor and transfer result to all ranks
-      System::Get().BroadcastExeResult(exeDevice.exeRank, exeResult);
-      for (int const transferIdx : exeResult.transferIdx) {
-        System::Get().BroadcastTfrResult(exeDevice.exeRank, results.tfrResults[transferIdx]);
-      }
-
-      results.exeResults[exeDevice] = exeResult;
-      results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
-                                                             exeResult.avgDurationMsec));
-    }
-    results.avgTotalBandwidthGbPerSec = (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec;
+//    // Perform iterations
+//    size_t numTimedIterations = 0;
+//    double totalCpuTimeSec = 0.0;
+//    for (int iteration = -cfg.general.numWarmups; ; iteration++) {
+//      // Stop if number of iterations/seconds has reached limit
+//      if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
+//
+//      // NOTE: Time-based limit is based on first rank to avoid any skew issues
+//      bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
+//      System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
+//      if (shouldStop) break;
+//
+//      // Wait for all ranks before starting any timing
+//      System::Get().Barrier();
+//
+//      // Start CPU timing for this iteration
+//      auto cpuStart = std::chrono::high_resolution_clock::now();
+//
+//      // Execute all Transfers in parallel
+//      std::vector<std::future<ErrResult>> asyncExecutors;
+//      for (auto const& exeDevice : localExecutors) {
+//        asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
+//                                               iteration,
+//                                               std::cref(cfg),
+//                                               std::cref(exeDevice),
+//                                               std::ref(executorMap[exeDevice])));
+//      }
+//
+//      // Wait for all threads to finish
+//      for (auto& asyncExecutor : asyncExecutors) {
+//        ERR_APPEND(asyncExecutor.get(), errResults);
+//      }
+//
+//      // Wait for all ranks to finish
+//      System::Get().Barrier();
+//
+//      // Stop CPU timing for this iteration
+//      auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+//      double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
+//
+//      if (cfg.data.alwaysValidate) {
+//        ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
+//                   errResults);
+//      }
+//
+//      if (iteration >= 0) {
+//        ++numTimedIterations;
+//        totalCpuTimeSec += deltaSec;
+//      }
+//    }
+//
+//    // Pause for interactive mode - run validation and show per-transfer result before prompt
+//    if (cfg.general.useInteractive) {
+//      if (localRank == 0) {
+//        System::Get().Log("Transfers complete. Validation results:\n");
+//
+//        size_t initOffset = cfg.data.byteOffset / sizeof(float);
+//        int numPass = 0, numFail = 0;
+//        for (auto rss : transferResources) {
+//          int transferIdx = rss->transferIdx;
+//          Transfer const& t = transfers[transferIdx];
+//          size_t N = t.numBytes / sizeof(float);
+//          float const* expected = dstReference[t.srcs.size()].data();
+//          bool transferOk = true;
+//          bool anyLocalDst = false;
+//
+//          System::Get().Log("  Transfer %03d:", transferIdx);
+//          for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
+//            if (t.dsts[dstIdx].memRank != GetRank()) {
+//              System::Get().Log("  DST[%d]=SKIP(remote)", dstIdx);
+//              continue;
+//            }
+//            anyLocalDst = true;
+//            float* output;
+//            if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+//              output = rss->dstMem[dstIdx] + initOffset;
+//            } else {
+//              (void)hipSetDevice(t.dsts[dstIdx].memIndex);
+//              (void)hipMemcpy(outputBuffer.data(), rss->dstMem[dstIdx] + initOffset, t.numBytes, hipMemcpyDefault);
+//              (void)hipDeviceSynchronize();
+//              output = outputBuffer.data();
+//            }
+//
+//            if (memcmp(output, expected, t.numBytes) == 0) {
+//              System::Get().Log("  DST[%d]=PASS", dstIdx);
+//            } else {
+//              size_t firstErr = 0;
+//              for (; firstErr < N; firstErr++)
+//                if (output[firstErr] != expected[firstErr]) break;
+//              if (firstErr < N)
+//                System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
+//                                  dstIdx, firstErr, expected[firstErr], output[firstErr]);
+//              else
+//                System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
+//                                  dstIdx);
+//              transferOk = false;
+//            }
+//          }
+//          System::Get().Log("\n");
+//          if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
+//        }
+//        System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
+//        System::Get().Log("Hit <Enter> to continue: ");
+//        fflush(stdout);
+//        if (scanf("%*c") != 0)  {
+//          System::Get().Log("[ERROR] Unexpected input\n");
+//          exit(1);
+//        }
+//        System::Get().Log("\n");
+//        fflush(stdout);
+//      }
+//      System::Get().Barrier();
+//    }
+//
+//    // Validate results
+//    if (!cfg.data.alwaysValidate) {
+//      ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
+//                 errResults);
+//    }
+//
+//    // Prepare results
+//    results.exeResults.clear();
+//    results.tfrResults.clear();
+//    results.tfrResults.resize(transfers.size());
+//    results.numTimedIterations = numTimedIterations;
+//    results.totalBytesTransferred = 0;
+//    results.avgTotalDurationMsec = (totalCpuTimeSec * 1000.0) / numTimedIterations;
+//    results.overheadMsec = results.avgTotalDurationMsec;
+//    for (auto& exeInfoPair : executorMap) {
+//      ExeDevice const& exeDevice = exeInfoPair.first;
+//      ExeInfo&         exeInfo   = exeInfoPair.second;
+//
+//      results.totalBytesTransferred += exeInfo.totalBytes;
+//
+//      // Copy over executor results
+//      ExeResult exeResult;
+//      if (exeDevice.exeRank == localRank) {
+//        // Local executor collects results
+//        exeResult.numBytes             = exeInfo.totalBytes;
+//        exeResult.avgDurationMsec      = exeInfo.totalDurationMsec / numTimedIterations;
+//        exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
+//        exeResult.sumBandwidthGbPerSec = 0.0;
+//        exeResult.transferIdx.clear();
+//
+//        // Copy over transfer results
+//        for (auto const& rss : exeInfo.resources) {
+//          int const transferIdx = rss.transferIdx;
+//          exeResult.transferIdx.push_back(transferIdx);
+//
+//          TransferResult& tfrResult      = results.tfrResults[transferIdx];
+//          tfrResult.exeDevice            = exeDevice;
+//#ifdef NIC_EXEC_ENABLED
+//          tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
+//#else
+//          tfrResult.exeDstDevice         = exeDevice;
+//#endif
+//          tfrResult.numBytes             = rss.numBytes;
+//          tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
+//          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
+//          if (cfg.general.recordPerIteration) {
+//            tfrResult.perIterMsec = rss.perIterMsec;
+//            tfrResult.perIterCUs  = rss.perIterCUs;
+//          }
+//          exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
+//        }
+//      }
+//
+//      // Send executor and transfer result to all ranks
+//      System::Get().BroadcastExeResult(exeDevice.exeRank, exeResult);
+//      for (int const transferIdx : exeResult.transferIdx) {
+//        System::Get().BroadcastTfrResult(exeDevice.exeRank, results.tfrResults[transferIdx]);
+//      }
+//
+//      results.exeResults[exeDevice] = exeResult;
+//      results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
+//                                                             exeResult.avgDurationMsec));
+//    }
+//    results.avgTotalBandwidthGbPerSec = (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec;
 
     // Teardown executors
     for (auto& exeInfoPair : executorMap) {
