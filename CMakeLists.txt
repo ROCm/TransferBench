@@ -180,13 +180,6 @@ if(NOT TB_GIT_BRANCH OR TB_GIT_BRANCH STREQUAL "" OR
 endif()
 message(STATUS "TransferBench ${VERSION_STRING} (${TB_GIT_BRANCH}:${TB_GIT_COMMIT})")
 
-# CMake < 3.20 has no CPACK_PRE_BUILD_SCRIPTS hook, so stamp GIT_VERSION now
-# while git values are in scope. Only writes when git is present — avoids
-# overwriting a correctly-stamped file in a tarball build where git is absent.
-# For >= 3.20 this is done just before CPack runs; see the packaging block below.
-if(CMAKE_VERSION VERSION_LESS "3.20" AND NOT TB_GIT_BRANCH STREQUAL "unknown")
-  file(WRITE "${CMAKE_SOURCE_DIR}/GIT_VERSION" "${TB_GIT_BRANCH}\n${TB_GIT_COMMIT}\n")
-endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "Setting build type to 'Release' as none was specified.")
@@ -695,6 +688,8 @@ if(BUILD_RELOCATABLE_PACKAGE)
       @ONLY
     )
     set(CPACK_PRE_BUILD_SCRIPTS "${CMAKE_BINARY_DIR}/WriteGitVersion.cmake")
+  elseif(NOT TB_GIT_BRANCH STREQUAL "unknown")
+    file(WRITE "${CMAKE_SOURCE_DIR}/GIT_VERSION" "${TB_GIT_BRANCH}\n${TB_GIT_COMMIT}\n")
   endif()
 
   set(CPACK_GENERATOR "DEB;RPM;TGZ")
@@ -719,6 +714,8 @@ else()
       @ONLY
     )
     set(CPACK_PRE_BUILD_SCRIPTS "${CMAKE_BINARY_DIR}/WriteGitVersion.cmake")
+  elseif(NOT TB_GIT_BRANCH STREQUAL "unknown")
+    file(WRITE "${CMAKE_SOURCE_DIR}/GIT_VERSION" "${TB_GIT_BRANCH}\n${TB_GIT_COMMIT}\n")
   endif()
 
   rocm_create_package(
