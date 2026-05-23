@@ -74,7 +74,7 @@ jobs:
             dpkg-deb -c "${deb}" | head -50
           done
 
-      - name: Upload artifacts (always, for inspection)
+      - name: Upload artifacts
         if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: actions/upload-artifact@v4
         with:
@@ -184,7 +184,7 @@ jobs:
             rpm -qlp "${rpm}" | head -50
           done
 
-      - name: Upload artifacts (always, for inspection)
+      - name: Upload artifacts
         if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: actions/upload-artifact@v4
         with:
@@ -297,6 +297,7 @@ jobs:
           cat report/build-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload report
+        if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: actions/upload-artifact@v4
         with:
           name: build-report
