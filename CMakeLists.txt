@@ -140,7 +140,8 @@ message(STATUS "TransferBench version: ${VERSION_STRING}")
 
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
-# Git metadata (branch + short commit hash; graceful fallback if git is unavailable)
+# Git metadata: branch + short commit hash
+# Priority: git rev-parse > GIT_VERSION file (populated by packaging scripts) > "unknown"
 find_package(Git QUIET)
 if(Git_FOUND)
   execute_process(
@@ -150,9 +151,6 @@ if(Git_FOUND)
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
     RESULT_VARIABLE _tb_git_branch_result
   )
-  if(NOT _tb_git_branch_result EQUAL 0 OR TB_GIT_BRANCH STREQUAL "")
-    set(TB_GIT_BRANCH "unknown")
-  endif()
   execute_process(
     COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -160,12 +158,16 @@ if(Git_FOUND)
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
     RESULT_VARIABLE _tb_git_commit_result
   )
-  if(NOT _tb_git_commit_result EQUAL 0 OR TB_GIT_COMMIT STREQUAL "")
+endif()
+if(NOT TB_GIT_BRANCH OR TB_GIT_BRANCH STREQUAL "")
+  if(EXISTS "${CMAKE_SOURCE_DIR}/GIT_VERSION")
+    file(STRINGS "${CMAKE_SOURCE_DIR}/GIT_VERSION" _tb_version_lines LIMIT_COUNT 2)
+    list(GET _tb_version_lines 0 TB_GIT_BRANCH)
+    list(GET _tb_version_lines 1 TB_GIT_COMMIT)
+  else()
+    set(TB_GIT_BRANCH "unknown")
     set(TB_GIT_COMMIT "unknown")
   endif()
-else()
-  set(TB_GIT_BRANCH "unknown")
-  set(TB_GIT_COMMIT "unknown")
 endif()
 message(STATUS "TransferBench ${VERSION_STRING} (${TB_GIT_BRANCH}:${TB_GIT_COMMIT})")
 
