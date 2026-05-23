@@ -671,6 +671,15 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_ARCHIVE_FILE_NAME "${_tb_archive_name}")
   set(CPACK_PACKAGE_FILE_NAME "${_tb_archive_name}")
 
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20")
+    configure_file(
+      cmake/WriteGitVersion.cmake.in
+      ${CMAKE_BINARY_DIR}/WriteGitVersion.cmake
+      @ONLY
+    )
+    set(CPACK_PRE_BUILD_SCRIPTS "${CMAKE_BINARY_DIR}/WriteGitVersion.cmake")
+  endif()
+
   set(CPACK_GENERATOR "DEB;RPM;TGZ")
   include(CPack)
 else()
@@ -685,6 +694,15 @@ else()
 
   set(PACKAGE_NAME TB)
   set(LIBRARY_NAME TransferBench)
+
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20")
+    configure_file(
+      cmake/WriteGitVersion.cmake.in
+      ${CMAKE_BINARY_DIR}/WriteGitVersion.cmake
+      @ONLY
+    )
+    set(CPACK_PRE_BUILD_SCRIPTS "${CMAKE_BINARY_DIR}/WriteGitVersion.cmake")
+  endif()
 
   rocm_create_package(
     NAME ${LIBRARY_NAME}
