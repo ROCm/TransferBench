@@ -102,7 +102,42 @@ set(ENV{ROCM_PATH} "${ROCM_PATH}")
 
 # TransferBench project definitions
 #==================================================================================================
-set(VERSION_STRING "1.67.00")
+set(TRANSFERBENCH_VERSION_MAJOR 1)
+set(TRANSFERBENCH_VERSION_MINOR 67)
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "00")
+
+# Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
+# Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,
+# this is not a git checkout, or no matching tag exists. Mirrors the RVS flow.
+set(TRANSFERBENCH_VERSION_PATCH "${TRANSFERBENCH_VERSION_PATCH_FALLBACK}")
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0 --match
+            "v${TRANSFERBENCH_VERSION_MAJOR}.${TRANSFERBENCH_VERSION_MINOR}.*"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE _tb_last_tag
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _tb_describe_rc
+    ERROR_QUIET)
+  if(_tb_describe_rc EQUAL 0 AND _tb_last_tag)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-list --count "${_tb_last_tag}..HEAD"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE _tb_commit_count
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _tb_count_rc
+      ERROR_QUIET)
+    if(_tb_count_rc EQUAL 0 AND _tb_commit_count MATCHES "^[0-9]+$")
+      set(TRANSFERBENCH_VERSION_PATCH "${_tb_commit_count}")
+    endif()
+  endif()
+endif()
+
+set(VERSION_STRING
+    "${TRANSFERBENCH_VERSION_MAJOR}.${TRANSFERBENCH_VERSION_MINOR}.${TRANSFERBENCH_VERSION_PATCH}")
+message(STATUS "TransferBench version: ${VERSION_STRING}")
+
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -128,6 +163,7 @@ option(ENABLE_MPI_COMM             "Enable MPI Communicator support"            
 option(ENABLE_DMA_BUF              "Enable DMA-BUF support for GPU Direct RDMA"   OFF)
 option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"        OFF)
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
+option(BUILD_RELOCATABLE_PACKAGE   "Build with RVS-style relocatable RPATH and amdrocm<MAJOR>-transferbench package naming" OFF)
 
 include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets, rocm_check_target_ids
 
@@ -475,16 +511,148 @@ target_link_libraries(TransferBench PRIVATE hip::host hip::device dl)
 target_link_libraries(TransferBench PRIVATE hsa-runtime64)
 target_link_libraries(TransferBench PRIVATE numa)
 
-rocm_install(TARGETS TransferBench COMPONENT devel)
-rocm_setup_version(VERSION ${VERSION_STRING})
+# gcc <9 ships std::filesystem in a separate library (libstdc++fs).
+# Required on AlmaLinux 8 / manylinux_2_28; harmless no-op stub on newer toolchains.
+target_link_libraries(TransferBench PRIVATE stdc++fs)
 
-rocm_package_add_dependencies(DEPENDS "numactl" "hsa-rocr")
+if(BUILD_RELOCATABLE_PACKAGE)
+  # RVS-style relocatable packaging: bypass rocm_install/rocm_create_package and
+  # drive CPack directly so CMAKE_INSTALL_PREFIX / CPACK_PACKAGING_INSTALL_PREFIX
+  # set by the caller (build_packages_local.sh) are honored.
+  #
+  # The CPack flow below uses CPACK_ARCHIVE_FILE_NAME (3.13+) and the
+  # DEB-DEFAULT / RPM-DEFAULT canonical-naming sentinels (3.6+). The
+  # project-wide cmake_minimum_required is 3.5 for the non-packaging build, so
+  # gate the relocatable path locally to avoid silently producing a literal
+  # "DEB-DEFAULT" filename on a too-old CMake.
+  if(CMAKE_VERSION VERSION_LESS 3.13)
+    message(FATAL_ERROR
+      "BUILD_RELOCATABLE_PACKAGE requires CMake >= 3.13 "
+      "(found ${CMAKE_VERSION}); needed for CPACK_ARCHIVE_FILE_NAME and "
+      "the DEB-DEFAULT / RPM-DEFAULT canonical-naming sentinels.")
+  endif()
+  if(NOT DEFINED ROCM_MAJOR_VERSION)
+    set(ROCM_MAJOR_VERSION "7")
+  endif()
 
-set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
-set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+  # Relocatable RPATH (matches the RVS reference flow). Mirrors what
+  # build_packages_local.sh used to inject via -DCMAKE_INSTALL_RPATH=, so
+  # plain `cmake -DBUILD_RELOCATABLE_PACKAGE=ON ..` now produces the same
+  # RPATH as a CI/packaged build.
+  set(CMAKE_SKIP_RPATH FALSE)
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
+  set(CMAKE_INSTALL_RPATH
+      "\$ORIGIN:\$ORIGIN/../lib:/opt/rocm/extras-${ROCM_MAJOR_VERSION}/lib:/opt/rocm/lib:/opt/rocm/lib/llvm/lib:/opt/rocm/core-${ROCM_MAJOR_VERSION}/lib:/opt/rocm/core-${ROCM_MAJOR_VERSION}/lib/llvm/lib")
+  set(CMAKE_BUILD_RPATH "${CMAKE_INSTALL_RPATH}")
+  # Strip implicit SDK-from-build-host paths on install so the ephemeral
+  # $HOME/rocm-sdk/install path the CI script uses does not leak into the
+  # packaged binary's RPATH.
+  if(NOT CMAKE_VERSION VERSION_LESS "3.16")
+    set(CMAKE_INSTALL_REMOVE_ENVIRONMENT_RPATH TRUE)
+  endif()
 
-rocm_create_package(
-  NAME ${LIBRARY_NAME}
-  DESCRIPTION "TransferBench package"
-  MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
-)
+  install(TARGETS TransferBench RUNTIME DESTINATION bin COMPONENT devel)
+
+  set(CPACK_PACKAGE_NAME "amdrocm${ROCM_MAJOR_VERSION}-transferbench")
+  set(CPACK_PACKAGE_VERSION "${VERSION_STRING}")
+  set(CPACK_PACKAGE_VENDOR "Advanced Micro Devices, Inc.")
+  set(CPACK_PACKAGE_CONTACT "RCCL Team <gilbert.lee@amd.com>")
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "TransferBench: benchmark simultaneous transfers between CPU/GPU/NIC")
+  set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
+
+  # Per-build release tag, threaded into DEB/RPM metadata AND the TGZ filename.
+  # Prefer the explicit -D from build_packages_local.sh; fall back to the env
+  # vars CPack itself reads (so direct cmake invocations still work).
+  # Quote variable references throughout so the comparison is unambiguous
+  # under any CMP0054 setting.
+  set(_tb_pkg_release "")
+  if(NOT "${TRANSFERBENCH_PACKAGE_RELEASE}" STREQUAL "")
+    set(_tb_pkg_release "${TRANSFERBENCH_PACKAGE_RELEASE}")
+  elseif(NOT "$ENV{CPACK_RPM_PACKAGE_RELEASE}" STREQUAL "")
+    set(_tb_pkg_release "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
+  elseif(NOT "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}" STREQUAL "")
+    set(_tb_pkg_release "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
+  endif()
+
+  # DEB
+  set(CPACK_DEBIAN_PACKAGE_NAME       "${CPACK_PACKAGE_NAME}")
+  set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS    "numactl, libnuma1")
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
+  if(NOT "${_tb_pkg_release}" STREQUAL "")
+    set(CPACK_DEBIAN_PACKAGE_RELEASE "${_tb_pkg_release}")
+  elseif(DEFINED ENV{CPACK_DEBIAN_PACKAGE_RELEASE})
+    set(CPACK_DEBIAN_PACKAGE_RELEASE "$ENV{CPACK_DEBIAN_PACKAGE_RELEASE}")
+  endif()
+  # Canonical filename: <name>_<version>-<release>_<arch>.deb
+  set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
+
+  # RPM
+  set(CPACK_RPM_PACKAGE_NAME    "${CPACK_PACKAGE_NAME}")
+  set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+  set(CPACK_RPM_PACKAGE_REQUIRES "numactl")
+  set(CPACK_RPM_PACKAGE_VENDOR  "${CPACK_PACKAGE_VENDOR}")
+  if(NOT "${_tb_pkg_release}" STREQUAL "")
+    set(CPACK_RPM_PACKAGE_RELEASE "${_tb_pkg_release}")
+  elseif(DEFINED ENV{CPACK_RPM_PACKAGE_RELEASE})
+    set(CPACK_RPM_PACKAGE_RELEASE "$ENV{CPACK_RPM_PACKAGE_RELEASE}")
+  endif()
+  # Canonical filename: <name>-<version>-<release>.<arch>.rpm
+  set(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
+  # Use the actual install prefix (caller-controlled in relocatable mode)
+  # rather than hard-coded /opt/... paths.
+  if(DEFINED CPACK_PACKAGING_INSTALL_PREFIX)
+    set(_rpm_exclude_prefix "${CPACK_PACKAGING_INSTALL_PREFIX}")
+  else()
+    set(_rpm_exclude_prefix "${CMAKE_INSTALL_PREFIX}")
+  endif()
+  set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+        "/opt" "/opt/rocm"
+        "${_rpm_exclude_prefix}"
+        "${_rpm_exclude_prefix}/bin")
+
+  # Advisory install-time check for libhsa-runtime64.so.1. The package declares
+  # no hard ROCm dep so it can install on TheRock-tarball systems where no ROCm
+  # component is tracked by apt/dpkg; the postinst warns (never fails) when the
+  # HSA runtime is not discoverable, so a missing runtime surfaces at install
+  # time instead of as a dynamic-linker error on first invocation.
+  set(_tb_postinst_src "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst-check-hsa.sh")
+  set(_tb_postinst_deb "${CMAKE_BINARY_DIR}/packaging/postinst")
+  configure_file("${_tb_postinst_src}" "${_tb_postinst_deb}" COPYONLY)
+  set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${_tb_postinst_deb}")
+  set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${_tb_postinst_src}")
+
+  # TGZ — embed release tag so successive runs do not collide on the same key.
+  # CMake 3.13+ honors CPACK_ARCHIVE_FILE_NAME for archive generators, but
+  # CMake 3.22 (Ubuntu 22.04) falls back to CPACK_PACKAGE_FILE_NAME for TGZ.
+  # Set both to the same suffixed value. DEB/RPM are unaffected because they
+  # use the explicit DEB-DEFAULT / RPM-DEFAULT canonical-naming tokens above.
+  if("${_tb_pkg_release}" STREQUAL "")
+    set(_tb_archive_name "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-Linux")
+  else()
+    set(_tb_archive_name "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${_tb_pkg_release}-Linux")
+  endif()
+  set(CPACK_ARCHIVE_FILE_NAME "${_tb_archive_name}")
+  set(CPACK_PACKAGE_FILE_NAME "${_tb_archive_name}")
+
+  set(CPACK_GENERATOR "DEB;RPM;TGZ")
+  include(CPack)
+else()
+  rocm_install(TARGETS TransferBench COMPONENT devel)
+  rocm_setup_version(VERSION ${VERSION_STRING})
+
+  # Package specific CPACK vars
+  rocm_package_add_dependencies(DEPENDS "numactl")
+
+  set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
+  set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+
+  set(PACKAGE_NAME TB)
+  set(LIBRARY_NAME TransferBench)
+
+  rocm_create_package(
+    NAME ${LIBRARY_NAME}
+    DESCRIPTION "TransferBench package"
+    MAINTAINER "RCCL Team <gilbert.lee@amd.com>"
+  )
+endif()

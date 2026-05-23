@@ -1,0 +1,301 @@
+name: Build Relocatable Packages
+
+on:
+  push:
+    branches: [develop, mainline, 'release/**', candidate]
+  pull_request:
+    branches: [develop, mainline]
+  schedule:
+    # Daily at 13:00 UTC (5:00 AM PST)
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    inputs:
+      rocm_version:
+        description: 'ROCm version (empty = auto-fetch latest from TheRock)'
+        required: false
+        default: ''
+      gpu_family:
+        description: 'GPU family target'
+        required: false
+        default: 'gfx94X-dcgpu'
+        type: choice
+        options:
+          - gfx94X-dcgpu
+          - gfx950-dcgpu
+          - gfx110X-all
+          - gfx120X-all
+          - gfx1151
+
+permissions:
+  contents: read
+  id-token: write   # Required for OIDC S3 upload
+
+env:
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || '' }}
+  GPU_FAMILY: ${{ github.event.inputs.gpu_family || 'gfx94X-dcgpu' }}
+  BUILD_TYPE: Release
+
+jobs:
+  # ============================================================
+  # Ubuntu 22.04 — DEB + TGZ
+  # ============================================================
+  build-ubuntu:
+    name: Build (Ubuntu 22.04)
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-22.04' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0   # for branch.commit version tags
+
+      - name: Set environment
+        run: |
+          echo "ROCM_VERSION=${ROCM_VERSION}" >> "$GITHUB_ENV"
+          echo "GPU_FAMILY=${GPU_FAMILY}"     >> "$GITHUB_ENV"
+          echo "BUILD_TYPE=${BUILD_TYPE}"     >> "$GITHUB_ENV"
+
+      - name: Build packages
+        run: |
+          chmod +x ./build_packages_local.sh
+          sudo -E ROCM_VERSION="${ROCM_VERSION}" \
+                  GPU_FAMILY="${GPU_FAMILY}" \
+                  BUILD_TYPE="${BUILD_TYPE}" \
+                  GITHUB_RUN_NUMBER="${GITHUB_RUN_NUMBER}" \
+                  GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
+                  ./build_packages_local.sh
+
+      - name: Verify DEB package
+        run: |
+          shopt -s nullglob
+          for deb in build/amdrocm*-transferbench*.deb; do
+            echo "==> ${deb}"
+            dpkg-deb -I "${deb}"
+            dpkg-deb -c "${deb}" | head -50
+          done
+
+      - name: Upload artifacts (always, for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-22.04-packages
+          path: |
+            build/amdrocm*-transferbench*.deb
+            build/amdrocm*-transferbench*.tar.gz
+          if-no-files-found: error
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Upload to S3
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        env:
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            S3_PATH="s3://${AWS_S3_BUCKET}/transferbench/${GITHUB_HEAD_REF//\//_}/${GITHUB_RUN_NUMBER}/ubuntu-22.04"
+            METADATA="skip"
+          elif [[ "${GITHUB_REF_NAME}" == release/* ]]; then
+            S3_PATH="s3://${AWS_S3_BUCKET}/release/transferbench/deb"
+            METADATA="generate"
+          else
+            S3_PATH="s3://${AWS_S3_BUCKET}/nightly/transferbench/deb"
+            METADATA="generate"
+          fi
+          echo "S3_DEB_PATH=${S3_PATH}"      >> "$GITHUB_ENV"
+          echo "DEB_METADATA=${METADATA}"    >> "$GITHUB_ENV"
+          aws s3 cp build/ "${S3_PATH}/" --recursive --exclude "*" \
+            --include "amdrocm*-transferbench*.deb" \
+            --include "amdrocm*-transferbench*.tar.gz"
+          echo "Uploaded to ${S3_PATH}"
+
+      - name: Generate apt repo metadata
+        if: github.repository == 'ROCm/TransferBench' && env.DEB_METADATA == 'generate'
+        env:
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          WORK="$(mktemp -d)"
+          echo "Downloading existing DEBs from ${S3_DEB_PATH}/ ..."
+          aws s3 sync "${S3_DEB_PATH}/" "${WORK}/" \
+            --exclude "*" --include "*.deb" \
+            --no-progress
+          cp build/amdrocm*-transferbench*.deb "${WORK}/" 2>/dev/null || true
+          cd "${WORK}"
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -k -f Packages
+          {
+            echo "Origin: ROCm-TransferBench"
+            echo "Label: ROCm TransferBench Packages"
+            echo "Suite: stable"
+            echo "Codename: stable"
+            echo "Architectures: amd64"
+            echo "Components: main"
+            echo "Description: TransferBench DEB packages built from TheRock SDK"
+            echo "Date: $(date -Ru)"
+          } > Release
+          aws s3 sync "${WORK}/" "${S3_DEB_PATH}/" --no-progress
+          echo "=== DEB repo metadata uploaded to ${S3_DEB_PATH}/ ==="
+          aws s3 ls "${S3_DEB_PATH}/" --human-readable
+
+  # ============================================================
+  # manylinux_2_28 (AlmaLinux 8) — RPM + TGZ
+  # ============================================================
+  build-manylinux:
+    name: Build (manylinux_2_28)
+    runs-on: ${{ vars.RUNNER_LABEL_CONTAINER || 'ubuntu-latest' }}
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set environment
+        run: |
+          echo "ROCM_VERSION=${ROCM_VERSION}" >> "$GITHUB_ENV"
+          echo "GPU_FAMILY=${GPU_FAMILY}"     >> "$GITHUB_ENV"
+          echo "BUILD_TYPE=${BUILD_TYPE}"     >> "$GITHUB_ENV"
+
+      - name: Build packages
+        run: |
+          chmod +x ./build_packages_local.sh
+          # No sudo: container runs as root
+          ROCM_VERSION="${ROCM_VERSION}" \
+          GPU_FAMILY="${GPU_FAMILY}" \
+          BUILD_TYPE="${BUILD_TYPE}" \
+          GITHUB_RUN_NUMBER="${GITHUB_RUN_NUMBER}" \
+          GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
+          ./build_packages_local.sh
+
+      - name: Verify RPM package
+        run: |
+          shopt -s nullglob
+          for rpm in build/amdrocm*-transferbench*.rpm; do
+            echo "==> ${rpm}"
+            rpm -qip "${rpm}"
+            rpm -qlp "${rpm}" | head -50
+          done
+
+      - name: Upload artifacts (always, for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: manylinux_2_28-packages
+          path: |
+            build/amdrocm*-transferbench*.rpm
+            build/amdrocm*-transferbench*.tar.gz
+          if-no-files-found: error
+
+      - name: Install AWS CLI
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        run: |
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+          (cd /tmp && unzip -q awscli.zip && ./aws/install)
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Upload to S3
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        env:
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            S3_RPM="s3://${AWS_S3_BUCKET}/transferbench/${GITHUB_HEAD_REF//\//_}/${GITHUB_RUN_NUMBER}/manylinux_2_28"
+            S3_TAR="${S3_RPM}"
+            METADATA="skip"
+          elif [[ "${GITHUB_REF_NAME}" == release/* ]]; then
+            S3_RPM="s3://${AWS_S3_BUCKET}/release/transferbench/rpm"
+            S3_TAR="s3://${AWS_S3_BUCKET}/release/transferbench/tar"
+            METADATA="generate"
+          else
+            S3_RPM="s3://${AWS_S3_BUCKET}/nightly/transferbench/rpm"
+            S3_TAR="s3://${AWS_S3_BUCKET}/nightly/transferbench/tar"
+            METADATA="generate"
+          fi
+          echo "S3_RPM_PATH=${S3_RPM}"  >> "$GITHUB_ENV"
+          echo "S3_TAR_PATH=${S3_TAR}"  >> "$GITHUB_ENV"
+          echo "RPM_METADATA=${METADATA}" >> "$GITHUB_ENV"
+          aws s3 cp build/ "${S3_RPM}/" --recursive --exclude "*" --include "amdrocm*-transferbench*.rpm"
+          aws s3 cp build/ "${S3_TAR}/" --recursive --exclude "*" --include "amdrocm*-transferbench*.tar.gz"
+          echo "Uploaded RPM to ${S3_RPM}, TGZ to ${S3_TAR}"
+
+      - name: Generate yum repo metadata
+        if: github.repository == 'ROCm/TransferBench' && env.RPM_METADATA == 'generate'
+        env:
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          dnf install -y createrepo_c || yum install -y createrepo_c
+          WORK="$(mktemp -d)"
+          echo "Downloading existing RPMs from s3://${AWS_S3_BUCKET}/${S3_RPM_PATH#s3://${AWS_S3_BUCKET}/}/ ..."
+          aws s3 sync "${S3_RPM_PATH}/" "${WORK}/" --exclude "repodata/*" --no-progress
+          cp build/amdrocm*-transferbench*.rpm "${WORK}/" 2>/dev/null || true
+          createrepo_c "${WORK}"
+          aws s3 sync "${WORK}/" "${S3_RPM_PATH}/" --no-progress
+          echo "=== RPM repository contents (RPMs + repodata) synced to ${S3_RPM_PATH}/ ==="
+          aws s3 ls "${S3_RPM_PATH}/repodata/" --human-readable
+
+  # ============================================================
+  # Build report — collects S3 paths for browsing
+  # ============================================================
+  release-summary:
+    name: Build Report
+    needs: [build-ubuntu, build-manylinux]
+    if: always()
+    runs-on: ${{ vars.RUNNER_LABEL_UTILITY || 'ubuntu-latest' }}
+    steps:
+      - name: Generate report
+        env:
+          AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          mkdir -p report
+          {
+            echo "# TransferBench Build Report"
+            echo ""
+            echo "- Event:       \`${GITHUB_EVENT_NAME}\`"
+            echo "- Ref:         \`${GITHUB_REF_NAME}\`"
+            echo "- Run number:  \`${GITHUB_RUN_NUMBER}\`"
+            echo "- ROCm:        \`${ROCM_VERSION:-auto}\`"
+            echo "- GPU family:  \`${GPU_FAMILY}\`"
+            echo "- Ubuntu job:  \`${{ needs.build-ubuntu.result }}\`"
+            echo "- manylinux:   \`${{ needs.build-manylinux.result }}\`"
+            echo ""
+            if [[ -n "${AWS_S3_BUCKET:-}" ]]; then
+              echo "## S3 Upload Locations"
+              if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+                BASE="transferbench/${GITHUB_HEAD_REF//\//_}/${GITHUB_RUN_NUMBER}"
+                echo "- [DEB (Ubuntu)](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=${BASE}/ubuntu-22.04/)"
+                echo "- [RPM/TGZ (manylinux)](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=${BASE}/manylinux_2_28/)"
+              elif [[ "${GITHUB_REF_NAME}" == release/* ]]; then
+                echo "- [DEB](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=release/transferbench/deb/)"
+                echo "- [RPM](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=release/transferbench/rpm/)"
+                echo "- [TGZ](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=release/transferbench/tar/)"
+              else
+                echo "- [DEB](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=nightly/transferbench/deb/)"
+                echo "- [RPM](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=nightly/transferbench/rpm/)"
+                echo "- [TGZ](https://s3.console.aws.amazon.com/s3/buckets/${AWS_S3_BUCKET}?prefix=nightly/transferbench/tar/)"
+              fi
+            else
+              echo "_S3 upload not configured (\`AWS_S3_BUCKET\` variable not set)._"
+            fi
+          } > report/build-report.md
+          cat report/build-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-report
+          path: report/build-report.md
