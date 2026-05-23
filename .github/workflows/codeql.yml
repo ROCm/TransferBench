@@ -3,11 +3,12 @@ name: "CodeQL Security Scanning"
 on:
   push:
     branches:
+      - candidate
       - develop
       - mainline
-      - candidate
   pull_request:
     branches:
+      - candidate
       - develop
       - mainline
   schedule:

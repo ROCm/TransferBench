@@ -2,9 +2,9 @@ name: Build Relocatable Packages
 
 on:
   push:
-    branches: [develop, mainline, 'release/**', candidate]
+    branches: [candidate, develop, mainline, 'release/**']
   pull_request:
-    branches: [develop, mainline]
+    branches: [candidate, develop, mainline]
   schedule:
     # Daily at 13:00 UTC (5:00 AM PST)
     - cron: '0 13 * * *'
@@ -84,14 +84,14 @@ jobs:
           if-no-files-found: error
 
       - name: Configure AWS credentials (OIDC)
-        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Upload to S3
-        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
         env:
           AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
         run: |
@@ -193,20 +193,20 @@ jobs:
           if-no-files-found: error
 
       - name: Install AWS CLI
-        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
         run: |
           curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
           (cd /tmp && unzip -q awscli.zip && ./aws/install)
 
       - name: Configure AWS credentials (OIDC)
-        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Upload to S3
-        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != ''
+        if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
         env:
           AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET }}
         run: |
