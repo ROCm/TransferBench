@@ -135,27 +135,30 @@ int EmptyKernelPreset(EnvVars&          ev,
     std::string const batchStr = EnvVars::ToStr(batchSizes);
     std::string const gridStr  = EnvVars::ToStr(gridSizes);
     std::string const blockStr = EnvVars::ToStr(blockSizes);
-    ev.Print("BATCHSIZES",      batchStr,          "Kernels per batch before hipStreamSynchronize");
-    ev.Print("GRIDSIZES",       gridStr,           "Grid X dimension (# threadblocks per kernel launch, set to ',' to sweep all)");
-    ev.Print("BLOCKSIZES",      blockStr,          "Thread-block width (blockDim.x)");
-    ev.Print("NUM_GPU_DEVICES", numGpuDevices,     "GPUs per rank to benchmark");
-    ev.Print("NUM_ITERATIONS",  numIterations,     "Timed passes per cell (HIP and CPU measured separately each pass)");
-    ev.Print("NUM_WARMUPS",     ev.numWarmups,     "Untimed warmup iterations");
-    ev.Print("OUTPUT_TO_CSV",   ev.outputToCsv,    "CSV formatting for result table");
-    ev.Print("SHOW_ITERATIONS", ev.showIterations, "Show per-iteration EVT/CPU columns before MIN/AVG/MAX");
-    ev.Print("USE_EXT_LAUNCH",  useExtLaunch,      "Use hipExtLaunchKernelGGL to combine hipEvents with kernel launch");
+    ev.Print("BATCHSIZES",       batchStr,          "Kernels per batch before hipStreamSynchronize");
+    ev.Print("GRIDSIZES",        gridStr,           "Grid X dimension (# threadblocks per kernel launch, set to ',' to sweep all)");
+    ev.Print("BLOCKSIZES",       blockStr,          "Thread-block width (blockDim.x)");
+    ev.Print("NUM_GPU_DEVICES",  numGpuDevices,     "GPUs per rank to benchmark");
+    ev.Print("NUM_ITERATIONS",   numIterations,     "Timed passes per cell (HIP and CPU measured separately each pass)");
+    ev.Print("NUM_WARMUPS",      ev.numWarmups,     "Untimed warmup iterations");
+    ev.Print("OUTPUT_TO_CSV",    ev.outputToCsv,    "CSV formatting for result table");
+    ev.Print("SHOW_ITERATIONS",  ev.showIterations, "Show per-iteration EVT/CPU columns before MIN/AVG/MAX");
+    ev.Print("SHOW_PERCENTILES", ev.showPercentiles.empty() ? 0 : 1, "%s",
+             ev.showPercentiles.empty() ? "Disabled" : ev.GetStr(ev.showPercentiles).c_str());
+    ev.Print("USE_EXT_LAUNCH",   useExtLaunch,      "Use hipExtLaunchKernelGGL to combine hipEvents with kernel launch");
     Utils::Print("\n");
   }
 
   // Check that input parameters are uniform across all ranks
-  IS_UNIFORM(batchSizes,        "BATCHSIZES");
-  IS_UNIFORM(gridSizes,         "GRIDSIZES");
-  IS_UNIFORM(blockSizes,        "BLOCKSIZES");
-  IS_UNIFORM(numGpuDevices,     "NUM_GPU_DEVICES");
-  IS_UNIFORM(numIterations,     "NUM_ITERATIONS");
-  IS_UNIFORM(ev.numWarmups,     "NUM_WARMUPS");
-  IS_UNIFORM(ev.showIterations, "SHOW_ITERATIONS");
-  IS_UNIFORM(useExtLaunch,      "USE_EXT_LAUNCH");
+  IS_UNIFORM(batchSizes,         "BATCHSIZES");
+  IS_UNIFORM(gridSizes,          "GRIDSIZES");
+  IS_UNIFORM(blockSizes,         "BLOCKSIZES");
+  IS_UNIFORM(numGpuDevices,      "NUM_GPU_DEVICES");
+  IS_UNIFORM(numIterations,      "NUM_ITERATIONS");
+  IS_UNIFORM(ev.numWarmups,      "NUM_WARMUPS");
+  IS_UNIFORM(ev.showIterations,  "SHOW_ITERATIONS");
+  IS_UNIFORM(ev.showPercentiles, "SHOW_PERCENTILES");
+  IS_UNIFORM(useExtLaunch,       "USE_EXT_LAUNCH");
 
   if (batchSizes.empty()) {
     Utils::Print("[ERROR] BATCHSIZES may not be empty\n");
@@ -230,6 +233,13 @@ int EmptyKernelPreset(EnvVars&          ev,
           Utils::Print("%c%6s", sep, col);
         }
       }
+      if (!ev.showPercentiles.empty()) {
+        for (int pct : ev.showPercentiles) {
+          char col[32];
+          snprintf(col, sizeof(col), "%sp%d", modeStr.c_str(), pct);
+          Utils::Print("%c%6s", sep, col);
+        }
+      }
       Utils::Print("%c%sMin%c%sAvg%c%sMax", sep, modeStr.c_str(), sep, modeStr.c_str(), sep, modeStr.c_str());
     }
     Utils::Print("\n");
@@ -299,6 +309,14 @@ int EmptyKernelPreset(EnvVars&          ev,
                   maxTime  = std::max(maxTime, val);
                   if (ev.showIterations) {
                     Utils::Print("%c%6.3f", sep, val);
+                  }
+                }
+                if (!ev.showPercentiles.empty()) {
+                  std::vector<double> sorted(data.begin() + baseOffset,
+                                             data.begin() + baseOffset + numIterations);
+                  std::sort(sorted.begin(), sorted.end());
+                  for (int pct : ev.showPercentiles) {
+                    Utils::Print("%c%6.3f", sep, TransferBench::Utils::PercentileDurationMsecFromSorted(sorted, pct));
                   }
                 }
                 Utils::Print("%c%6.3f%c%6.3f%c%6.3f", sep, minTime, sep, sumTime / numIterations, sep, maxTime);
