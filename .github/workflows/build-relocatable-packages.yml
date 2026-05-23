@@ -75,6 +75,7 @@ jobs:
           done
 
       - name: Upload artifacts (always, for inspection)
+        if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: actions/upload-artifact@v4
         with:
           name: ubuntu-22.04-packages
@@ -184,6 +185,7 @@ jobs:
           done
 
       - name: Upload artifacts (always, for inspection)
+        if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
         uses: actions/upload-artifact@v4
         with:
           name: manylinux_2_28-packages
