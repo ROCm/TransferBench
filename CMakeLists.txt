@@ -171,6 +171,14 @@ if(NOT TB_GIT_BRANCH OR TB_GIT_BRANCH STREQUAL "")
 endif()
 message(STATUS "TransferBench ${VERSION_STRING} (${TB_GIT_BRANCH}:${TB_GIT_COMMIT})")
 
+# CMake < 3.20 has no CPACK_PRE_BUILD_SCRIPTS hook, so stamp GIT_VERSION now
+# while git values are in scope. Only writes when git is present — avoids
+# overwriting a correctly-stamped file in a tarball build where git is absent.
+# For >= 3.20 this is done just before CPack runs; see the packaging block below.
+if(CMAKE_VERSION VERSION_LESS "3.20" AND NOT TB_GIT_BRANCH STREQUAL "unknown")
+  file(WRITE "${CMAKE_SOURCE_DIR}/GIT_VERSION" "${TB_GIT_BRANCH}\n${TB_GIT_COMMIT}\n")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "Setting build type to 'Release' as none was specified.")
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
