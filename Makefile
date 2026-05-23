@@ -297,6 +297,11 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   endif
 endif
 
+# Git metadata (branch + short commit hash; graceful fallback if git is unavailable)
+TB_GIT_BRANCH := $(shell git -C $(dir $(abspath $(firstword $(MAKEFILE_LIST)))) rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+TB_GIT_COMMIT := $(shell git -C $(dir $(abspath $(firstword $(MAKEFILE_LIST)))) rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMMON_FLAGS  += -DTB_GIT_BRANCH='"$(TB_GIT_BRANCH)"' -DTB_GIT_COMMIT='"$(TB_GIT_COMMIT)"'
+
 .PHONY : all clean
 
 all: TransferBench

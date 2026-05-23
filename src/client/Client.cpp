@@ -253,7 +253,13 @@ void DisplayVersion()
   case COMM_MPI:    multiNodeMode = " (Multi-node via MPI)";     break;
   }
 
-  Print("TransferBench v%s.%s%s%s\n", VERSION, CLIENT_VERSION, support.c_str(), multiNodeMode.c_str());
+#ifndef TB_GIT_BRANCH
+#define TB_GIT_BRANCH "unknown"
+#endif
+#ifndef TB_GIT_COMMIT
+#define TB_GIT_COMMIT "unknown"
+#endif
+  Print("TransferBench v%s.%s (%s:%s)%s%s\n", VERSION, CLIENT_VERSION, TB_GIT_BRANCH, TB_GIT_COMMIT, support.c_str(), multiNodeMode.c_str());
   Print("=============================================================================================================\n");
 }
 

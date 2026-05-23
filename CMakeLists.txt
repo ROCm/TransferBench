@@ -140,6 +140,35 @@ message(STATUS "TransferBench version: ${VERSION_STRING}")
 
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
+# Git metadata (branch + short commit hash; graceful fallback if git is unavailable)
+find_package(Git QUIET)
+if(Git_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE TB_GIT_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+    RESULT_VARIABLE _tb_git_branch_result
+  )
+  if(NOT _tb_git_branch_result EQUAL 0 OR TB_GIT_BRANCH STREQUAL "")
+    set(TB_GIT_BRANCH "unknown")
+  endif()
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE TB_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+    RESULT_VARIABLE _tb_git_commit_result
+  )
+  if(NOT _tb_git_commit_result EQUAL 0 OR TB_GIT_COMMIT STREQUAL "")
+    set(TB_GIT_COMMIT "unknown")
+  endif()
+else()
+  set(TB_GIT_BRANCH "unknown")
+  set(TB_GIT_COMMIT "unknown")
+endif()
+message(STATUS "TransferBench ${VERSION_STRING} (${TB_GIT_BRANCH}:${TB_GIT_COMMIT})")
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "Setting build type to 'Release' as none was specified.")
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
@@ -496,6 +525,11 @@ endif()
 if(POD_COMM_FOUND)
   target_compile_definitions(TransferBench PRIVATE POD_COMM_ENABLED)
 endif()
+
+target_compile_definitions(TransferBench PRIVATE
+  TB_GIT_BRANCH="${TB_GIT_BRANCH}"
+  TB_GIT_COMMIT="${TB_GIT_COMMIT}"
+)
 
 check_cxx_compiler_flag(-parallel-jobs=12 HAVE_PARALLEL_JOBS)
 if(HAVE_PARALLEL_JOBS)
