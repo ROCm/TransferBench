@@ -270,6 +270,8 @@ namespace TransferBench
     int         queueSize       = 100;          ///< Completion queue size
     int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
     int         useRelaxedOrder = 1;            ///< Use relaxed ordering
+    uint8_t     serviceLevel    = 0;            ///< IB service level (sl) for InfiniBand QPs
+    uint8_t     trafficClass    = 0;            ///< DSCP/traffic class byte for RoCE GRH
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
@@ -2000,6 +2002,8 @@ namespace {
       if (nic.maxSendWorkReq  != cfg.nic.maxSendWorkReq)  ADD_ERROR("cfg.nic.maxSendWorkReq");
       // nic.queueSize   is permitted to be different across ranks
       if (nic.roceVersion     != cfg.nic.roceVersion)     ADD_ERROR("cfg.nic.roceVersion");
+      if (nic.serviceLevel    != cfg.nic.serviceLevel)    ADD_ERROR("cfg.nic.serviceLevel");
+      if (nic.trafficClass    != cfg.nic.trafficClass)    ADD_ERROR("cfg.nic.trafficClass");
       if (nic.useRelaxedOrder != cfg.nic.useRelaxedOrder) ADD_ERROR("cfg.nic.useRelaxedOrder");
       if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
     }
@@ -3284,7 +3288,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                      ConnInfo const& connInfo,
                                      uint8_t  const& port,
                                      bool     const& isRoCE,
-                                     ibv_mtu  const& mtu)
+                                     ibv_mtu  const& mtu,
+                                     uint8_t  const& trafficClass,
+                                     uint8_t  const& serviceLevel)
   {
     // Prepare QP attributes
     struct ibv_qp_attr attr = {};
@@ -3300,11 +3306,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       attr.ah_attr.grh.flow_label                = 0;
       attr.ah_attr.grh.sgid_index                = connInfo.gidIdx;
       attr.ah_attr.grh.hop_limit                 = 255;
+      attr.ah_attr.grh.traffic_class             = trafficClass;
     } else {
       attr.ah_attr.is_global = 0;
       attr.ah_attr.dlid      = connInfo.lid;
     }
-    attr.ah_attr.sl            = 0;
+    attr.ah_attr.sl            = serviceLevel;
     attr.ah_attr.src_path_bits = 0;
     attr.ah_attr.port_num      = port;
     attr.dest_qp_num           = connInfo.qpn;
@@ -3588,7 +3595,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       static_assert(std::is_trivially_copyable<QpTransitionResult>::value, "QpTransitionResult must be trivially copyable for MPI broadcast");
       QpTransitionResult srcQpResult = {ERR_NONE, false};
       if (GetRank() == srcMemRank) {
-        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu);
+        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
         srcQpResult.rtrFailed = (err.errType != ERR_NONE);
         if (err.errType == ERR_NONE) {
           err = TransitionQpToRts(rss.srcQueuePairs[i]);
@@ -3603,7 +3610,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       QpTransitionResult dstQpResult = {ERR_NONE, false};
       if (GetRank() == dstMemRank) {
-        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu);
+        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
         dstQpResult.rtrFailed = (err.errType != ERR_NONE);
         if (err.errType == ERR_NONE) {
           err = TransitionQpToRts(rss.dstQueuePairs[i]);
