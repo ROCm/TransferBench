@@ -154,15 +154,16 @@ int PodAllToAllPreset(EnvVars&          ev,
       return ERR_FATAL;
     }
     int groupSize = n / numGroups;
-    std::vector<MemDevice> devices(n);
     std::vector<int> indices(n);
     for (int k = 0; k < n; k++) indices[k] = k;
     Utils::StrideGenerate(indices, groupStride);
-    int idx = 0;
-    for (int rank : ranks) {
-      for (int devIdx = 0; devIdx < numGpus; devIdx++) {
-        devices[indices[idx++]] = {memType, devIdx, rank};
-      }
+
+    std::vector<MemDevice> devices(n);
+    for (int i = 0; i < n; i++) {
+      int const globalIdx = indices[i];
+      int const rankIdx   = globalIdx / numGpus;
+      int const devIdx    = globalIdx % numGpus;
+      devices[i] = {memType, devIdx, ranks[rankIdx]};
     }
 
     // Build transfers for every group, then run once per pod so all groups share the same
