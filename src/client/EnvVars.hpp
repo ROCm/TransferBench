@@ -190,6 +190,16 @@ public:
     nicServiceLevel   = GetEnvVar("NIC_SERVICE_LEVEL"   , 0);
     nicTrafficClass   = GetEnvVar("NIC_TRAFFIC_CLASS"   , 0);
 
+    // Check that NIC service level and traffic class are in valid ranges
+    if (nicServiceLevel < 0 || nicServiceLevel > 15) {
+      printf("[ERROR] NIC_SERVICE_LEVEL must be in range 0..15 (got %d)", nicServiceLevel);
+      exit(1);
+    }
+    if (nicTrafficClass < 0 || nicTrafficClass > 255) {
+      printf("[ERROR] NIC_TRAFFIC_CLASS must be in range 0..255 (got %d)", nicTrafficClass);
+      exit(1);
+    }
+
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
 
 
