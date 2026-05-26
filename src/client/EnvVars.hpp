@@ -192,11 +192,11 @@ public:
 
     // Check that NIC service level and traffic class are in valid ranges
     if (nicServiceLevel < 0 || nicServiceLevel > 15) {
-      printf("[ERROR] NIC_SERVICE_LEVEL must be in range 0..15 (got %d)", nicServiceLevel);
+      printf("[ERROR] NIC_SERVICE_LEVEL must be in range 0..15 (got %d)\n", nicServiceLevel);
       exit(1);
     }
     if (nicTrafficClass < 0 || nicTrafficClass > 255) {
-      printf("[ERROR] NIC_TRAFFIC_CLASS must be in range 0..255 (got %d)", nicTrafficClass);
+      printf("[ERROR] NIC_TRAFFIC_CLASS must be in range 0..255 (got %d)\n", nicTrafficClass);
       exit(1);
     }
 
