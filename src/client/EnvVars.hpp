@@ -380,7 +380,7 @@ public:
     printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
     printf(" NIC_CQ_POLL_BATCH   - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
     printf(" NIC_RELAX_ORDER     - Set to non-zero to use relaxed ordering\n");
-    printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0, ignored for RoCE)\n");
+    printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0)\n");
     printf(" NIC_TRAFFIC_CLASS   - DSCP/traffic class byte for RoCE GRH (default=0)\n");
 #endif
     printf(" NUM_ITERATIONS      - # of timed iterations per test. If negative, run for this many seconds instead\n");
