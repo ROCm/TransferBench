@@ -144,15 +144,15 @@ project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 # Priority: git rev-parse > GIT_VERSION file (populated by packaging scripts) > "unknown"
 if(GIT_FOUND)
   execute_process(
-    COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE TB_GIT_BRANCH
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
     RESULT_VARIABLE _tb_git_branch_result
   )
   execute_process(
-    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE TB_GIT_COMMIT
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
     RESULT_VARIABLE _tb_git_commit_result
