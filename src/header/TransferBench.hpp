@@ -5019,7 +5019,6 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     return;
   }
 
-   // Log2 of the element size in bytes, so 2 for float
   int numElementsToProcess = std::min(numElementsPerSubtile, (int)(src + numElements - srcPtr));
   TileMover tileMovers[pipelineDepth]{};
   unsigned int slot = 0;
@@ -5033,13 +5032,10 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     }
     // Copy from global memory to LDS
     tileMovers[slot].LoadTile(shmemPtr + slot * numElementsPerSubtile, srcPtr + slot * numElementsPerSubtile, dstPtr + slot * numElementsPerSubtile, numElementsToProcess);
-
-   // if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Loading %zu elements from %p to shared memory at %p\n", blockIdx.x, waveId, numElementsToProcess, srcPtr, shmemPtr);
     __builtin_amdgcn_s_wait_tensorcnt(1);
 
     // write back from LDS to global for the other slot
     tileMovers[slot^1].StoreTile();
-    //if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Storing %zu elements from shared memory at %p to %p\n", blockIdx.x, waveId, numElementsToProcess, shmemPtr, dstPtr);
     __builtin_amdgcn_s_wait_tensorcnt(1);
     srcPtr += itemsProcessedPerGridIteration * slot;
     dstPtr += itemsProcessedPerGridIteration * slot;
@@ -5722,6 +5718,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
                                              bool          const  tensorFlavor,
                                              ExeInfo&             exeInfo)
   {
+    auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
     vector<std::future<ErrResult>> asyncTransfers;
@@ -5745,6 +5742,11 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     for (auto& asyncTransfer : asyncTransfers)
       ERR_CHECK(asyncTransfer.get());
 
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+                       / cfg.general.numSubIterations;
+    if (iteration >= 0)
+      exeInfo.totalDurationMsec += deltaMsec;
     return ERR_NONE;
   }
 
