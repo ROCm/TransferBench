@@ -122,6 +122,11 @@ public:
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
   int roceVersion;                   // RoCE version number
 
+  // TDM (async tensor) options
+  int tdmBlockSize;                  // Size of each threadblock for TDM (async tensor) kernels (must be multiple of 32)
+  int tdmMaxLdsBytes;                // Max LDS (shared memory) bytes per workgroup for TDM kernels (INT_MAX = use device max)
+  int tdmPipelined;                  // Use the pipelined (depth=2) TDM tensor kernel (0=non-pipelined, 1=pipelined)
+
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
 
@@ -171,6 +176,9 @@ public:
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
     showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
+    tdmBlockSize      = GetEnvVar("TDM_BLOCK_SIZE"      , 256);
+    tdmMaxLdsBytes    = GetEnvVar("TDM_MAX_LDS_BYTES"   , INT_MAX);
+    tdmPipelined      = GetEnvVar("TDM_PIPELINED"       , 0);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
@@ -378,6 +386,9 @@ public:
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
     printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
+    printf(" TDM_BLOCK_SIZE      - # of threads per threadblock for TDM (async tensor) kernels (Must be multiple of 32)\n");
+    printf(" TDM_MAX_LDS_BYTES   - Max LDS bytes per workgroup for TDM kernels (defaults to device max; K/M/G suffixes accepted)\n");
+    printf(" TDM_PIPELINED       - 1=use pipelined (depth=2) TDM kernel, 0=use non-pipelined kernel\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
@@ -521,6 +532,14 @@ public:
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("SHOW_PERCENTILES", showPercentiles.empty() ? 0 : 1, "%s",
           showPercentiles.empty() ? "Disabled" : GetStr(showPercentiles).c_str());
+    Print("TDM_BLOCK_SIZE", tdmBlockSize,
+          "TDM threadblock size of %d", tdmBlockSize);
+    Print("TDM_MAX_LDS_BYTES", tdmMaxLdsBytes,
+          "%s", tdmMaxLdsBytes == INT_MAX
+                  ? "Using device max LDS bytes per workgroup"
+                  : (std::string("Capping LDS to ") + std::to_string(tdmMaxLdsBytes) + " bytes per workgroup").c_str());
+    Print("TDM_PIPELINED", tdmPipelined,
+          "Using %s TDM tensor kernel", tdmPipelined ? "pipelined (depth=2)" : "non-pipelined");
     Print("USE_HIP_EVENTS", useHipEvents,
           "Using %s for GFX/DMA Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
@@ -726,6 +745,10 @@ public:
     cfg.nic.ipAddressFamily        = ipAddressFamily;
     cfg.nic.useRelaxedOrder        = nicRelaxedOrder;
     cfg.nic.roceVersion            = roceVersion;
+
+    cfg.tdm.blockSize              = tdmBlockSize;
+    cfg.tdm.maxLDSBytes            = tdmMaxLdsBytes;
+    cfg.tdm.pipelined              = tdmPipelined;
 
     return cfg;
   }

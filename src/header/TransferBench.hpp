@@ -282,6 +282,13 @@ namespace TransferBench
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
+  struct TdmOptions
+  {
+    int blockSize = 256; ///< Size of each threadblock (must be multiple of 64)
+    int maxLDSBytes = INT_MAX; ///< Maximum number of bytes of __shared__ memory to use
+    int pipelined = 0; ///< Whether to call the pipelined TDM kernel
+  };
+
 
   /**
    * Configuration options for performing Transfers
@@ -294,6 +301,7 @@ namespace TransferBench
     GfxOptions     gfx;                         ///< GFX executor options
     DmaOptions     dma;                         ///< DMA executor options
     NicOptions     nic;                         ///< NIC executor options
+    TdmOptions     tdm;                         ///< TDM executor options
   };
 
   /**
@@ -4925,7 +4933,7 @@ __device__ void SetTransferSize(gfx1250_TDM_GROUP1& group1, int numElements){
   group1.tileDim0(numElements);
 }
 namespace {
-  __constant__ constexpr bool verbose = false; // Turn off to disable debug prints.
+  __constant__ constexpr bool verbose = false; // Turn off to disable debug prints from kernel TDM kernels.
 }
 
 // numElementsPerTile is the number of elements to process per tile.  Its maximum value is the shared memory size / number of waves per workgroup.
@@ -5650,7 +5658,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     float const* __restrict__ src = rss.srcMem[0] + initOffset;
     float* __restrict__ dst       = rss.dstMem[0] + initOffset;
 
-    int const threads = cfg.gfx.blockSize;
+    int const threads = tensorFlavor ? cfg.tdm.blockSize : cfg.gfx.blockSize;
     int const blocks = numSubExecs;
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -5670,12 +5678,13 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
           return {ERR_FATAL, "Async tensor executor (TDM): numBytes (%zu) must be a multiple of %zu", rss.numBytes,
                   sizeof(float)};
 
-        bool usePipelinedTensorOps = 1;
+        bool usePipelinedTensorOps = (cfg.tdm.pipelined != 0);
         hipDeviceProp_t props{};
         ERR_CHECK(hipGetDeviceProperties(&props, exeIndex));
         int const warpSize = props.warpSize;
         int maxShmem = 0;
         ERR_CHECK(hipDeviceGetAttribute(&maxShmem, hipDeviceAttributeMaxSharedMemoryPerBlock, exeIndex));
+        maxShmem = std::min<int>(maxShmem, cfg.tdm.maxLDSBytes);
         int kWavesPerWorkgroup = threads / warpSize;
         int pipelineDepth = usePipelinedTensorOps ? 2 : 1;
         int numFloatsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup * pipelineDepth));
