@@ -3592,6 +3592,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         rss.srcNicIndex, srcMemRank, rss.dstNicIndex, dstMemRank, rss.srcPortAttr.link_layer, rss.dstPortAttr.link_layer};
     }
 
+    // Shared result type for broadcasting QP transition success/failure across MPI ranks
+    struct QpTransitionResult { ErrType errType; bool rtrFailed; };
+    static_assert(std::is_trivially_copyable<QpTransitionResult>::value,
+                  "QpTransitionResult must be trivially copyable for MPI broadcast");
+
     ConnInfo dstConnInfo = {};
     ConnInfo srcConnInfo = {};
     for (int i = 0; i < rss.qpCount; i++) {
@@ -3621,8 +3626,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Then move them to read-to-send (RTS)
       // Broadcast each rank's result so all ranks fail together rather than
       // hanging on the next iteration's Broadcast when qpCount > 1.
-      struct QpTransitionResult { ErrType errType; bool rtrFailed; };
-      static_assert(std::is_trivially_copyable<QpTransitionResult>::value, "QpTransitionResult must be trivially copyable for MPI broadcast");
       QpTransitionResult srcQpResult = {ERR_NONE, false};
       if (GetRank() == srcMemRank) {
         ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
