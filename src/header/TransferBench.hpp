@@ -270,6 +270,7 @@ namespace TransferBench
     int         queueSize       = 100;          ///< Completion queue size
     int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
     int         useRelaxedOrder = 1;            ///< Use relaxed ordering
+    uint8_t     fifoTrafficClass = 0;           ///< DSCP/traffic class byte for control (FIFO) QPs
     uint8_t     serviceLevel    = 0;            ///< IB service level (sl) for InfiniBand QPs
     uint8_t     trafficClass    = 0;            ///< DSCP/traffic class byte for RoCE GRH
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
@@ -2001,9 +2002,10 @@ namespace {
       if (nic.maxRecvWorkReq  != cfg.nic.maxRecvWorkReq)  ADD_ERROR("cfg.nic.maxRecvWorkReq");
       if (nic.maxSendWorkReq  != cfg.nic.maxSendWorkReq)  ADD_ERROR("cfg.nic.maxSendWorkReq");
       // nic.queueSize   is permitted to be different across ranks
-      if (nic.roceVersion     != cfg.nic.roceVersion)     ADD_ERROR("cfg.nic.roceVersion");
-      if (nic.serviceLevel    != cfg.nic.serviceLevel)    ADD_ERROR("cfg.nic.serviceLevel");
-      if (nic.trafficClass    != cfg.nic.trafficClass)    ADD_ERROR("cfg.nic.trafficClass");
+      if (nic.roceVersion        != cfg.nic.roceVersion)        ADD_ERROR("cfg.nic.roceVersion");
+      if (nic.fifoTrafficClass   != cfg.nic.fifoTrafficClass)   ADD_ERROR("cfg.nic.fifoTrafficClass");
+      if (nic.serviceLevel       != cfg.nic.serviceLevel)       ADD_ERROR("cfg.nic.serviceLevel");
+      if (nic.trafficClass       != cfg.nic.trafficClass)       ADD_ERROR("cfg.nic.trafficClass");
       if (nic.useRelaxedOrder != cfg.nic.useRelaxedOrder) ADD_ERROR("cfg.nic.useRelaxedOrder");
       if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
     }
@@ -2749,6 +2751,12 @@ namespace {
     ibv_gid                    dstGid;            ///< GID handle for DST NIC
     vector<ibv_qp*>            srcQueuePairs;     ///< Queue pairs for SRC NIC
     vector<ibv_qp*>            dstQueuePairs;     ///< Queue pairs for DST NIC
+    ibv_cq*                    srcCtrlCompQueue;  ///< Completion queue for SRC ctrl QPs (FIFO TC)
+    ibv_cq*                    dstCtrlCompQueue;  ///< Completion queue for DST ctrl QPs (FIFO TC)
+    vector<ibv_qp*>            srcCtrlQueuePairs; ///< Control QPs on SRC NIC (FIFO TC)
+    vector<ibv_qp*>            dstCtrlQueuePairs; ///< Control QPs on DST NIC (FIFO TC)
+    ibv_send_wr                ctrlSendWr;        ///< Send WR for ctrl signal (zero-byte inline, reused per iteration)
+    ibv_recv_wr                ctrlRecvWr;        ///< Recv WR for ctrl signal (reused per iteration)
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     int                        srcDmabufFd;       ///< DMA-BUF file descriptor for SRC (if using dmabuf)
@@ -3554,6 +3562,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rss.sendWorkRequests.resize(rss.qpCount);
     }
 
+    // Create control (FIFO) QPs when fifoTrafficClass differs from trafficClass
+    if (cfg.nic.fifoTrafficClass != cfg.nic.trafficClass) {
+      if (GetRank() == srcMemRank) {
+        IBV_PTR_CALL(rss.srcCtrlCompQueue, ibv_create_cq,
+                     rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+        rss.srcCtrlQueuePairs.resize(rss.qpCount);
+        for (int i = 0; i < rss.qpCount; i++) {
+          ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCtrlCompQueue, rss.srcCtrlQueuePairs[i]));
+          ERR_CHECK(InitQueuePair(rss.srcCtrlQueuePairs[i], port, rdmaAccessFlags));
+        }
+      }
+      if (GetRank() == dstMemRank) {
+        IBV_PTR_CALL(rss.dstCtrlCompQueue, ibv_create_cq,
+                     rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+        rss.dstCtrlQueuePairs.resize(rss.qpCount);
+        for (int i = 0; i < rss.qpCount; i++) {
+          ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCtrlCompQueue, rss.dstCtrlQueuePairs[i]));
+          ERR_CHECK(InitQueuePair(rss.dstCtrlQueuePairs[i], port, rdmaAccessFlags));
+        }
+      }
+    }
+
     // Broadcast SRC/DST port link_layer so that all ranks know it so that they can be compared
     System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
     System::Get().Broadcast(dstMemRank, sizeof(rss.dstPortAttr.link_layer), &rss.dstPortAttr.link_layer);
@@ -3675,6 +3705,70 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
     }
+
+    // Exchange ctrl QP numbers and connect them with fifoTrafficClass
+    if (cfg.nic.fifoTrafficClass != cfg.nic.trafficClass) {
+      ConnInfo srcCtrlInfo = {}, dstCtrlInfo = {};
+      for (int i = 0; i < rss.qpCount; i++) {
+        if (GetRank() == srcMemRank) {
+          srcCtrlInfo.lid    = rss.srcPortAttr.lid;
+          srcCtrlInfo.gid    = rss.srcGid;
+          srcCtrlInfo.gidIdx = srcGidIndex;
+          srcCtrlInfo.qpn    = rss.srcCtrlQueuePairs[i]->qp_num;
+          srcCtrlInfo.rkey   = 0;
+          srcCtrlInfo.vaddr  = 0;
+        }
+        System::Get().Broadcast(srcMemRank, sizeof(srcCtrlInfo), &srcCtrlInfo);
+
+        if (GetRank() == dstMemRank) {
+          dstCtrlInfo.lid    = rss.dstPortAttr.lid;
+          dstCtrlInfo.gid    = rss.dstGid;
+          dstCtrlInfo.gidIdx = dstGidIndex;
+          dstCtrlInfo.qpn    = rss.dstCtrlQueuePairs[i]->qp_num;
+          dstCtrlInfo.rkey   = 0;
+          dstCtrlInfo.vaddr  = 0;
+        }
+        System::Get().Broadcast(dstMemRank, sizeof(dstCtrlInfo), &dstCtrlInfo);
+
+        QpTransitionResult srcCtrlResult = {ERR_NONE, false};
+        if (GetRank() == srcMemRank) {
+          ErrResult err = TransitionQpToRtr(rss.srcCtrlQueuePairs[i], dstCtrlInfo, port, srcIsRoCE,
+                                            rss.srcPortAttr.active_mtu, cfg.nic.fifoTrafficClass, cfg.nic.serviceLevel);
+          srcCtrlResult.rtrFailed = (err.errType != ERR_NONE);
+          if (err.errType == ERR_NONE) err = TransitionQpToRts(rss.srcCtrlQueuePairs[i]);
+          srcCtrlResult.errType = err.errType;
+        }
+        System::Get().Broadcast(srcMemRank, sizeof(srcCtrlResult), &srcCtrlResult);
+        if (srcCtrlResult.errType != ERR_NONE)
+          return {ERR_FATAL, "SRC rank %d failed to transition ctrl QP %d to %s",
+                  srcMemRank, i, srcCtrlResult.rtrFailed ? "RTR" : "RTS"};
+
+        QpTransitionResult dstCtrlResult = {ERR_NONE, false};
+        if (GetRank() == dstMemRank) {
+          ErrResult err = TransitionQpToRtr(rss.dstCtrlQueuePairs[i], srcCtrlInfo, port, dstIsRoCE,
+                                            rss.dstPortAttr.active_mtu, cfg.nic.fifoTrafficClass, cfg.nic.serviceLevel);
+          dstCtrlResult.rtrFailed = (err.errType != ERR_NONE);
+          if (err.errType == ERR_NONE) err = TransitionQpToRts(rss.dstCtrlQueuePairs[i]);
+          dstCtrlResult.errType = err.errType;
+        }
+        System::Get().Broadcast(dstMemRank, sizeof(dstCtrlResult), &dstCtrlResult);
+        if (dstCtrlResult.errType != ERR_NONE)
+          return {ERR_FATAL, "DST rank %d failed to transition ctrl QP %d to %s",
+                  dstMemRank, i, dstCtrlResult.rtrFailed ? "RTR" : "RTS"};
+      }
+
+      // Pre-build reusable ctrl send/recv WRs (zero-byte inline, posted once per iteration)
+      rss.ctrlSendWr            = {};
+      rss.ctrlSendWr.sg_list    = nullptr;
+      rss.ctrlSendWr.num_sge    = 0;
+      rss.ctrlSendWr.opcode     = IBV_WR_SEND;
+      rss.ctrlSendWr.send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+
+      rss.ctrlRecvWr            = {};
+      rss.ctrlRecvWr.sg_list    = nullptr;
+      rss.ctrlRecvWr.num_sge    = 0;
+    }
+
     return ERR_NONE;
   }
 
@@ -3709,6 +3803,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       for (auto dstQueuePair : rss.dstQueuePairs)
         IBV_CALL(ibv_destroy_qp, dstQueuePair);
       rss.dstQueuePairs.clear();
+    }
+
+    // Destroy ctrl queue pairs and completion queues (only exist when fifoTrafficClass != trafficClass)
+    if (isSrcRank && !rss.srcCtrlQueuePairs.empty()) {
+      for (auto qp : rss.srcCtrlQueuePairs) IBV_CALL(ibv_destroy_qp, qp);
+      rss.srcCtrlQueuePairs.clear();
+      IBV_CALL(ibv_destroy_cq, rss.srcCtrlCompQueue);
+    }
+    if (isDstRank && !rss.dstCtrlQueuePairs.empty()) {
+      for (auto qp : rss.dstCtrlQueuePairs) IBV_CALL(ibv_destroy_qp, qp);
+      rss.dstCtrlQueuePairs.clear();
+      IBV_CALL(ibv_destroy_cq, rss.dstCtrlCompQueue);
     }
 
     // Destroy completion queues
@@ -4653,7 +4759,56 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
-    // Loop over each of the queue pairs and post work request
+    // Ping-pong control path: receiver arms recv, both sync, sender fires zero-byte signal
+    // on ctrl QPs (stamped with fifoTrafficClass), then data transfer proceeds as normal.
+    if (cfg.nic.fifoTrafficClass != cfg.nic.trafficClass) {
+      // [1] Receiver arms one recv WR per ctrl QP before the barrier
+      if (!rss.srcIsExeNic) {
+        ibv_recv_wr* badRecvWr;
+        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+          ibv_recv_wr wr = rss.ctrlRecvWr;   // copy: wr.next must be null
+          int err = ibv_post_recv(rss.dstCtrlQueuePairs[qpIdx], &wr, &badRecvWr);
+          if (err)
+            return {ERR_FATAL, "Transfer %d: ibv_post_recv on ctrl QP %d failed (%s)",
+                    rss.transferIdx, qpIdx, strerror(err)};
+        }
+      }
+
+      // [2] Barrier — guarantees receiver has armed recv before sender fires
+      System::Get().Barrier();
+
+      // [3] Sender fires one zero-byte inline IBV_WR_SEND per ctrl QP
+      if (rss.srcIsExeNic) {
+        ibv_send_wr* badSendWr;
+        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+          int err = ibv_post_send(rss.srcCtrlQueuePairs[qpIdx], &rss.ctrlSendWr, &badSendWr);
+          if (err)
+            return {ERR_FATAL, "Transfer %d: ibv_post_send on ctrl QP %d failed (%s)",
+                    rss.transferIdx, qpIdx, strerror(err)};
+        }
+        // [4] Sender polls ctrl CQ for send completions
+        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+          ibv_wc wc;
+          while (ibv_poll_cq(rss.srcCtrlCompQueue, 1, &wc) == 0) {}
+          if (wc.status != IBV_WC_SUCCESS)
+            return {ERR_FATAL, "Transfer %d: ctrl send CQ error on QP %d [status %d]",
+                    rss.transferIdx, qpIdx, wc.status};
+        }
+      }
+
+      // [5] Receiver polls ctrl CQ — confirms signal arrived
+      if (!rss.srcIsExeNic) {
+        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+          ibv_wc wc;
+          while (ibv_poll_cq(rss.dstCtrlCompQueue, 1, &wc) == 0) {}
+          if (wc.status != IBV_WC_SUCCESS)
+            return {ERR_FATAL, "Transfer %d: ctrl recv CQ error on QP %d [status %d]",
+                    rss.transferIdx, qpIdx, wc.status};
+        }
+      }
+    }
+
+    // [6] Data path — unchanged: post all RDMA send WRs (stamped with trafficClass)
     ibv_send_wr* badWorkReq;
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
       size_t numChunks = rss.sendWorkRequests[qpIndex].size();
