@@ -2756,7 +2756,6 @@ namespace {
     vector<ibv_qp*>            srcCtrlQueuePairs; ///< Control QPs on SRC NIC (FIFO TC)
     vector<ibv_qp*>            dstCtrlQueuePairs; ///< Control QPs on DST NIC (FIFO TC)
     ibv_send_wr                ctrlSendWr;        ///< Send WR for ctrl signal (zero-byte inline, reused per iteration)
-    ibv_recv_wr                ctrlRecvWr;        ///< Recv WR for ctrl signal (reused per iteration)
     ibv_mr*                    srcMemRegion;      ///< Memory region for SRC
     ibv_mr*                    dstMemRegion;      ///< Memory region for DST
     int                        srcDmabufFd;       ///< DMA-BUF file descriptor for SRC (if using dmabuf)
@@ -3563,7 +3562,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Create control (FIFO) QPs when fifoTrafficClass differs from trafficClass
-    if (cfg.nic.fifoTrafficClass != cfg.nic.trafficClass) {
+    if (cfg.nic.fifoTrafficClass != 0) {
       if (GetRank() == srcMemRank) {
         IBV_PTR_CALL(rss.srcCtrlCompQueue, ibv_create_cq,
                      rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
@@ -3710,7 +3709,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Exchange ctrl QP numbers and connect them with fifoTrafficClass
-    if (cfg.nic.fifoTrafficClass != cfg.nic.trafficClass) {
+    if (cfg.nic.fifoTrafficClass != 0) {
       ConnInfo srcCtrlInfo = {}, dstCtrlInfo = {};
       for (int i = 0; i < rss.qpCount; i++) {
         if (GetRank() == srcMemRank) {
@@ -3760,16 +3759,33 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                   dstMemRank, i, dstCtrlResult.rtrFailed ? "RTR" : "RTS"};
       }
 
-      // Pre-build reusable ctrl send/recv WRs (zero-byte inline, posted once per iteration)
+      // Pre-build reusable ctrl send WR (zero-byte inline IBV_WR_SEND, posted once per iteration)
       rss.ctrlSendWr            = {};
       rss.ctrlSendWr.sg_list    = nullptr;
       rss.ctrlSendWr.num_sge    = 0;
       rss.ctrlSendWr.opcode     = IBV_WR_SEND;
       rss.ctrlSendWr.send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
 
-      rss.ctrlRecvWr            = {};
-      rss.ctrlRecvWr.sg_list    = nullptr;
-      rss.ctrlRecvWr.num_sge    = 0;
+      // DST rank pre-posts recv WRs for all expected iterations so no per-iteration
+      // coordination (barrier) is needed between executor and non-executor ranks.
+      // numWarmups uses negative iteration indices; total sends = numWarmups + numIterations.
+      int numPrepost = cfg.general.numWarmups +
+                       std::max(1, std::abs(cfg.general.numIterations)) + 5;
+      if (GetRank() == dstMemRank) {
+        ibv_recv_wr ctrlRecvWr = {};
+        ctrlRecvWr.sg_list = nullptr;
+        ctrlRecvWr.num_sge = 0;
+        ibv_recv_wr* badRecvWr;
+        for (int i = 0; i < rss.qpCount; i++) {
+          for (int n = 0; n < numPrepost; n++) {
+            ibv_recv_wr wr = ctrlRecvWr;
+            int err = ibv_post_recv(rss.dstCtrlQueuePairs[i], &wr, &badRecvWr);
+            if (err)
+              return {ERR_FATAL, "Transfer %d: ibv_post_recv pre-post on ctrl QP %d failed (%s)",
+                      rss.transferIdx, i, strerror(err)};
+          }
+        }
+      }
     }
 
     return ERR_NONE;
@@ -4762,56 +4778,26 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
-    // Ping-pong control path: receiver arms recv, both sync, sender fires zero-byte signal
-    // on ctrl QPs (stamped with fifoTrafficClass), then data transfer proceeds as normal.
-    if (cfg.nic.fifoTrafficClass != cfg.nic.trafficClass) {
-      // [1] Receiver arms one recv WR per ctrl QP before the barrier
-      if (!rss.srcIsExeNic) {
-        ibv_recv_wr* badRecvWr;
-        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
-          ibv_recv_wr wr = rss.ctrlRecvWr;   // copy: wr.next must be null
-          int err = ibv_post_recv(rss.dstCtrlQueuePairs[qpIdx], &wr, &badRecvWr);
-          if (err)
-            return {ERR_FATAL, "Transfer %d: ibv_post_recv on ctrl QP %d failed (%s)",
-                    rss.transferIdx, qpIdx, strerror(err)};
-        }
+    // Ctrl path: executor (src) fires one zero-byte inline IBV_WR_SEND per ctrl QP.
+    // Recv WRs are pre-posted on the dst side during setup, so no barrier is needed.
+    if (cfg.nic.fifoTrafficClass != 0 && rss.srcIsExeNic) {
+      ibv_send_wr* badSendWr;
+      for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+        int err = ibv_post_send(rss.srcCtrlQueuePairs[qpIdx], &rss.ctrlSendWr, &badSendWr);
+        if (err)
+          return {ERR_FATAL, "Transfer %d: ibv_post_send on ctrl QP %d failed (%s)",
+                  rss.transferIdx, qpIdx, strerror(err)};
       }
-
-      // [2] Barrier — guarantees receiver has armed recv before sender fires
-      System::Get().Barrier();
-
-      // [3] Sender fires one zero-byte inline IBV_WR_SEND per ctrl QP
-      if (rss.srcIsExeNic) {
-        ibv_send_wr* badSendWr;
-        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
-          int err = ibv_post_send(rss.srcCtrlQueuePairs[qpIdx], &rss.ctrlSendWr, &badSendWr);
-          if (err)
-            return {ERR_FATAL, "Transfer %d: ibv_post_send on ctrl QP %d failed (%s)",
-                    rss.transferIdx, qpIdx, strerror(err)};
-        }
-        // [4] Sender polls ctrl CQ for send completions
-        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
-          ibv_wc wc;
-          while (ibv_poll_cq(rss.srcCtrlCompQueue, 1, &wc) == 0) {}
-          if (wc.status != IBV_WC_SUCCESS)
-            return {ERR_FATAL, "Transfer %d: ctrl send CQ error on QP %d [status %d]",
-                    rss.transferIdx, qpIdx, wc.status};
-        }
-      }
-
-      // [5] Receiver polls ctrl CQ — confirms signal arrived
-      if (!rss.srcIsExeNic) {
-        for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
-          ibv_wc wc;
-          while (ibv_poll_cq(rss.dstCtrlCompQueue, 1, &wc) == 0) {}
-          if (wc.status != IBV_WC_SUCCESS)
-            return {ERR_FATAL, "Transfer %d: ctrl recv CQ error on QP %d [status %d]",
-                    rss.transferIdx, qpIdx, wc.status};
-        }
+      for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+        ibv_wc wc;
+        while (ibv_poll_cq(rss.srcCtrlCompQueue, 1, &wc) == 0) {}
+        if (wc.status != IBV_WC_SUCCESS)
+          return {ERR_FATAL, "Transfer %d: ctrl send CQ error on QP %d [status %d]",
+                  rss.transferIdx, qpIdx, wc.status};
       }
     }
 
-    // [6] Data path — unchanged: post all RDMA send WRs (stamped with trafficClass)
+    // Data path — unchanged: post all RDMA send WRs (stamped with trafficClass)
     ibv_send_wr* badWorkReq;
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
       size_t numChunks = rss.sendWorkRequests[qpIndex].size();
