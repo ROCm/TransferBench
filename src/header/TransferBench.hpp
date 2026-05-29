@@ -3237,17 +3237,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   static ErrResult CreateQueuePair(ConfigOptions const& cfg,
                                    struct ibv_pd*       pd,
                                    struct ibv_cq*       cq,
-                                   struct ibv_qp*&      qp)
+                                   struct ibv_qp*&      qp,
+                                   int                  maxRecvWr = -1)
   {
     // Set queue pair attributes
     struct ibv_qp_init_attr attr = {};
-    attr.qp_type          = IBV_QPT_RC;                  // Set type to reliable connection
-    attr.send_cq          = cq;                          // Send completion queue
-    attr.recv_cq          = cq;                          // Recv completion queue
-    attr.cap.max_send_wr  = cfg.nic.maxSendWorkReq;      // Max send work requests
-    attr.cap.max_recv_wr  = cfg.nic.maxRecvWorkReq;      // Max recv work requests
-    attr.cap.max_send_sge = 1;                           // Max send scatter-gather entries
-    attr.cap.max_recv_sge = 1;                           // Max recv scatter-gather entries
+    attr.qp_type          = IBV_QPT_RC;                                              // Set type to reliable connection
+    attr.send_cq          = cq;                                                      // Send completion queue
+    attr.recv_cq          = cq;                                                      // Recv completion queue
+    attr.cap.max_send_wr  = cfg.nic.maxSendWorkReq;                                  // Max send work requests
+    attr.cap.max_recv_wr  = (maxRecvWr >= 0) ? maxRecvWr : cfg.nic.maxRecvWorkReq;  // Max recv work requests
+    attr.cap.max_send_sge = 1;                                                       // Max send scatter-gather entries
+    attr.cap.max_recv_sge = 1;                                                       // Max recv scatter-gather entries
 
     qp = ibv_create_qp(pd, &attr);
     if (qp == NULL)
@@ -3561,13 +3562,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rss.sendWorkRequests.resize(rss.qpCount);
     }
 
-    // Create control (FIFO) QPs when fifoTrafficClass differs from trafficClass
+    // Create control (FIFO) QPs when fifoTrafficClass is non-zero.
+    // Compute numPrepost here so dst ctrl QPs are created with enough max_recv_wr capacity.
+    int ctrlNumPrepost = cfg.general.numWarmups +
+                         std::max(1, std::abs(cfg.general.numIterations)) + 5;
     if (cfg.nic.fifoTrafficClass != 0) {
       if (GetRank() == srcMemRank) {
         IBV_PTR_CALL(rss.srcCtrlCompQueue, ibv_create_cq,
                      rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
         rss.srcCtrlQueuePairs.resize(rss.qpCount);
         for (int i = 0; i < rss.qpCount; i++) {
+          // SRC ctrl QP only posts sends, so use default max_recv_wr
           ERR_CHECK(CreateQueuePair(cfg, rss.srcProtect, rss.srcCtrlCompQueue, rss.srcCtrlQueuePairs[i]));
           ERR_CHECK(InitQueuePair(rss.srcCtrlQueuePairs[i], port, rdmaAccessFlags));
         }
@@ -3577,7 +3582,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                      rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
         rss.dstCtrlQueuePairs.resize(rss.qpCount);
         for (int i = 0; i < rss.qpCount; i++) {
-          ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCtrlCompQueue, rss.dstCtrlQueuePairs[i]));
+          // DST ctrl QP pre-posts ctrlNumPrepost recv WRs; ensure max_recv_wr is large enough
+          ERR_CHECK(CreateQueuePair(cfg, rss.dstProtect, rss.dstCtrlCompQueue, rss.dstCtrlQueuePairs[i],
+                                    ctrlNumPrepost));
           ERR_CHECK(InitQueuePair(rss.dstCtrlQueuePairs[i], port, rdmaAccessFlags));
         }
       }
@@ -3768,16 +3775,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       // DST rank pre-posts recv WRs for all expected iterations so no per-iteration
       // coordination (barrier) is needed between executor and non-executor ranks.
-      // numWarmups uses negative iteration indices; total sends = numWarmups + numIterations.
-      int numPrepost = cfg.general.numWarmups +
-                       std::max(1, std::abs(cfg.general.numIterations)) + 5;
+      // ctrlNumPrepost was computed above and matches the max_recv_wr used when creating ctrl QPs.
       if (GetRank() == dstMemRank) {
         ibv_recv_wr ctrlRecvWr = {};
         ctrlRecvWr.sg_list = nullptr;
         ctrlRecvWr.num_sge = 0;
         ibv_recv_wr* badRecvWr;
         for (int i = 0; i < rss.qpCount; i++) {
-          for (int n = 0; n < numPrepost; n++) {
+          for (int n = 0; n < ctrlNumPrepost; n++) {
             ibv_recv_wr wr = ctrlRecvWr;
             int err = ibv_post_recv(rss.dstCtrlQueuePairs[i], &wr, &badRecvWr);
             if (err)
