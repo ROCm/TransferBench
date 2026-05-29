@@ -3564,8 +3564,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Create control (FIFO) QPs when fifoTrafficClass is non-zero.
     // Compute numPrepost here so dst ctrl QPs are created with enough max_recv_wr capacity.
-    int ctrlNumPrepost = cfg.general.numWarmups +
-                         std::max(1, std::abs(cfg.general.numIterations)) + 5;
+    int ctrlNumPrepost = (cfg.general.numWarmups +
+                         std::max(1, std::abs(cfg.general.numIterations))) *
+                         std::max(1, cfg.general.numSubIterations);
+
     if (cfg.nic.fifoTrafficClass != 0) {
       if (GetRank() == srcMemRank) {
         IBV_PTR_CALL(rss.srcCtrlCompQueue, ibv_create_cq,
