@@ -3831,7 +3831,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rss.dstQueuePairs.clear();
     }
 
-    // Destroy ctrl queue pairs and completion queues (only exist when fifoTrafficClass != trafficClass)
+    // Destroy ctrl queue pairs and completion queues (only exist when fifoTrafficClass != 0)
     if (isSrcRank && !rss.srcCtrlQueuePairs.empty()) {
       for (auto qp : rss.srcCtrlQueuePairs) IBV_CALL(ibv_destroy_qp, qp);
       rss.srcCtrlQueuePairs.clear();
