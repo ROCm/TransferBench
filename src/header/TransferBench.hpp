@@ -4790,6 +4790,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (cfg.nic.fifoTrafficClass != 0 && rss.srcIsExeNic) {
       ibv_send_wr* badSendWr;
       for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
+        rss.ctrlSendWr.wr_id = qpIdx;
         int err = ibv_post_send(rss.srcCtrlQueuePairs[qpIdx], &rss.ctrlSendWr, &badSendWr);
         if (err)
           return {ERR_FATAL, "Transfer %d: ibv_post_send on ctrl QP %d failed (%s)",
@@ -4797,10 +4798,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       for (int qpIdx = 0; qpIdx < rss.qpCount; qpIdx++) {
         ibv_wc wc;
-        while (ibv_poll_cq(rss.srcCtrlCompQueue, 1, &wc) == 0) {}
+        int nc;
+        while ((nc = ibv_poll_cq(rss.srcCtrlCompQueue, 1, &wc)) == 0) {}
+        if (nc < 0)
+          return {ERR_FATAL, "Transfer %d: ctrl CQ poll error", rss.transferIdx};
         if (wc.status != IBV_WC_SUCCESS)
-          return {ERR_FATAL, "Transfer %d: ctrl send CQ error on QP %d [status %d]",
-                  rss.transferIdx, qpIdx, wc.status};
+          return {ERR_FATAL, "Transfer %d: ctrl send CQ error on QP %llu [status %d]",
+                  rss.transferIdx, wc.wr_id, wc.status};
       }
     }
 
