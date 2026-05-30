@@ -197,6 +197,10 @@ public:
       printf("[ERROR] NIC_TRAFFIC_CLASS_FIFO must be in range 0..255 (got %d)\n", nicFifoTrafficClass);
       exit(1);
     }
+    if (nicFifoTrafficClass != 0 && numIterations <= 0) {
+      printf("[ERROR] NIC_TRAFFIC_CLASS_FIFO requires NUM_ITERATIONS > 0 (timed/infinite mode is not supported)\n");
+      exit(1);
+    }
     if (nicServiceLevel < 0 || nicServiceLevel > 15) {
       printf("[ERROR] NIC_SERVICE_LEVEL must be in range 0..15 (got %d)\n", nicServiceLevel);
       exit(1);
