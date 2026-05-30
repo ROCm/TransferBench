@@ -3571,7 +3571,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (cfg.nic.fifoTrafficClass != 0) {
       if (GetRank() == srcMemRank) {
         IBV_PTR_CALL(rss.srcCtrlCompQueue, ibv_create_cq,
-                     rss.srcContext, cfg.nic.queueSize, NULL, NULL, 0);
+                     rss.srcContext, rss.qpCount, NULL, NULL, 0);
         rss.srcCtrlQueuePairs.resize(rss.qpCount);
         for (int i = 0; i < rss.qpCount; i++) {
           // SRC ctrl QP only posts sends, so use default max_recv_wr
@@ -3581,7 +3581,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
       if (GetRank() == dstMemRank) {
         IBV_PTR_CALL(rss.dstCtrlCompQueue, ibv_create_cq,
-                     rss.dstContext, cfg.nic.queueSize, NULL, NULL, 0);
+                     rss.dstContext, ctrlNumPrepost * rss.qpCount, NULL, NULL, 0);
         rss.dstCtrlQueuePairs.resize(rss.qpCount);
         for (int i = 0; i < rss.qpCount; i++) {
           // DST ctrl QP pre-posts ctrlNumPrepost recv WRs; ensure max_recv_wr is large enough
