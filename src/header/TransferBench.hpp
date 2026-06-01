@@ -2583,11 +2583,8 @@ namespace {
         }
 
         // Pod (cross-rank) transfers with a GPU executor are exchanged via CUDA/HIP fabric handles,
-        // which, for current version, only support device-backed allocations.
-        // Host (pinned) memory cannot be shared this way,
-        // attempting to do so currently allocates device memory on the remote rank and then
-        // crashes when host code (e.g. memset / hipMemcpy of init data) dereferences the device pointer.
-        // Reject such configurations up front.
+        // which, for current version, only support device backed allocations.
+        // Reject host memory allocations up front.
         if (IsGpuExeType(t.exeDevice.exeType)) {
           bool hasRemoteCpuMem = false;
           MemDevice offender = {};
