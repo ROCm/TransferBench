@@ -295,6 +295,13 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       endif
     endif
   endif
+
+# Git metadata (branch + short commit hash)
+# Priority: git rev-parse > GIT_VERSION file (populated by packaging scripts) > "unknown"
+_TB_DIR       := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
+TB_GIT_BRANCH := $(shell git -C "$(_TB_DIR)" rev-parse --abbrev-ref HEAD 2>/dev/null || sed -n '1p' "$(_TB_DIR)GIT_VERSION" 2>/dev/null || echo unknown)
+TB_GIT_COMMIT := $(shell git -C "$(_TB_DIR)" rev-parse --short HEAD 2>/dev/null || sed -n '2p' "$(_TB_DIR)GIT_VERSION" 2>/dev/null || echo unknown)
+COMMON_FLAGS  += -DTB_GIT_BRANCH='"$(TB_GIT_BRANCH)"' -DTB_GIT_COMMIT='"$(TB_GIT_COMMIT)"'
 endif
 
 .PHONY : all clean

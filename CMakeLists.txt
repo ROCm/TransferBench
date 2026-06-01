@@ -140,6 +140,47 @@ message(STATUS "TransferBench version: ${VERSION_STRING}")
 
 project(TransferBench VERSION ${VERSION_STRING} LANGUAGES CXX)
 
+# Git metadata: branch + short commit hash
+# Priority: git rev-parse > GIT_VERSION file (populated by packaging scripts) > "unknown"
+if(GIT_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE TB_GIT_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+    RESULT_VARIABLE _tb_git_branch_result
+  )
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE TB_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+    RESULT_VARIABLE _tb_git_commit_result
+  )
+endif()
+if(NOT TB_GIT_BRANCH OR TB_GIT_BRANCH STREQUAL "" OR
+   NOT TB_GIT_COMMIT OR TB_GIT_COMMIT STREQUAL "")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/GIT_VERSION")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/GIT_VERSION" _tb_version_lines LIMIT_COUNT 2)
+    list(LENGTH _tb_version_lines _tb_version_line_count)
+    if(_tb_version_line_count GREATER 0)
+      list(GET _tb_version_lines 0 TB_GIT_BRANCH)
+    else()
+      set(TB_GIT_BRANCH "unknown")
+    endif()
+    if(_tb_version_line_count GREATER 1)
+      list(GET _tb_version_lines 1 TB_GIT_COMMIT)
+    else()
+      set(TB_GIT_COMMIT "unknown")
+    endif()
+  else()
+    set(TB_GIT_BRANCH "unknown")
+    set(TB_GIT_COMMIT "unknown")
+  endif()
+endif()
+message(STATUS "TransferBench ${VERSION_STRING} (${TB_GIT_BRANCH}:${TB_GIT_COMMIT})")
+
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "Setting build type to 'Release' as none was specified.")
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
@@ -497,6 +538,11 @@ if(POD_COMM_FOUND)
   target_compile_definitions(TransferBench PRIVATE POD_COMM_ENABLED)
 endif()
 
+target_compile_definitions(TransferBench PRIVATE
+  TB_GIT_BRANCH="${TB_GIT_BRANCH}"
+  TB_GIT_COMMIT="${TB_GIT_COMMIT}"
+)
+
 check_cxx_compiler_flag(-parallel-jobs=12 HAVE_PARALLEL_JOBS)
 if(HAVE_PARALLEL_JOBS)
   message(STATUS "Enabling parallel compile jobs: -parallel-jobs=12")
@@ -635,6 +681,17 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CPACK_ARCHIVE_FILE_NAME "${_tb_archive_name}")
   set(CPACK_PACKAGE_FILE_NAME "${_tb_archive_name}")
 
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20")
+    configure_file(
+      cmake/WriteGitVersion.cmake.in
+      ${CMAKE_BINARY_DIR}/WriteGitVersion.cmake
+      @ONLY
+    )
+    set(CPACK_PRE_BUILD_SCRIPTS "${CMAKE_BINARY_DIR}/WriteGitVersion.cmake")
+  elseif(NOT TB_GIT_BRANCH STREQUAL "unknown")
+    file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/GIT_VERSION" "${TB_GIT_BRANCH}\n${TB_GIT_COMMIT}\n")
+  endif()
+
   set(CPACK_GENERATOR "DEB;RPM;TGZ")
   include(CPack)
 else()
@@ -649,6 +706,17 @@ else()
 
   set(PACKAGE_NAME TB)
   set(LIBRARY_NAME TransferBench)
+
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20")
+    configure_file(
+      cmake/WriteGitVersion.cmake.in
+      ${CMAKE_BINARY_DIR}/WriteGitVersion.cmake
+      @ONLY
+    )
+    set(CPACK_PRE_BUILD_SCRIPTS "${CMAKE_BINARY_DIR}/WriteGitVersion.cmake")
+  elseif(NOT TB_GIT_BRANCH STREQUAL "unknown")
+    file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/GIT_VERSION" "${TB_GIT_BRANCH}\n${TB_GIT_COMMIT}\n")
+  endif()
 
   rocm_create_package(
     NAME ${LIBRARY_NAME}
