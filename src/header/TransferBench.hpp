@@ -1429,8 +1429,6 @@ namespace {
     }
 
     prop.requestedHandleTypes = hipMemHandleTypeFabric;
-//  at this point shouldn't have any memtype other than device
-//    ERR_CHECK(GetMemLocation(memDevice, prop.location));
     prop.location.type = hipMemLocationTypeDevice;
     prop.location.id = memDevice.memIndex;
     return ERR_NONE;
@@ -1529,7 +1527,6 @@ namespace {
 
       // Specify memory access descriptor to enable local read/write
       hipMemAccessDesc desc;
-//      ERR_CHECK(GetMemLocation(memDevice, desc.location));
       desc.location.type = hipMemLocationTypeDevice;
       desc.location.id = memDevice.memIndex;
       desc.flags = hipMemAccessFlagsProtReadWrite;
@@ -2583,6 +2580,40 @@ namespace {
           errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
               i, t.exeDevice.exeRank});
           break;
+        }
+
+        // Pod (cross-rank) transfers with a GPU executor are exchanged via CUDA/HIP fabric handles,
+        // which, for current version, only support device-backed allocations.
+        // Host (pinned) memory cannot be shared this way,
+        // attempting to do so currently allocates device memory on the remote rank and then
+        // crashes when host code (e.g. memset / hipMemcpy of init data) dereferences the device pointer.
+        // Reject such configurations up front.
+        if (IsGpuExeType(t.exeDevice.exeType)) {
+          bool hasRemoteCpuMem = false;
+          MemDevice offender = {};
+          char const* role = nullptr;
+          for (auto const& src : t.srcs) {
+            if (src.memRank != t.exeDevice.exeRank && IsCpuMemType(src.memType)) {
+              hasRemoteCpuMem = true; offender = src; role = "SRC"; break;
+            }
+          }
+          if (!hasRemoteCpuMem) {
+            for (auto const& dst : t.dsts) {
+              if (dst.memRank != t.exeDevice.exeRank && IsCpuMemType(dst.memType)) {
+                hasRemoteCpuMem = true; offender = dst; role = "DST"; break;
+              }
+            }
+          }
+          if (hasRemoteCpuMem) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
+                i, t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                role, offender.memRank, GetMemTypeName(offender.memType), t.exeDevice.exeRank});
+            hasFatalError = true;
+            break;
+          }
         }
       }
 
