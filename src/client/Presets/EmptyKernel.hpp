@@ -308,7 +308,7 @@ int EmptyKernelPreset(EnvVars&          ev,
                   sumTime += val;
                   maxTime  = std::max(maxTime, val);
                   if (ev.showIterations) {
-                    Utils::Print("%c%6.3f", sep, val);
+                    Utils::Print("%c%6.2f", sep, val);
                   }
                 }
                 if (!ev.showPercentiles.empty()) {
@@ -316,10 +316,10 @@ int EmptyKernelPreset(EnvVars&          ev,
                                              data.begin() + baseOffset + numIterations);
                   std::sort(sorted.begin(), sorted.end());
                   for (int pct : ev.showPercentiles) {
-                    Utils::Print("%c%6.3f", sep, TransferBench::Utils::PercentileDurationMsecFromSorted(sorted, pct));
+                    Utils::Print("%c%6.2f", sep, TransferBench::Utils::PercentileDurationMsecFromSorted(sorted, pct));
                   }
                 }
-                Utils::Print("%c%6.3f%c%6.3f%c%6.3f", sep, minTime, sep, sumTime / numIterations, sep, maxTime);
+                Utils::Print("%c%6.2f%c%6.2f%c%6.2f", sep, minTime, sep, sumTime / numIterations, sep, maxTime);
               }
               Utils::Print("\n");
               fflush(stdout);
