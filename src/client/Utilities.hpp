@@ -23,6 +23,7 @@ THE SOFTWARE.
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <iomanip>
 #include <map>
 #include <set>
