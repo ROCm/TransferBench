@@ -3562,13 +3562,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       rss.sendWorkRequests.resize(rss.qpCount);
     }
 
-    // Create control (FIFO) QPs when fifoTrafficClass is non-zero.
-    // Compute numPrepost here so dst ctrl QPs are created with enough max_recv_wr capacity.
-    int ctrlNumPrepost = (cfg.general.numWarmups +
-                         std::max(1, std::abs(cfg.general.numIterations))) *
-                         std::max(1, cfg.general.numSubIterations);
-
-    if (cfg.nic.fifoTrafficClass != 0) {
+    // Create control (FIFO) QPs when fifoTrafficClass is non-zero and this is an RDMA_WRITE
+    // transfer (srcIsExeNic == true).  RDMA_READ transfers never use ctrl QPs so skip them.
+    // Compute ctrlNumPrepost in 64-bit to avoid signed overflow for large iteration counts,
+    // then clamp to INT_MAX before casting (NIC_TRAFFIC_CLASS_FIFO already rejects numIterations<=0).
+    int64_t ctrlNumPrepost64 = (int64_t)(cfg.general.numWarmups + cfg.general.numIterations) *
+                                std::max(1, cfg.general.numSubIterations);
+    int ctrlNumPrepost = (int)std::min(ctrlNumPrepost64, (int64_t)INT_MAX);
+    if (cfg.nic.fifoTrafficClass != 0 && rss.srcIsExeNic) {
       if (GetRank() == srcMemRank) {
         IBV_PTR_CALL(rss.srcCtrlCompQueue, ibv_create_cq,
                      rss.srcContext, rss.qpCount, NULL, NULL, 0);
@@ -3717,8 +3718,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Exchange ctrl QP numbers and connect them with fifoTrafficClass
-    if (cfg.nic.fifoTrafficClass != 0) {
+    // Exchange ctrl QP numbers and connect them with fifoTrafficClass.
+    // Guard on srcIsExeNic to match the ctrl QP creation block above.
+    if (cfg.nic.fifoTrafficClass != 0 && rss.srcIsExeNic) {
       ConnInfo srcCtrlInfo = {}, dstCtrlInfo = {};
       for (int i = 0; i < rss.qpCount; i++) {
         if (GetRank() == srcMemRank) {
