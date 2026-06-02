@@ -20,19 +20,20 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int OneToAllPreset(EnvVars&           ev,
-                   size_t      const  numBytesPerTransfer,
-                   std::string const  presetName)
+int OneToAllPreset(EnvVars&          ev,
+                   size_t      const numBytesPerTransfer,
+                   std::string const presetName,
+                   bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] One-to-All preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   if (numDetectedGpus < 2) {
     printf("[ERROR] One-to-all benchmark requires machine with at least 2 GPUs\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect env vars for this preset
@@ -66,7 +67,7 @@ int OneToAllPreset(EnvVars&           ev,
   for (auto ch : sweepExe) {
     if (ch != 'G' && ch != 'D') {
       printf("[ERROR] Unrecognized executor type '%c' specified\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
   }
 
@@ -129,7 +130,7 @@ int OneToAllPreset(EnvVars&           ev,
         }
         if (!TransferBench::RunTransfers(cfg, transfers, results)) {
           Utils::PrintErrors(results.errResults);
-          return 1;
+          return ERR_FATAL;
         }
 
         int counter = 0;
@@ -151,5 +152,5 @@ int OneToAllPreset(EnvVars&           ev,
       }
     }
   }
-  return 0;
+  return ERR_NONE;
 }

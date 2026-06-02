@@ -23,13 +23,14 @@ THE SOFTWARE.
 #include <limits>
 #include "EnvVars.hpp"
 
-int AllToAllRdmaPreset(EnvVars&           ev,
-                       size_t      const  numBytesPerTransfer,
-                       std::string const  presetName)
+int AllToAllRdmaPreset(EnvVars&          ev,
+                       size_t      const numBytesPerTransfer,
+                       std::string const presetName,
+                       bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR]a2an preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
@@ -38,12 +39,6 @@ int AllToAllRdmaPreset(EnvVars&           ev,
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 1);
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , -999); // Deprecated
-
-  // Deprecated env var check
-  if (useFineGrain != -999) {
-    memTypeIdx = useFineGrain ? 2 : 0;
-  }
 
   MemType memType = Utils::GetGpuMemType(memTypeIdx);
   std::string memTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
@@ -63,7 +58,7 @@ int AllToAllRdmaPreset(EnvVars&           ev,
   // Validate env vars
   if (numGpus < 0 || numGpus > numDetectedGpus) {
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
-    return 1;
+    return ERR_FATAL;
   }
 
 
@@ -97,7 +92,7 @@ int AllToAllRdmaPreset(EnvVars&           ev,
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
       Utils::Print("%s\n", err.errMsg.c_str());
-    return 1;
+    return ERR_FATAL;
   } else {
     Utils::PrintResults(ev, 1, transfers, results);
   }
@@ -154,5 +149,5 @@ int AllToAllRdmaPreset(EnvVars&           ev,
 
   Utils::PrintErrors(results.errResults);
 
-  return 0;
+  return ERR_NONE;
 }

@@ -22,13 +22,14 @@ THE SOFTWARE.
 
 #include "EnvVars.hpp"
 
-int AllToAllSweepPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int AllToAllSweepPreset(EnvVars&          ev,
+                        size_t      const numBytesPerTransfer,
+                        std::string const presetName,
+                        bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] All to All Sweep preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   enum
@@ -42,22 +43,24 @@ int AllToAllSweepPreset(EnvVars&           ev,
 
   // Force single-stream mode for all-to-all benchmark
   ev.useSingleStream = 1;
+  // Default to GPU-event timing for a2asweep (overridable via USE_HIP_EVENTS=0 for CPU wall-clock)
+  ev.useHipEvents = EnvVars::GetEnvVar("USE_HIP_EVENTS", 1);
 
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
   int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , 1);
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
+  int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int showMinOnly   = EnvVars::GetEnvVar("SHOW_MIN_ONLY",   1);
-  int useFineGrain  = EnvVars::GetEnvVar("USE_FINE_GRAIN" , 1);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int useSpray      = EnvVars::GetEnvVar("USE_SPRAY",       0);
   int verbose       = EnvVars::GetEnvVar("VERBOSE",         0);
 
-  std::vector<int> blockList  = EnvVars::GetEnvVarArray("BLOCKSIZES", {256});
+  std::vector<int> blockList  = EnvVars::GetEnvVarArray("BLOCKSIZES", {256,512,768,1024});
   std::vector<int> unrollList = EnvVars::GetEnvVarArray("UNROLLS", {1,2,3,4,6,8});
-  std::vector<int> numCusList = EnvVars::GetEnvVarArray("NUM_CUS", {4,8,12,16,24,32});
+  std::vector<int> numSesList = EnvVars::GetEnvVarArray("NUM_SUB_EXECS", {4,8,12,16,24,32});
 
   // A2A_MODE may be 0,1,2 or else custom numSrcs:numDsts
   int numSrcs, numDsts;
@@ -74,6 +77,9 @@ int AllToAllSweepPreset(EnvVars&           ev,
     numDsts = (a2aMode == A2A_READ_ONLY  ? 0 : 1);
   }
 
+  MemType memType = Utils::GetGpuMemType(memTypeIdx);
+  std::string devMemTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
+
   // Print off environment variables
   ev.DisplayEnvVars();
   if (!ev.hideEnv) {
@@ -84,13 +90,13 @@ int AllToAllSweepPreset(EnvVars&           ev,
                                 (a2aMode == A2A_CUSTOM) ? (std::to_string(numSrcs) + " read(s) " +
                                                            std::to_string(numDsts) + " write(s)").c_str(): a2aModeStr[a2aMode]);
     ev.Print("BLOCKSIZES"     , blockList.size() , EnvVars::ToStr(blockList).c_str());
-    ev.Print("SHOW_MIN_ONLY"  , showMinOnly      , showMinOnly ? "Showing only slowest GPU results" : "Showing slowest and fastest GPU results");
-    ev.Print("NUM_CUS"        , numCusList.size(), EnvVars::ToStr(numCusList).c_str());
+    ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
     ev.Print("NUM_GPU_DEVICES", numGpus          , "Using %d GPUs", numGpus);
+    ev.Print("NUM_SUB_EXECS"  , numSesList.size(), EnvVars::ToStr(numSesList).c_str());
+    ev.Print("SHOW_MIN_ONLY"  , showMinOnly      , showMinOnly ? "Showing only slowest GPU results" : "Showing slowest and fastest GPU results");
     ev.Print("UNROLLS"        , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
-    ev.Print("USE_FINE_GRAIN" , useFineGrain     , "Using %s-grained memory", useFineGrain ? "fine" : "coarse");
     ev.Print("USE_REMOTE_READ", useRemoteRead    , "Using %s as executor", useRemoteRead ? "DST" : "SRC");
-    ev.Print("USE_SPRAY"      , useSpray         , "%s per CU", useSpray ? "All targets" : "One target");
+    ev.Print("USE_SPRAY"      , useSpray         , "%s per SubExecutor", useSpray ? "All targets" : "One target");
     ev.Print("VERBOSE"        , verbose          , verbose ? "Display test results" : "Display summary only");
     printf("\n");
   }
@@ -107,14 +113,13 @@ int AllToAllSweepPreset(EnvVars&           ev,
   }
 
   // Collect the number of GPU devices to use
-  MemType memType = useFineGrain ? MEM_GPU_FINE : MEM_GPU;
   ExeType exeType = EXE_GPU_GFX;
 
   std::vector<Transfer> transfers;
 
   int targetCount = 0;
   if (!useSpray) {
-    // Each CU will work on just one target
+    // Each SubExecutor will work on just one target
     for (int i = 0; i < numGpus; i++) {
       targetCount = 0;
       for (int j = 0; j < numGpus; j++) {
@@ -144,7 +149,10 @@ int AllToAllSweepPreset(EnvVars&           ev,
       }
     }
   } else {
-    // Each CU will work on all targets
+    // Each CU will work on all targets.
+    // NOTE: targetCount ends up reflecting the last GPU's target count. This is correct for
+    // symmetric topologies (all GPUs have equal peer counts), but may be inaccurate with
+    // A2A_DIRECT on asymmetric hardware where different GPUs have different hop-1 peer counts.
     for (int i = 0; i < numGpus; i++) {
       TransferBench::Transfer transfer;
       transfer.numBytes = numBytesPerTransfer;
@@ -172,70 +180,116 @@ int AllToAllSweepPreset(EnvVars&           ev,
     }
   }
 
-  printf("GPU-GFX All-To-All Sweep benchmark:\n");
-  printf("==========================\n");
-  printf("- Copying %lu bytes between %s pairs of GPUs\n", numBytesPerTransfer, a2aDirect ? "directly connected" : "all");
+  Utils::Print("GPU-GFX All-To-All Sweep benchmark (%lu bytes, local=%s). All values are %s GB/s\n",
+               numBytesPerTransfer,
+               a2aLocal         ? "yes"                            : "no",
+               ev.useHipEvents  ? "GPU-Event-Timed (min over GPUs)": "CPU-Timed");
+  Utils::Print("=======================================================================================\n");
   if (transfers.size() == 0) {
-    printf("[WARN} No transfers requested. Try adjusting A2A_DIRECT or A2A_LOCAL\n");
+    Utils::Print("[WARN] No transfers requested. Try adjusting A2A_DIRECT or A2A_LOCAL\n");
     return 0;
   }
 
   // Execute Transfers
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
 
-  // Run tests
-  std::map<std::pair<int, int>, TransferBench::TestResults> results;
+  char sep = ev.outputToCsv ? ',' : ' ';
 
-  // Display summary
-  for (int blockSize : blockList) {
-    printf("Blocksize: %d\n", blockSize);
-    ev.gfxBlockSize = cfg.gfx.blockSize = blockSize;
+  double bestMinBw = 0.0;
+  int bestBlock = -1, bestUnroll = -1, bestNumSes = -1;
 
-    printf("#CUs\\Unroll");
-    for (int u : unrollList) {
-      printf("  %d(Min) ", u);
-      if (!showMinOnly) printf("  %d(Max) ", u);
+  // Print header once
+  Utils::Print(" BlkS %c UnR ", sep);
+  for (int c : numSesList) {
+    Utils::Print("%c  SE %03d", sep, c);
+    if (ev.useHipEvents && !showMinOnly) {
+      Utils::Print("%c SE%03dMx", sep, c);
     }
-    printf("\n");
-    for (int c : numCusList) {
-      printf("   %5d   ", c);  fflush(stdout);
-      for (int u : unrollList) {
-        ev.gfxUnroll = cfg.gfx.unrollFactor = u;
-        for (auto& transfer : transfers)
-          transfer.numSubExecs = useSpray ? (c * targetCount) : c;
+  }
+  Utils::Print("\n");
 
-        double minBandwidth = std::numeric_limits<double>::max();
-        double maxBandwidth = std::numeric_limits<double>::min();
-        TransferBench::TestResults result;
-        if (TransferBench::RunTransfers(cfg, transfers, result)) {
-          for (auto const& exeResult : result.exeResults) {
-            minBandwidth = std::min(minBandwidth, exeResult.second.avgBandwidthGbPerSec);
-            maxBandwidth = std::max(maxBandwidth, exeResult.second.avgBandwidthGbPerSec);
-          }
-          if (useSpray) {
-            minBandwidth *= targetCount;
-            maxBandwidth *= targetCount;
-          }
-          results[std::make_pair(c,u)] = result;
-        } else {
-          minBandwidth = 0.0;
+  // Results keyed by (blockSize, numSes, unroll) for verbose output
+  std::map<std::tuple<int,int,int>, TransferBench::TestResults> results;
+
+  for (int blockSize : blockList) {
+    cfg.gfx.blockSize = blockSize;
+
+    for (int u : unrollList) {
+      cfg.gfx.unrollFactor = u;
+      Utils::Print("%5d %c %3d ", blockSize, sep, u);
+      fflush(stdout);
+
+      for (int c : numSesList) {
+        for (auto& transfer : transfers) {
+          transfer.numSubExecs = useSpray ? (c * targetCount) : c;
         }
-        printf(" %7.2f ", minBandwidth);
-        if (!showMinOnly) printf(" %7.2f ", maxBandwidth);
+
+        TransferBench::TestResults result;
+        double minBw = 0.0, maxBw = 0.0;
+        if (TransferBench::RunTransfers(cfg, transfers, result)) {
+          if (!ev.useHipEvents) {
+            minBw = result.avgTotalBandwidthGbPerSec;
+            if (useSpray) {
+              minBw *= targetCount;
+            }
+          } else {
+            minBw = std::numeric_limits<double>::max();
+            maxBw = std::numeric_limits<double>::lowest();
+            for (auto const& exeResult : result.exeResults) {
+              minBw = std::min(minBw, exeResult.second.avgBandwidthGbPerSec);
+              maxBw = std::max(maxBw, exeResult.second.avgBandwidthGbPerSec);
+            }
+            if (useSpray) {
+              minBw *= targetCount;
+              maxBw *= targetCount;
+            }
+          }
+          if (minBw > bestMinBw) {
+            bestMinBw  = minBw;
+            bestBlock  = blockSize;
+            bestUnroll = u;
+            bestNumSes = c;
+          }
+          if (verbose) {
+            results[std::make_tuple(blockSize, c, u)] = result;
+          }
+        }
+        Utils::Print("%c%8.2f", sep, minBw);
+        if (ev.useHipEvents && !showMinOnly) {
+          Utils::Print("%c%8.2f", sep, maxBw);
+        }
         fflush(stdout);
       }
-      printf("\n"); fflush(stdout);
+      Utils::Print("\n");
+      fflush(stdout);
     }
+  }
+  Utils::Print("=======================================================================================\n");
 
-    if (verbose) {
-      int testNum = 0;
-      for (int c : numCusList) {
+  if (verbose) {
+    int testNum = 0;
+    for (int blockSize : blockList) {
+      for (int c : numSesList) {
         for (int u : unrollList) {
-          printf("CUs: %d Unroll %d\n", c, u);
-          Utils::PrintResults(ev, ++testNum, transfers, results[std::make_pair(c,u)]);
+          auto verboseTransfers = transfers;
+          for (auto& t : verboseTransfers) {
+            t.numSubExecs = useSpray ? (c * targetCount) : c;
+          }
+          Utils::Print("BlockSize: %d SubExecs: %d Unroll: %d\n", blockSize, c, u);
+          Utils::PrintResults(ev, ++testNum, verboseTransfers, results[std::make_tuple(blockSize, c, u)]);
         }
       }
     }
   }
-  return 1;
+
+  // Print combination that produced highest bandwidth
+  if (bestBlock != -1) {
+    Utils::Print("Highest %s bandwidth found: %7.2f GB/s\n",
+                 ev.useHipEvents ? "GPU-event-timed (min)" : "CPU-timed", bestMinBw);
+    Utils::Print("          BlockSize  : %7d\n", bestBlock);
+    Utils::Print("          Unroll     : %7d\n", bestUnroll);
+    Utils::Print("          NumSubExec : %7d\n", bestNumSes);
+  }
+
+  return ERR_NONE;
 }

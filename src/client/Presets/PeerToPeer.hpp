@@ -20,13 +20,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int PeerToPeerPreset(EnvVars&           ev,
-                     size_t      const  numBytesPerTransfer,
-                     std::string const  presetName)
+int PeerToPeerPreset(EnvVars&          ev,
+                     size_t      const numBytesPerTransfer,
+                     std::string const presetName,
+                     bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Peer-to-peer preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   int numDetectedCpus = TransferBench::GetNumExecutors(EXE_CPU);
@@ -42,7 +43,6 @@ int PeerToPeerPreset(EnvVars&           ev,
   int numGpuDevices  = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numGpuSubExecs = EnvVars::GetEnvVar("NUM_GPU_SE",      useDmaCopy ? 1 : TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0}));
   int p2pMode        = EnvVars::GetEnvVar("P2P_MODE",        0);
-  int useFineGrain   = EnvVars::GetEnvVar("USE_FINE_GRAIN",  -999); // Deprecated
   int useRemoteRead  = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
   MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
@@ -70,12 +70,6 @@ int PeerToPeerPreset(EnvVars&           ev,
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
     }
-  }
-
-  // Check for deprecated env vars
-  if (useFineGrain != -999) {
-    Utils::Print("[ERROR] USE_FINE_GRAIN has been deprecated and replaced by CPU_MEM_TYPE and GPU_MEM_TYPE\n");
-    return 1;
   }
 
   char const separator = ev.outputToCsv ? ',' : ' ';
@@ -188,7 +182,7 @@ int PeerToPeerPreset(EnvVars&           ev,
           if (!TransferBench::RunTransfers(cfg, transfers, results)) {
             for (auto const& err : results.errResults)
               printf("%s\n", err.errMsg.c_str());
-            return 1;
+            return ERR_FATAL;
           }
 
           for (int dir = 0; dir <= isBidirectional; dir++) {
@@ -326,5 +320,5 @@ int PeerToPeerPreset(EnvVars&           ev,
       printf("\n\n");
     }
   }
-  return 0;
+  return ERR_NONE;
 }

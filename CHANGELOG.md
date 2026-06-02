@@ -3,6 +3,48 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.67.00
+### Added
+- Added NIC_TRAFFIC_CLASS to set the DSCP/traffic class byte in the RoCE GRH for QPs (RoCE only)
+- Added NIC_SERVICE_LEVEL to set the IB service level (sl) for QPs (IB and RoCE)
+- Initial support for pod communication.  Requires compatible hardware / ROCm version and subject to further testing
+  - This potentially enables GFX/DMA executors to access SRC/DST memory locations on GPUs within the same pod
+  - Pod membership requires amd-smi however can be skipped by setting TB_FORCE_SINGLE_POD=1
+- Support for dumping executed Transfers to a config file specified by TB_DUMP_CFG_FILE
+  - This will write Transfers that are executed (for example via a preset) to a config file that can then be executed
+- Reporting number of iterations run when running in timed mode (NUM_ITERATIONS < 0)
+- Adding NIC_CQ_POLL_BATCH to control CQ poll batch size for NIC transfers
+- New "hbm" preset which sweeps and tests local HBM read performance
+- Added a new TB_WALLCLOCK_RATE that will override GPU GFX wallclock rate if it returns 0 (debug)
+- Adding new batched-DMA executor "B", which utilizes the hipMemcpyBatchAsync API introduced in HIP 7.1 / CUDA 12.8
+- Added new "bmasweep" preset that compares DMA to batched DMA execution for parallel transfers to other GPUs
+- Added new "wallclock" preset that compares wallclock counters across XCCs within a GPU
+- Added new "smoketest" preset that runs a variety of DMA/GFX tests for simple correctness tests
+- Added new "help" preset to show config file examples
+- Added new "presets" preset to show available presets and their descriptions
+- Added new "rings" preset that runs parallel rings of transfers (pod-capable)
+- Added new "envvars" preset to show environment variables that can change TransferBench behavior
+- Adding information on how to run multi-rank with TransferBench, when run with no args
+- Added new "nica2a" preset (NIC all-to-all over GPUs via NIC executors, multi-node)
+- Added new GFX_KERNEL to allow experimenting with copy-only GFX kernel.  Currently this is opt-in only
+- Added `SHOW_PERCENTILES` (e.g. `50,75,90,95,99`) to show empirical percentiles of per-iteration duration
+- Adding new LaunchTransferBench.sh script to simplify launching TransferBench across multiple nodes (via socket)
+- New `empty` preset (EmptyKernel) to measure empty-kernel launch latency with BATCHSIZES/GRIDSIZES/BLOCKSIZES sweeps
+
+### Modified
+- DMA-BUF support enablement in CMake changed to ENABLE_DMA_BUF to be more similar to other compile-time options
+- Adding extra information to CMake and make build methods to indicate enabled / disabled features
+- a2asweep preset changes from USE_FINE_GRAIN to MEM_TYPE to reflect various memory types
+- a2asweep preset changes from NUM_CUS to NUM_SUB_EXECS to match with a2a preset naming convention
+- scaling preset changes from using USE_FINE_GRAIN to CPU_MEM_TYPE and GPU_MEM_TYPE
+- NIC_FILTER renamed to TB_NIC_FILTER for consistency
+- DUMP_LINES renamed to TB_DUMP_LINES for consistency
+- Dynamically size CQs for NIC transfers in high QPs case
+- Switch to using hipMemcpyDeviceToDeviceNoCU instead of hipMemcpyDefault for DMA Executor if available (requires HIP >= 6.0)
+- Allow for multiple destination memory locations for DMA/Batched-DMA Transfers
+- Removed env vars printing and preset print when running TransferBench with no args
+- Modification to simplify socket comm usage - first rank only needs to set TB_NUM_RANKS=X to see connection info
+
 ## v1.66.02
 ### Added
 - Adding DMA-BUF support

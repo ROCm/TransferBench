@@ -39,13 +39,14 @@ void LogTransfers(FILE *fp, int const testNum, std::vector<Transfer> const& tran
   }
 }
 
-int SweepPreset(EnvVars&           ev,
-                size_t      const  numBytesPerTransfer,
-                std::string const  presetName)
+int SweepPreset(EnvVars&          ev,
+                size_t      const numBytesPerTransfer,
+                std::string const presetName,
+                bool        const bytesSpecified)
 {
   if (TransferBench::GetNumRanks() > 1) {
     Utils::Print("[ERROR] Sweep preset currently not supported for multi-node\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   bool const isRandom = (presetName == "rsweep");
@@ -103,33 +104,33 @@ int SweepPreset(EnvVars&           ev,
   for (auto ch : sweepSrc) {
     if (!strchr(MemTypeStr, ch)) {
       printf("[ERROR] Unrecognized memory type '%c' specified for sweep source\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
     if (strchr(sweepSrc.c_str(), ch) != strrchr(sweepSrc.c_str(), ch)) {
       printf("[ERROR] Duplicate memory type '%c' specified for sweep source\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
   }
 
   for (auto ch : sweepDst) {
     if (!strchr(MemTypeStr, ch)) {
       printf("[ERROR] Unrecognized memory type '%c' specified for sweep destination\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
     if (strchr(sweepDst.c_str(), ch) != strrchr(sweepDst.c_str(), ch)) {
       printf("[ERROR] Duplicate memory type '%c' specified for sweep destination\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
   }
 
   for (auto ch : sweepExe) {
     if (!strchr(ExeTypeStr, ch)) {
       printf("[ERROR] Unrecognized executor type '%c' specified for sweep executor\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
     if (strchr(sweepExe.c_str(), ch) != strrchr(sweepExe.c_str(), ch)) {
       printf("[ERROR] Duplicate executor type '%c' specified for sweep executor\n", ch);
-      return 1;
+      return ERR_FATAL;
     }
   }
 
@@ -339,14 +340,15 @@ int SweepPreset(EnvVars&           ev,
 
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       Utils::PrintErrors(results.errResults);
-      if (!continueOnErr) return 1;
+      if (!continueOnErr) return ERR_FATAL;
     } else {
       Utils::PrintResults(ev, numTestsRun, transfers, results);
     }
 
     // Check for test limit
     if (numTestsRun == sweepTestLimit) {
-      printf("Sweep Test limit reached\n");
+      printf("Sweep Test limit reached: ran %d of %d configured tests (SWEEP_TEST_LIMIT=%d), terminated with no error.\n",
+             numTestsRun, sweepTestLimit, sweepTestLimit);
       break;
     }
 
@@ -354,7 +356,8 @@ int SweepPreset(EnvVars&           ev,
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double totalCpuTime = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count();
     if (sweepTimeLimit && totalCpuTime > sweepTimeLimit) {
-      printf("Sweep Time limit exceeded\n");
+      printf("Sweep Time limit exceeded: elapsed %.2f s > %d s configured (SWEEP_TIME_LIMIT=%d), after %d test(s), terminated with no error.\n",
+             totalCpuTime, sweepTimeLimit, sweepTimeLimit, numTestsRun);
       break;
     }
 
@@ -371,5 +374,5 @@ int SweepPreset(EnvVars&           ev,
     }
   }
   if (fp) fclose(fp);
-  return 0;
+  return ERR_NONE;
 }

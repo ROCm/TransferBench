@@ -20,17 +20,18 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-int NicRingsPreset(EnvVars&           ev,
-                   size_t      const  numBytesPerTransfer,
-                   std::string const  presetName)
+int NicRingsPreset(EnvVars&          ev,
+                   size_t      const numBytesPerTransfer,
+                   std::string const presetName,
+                   bool        const bytesSpecified)
 {
 
   // Check for single homogenous group
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] NIC-rings preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] NIC_FILTER may also be used to limit NIC visibility\n");
-    return 1;
+    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
+    return ERR_FATAL;
   }
 
   // Collect topology
@@ -104,7 +105,7 @@ int NicRingsPreset(EnvVars&           ev,
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
     for (auto const& err : results.errResults)
       Utils::Print("%s\n", err.errMsg.c_str());
-    return 1;
+    return ERR_FATAL;
   } else if (showDetails) {
     Utils::PrintResults(ev, 1, transfers, results);
     Utils::Print("\n");
@@ -160,7 +161,7 @@ int NicRingsPreset(EnvVars&           ev,
 
       double ringMin = std::numeric_limits<double>::max();
       double ringAvg = 0.0;
-      double ringMax = std::numeric_limits<double>::min();
+      double ringMax = std::numeric_limits<double>::lowest();
 
       for (int rank = 0; rank < numRanks; rank++) {
         double avgBw = results.tfrResults[transferIdx].avgBandwidthGbPerSec;
@@ -184,7 +185,7 @@ int NicRingsPreset(EnvVars&           ev,
 
   double rankMin = std::numeric_limits<double>::max();
   double rankAvg = 0.0;
-  double rankMax = std::numeric_limits<double>::min();
+  double rankMax = std::numeric_limits<double>::lowest();
   for (int rank = 0; rank < numRanks; rank++) {
     table.Set(3 + rank, numCols - 1, " %.2f ", rankTotal[rank]);
     rankMin = std::min(rankMin, rankTotal[rank]);
@@ -204,5 +205,5 @@ int NicRingsPreset(EnvVars&           ev,
   if (Utils::HasDuplicateHostname()) {
     printf("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
   }
-  return 0;
+  return ERR_NONE;
 }

@@ -35,12 +35,16 @@ THE SOFTWARE.
   } while (0)
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
+#include <optional>
+#include <set>
 #include <numa.h>
 #include <random>
 #include <time.h>
 
-#define CLIENT_VERSION "02"
+#define CLIENT_VERSION "00"
 
 #include "TransferBench.hpp"
 using namespace TransferBench;
@@ -87,18 +91,19 @@ public:
   int useHsaDma;                     // Use hsa_amd_async_copy instead of hipMemcpy for non-targetted DMA executions
 
   // GFX options
+  vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
   int gfxBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
   int gfxBlockSize;                  // Size of each threadblock (must be multiple of 64)
-  vector<uint32_t> cuMask;           // Bit-vector representing the CU mask
-  vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int gfxKernel;                     // GFX Kernel to use (-1=auto, 0=reduce, 1=copy-only)
   int gfxSeType;                     // GFX subexecutor type (0=threadblock, 1=warp)
+  int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxTemporal;                   // Non-temporal load/store mode (0=none, 1=load, 2=store, 3=both)
   int gfxUnroll;                     // GFX-kernel unroll factor
-  int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
-  int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
-  int gfxSingleTeam;                 // Team all subExecutors across the data array
   int gfxWaveOrder;                  // GFX-kernel wavefront ordering
   int gfxWordSize;                   // GFX-kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)
+  vector<vector<int>> prefXccTable;  // Specifies XCC to use for given exe->dst pair
+  int useHipEvents;                  // Use HIP events for timing GFX/DMA Executor
+  int useSingleStream;               // Use a single stream per GPU GFX executor instead of stream per Transfer
 
   // Client options
   int hideEnv;                       // Skip printing environment variable
@@ -106,13 +111,17 @@ public:
   int maxNumVarSubExec;              // Maximum # of subexecutors to use for variable subExec Transfers (0 to use device limit)
   int outputToCsv;                   // Output in CSV format
   int samplingFactor;                // Affects how many different values of N are generated (when N set to 0)
+  std::vector<int> showPercentiles;  // Iteration-duration percentiles to print
 
   // NIC options
   int ibGidIndex;                    // GID Index for RoCE NICs
   uint8_t ibPort;                    // NIC port number to be used
   int ipAddressFamily;               // IP Address Famliy
   int nicChunkBytes;                 // Number of bytes to send per chunk for RDMA operations
+  int nicCqPollBatch;                // Number of CQ entries to poll per ibv_poll_cq call
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
+  int nicServiceLevel;               // IB service level (sl) for InfiniBand QPs
+  int nicTrafficClass;               // DSCP/traffic class byte for RoCE GRH
   int roceVersion;                   // RoCE version number
 
   // Developer features
@@ -146,8 +155,9 @@ public:
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
     gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
+    gfxKernel         = GetEnvVar("GFX_KERNEL"          , 0);
     gfxSeType         = GetEnvVar("GFX_SE_TYPE"         , 0);
-    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 1);
+    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
     gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
     gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
     gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
@@ -162,6 +172,7 @@ public:
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
+    showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
@@ -174,7 +185,20 @@ public:
     roceVersion       = GetEnvVar("ROCE_VERSION"        , 2);
     ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
     nicChunkBytes     = GetEnvVar("NIC_CHUNK_BYTES"     , 1073741824);
+    nicCqPollBatch    = GetEnvVar("NIC_CQ_POLL_BATCH"   , 4);
     nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
+    nicServiceLevel   = GetEnvVar("NIC_SERVICE_LEVEL"   , 0);
+    nicTrafficClass   = GetEnvVar("NIC_TRAFFIC_CLASS"   , 0);
+
+    // Check that NIC service level and traffic class are in valid ranges
+    if (nicServiceLevel < 0 || nicServiceLevel > 15) {
+      printf("[ERROR] NIC_SERVICE_LEVEL must be in range 0..15 (got %d)\n", nicServiceLevel);
+      exit(1);
+    }
+    if (nicTrafficClass < 0 || nicTrafficClass > 255) {
+      printf("[ERROR] NIC_TRAFFIC_CLASS must be in range 0..255 (got %d)\n", nicTrafficClass);
+      exit(1);
+    }
 
     gpuMaxHwQueues    = GetEnvVar("GPU_MAX_HW_QUEUES"   , 4);
 
@@ -234,14 +258,15 @@ public:
     // Check for CU mask
     int numXccs = TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, 0});
     cuMask.clear();
-    char* cuMaskStr = getenv("CU_MASK");
-    if (cuMaskStr != NULL) {
+    char const* cuMaskRaw = getenv("CU_MASK");
+    if (cuMaskRaw != NULL) {
 #if defined(__NVCC__)
       printf("[WARN] CU_MASK is not supported in CUDA\n");
 #else
       std::vector<std::pair<int, int>> ranges;
       int maxCU = 0;
-      char* token = strtok(cuMaskStr, ",");
+      std::string cuMaskCopy(cuMaskRaw);
+      char* token = cuMaskCopy.empty() ? NULL : strtok(&cuMaskCopy[0], ",");
       while (token) {
         int start, end;
         if (sscanf(token, "%d-%d", &start, &end) == 2) {
@@ -269,14 +294,25 @@ public:
 #endif
     }
 
+    // Check that percentiles are valid
+    std::sort(showPercentiles.begin(), showPercentiles.end());
+    showPercentiles.erase(std::unique(showPercentiles.begin(), showPercentiles.end()), showPercentiles.end());
+    for (int v : showPercentiles) {
+      if (v < 1 || v > 99) {
+        printf("[ERROR] SHOW_PERCENTILES: value %d out of range (allowed 1..99)\n", v);
+        exit(1);
+      }
+    }
+
     // Parse preferred XCC table (if provided)
-    char* prefXccStr = getenv("XCC_PREF_TABLE");
-    if (prefXccStr) {
+    char const* prefXccRaw = getenv("XCC_PREF_TABLE");
+    if (prefXccRaw) {
       prefXccTable.resize(numDetectedGpus);
       for (int i = 0; i < numDetectedGpus; i++){
         prefXccTable[i].resize(numDetectedGpus, -1);
       }
-      char* token = strtok(prefXccStr, ",");
+      std::string prefXccCopy(prefXccRaw);
+      char* token = prefXccCopy.empty() ? NULL : strtok(&prefXccCopy[0], ",");
       int tokenCount = 0;
       while (token) {
         int xccId;
@@ -312,54 +348,75 @@ public:
   }
 
   // Display info on the env vars that can be used
-  static void DisplayUsage()
+  static void DisplayEnvVarsList()
   {
-    printf("Environment variables:\n");
+    printf("Environment variables (client):\n");
     printf("======================\n");
-    printf(" ALWAYS_VALIDATE   - Validate after each iteration instead of once after all iterations\n");
-    printf(" BLOCK_BYTES       - Controls granularity of how work is divided across subExecutors\n");
-    printf(" BYTE_OFFSET       - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
-    printf(" CU_MASK           - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
-    printf(" FILL_COMPRESS     - Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0\n");
-    printf(" FILL_PATTERN      - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
-    printf(" GFX_BLOCK_ORDER   - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
-    printf(" GFX_BLOCK_SIZE    - # of threads per threadblock (Must be multiple of 64)\n");
-    printf(" GFX_SE_TYPE       - SubExecutor granularity type (0=threadblock, 1=warp)\n");
-    printf(" GFX_TEMPORAL      - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
-    printf(" GFX_UNROLL        - Unroll factor for GFX kernel (0=auto), must be less than %d\n", TransferBench::GetIntAttribute(ATR_GFX_MAX_UNROLL));
-    printf(" GFX_SINGLE_TEAM   - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
-    printf(" GFX_WAVE_ORDER    - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
-    printf(" GFX_WORD_SIZE     - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
-    printf(" HIDE_ENV          - Hide environment variable value listing\n");
+    printf(" ALWAYS_VALIDATE     - Validate after each iteration instead of once after all iterations\n");
+    printf(" BLOCK_BYTES         - Controls granularity of how work is divided across subExecutors\n");
+    printf(" BYTE_OFFSET         - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
+    printf(" CU_MASK             - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
+    printf(" FILL_COMPRESS       - Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0\n");
+    printf(" FILL_PATTERN        - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
+    printf(" GFX_BLOCK_ORDER     - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" GFX_BLOCK_SIZE      - # of threads per threadblock (Must be multiple of 64)\n");
+    printf(" GFX_KERNEL          - -1=auto, 0=force GpuReduceKernel, 1=force GpuCopyKernel (may error if ineligible)\n");
+    printf(" GFX_SE_TYPE         - SubExecutor granularity type (0=threadblock, 1=warp)\n");
+    printf(" GFX_TEMPORAL        - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
+    printf(" GFX_UNROLL          - Unroll factor for GFX kernel\n");
+    printf(" GFX_SINGLE_TEAM     - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
+    printf(" GFX_WAVE_ORDER      - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
+    printf(" GFX_WORD_SIZE       - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
+    printf(" GPU_MAX_HW_QUEUES   - Max hardware queues per GPU device (default = 4)\n");
+    printf(" HIDE_ENV            - Hide environment variable value listing\n");
 #if NIC_EXEC_ENABLED
-    printf(" IB_GID_INDEX      - Required for RoCE NICs (default=-1/auto)\n");
-    printf(" IB_PORT_NUMBER    - RDMA port count for RDMA NIC (default=1)\n");
-    printf(" IP_ADDRESS_FAMILY - IP address family (4=v4, 6=v6, default=v4)\n");
+    printf(" IB_GID_INDEX        - Required for RoCE NICs (default=-1/auto)\n");
+    printf(" IB_PORT_NUMBER      - RDMA port count for RDMA NIC (default=1)\n");
+    printf(" IP_ADDRESS_FAMILY   - IP address family (4=v4, 6=v6, default=v4)\n");
 #endif
-    printf(" MIN_VAR_SUBEXEC   - Minumum # of subexecutors to use for variable subExec Transfers\n");
-    printf(" MAX_VAR_SUBEXEC   - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
+    printf(" MIN_VAR_SUBEXEC     - Minimum # of subexecutors to use for variable subExec Transfers\n");
+    printf(" MAX_VAR_SUBEXEC     - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
 #if NIC_EXEC_ENABLED
-    printf(" NIC_CHUNK_BYTES   - Number of bytes to send at a time using NIC (default = 1GB)\n");
-    printf(" NIC_RELAX_ORDER   - Set to non-zero to use relaxed ordering");
+    printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
+    printf(" NIC_CQ_POLL_BATCH   - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
+    printf(" NIC_RELAX_ORDER     - Set to non-zero to use relaxed ordering\n");
+    printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0)\n");
+    printf(" NIC_TRAFFIC_CLASS   - DSCP/traffic class byte for RoCE GRH (default=0)\n");
 #endif
-    printf(" NUM_ITERATIONS    - # of timed iterations per test. If negative, run for this many seconds instead\n");
-    printf(" NUM_SUBITERATIONS - # of sub-iterations to run per iteration. Must be non-negative\n");
-    printf(" NUM_WARMUPS       - # of untimed warmup iterations per test\n");
-    printf(" OUTPUT_TO_CSV     - Outputs to CSV format if set\n");
+    printf(" NUM_ITERATIONS      - # of timed iterations per test. If negative, run for this many seconds instead\n");
+    printf(" NUM_SUBITERATIONS   - # of sub-iterations to run per iteration. Must be non-negative\n");
+    printf(" NUM_WARMUPS         - # of untimed warmup iterations per test\n");
+    printf(" OUTPUT_TO_CSV       - Outputs to CSV format if set\n");
 #if NIC_EXEC_ENABLED
-    printf(" ROCE_VERSION      - RoCE version (default=2)\n");
+    printf(" ROCE_VERSION        - RoCE version (default=2)\n");
 #endif
-    printf(" SAMPLING_FACTOR   - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
-    printf(" SHOW_BORDERS      - Show ASCII box-drawing characaters in tables\n");
-    printf(" SHOW_ITERATIONS   - Show per-iteration timing info\n");
-    printf(" USE_HIP_EVENTS    - Use HIP events for GFX executor timing\n");
-    printf(" USE_HSA_DMA       - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
-    printf(" USE_INTERACTIVE   - Pause for user-input before starting transfer loop\n");
-    printf(" USE_SINGLE_STREAM - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
-    printf(" VALIDATE_DIRECT   - Validate GPU destination memory directly instead of staging GPU memory on host\n");
-    printf(" VALIDATE_SOURCE   - Validate GPU src memory immediately after preparation\n");
+    printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
+    printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
+    printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
+    printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
+    printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
+    printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
+    printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
+    printf(" USE_SINGLE_STREAM   - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
+    printf(" VALIDATE_DIRECT     - Validate GPU destination memory directly instead of staging GPU memory on host\n");
+    printf(" VALIDATE_SOURCE     - Validate GPU src memory immediately after preparation\n");
+    printf("\n");
+    printf("Environment variables (back-end):\n");
+    printf("====================================\n");
+    printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
+    printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
+    printf(" TB_MASTER_ADDR      - Rank 0 hostname or IPv4 for workers; optional on rank 0 (auto-detected if unset)\n");
+    printf(" TB_MASTER_IFACE     - When TB_MASTER_ADDR unset on rank 0, optional interface for IPv4 detection (e.g. eth0)\n");
+    printf(" TB_MASTER_PORT      - Used to set Rank 0 port for socket communicator (default: 29500)\n");
+    printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
+    printf(" TB_VERBOSE          - Enables additional internal logging\n");
+    printf(" TB_DUMP_CFG_FILE    - Writes executed transfers to a config file\n");
+    printf(" TB_DUMP_LINES       - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
+    printf(" TB_NIC_FILTER       - Regex filter to limit NIC visibility for NIC executors\n");
+    printf(" TB_FORCE_SINGLE_POD - Forces all ranks into one pod (skips pod query)\n");
+    printf(" TB_WALLCLOCK_RATE   - Overrides queried GPU wallclock rate if needed\n");
+    printf(" TB_PAUSE            - Pauses startup for debugger attachment\n");
   }
-
 
   void Print(std::string const& name, int32_t const value, const char* format, ...) const
   {
@@ -412,6 +469,10 @@ public:
           "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential" : "Interleaved");
     Print("GFX_BLOCK_SIZE", gfxBlockSize,
           "Threadblock size of %d", gfxBlockSize);
+    Print("GFX_KERNEL", gfxKernel,
+          "%s", gfxKernel == -1 ? "auto" :
+                gfxKernel ==  0 ? "force GpuReduceKernel" :
+                gfxKernel ==  1 ? "force GpuCopyKernel"   : "unknown");
     Print("GFX_SE_TYPE", gfxSeType,
           "SubExecutor granularity: %s", gfxSeType == 0 ? "Threadblock" : "Warp");
     Print("GFX_SINGLE_TEAM", gfxSingleTeam,
@@ -435,6 +496,9 @@ public:
     Print("GFX_WORD_SIZE", gfxWordSize,
           "Using GFX word size of %d (DWORDx%d)", gfxWordSize, gfxWordSize);
 
+    Print("GPU_MAX_HW_QUEUES", gpuMaxHwQueues,
+          "Max %d hardware queues per GPU device", gpuMaxHwQueues);
+
 #if NIC_EXEC_ENABLED
     Print("IP_ADDRESS_FAMILY", ipAddressFamily,
           "IP address family is set to IPv%d", ipAddressFamily);
@@ -452,8 +516,14 @@ public:
 #if NIC_EXEC_ENABLED
     Print("NIC_CHUNK_BYTES", nicChunkBytes,
           "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
+    Print("NIC_CQ_POLL_BATCH", nicCqPollBatch,
+          "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
     Print("NIC_RELAX_ORDER", nicRelaxedOrder,
           "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
+    Print("NIC_SERVICE_LEVEL", nicServiceLevel,
+          "IB service level (sl) set to %d", nicServiceLevel);
+    Print("NIC_TRAFFIC_CLASS", nicTrafficClass,
+          "RoCE traffic class (DSCP) set to %d", nicTrafficClass);
 #endif
     Print("NUM_ITERATIONS", numIterations,
           (numIterations == 0) ? "Running infinitely" :
@@ -469,6 +539,8 @@ public:
     Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
+    Print("SHOW_PERCENTILES", showPercentiles.empty() ? 0 : 1, "%s",
+          showPercentiles.empty() ? "Disabled" : GetStr(showPercentiles).c_str());
     Print("USE_HIP_EVENTS", useHipEvents,
           "Using %s for GFX/DMA Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
@@ -500,6 +572,9 @@ public:
   {
     char const* varStr = getenv(varname.c_str());
     if (varStr) {
+      if (varStr[0] == '\0') {
+        return defaultValue;
+      }
       int val = atoi(varStr);
       char units = varStr[strlen(varStr)-1];
       switch (units) {
@@ -512,50 +587,59 @@ public:
     return defaultValue;
   }
 
+  // Returns comma-split tokens for varname, or an empty optional if unset/empty (use default).
+  static std::optional<std::vector<std::string>> GetEnvTokens(std::string const& varname)
+  {
+    char const* raw = getenv(varname.c_str());
+    if (!raw || raw[0] == '\0') return std::nullopt;
+    std::vector<std::string> tokens;
+    std::string copy(raw);
+    char* token = strtok(&copy[0], ",");
+    while (token) { tokens.push_back(token); token = strtok(NULL, ","); }
+    return tokens;
+  }
+
   static std::vector<int> GetEnvVarArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
-    if (getenv(varname.c_str())) {
-      std::vector<int> values;
-      char* arrayStr = getenv(varname.c_str());
-      char* token = strtok(arrayStr, ",");
-      while (token) {
-        int val;
-        if (sscanf(token, "%d", &val) == 1) {
-          values.push_back(val);
-        } else {
-          printf("[ERROR] Unrecognized token [%s]\n", token);
-          exit(1);
-        }
-        token = strtok(NULL, ",");
+    auto tokens = GetEnvTokens(varname);
+    if (!tokens) return defaultValue;
+    std::vector<int> values;
+    for (auto const& tok : *tokens) {
+      int val;
+      if (sscanf(tok.c_str(), "%d", &val) == 1) {
+        values.push_back(val);
+      } else {
+        printf("[ERROR] Unrecognized token [%s]\n", tok.c_str());
+        exit(1);
       }
-      return values;
     }
-    return defaultValue;
+    return values;
+  }
+
+  static std::vector<std::string> GetEnvVarStrArray(std::string const& varname, std::vector<std::string> const& defaultValue)
+  {
+    auto tokens = GetEnvTokens(varname);
+    if (!tokens) return defaultValue;
+    return *tokens;
   }
 
   static std::vector<int> GetEnvVarRangeArray(std::string const& varname, std::vector<int> const& defaultValue)
   {
-    if (getenv(varname.c_str())) {
-      char* rangeStr = getenv(varname.c_str());
-      std::set<int> values;
-      char* token = strtok(rangeStr, ",");
-      while (token) {
-        int start, end;
-        if (sscanf(token, "%d-%d", &start, &end) == 2) {
-          for (int i = start; i <= end; i++) values.insert(i);
-        } else if (sscanf(token, "%d", &start) == 1) {
-          values.insert(start);
-        } else {
-          printf("[ERROR] Unrecognized token [%s]\n", token);
-          exit(1);
-        }
-        token = strtok(NULL, ",");
+    auto tokens = GetEnvTokens(varname);
+    if (!tokens) return defaultValue;
+    std::set<int> values;
+    for (auto const& tok : *tokens) {
+      int start, end;
+      if (sscanf(tok.c_str(), "%d-%d", &start, &end) == 2) {
+        for (int i = start; i <= end; i++) values.insert(i);
+      } else if (sscanf(tok.c_str(), "%d", &start) == 1) {
+        values.insert(start);
+      } else {
+        printf("[ERROR] Unrecognized token [%s]\n", tok.c_str());
+        exit(1);
       }
-      std::vector<int> result;
-      for (auto v : values) result.push_back(v);
-      return result;
     }
-    return defaultValue;
+    return std::vector<int>(values.begin(), values.end());
   }
 
   static std::string GetEnvVar(std::string const& varname, std::string const& defaultValue)
@@ -567,9 +651,18 @@ public:
 
   std::string GetStr(std::vector<int> const& varnameList) const {
     std::string result = "";
-    for (int i = 0; i < varnameList.size(); i++) {
+    for (size_t i = 0; i < varnameList.size(); i++) {
       if (i) result += ",";
       result += std::to_string(varnameList[i]);
+    }
+    return result;
+  }
+
+  std::string GetStr(std::vector<std::string> const& varnameList) const {
+    std::string result = "";
+    for (size_t i = 0; i < varnameList.size(); i++) {
+      if (i) result += ",";
+      result += varnameList[i];
     }
     return result;
   }
@@ -596,8 +689,10 @@ public:
         }
       }
     }
-    if (inRun)
+    if (inRun) {
       curr.second = (cuMask.size() * 32) / numXccs - 1;
+      runs.push_back(curr);
+    }
 
     std::string result = "CUs used: (" + std::to_string(used) + ") ";
     for (int i = 0; i < runs.size(); i++)
@@ -616,7 +711,7 @@ public:
     cfg.general.numIterations      = numIterations;
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
-    cfg.general.recordPerIteration = showIterations;
+    cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
     cfg.general.useInteractive     = useInteractive;
 
     cfg.data.alwaysValidate        = alwaysValidate;
@@ -633,6 +728,7 @@ public:
     cfg.gfx.blockOrder             = gfxBlockOrder;
     cfg.gfx.blockSize              = gfxBlockSize;
     cfg.gfx.cuMask                 = cuMask;
+    cfg.gfx.gfxKernel              = gfxKernel;
     cfg.gfx.prefXccTable           = prefXccTable;
     cfg.gfx.seType                 = gfxSeType;
     cfg.gfx.unrollFactor           = gfxUnroll;
@@ -644,10 +740,13 @@ public:
     cfg.gfx.wordSize               = gfxWordSize;
 
     cfg.nic.chunkBytes             = nicChunkBytes;
+    cfg.nic.cqPollBatch            = nicCqPollBatch;
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
     cfg.nic.ipAddressFamily        = ipAddressFamily;
     cfg.nic.useRelaxedOrder        = nicRelaxedOrder;
+    cfg.nic.serviceLevel           = nicServiceLevel;
+    cfg.nic.trafficClass           = nicTrafficClass;
     cfg.nic.roceVersion            = roceVersion;
 
     return cfg;

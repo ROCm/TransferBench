@@ -24,122 +24,29 @@ THE SOFTWARE.
 
 // Helper functions
 
-// Returns a schedule of round robin pairing of N elements, using Circle Method
-// if parallel, each round contains N/2 pairs, otherwise serial
-void RoundRobinSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
-                        int N, int parallel = 0) {
-  if (N == 1) {
-    schedule.push_back({{0,0}});
-    return;
-  }
-  // Generate standard round-robin tournament (maximum parallelism)
-  std::vector<std::vector<std::pair<int, int>>> fullSchedule;
-
-  // Pad odd number of ranks with a dummy round (N+1)
-  int paddedN = N + N%2;
-  // Round-robin tournament scheduling
-  for (int round = 0; round < paddedN - 1; round++) {
-    std::vector<std::pair<int, int>> roundPairs;
-    std::vector<std::pair<int, int>> roundPairsReversed;
-    for (int i = 0; i < paddedN / 2; i++) {
-      int item1 = i;
-      int item2 = paddedN - 1 - i;
-      if (round > 0) {
-        // Rotate all except the first item
-        if (item1 > 0) item1 = ((item1 - 1 + round) % (paddedN - 1)) + 1;
-        if (item2 > 0) item2 = ((item2 - 1 + round) % (paddedN - 1)) + 1;
-      }
-      // Ignore dummy round, its partner sits out this ronud
-      if (item1 < N && item2 < N){
-        roundPairs.push_back({item1, item2});
-        roundPairsReversed.push_back({item2, item1});
-      }
-    }
-    fullSchedule.push_back(roundPairs);
-    fullSchedule.push_back(roundPairsReversed);
-  }
-
-  // A loopback round where all run in parallel
-  std::vector<std::pair<int, int>> selfRound;
-  for (int i = 0; i < N; i++) {
-    selfRound.push_back({i, i});
-  }
-  fullSchedule.push_back(selfRound);
-
-  if (parallel) {
-    schedule = std::move(fullSchedule);
-  } else {
-    // Serialize each round if needed
-    for (auto const& fullRound : fullSchedule) {
-      for (auto const& match : fullRound) {
-        std::vector<std::pair<int, int>> subRound;
-        subRound.push_back({match.first, match.second});
-        schedule.push_back(subRound);
-      }
-    }
-  }
-}
-
-// Returns a schedule for ordered 2-combination of N elements 
-// by pairing the list with its rotating self,
-// each round contains n pairs, where 1 <= n <= N and N is divisible by n
-// and an element cannot appear more than twice in a round,
-void CombinationSchedule(std::vector<std::vector<std::pair<int, int>>>& schedule,
-                           int N, int n = 0) {
-  std::vector<std::vector<std::pair<int, int>>> fullSchedule;
-
-  if (n <= 0) n = N;
-  if (N <= 0 || n > N || N % n != 0) // Assuming balanced load for each round
-  {
-    n = 1;
-    Utils::Print("[WARN] cannot create round robin schedule, falling back to serial");
-  }
-
-  // Generate rounds of combination based on incrementing distance
-  for (int i = 0; i < N; i++) {
-    std::vector<std::pair<int, int>> round;
-    for (int j = 0; j < N; j++) {
-      round.push_back({j, (j+i)%N});
-    }
-    fullSchedule.push_back(round);
-  }
-
-  // Step 2: Split each full round into sub-rounds with at most n pairs
-  for (auto const& fullRound : fullSchedule) {
-    for (size_t start = 0; start < fullRound.size(); start += n) {
-      std::vector<std::pair<int, int>> subRound;
-      for (size_t i = start; i < start + n && i < fullRound.size(); i++) {
-        subRound.push_back(fullRound[i]);
-      }
-      if (!subRound.empty()) {
-        schedule.push_back(subRound);
-      }
-    }
-  }
-}
-
 int GetClosestDeviceToNic(MemType memType, int nicIdx, int rank) {
   return TransferBench::IsCpuMemType(memType) ?
          TransferBench::GetClosestCpuNumaToNic(nicIdx, rank) :
          TransferBench::GetClosestGpuToNic(nicIdx, rank);
 }
 
-int NicPeerToPeerPreset(EnvVars&           ev,
-                        size_t      const  numBytesPerTransfer,
-                        std::string const  presetName)
+int NicPeerToPeerPreset(EnvVars&          ev,
+                        size_t      const numBytesPerTransfer,
+                        std::string const presetName,
+                        bool        const bytesSpecified)
 {
   if (Utils::GetNumRankGroups() > 1) {
     Utils::Print("[ERROR] NIC p2p preset can only be run across ranks that are homogenous\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] NIC_FILTER may also be used to limit NIC visibility\n");
-    return 1;
+    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
+    return ERR_FATAL;
   }
 
   int numRanks = TransferBench::GetNumRanks();
   int numNicsPerRank = TransferBench::GetNumExecutors(EXE_NIC);
   if (numNicsPerRank == 0) {
     Utils::Print("No NIC detected, NICs are required to run this preset\n");
-    return 1;
+    return ERR_FATAL;
   }
 
   // Collect env vars for this preset
@@ -204,8 +111,8 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   std::vector<std::vector<std::pair<int, int>>> schedule;
   std::vector<std::vector<std::pair<int, int>>> nicSchedule;
 
-  RoundRobinSchedule(schedule, numRanks, nodeParallel);
-  CombinationSchedule(nicSchedule, numNicsPerRank, nicParLevel);
+  Utils::RoundRobinSchedule(schedule, numRanks, nodeParallel);
+  Utils::CombinationSchedule(nicSchedule, numNicsPerRank, nicParLevel);
 
   int totalTransfers = numRanks * numNicsPerRank * numRanks * numNicsPerRank;
   int counter = 0;
@@ -239,7 +146,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
           if (srcMemIndex == -1 || dstMemIndex == -1) {
             Utils::Print("[ERROR] No proper GPU device can be found for transfer R%dN%d - R%dN%d\n",
                          srcRank, srcNicIdx, dstRank, dstNicIdx);
-            return 1;
+            return ERR_FATAL;
           }
           transfer.numBytes = numBytesPerTransfer;
           transfer.srcs.push_back({srcTypeActual, srcMemIndex, srcRank});
@@ -255,7 +162,7 @@ int NicPeerToPeerPreset(EnvVars&           ev,
       if (!TransferBench::RunTransfers(cfg, transfers, results)) {
         for (auto const& err : results.errResults)
           Utils::Print("%s\n", err.errMsg.c_str());
-        return 1;
+        return ERR_FATAL;
       }
 
       counter += transfers.size();
@@ -365,10 +272,10 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   Utils::TableHelper summaryTable(11, 6, precision);
   Utils::Print("Summary of top 10 fastest/slowest connection\n");
 
-  summaryTable.Set(0, 0, " Fastest Bandwidth (GB/s) "); 
+  summaryTable.Set(0, 0, " Fastest Bandwidth (GB/s) ");
   summaryTable.Set(0, 1, " Src ");
   summaryTable.Set(0, 2, " Dst ");
-  summaryTable.Set(0, 3, " Slowest Bandwidth (GB/s) "); 
+  summaryTable.Set(0, 3, " Slowest Bandwidth (GB/s) ");
   summaryTable.Set(0, 4, " Src ");
   summaryTable.Set(0, 5, " Dst ");
 
@@ -410,5 +317,5 @@ int NicPeerToPeerPreset(EnvVars&           ev,
   }
   summaryTable.PrintTable(ev.outputToCsv, ev.showBorders);
 
-  return 0;
+  return ERR_NONE;
 }
