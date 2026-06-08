@@ -1,0 +1,387 @@
+.. meta::
+  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :keywords: TransferBench usage, TransferBench how to, TransferBench configuration file, TransferBench custom transfers, TransferBench wildcards
+
+.. _running-transferbench-customized:
+
+========================================
+Running custom tests using TransferBench
+========================================
+
+You can run custom transfer tests using TransferBench by defining them in a configuration file. This topic describes the configuration file format, wildcard syntax for transfer definitions in simple and advanced modes, and the supported memory and executor types.
+
+Running TransferBench with a configuration file
+================================================
+
+To run TransferBench with a configuration file, use:
+
+.. code-block:: shell
+
+    ./TransferBench <config_file> [num_bytes]
+
+The command accepts the following arguments:
+
+- ``config_file``: Path to a configuration file that defines the transfers to run.
+
+- ``num_bytes``: Number of bytes per transfer. You can suffix this value with ``K``, ``M``, or ``G`` (for example, ``128M``). The value must be a multiple of 4. You can omit this argument.
+
+.. note::
+
+  If you set ``num_bytes`` to ``0``, TransferBench sweeps over transfer sizes from 1 KB to 512 MB in power-of-2 steps. Use ``SAMPLING_FACTOR`` to control how many sizes are sampled per power-of-2 range. For example, ``SAMPLING_FACTOR=4`` produces four evenly spaced sizes between each power of 2.
+
+Alternative modes
+------------------
+
+In addition to configuration file mode, TransferBench supports the following alternative modes:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Mode
+      - Usage
+      - Description
+
+    * - ``cmdline``
+      - ``./TransferBench cmdline [num_bytes] <transfer_definitions...>``
+      - Defines transfers on the command line instead of in a file.
+
+    * - ``dryrun``
+      - ``./TransferBench dryrun [num_bytes] <transfer_definitions...>``
+      - Parses and prints the expanded transfers without executing them. Use this mode to validate wildcard expansion.
+
+- Using ``cmdline`` mode:
+
+  .. code-block:: shell
+
+    ./TransferBench cmdline 1G "1 1 (G0->G0->G1)"
+
+  Running the preceding command produces the same result as using a configuration file that contains the following line:
+
+  .. code-block:: shell
+
+    1 1 (G0->G0->G1)
+
+- Using ``dryrun`` mode:
+
+  .. code-block:: shell
+
+    ./TransferBench dryrun 1G "1 1 (G0->G0->G*)"
+
+  The output lists all transfers that would be executed:
+
+  .. code-block:: shell
+
+    =============================================================================================================
+    Transfers to be executed (dry-run):
+    ================================================================================
+    Transfer     0: (G0->G0->G0)
+    Transfer     1: (G0->G0->G1)
+    Transfer     2: (G0->G0->G2)
+    Transfer     3: (G0->G0->G3)
+    Transfer     4: (G0->G0->G4)
+    Transfer     5: (G0->G0->G5)
+    Transfer     6: (G0->G0->G6)
+    Transfer     7: (G0->G0->G7)
+
+Configuration file format
+==========================
+
+Each line in a configuration file defines one test, which is a set of transfers that run in parallel. The following rules apply:
+
+- Blank lines are ignored.
+
+- Lines starting with ``#`` are treated as comments and are ignored.
+
+- Lines starting with ``##`` are echoed to the output. Use these for section headers.
+
+- Round brackets ``()`` and arrows ``->`` are optional and ignored. You can include them for readability.
+
+Transfer definition modes
+==========================
+
+A transfer is a single operation where an executor reads and adds values from source (SRC) memory, then writes the sum to destination (DST) memory. When a transfer has a single SRC and a single DST, it is a copy operation.
+
+TransferBench supports two modes for defining transfers: simple mode and advanced mode.
+
+Simple mode
+-----------
+
+Use simple mode when all transfers in a test share the same number of subexecutors. The format is:
+
+.. code-block:: shell
+
+    #Transfers #SEs (srcMem1 Executor1 dstMem1) ... (srcMemL ExecutorL dstMemL)
+
+The format uses the following fields:
+
+- ``#Transfers``: A positive integer that specifies the number of parallel transfers.
+- ``#SEs``: The number of subexecutors (CUs, threads, or queue pairs) used by all transfers.
+- ``(srcMem Executor dstMem)``: A triplet that describes one transfer.
+
+The transfer size comes from the ``num_bytes`` command-line argument.
+
+The following examples show valid simple mode definitions:
+
+.. code-block:: shell
+
+    1 4 (G0->G0->G1)                  # Uses 4 CUs on GPU 0 to copy from GPU 0 to GPU 1
+    2 4 (G0 G0 G1) (G1 G1 G0)         # Two parallel transfers: GPU 0 to GPU 1 and GPU 1 to GPU 0
+    1 4 (G0->G0->G0G1G2G3)            # Reads GPU 0 then writes to GPU 0, GPU 1, GPU 2, and GPU 3
+
+Advanced mode
+-------------
+
+Use advanced mode when transfers in a test require different subexecutor counts or sizes. The format is:
+
+.. code-block:: shell
+
+    -#Transfers (srcMem1 Executor1 dstMem1 #SEs1 Bytes1) ... (srcMemL ExecutorL dstMemL #SEsL BytesL)
+
+The format uses the following fields:
+
+- ``-#Transfers``: A negative integer that specifies the number of parallel transfers.
+- ``(srcMem Executor dstMem #SEs Bytes)``: A quintuplet that describes one transfer.
+- ``Bytes``: The per-transfer size. Set to ``0`` to use the command-line ``num_bytes`` value. You can suffix this value with ``K``, ``M``, or ``G``. A non-zero value overrides the command-line value for that transfer only.
+
+The following example runs two transfers with different sizes and subexecutor counts:
+
+.. code-block:: shell
+
+    -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M)   # 1 MB GPU 0 to GPU 1 with 4 CUs; 2 MB GPU 1 to GPU 0 with 2 CUs
+
+Memory and executor letter codes
+==================================
+
+The memory locations and executors use a format consisting of letters indicating the memory or executor type, and index. The following tables indicate what these letters stand for.
+
+Memory location letters
+------------------------
+
+Memory locations use the format ``[R<rank>]<MemType><Index>``, where ``MemType`` is a single letter and ``Index`` is the zero-based device index. If you omit the rank prefix ``R``, TransferBench uses the local rank.
+
+The following table lists the supported memory type letters:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Letter
+      - Memory type
+      - Indexed by
+
+    * - ``C``
+      - Coarse-grained pinned host
+      - NUMA node (0 to #NUMA - 1)
+
+    * - ``P``
+      - Pinned host (closest to GPU)
+      - GPU index (0 to #GPUs - 1)
+
+    * - ``B``
+      - Coherent pinned host
+      - NUMA node
+
+    * - ``D``
+      - Non-coherent pinned host
+      - NUMA node
+
+    * - ``K``
+      - Uncached pinned host
+      - NUMA node
+
+    * - ``H``
+      - Unpinned host
+      - NUMA node
+
+    * - ``G``
+      - Coarse-grained global device
+      - GPU (0 to #GPUs - 1)
+
+    * - ``F``
+      - Fine-grained device
+      - GPU
+
+    * - ``U``
+      - Uncached device
+      - GPU
+
+    * - ``M``
+      - Managed memory
+      - GPU
+
+    * - ``N``
+      - Null (empty). Use this to denote read-only or write-only transfers.
+      - Index ignored.
+
+You can concatenate multiple memory locations for broadcast or reduce operations. For example, ``G0G1`` refers to GPU 0 and GPU 1.
+
+Executor letters
+-----------------
+
+Executors use the format ``[R<rank>]<ExeType><Index>[Slot][.<SubIndex>][SubSlot]``.
+
+The following table lists the supported executor type letters:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Letter
+      - Executor type
+      - Subexecutor
+      - Indexed by
+
+    * - ``C``
+      - CPU
+      - CPU thread
+      - NUMA node (0 to #NUMA - 1)
+
+    * - ``G``
+      - GPU (GFX/kernel)
+      - Threadblock/CU
+      - GPU (0 to #GPUs - 1)
+
+    * - ``D``
+      - DMA (SDMA)
+      - N/A (streams)
+      - GPU
+
+    * - ``I``
+      - NIC RDMA
+      - Queue pair
+      - NIC index. Requires ``.SubIndex`` (for example, ``I0.2``).
+
+    * - ``N``
+      - Nearest NIC
+      - Queue pair
+      - GPU. Uses the closest NIC for SRC and DST. SubIndex is optional.
+
+The optional executor fields have the following meanings:
+
+- ``Slot`` (``A``, ``B``, ...): Selects which closest NIC to use, where ``A`` is the first and ``B`` is the second, and so on. Used for ``EXE_NIC_NEAREST``.
+- ``SubIndex`` (after ``.``): Specifies the queue pair or sub-index for the NIC.
+- ``SubSlot``: Specifies the alpha range for sub-slot selection.
+
+Wildcards
+==========
+
+Wildcards expand a single configuration file line into multiple concrete transfers at runtime.
+
+Numeric wildcards
+------------------
+
+Numeric wildcards apply to ranks (``R``), device indices (for example, ``G0`` or ``C1``), and executor indices.
+
+The following table describes the supported numeric wildcard syntax:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Syntax
+      - Meaning
+      - Example
+
+    * - ``*``
+      - All values in range
+      - ``R*G0``: GPU 0 on all ranks
+
+    * - ``[n]``
+      - Single value
+      - ``R[2]G0``: GPU 0 on rank 2
+
+    * - ``[n,m,...]``
+      - Comma-separated list
+      - ``G[0,2,4]``: GPUs 0, 2, and 4
+
+    * - ``[start..end]``
+      - Inclusive range
+      - ``G[1..3]``: GPUs 1, 2, and 3
+
+The following list shows additional examples:
+
+- ``G*``: All GPUs (for example, G0, G1, G2, ...)
+- ``G[0,2,4]``: GPUs 0, 2, and 4
+- ``R[1..3]G0``: GPU 0 on ranks 1, 2, and 3
+
+Alpha wildcards
+----------------
+
+Alpha wildcards apply to executor slots and subslots (``A``, ``B``, ``C``, ...).
+
+The following table describes the supported alpha wildcard syntax:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Syntax
+      - Meaning
+      - Example
+
+    * - ``*``
+      - Full wildcard, resolved at runtime
+      - All available slots
+
+    * - ``[A]`` or ``A``
+      - Single letter
+      - First closest NIC
+
+    * - ``[A..C]``
+      - Letter range
+      - Slots A, B, and C
+
+    * - ``[A,D,F]``
+      - Comma-separated letters
+      - Slots A, D, and F
+
+Rank prefix (multinode)
+-------------------------
+
+The ``R`` prefix is optional and specifies the rank index for a memory location or executor:
+
+- ``R2G3``: GPU 3 on rank 2.
+- ``G3`` (no ``R``): GPU 3 on the local rank.
+
+The rank prefix accepts the same numeric wildcards as device indices, such as ``R*`` and ``R[0..1]``.
+
+Nearest NIC wildcard
+---------------------
+
+For the ``N`` (Nearest NIC) executor, you can omit the executor index and sub-index. TransferBench resolves the correct NICs for the SRC and DST memory locations at runtime.
+
+For example, the following definition:
+
+.. code-block:: shell
+
+  (R0G0 N R2G4)
+
+This definition expands to:
+
+.. code-block:: shell
+
+  (R0G0 N0.4 R2G4)
+
+Example configuration file
+============================
+
+The following configuration file shows a range of transfer types using both simple and advanced modes:
+
+.. code-block:: shell
+
+  # Single GPU-executed transfer between GPUs 0 and 1 using 4 CUs
+  1 4 (G0->G0->G1)
+
+  # Single DMA transfer between GPUs 0 and 1
+  1 1 (G0->D0->G1)
+
+  # Advanced: 1 MB GPU 0 to GPU 1 with 4 CUs; 2 MB GPU 1 to GPU 0 with 8 CUs
+  -2 (G0 G0 G1 4 1M) (G1 G1 G0 8 2M)
+
+  # Memset by GPU 0 to its own memory (null source)
+  1 32 (N0->G0->G0)
+
+  # Read-only by CPU 0 (null destination)
+  1 4 (C0->C0->N0)
+
+  # Broadcast from GPU 0 to GPUs 0 and 1
+  1 16 (G0->G0->G0G1)
+
+  # Multi-rank: GPU 0 on rank 0 to GPU 1 on rank 1
+  1 4 (R0G0->R0G0->R1G1)
