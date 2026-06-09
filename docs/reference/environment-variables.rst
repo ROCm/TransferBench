@@ -1,5 +1,5 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :description: Reference for TransferBench environment variables that control the frontend client, backend library, and runtime behavior for configuration-file and preset runs.
   :keywords: TransferBench environment variables, TransferBench configuration, TransferBench client, TransferBench customization, TransferBench how to
 
 .. _environment-variables:

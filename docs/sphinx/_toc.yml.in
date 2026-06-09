@@ -5,29 +5,24 @@ subtrees:
 - caption: Install
   entries:
   - file: install/install.rst
-    title: Installation
 
 - caption: How to
   entries:
-  - file: how to/use-transferbench.rst
-  - file: how to/running-transferbench.rst
   - file: how to/running-transferbench-customized.rst
-  - file: how to/running-presets.rst
-
-- caption: Reference
-  entries:
-  - file: reference/environment-variables.rst
-  - file: reference/faq.rst
-    title: Frequently asked questions
+    title: Run custom tests using TransferBench
 
 - caption: Conceptual
   entries:
   - file: conceptual/transferbench-workflow.rst
-    title: TransferBench workflow
   - file: conceptual/transferbench-timing.rst
-    title: TransferBench timing
   - file: conceptual/transferbench-data-validation.rst
-    title: TransferBench data validation
+
+- caption: Reference
+  entries:
+  - file: reference/presets.rst
+  - file: reference/transfer-definition-syntax.rst
+  - file: reference/environment-variables.rst
+  - file: reference/faq.rst
 
 - caption: About
   entries:

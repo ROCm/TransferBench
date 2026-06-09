@@ -1,5 +1,5 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :description: Frequently asked questions about TransferBench, covering common errors, warnings, and configuration issues including IOMMU, memory types, and XGMI.
   :keywords: TransferBench FAQ, TransferBench errors, TransferBench warnings, IOMMU, GPU_MAX_HW_QUEUES, GFX_UNROLL, validation, XGMI, UALoE, memory types
 
 .. _faq:
@@ -7,6 +7,8 @@
 ==========================
 Frequently asked questions
 ==========================
+
+This topic answers common questions about TransferBench errors, warnings, features, environment variables, and presets.
 
 Error and warning messages
 ===========================

@@ -1,12 +1,12 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
-  :keywords: TransferBench usage, TransferBench how to, TransferBench user guide, TransferBench user manual, TransferBench presets
+  :description: Reference for TransferBench presets, including all-to-all, peer-to-peer, NIC rings, sweep, and scaling tests with supported environment variables and example outputs.
+  :keywords: TransferBench presets, TransferBench a2a, TransferBench p2p, TransferBench nicrings, TransferBench nicp2p, TransferBench sweep, TransferBench scaling
 
 .. _running-presets:
 
-==============================
-Running TransferBench presets
-==============================
+=======================
+TransferBench presets
+=======================
 
 Presets are a predefined series of Transfers that can be used instead of manually configuring the Transfers.
 
@@ -263,7 +263,7 @@ The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers
 
 - Sweep order: Outer loop over ``BLOCKSIZES``, then table of (``NUM_SUB_EXECS`` x ``UNROLLS``).
 
-- By default reports only the slowest GPU's bandwidth (min bandwidth) per CU-Unroll combination. To include the fastest GPU's bandwidth (max bandwidth) per config, set ``SHOW_MIN_ONLY``=0.
+- By default reports only the slowest GPU's bandwidth (min bandwidth) per CU-Unroll combination. To include the fastest GPU's bandwidth (max bandwidth) per config, set ``SHOW_MIN_ONLY`` = 0.
 
 - Uses same transfer topology as a2a preset, such as direct links, A2A_MODE, and others.
 
@@ -271,7 +271,7 @@ The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers
 
 - Supports single node only: Multinode is not supported.
 
-- Forced single-stream: ``useSingleStream``=1.
+- Forced single-stream: ``useSingleStream`` = 1.
 
 - Can't use ``USE_SPRAY`` with multiple destination buffers (``numDsts`` > 1).
 
@@ -389,7 +389,7 @@ The following image shows the ring topology:
 
 - Homogeneous ranks required: Supports multinode provided that all ranks are homogeneous (same topology). Use ``NIC_FILTER`` to limit NIC visibility if needed.
 
-- Transfer direction: ``currRank`` sends to (``currRank``+1) % ``numRanks``.
+- Transfer direction: ``currRank`` sends to (``currRank`` + 1) % ``numRanks``.
 
 - Executor placement: Executor is placed on the SRC rank for RDMA write and DST rank for RDMA read.
 
@@ -639,7 +639,7 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 - Supports single node only: Multinode is not supported.
 
-- Invalid configs skipped: Skips when (``exe``=DMA and (``src``=N or ``dst``=N)) or (``src``=N and ``dst``=N).
+- Invalid configs skipped: Skips when (``exe`` = DMA and ( ``src`` = N or ``dst`` = N)) or ( ``src`` = N and ``dst`` = N).
 
 - Output format: Each line shows bandwidth per DST GPU, ``p``, ``numSubExecs``, and transfer triplets.
 
@@ -1528,7 +1528,7 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 
 - Optionally filters using XGMI hop count (``SWEEP_XGMI_MIN``, ``SWEEP_XGMI_MAX``).
 
-- M increment: Selects M transfers for each test. M starts at ``SWEEP_MIN``, and increments until M > ``SWEEP_MAX`` (or ``SWEEP_MAX``=0 for no limit) when all M-combinations are exhausted.
+- M increment: Selects M transfers for each test. M starts at ``SWEEP_MIN``, and increments until M > ``SWEEP_MAX`` (or ``SWEEP_MAX`` = 0 for no limit) when all M-combinations are exhausted.
 
 - Ordered permutation: Uses ``std::prev_permutation`` to iterate through M-combinations of the possible transfer set in a deterministic order.
 
@@ -1536,7 +1536,7 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 
 - Follows ``SWEEP_TEST_LIMIT`` and ``SWEEP_TIME_LIMIT``.
 
-- Default executors: ``SWEEP_EXE``=CDG includes CPU, DMA, and GFX for broad coverage.
+- Default executors: ``SWEEP_EXE`` = CDG includes CPU, DMA, and GFX for broad coverage.
 
 - Supports single node only: Multinode is not supported.
 
@@ -1627,11 +1627,11 @@ To modify the behavior of sweep and rsweep preset, use the following environment
       - time(NULL)
 
     * - ``SWEEP_TEST_LIMIT``
-      - Maximum number of tests allowed to run. ``0``=no limit.
+      - Maximum number of tests allowed to run. ``0`` = no limit.
       - ``0``
 
     * - ``SWEEP_TIME_LIMIT``
-      - Maximum allowed test duration (in seconds). ``0``=no limit.
+      - Maximum allowed test duration (in seconds). ``0`` = no limit.
       - ``0``
 
     * - ``SWEEP_XGMI_MIN``
@@ -1639,7 +1639,7 @@ To modify the behavior of sweep and rsweep preset, use the following environment
       - ``0``
 
     * - ``SWEEP_XGMI_MAX``
-      - Maximum allowed XGMI hops. ``-1``=no limit.
+      - Maximum allowed XGMI hops. ``-1`` = no limit.
       - ``-1``
 
 Example output

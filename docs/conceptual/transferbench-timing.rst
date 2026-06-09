@@ -1,5 +1,5 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :description: Explains how TransferBench measures performance at the test, executor, and transfer levels using HIP events and CPU wall-clock timing.
   :keywords: TransferBench timing, TransferBench measurement, HIP events, CPU wall-clock, executor timing, transfer timing, overhead
 
 .. _transferbench-timing:

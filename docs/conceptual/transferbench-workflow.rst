@@ -1,5 +1,5 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :description: Explains the TransferBench internal workflow, including how presets and config files feed into RunTransfers() and how transfers are executed and reported.
   :keywords: TransferBench workflow, RunTransfers, TransferBench internals, TransferBench architecture, TransferBench conceptual
 
 .. _transferbench-workflow:
@@ -81,9 +81,9 @@ Here are the steps involved in the second phase:
 
    .. note::
 
-    For GPU SRC memory locations, data is copied onto the GPUs via DMA (``hipMemcpy``). If profiling, this copy appears as part of the profiling trace, which is why setting ``USE_INTERACTIVE``=``1`` is recommended when profiling.
+    For GPU SRC memory locations, data is copied onto the GPUs via DMA (``hipMemcpy``). If profiling, this copy appears as part of the profiling trace, which is why setting ``USE_INTERACTIVE`` = 1 is recommended when profiling.
 
-3. **Optional pause:** When ``USE_INTERACTIVE``=``1``, TransferBench pauses for user input after all memory has been initialized. Virtual addresses are printed at this point, which is useful for attaching a profiler before any transfers execute.
+3. **Optional pause:** When ``USE_INTERACTIVE`` = 1, TransferBench pauses for user input after all memory has been initialized. Virtual addresses are printed at this point, which is useful for attaching a profiler before any transfers execute.
 
 Iteration loop
 --------------
@@ -101,11 +101,11 @@ Each iteration proceeds through the following steps:
 
 5. **Stop CPU timing:** Stops the CPU timer.
 
-6. **Validate (optional):** If ``ALWAYS_VALIDATE``=``1``, performs a correctness check after each iteration to verify that destination memory matches the expected reference results.
+6. **Validate (optional):** If ``ALWAYS_VALIDATE`` = 1, performs a correctness check after each iteration to verify that destination memory matches the expected reference results.
 
    .. note::
 
-    By default, validation runs only once after all iterations complete. Setting ``ALWAYS_VALIDATE``=``1`` validates after every iteration, which can help detect transient errors that would otherwise be masked by a passing final iteration.
+    By default, validation runs only once after all iterations complete. Setting ``ALWAYS_VALIDATE`` = 1 validates after every iteration, which can help detect transient errors that would otherwise be masked by a passing final iteration.
 
 Finalize
 --------

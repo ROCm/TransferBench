@@ -1,12 +1,12 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
-  :keywords: Build TransferBench, Install TransferBench
+  :description: Instructions for installing TransferBench from source or using a package manager on supported platforms.
+  :keywords: Build TransferBench, Install TransferBench, TransferBench package manager, TransferBench source build
 
 .. _install-transferbench:
 
----------------------------
-Installing TransferBench
----------------------------
+-----------------------
+Install TransferBench
+-----------------------
 
 To install TransferBench, you have the following options:
 
@@ -309,7 +309,7 @@ To modify the CMake behavior, use the following environment variables:
               <td rowspan="3"><b>CMake cache variables</b></td>
               <td><code>GPU_TARGETS</code></td>
               <td>Semicolon-separated GPU architectures. Overridden if <code>BUILD_LOCAL_GPU_TARGET_ONLY</code> is <code>ON</code></td>
-              <td><code>gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201;gfx1250</code></td>
+              <td><code style="word-break: break-all;">gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201;gfx1250</code></td>
               </tr>
               <tr>
                 <td><code>AMD_SMI_EXECUTABLE</code></td>
@@ -343,22 +343,18 @@ Troubleshooting common build errors
 
 Here are some commonly encountered build errors and their fix:
 
-.. list-table::
-  :header-rows: 1
+- ``Could not find /opt/rocm/bin/amdclang++ or /opt/rocm/bin/hipcc. Check if the path is correct if you want to build TransferBench``
 
-  * - Build error
-    - Fix
+  Occurs if HIP isn't installed correctly. If it is installed in a different directory, specify it using ``ROCM_PATH``.
 
-  * - ``Could not find /opt/rocm/bin/amdclang++ or /opt/rocm/bin/hipcc. Check if the path is correct if you want to build TransferBench``
-    - Occurs if HIP isn't installed correctly. If it is installed in a different directory, specify it using ``ROCM_PATH``.
+- ``Could not find standard C++ header 'cmath'``
 
-  * - ``Could not find standard C++ header 'cmath'``
-    - Normally occurs if the standard C++ headers aren't installed. Try installing ``g++-12`` or ``g++-14`` based on the OS version. For example, ``apt-get install g++-12``.
+  Normally occurs if the standard C++ headers aren't installed. Try installing ``g++-12`` or ``g++-14`` based on the OS version. For example, ``apt-get install g++-12``.
 
 .. _package-manager:
 
-Installing TransferBench using package
-=======================================
+Installing TransferBench using package manager
+===============================================
 
 To install TransferBench using package, install ROCm first and then run:
 

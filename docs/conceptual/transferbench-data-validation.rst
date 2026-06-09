@@ -1,5 +1,5 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
+  :description: Explains how TransferBench validates transfer correctness by comparing destination memory against precomputed expected values derived from source buffers.
   :keywords: TransferBench data validation, TransferBench correctness, ValidateAllTransfers, PrepareReference, destination buffer, source buffer
 
 .. _transferbench-data-validation:
