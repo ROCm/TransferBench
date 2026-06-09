@@ -1,6 +1,6 @@
 .. meta::
-  :description: TransferBench is a utility to benchmark simultaneous transfers between user-specified devices (CPUs or GPUs)
-  :keywords: TransferBench library, TransferBench functions, Transferbench API, Transferbench interface
+  :description: API reference for the TransferBench backend library, including functions and interfaces exposed by the header-only TransferBench.hpp.
+  :keywords: TransferBench library, TransferBench functions, TransferBench API, TransferBench interface, TransferBench.hpp
 
 .. _transferbench-api:
 
