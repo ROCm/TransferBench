@@ -25,18 +25,8 @@ THE SOFTWARE.
 #include <dlfcn.h>
 #include <mutex>
 
-#include "ibv_core.hpp"
+#include "IbvHeader.hpp"
 
-/// @brief Outcome of the runtime libibverbs probe.
-///
-/// Stored on @ref IbvDynloadState::status and surfaced via
-/// @ref TbIbvGetLoadStatus(). The integer values are stable and may be copied
-/// directly into TransferBench's `System` fields.
-///   - TB_IBV_OK         (0): all required symbols resolved (RDMA + DMA-BUF).
-///   - TB_IBV_NO_DMABUF  (1): RDMA symbols resolved, but `ibv_reg_dmabuf_mr`
-///                            is missing (older libibverbs / no DMA-BUF API).
-///   - TB_IBV_NO_RDMA    (2): dlopen failed, or any non-DMA-BUF symbol is
-///                            missing. Whole library is treated as unusable.
 enum TbIbvLoadStatus {
   TB_IBV_OK        = 0,
   TB_IBV_NO_DMABUF = 1,
@@ -64,18 +54,11 @@ IBV_FN(ibv_poll_cq, int, (ibv_cq*, int, ibv_wc*))
 IBV_FN(ibv_post_send, int, (ibv_qp*, ibv_send_wr*, ibv_send_wr**))
 IBV_FN(ibv_query_device, int, (ibv_context*, ibv_device_attr*))
 IBV_FN(ibv_query_gid, int, (ibv_context*, uint8_t, int, ibv_gid*))
-// MEMO: Previously the IBV_DIRECT path bound to `___ibv_query_port` because
-// older versions of <infiniband/verbs.h> only exposed `ibv_query_port` as an
-// inline wrapper around that internal extern symbol. Now that we no longer
-// include verbs.h (it has been vendored into ibv_core.hpp), we always link or
-// dlsym the public `ibv_query_port` symbol from libibverbs.so.1 directly.
-// Revisit only if support for pre-1.1 libibverbs ever becomes a requirement.
 IBV_FN(ibv_query_port, int, (ibv_context*, uint8_t, ibv_port_attr*))
 // `ibv_reg_dmabuf_mr` is always declared; whether the underlying symbol
 // actually exists in the loaded libibverbs is decided at runtime by tryLoad().
 IBV_FN(ibv_reg_dmabuf_mr, ibv_mr*, (ibv_pd*, uint64_t, size_t, uint64_t, int, int))
 IBV_FN(ibv_reg_mr, ibv_mr*, (ibv_pd*, void*, size_t, int))
-
 } // namespace
 
 struct IbvDynloadState {
@@ -83,8 +66,6 @@ struct IbvDynloadState {
   void*            handle = nullptr;
   TbIbvLoadStatus  status = TB_IBV_NO_RDMA;
 
-  /// @brief Run dlopen + dlsym once and classify the outcome.
-  /// @return One of the @ref TbIbvLoadStatus values, also stored in @c status.
   TbIbvLoadStatus tryLoad()
   {
     status = TB_IBV_NO_RDMA;

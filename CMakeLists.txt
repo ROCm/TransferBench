@@ -314,7 +314,7 @@ endif()
 ## NIC / RDMA executor
 ##
 ## libibverbs is loaded dynamically at runtime via dlopen/dlsym
-## (see vendors/ibverbs/IbvDynLoad.hpp). The build neither links against
+## (see third-party/ibverbs/IbvDynLoad.hpp). The build neither links against
 ## -libverbs nor requires libibverbs-dev to be installed on the build host.
 ## Only libdl needs to be linked so that dlopen/dlsym resolve.
 message(STATUS "NIC executor: libibverbs is loaded dynamically at runtime (no -libverbs link, no build-host dependency)")
@@ -451,9 +451,9 @@ target_include_directories(TransferBench PRIVATE
   src/header
   src/client
   src/client/Presets
-  vendors/ibverbs)
+  third-party/ibverbs)
 
-# libdl supplies dlopen/dlsym used by vendors/ibverbs/IbvDynLoad.hpp.
+# libdl supplies dlopen/dlsym used by third-party/ibverbs/IbvDynLoad.hpp.
 target_link_libraries(TransferBench PRIVATE ${CMAKE_DL_LIBS})
 if(MPI_COMM_FOUND)
   if(TARGET MPI::MPI_CXX)

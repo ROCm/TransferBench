@@ -81,10 +81,10 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   else
     COMMON_FLAGS += -O0 -g -ggdb3
   endif
-  COMMON_FLAGS += -I./src/header -I./src/client -I./src/client/Presets -I./vendors/ibverbs
+  COMMON_FLAGS += -I./src/header -I./src/client -I./src/client/Presets -I./third-party/ibverbs
 
   # libibverbs is loaded dynamically at runtime via dlopen/dlsym (see
-  # vendors/ibverbs/IbvDynLoad.hpp), so the build never links against -libverbs
+  # third-party/ibverbs/IbvDynLoad.hpp), so the build never links against -libverbs
   # and does not require libibverbs-dev to be installed. We only need -ldl so
   # the dynamic loader API is resolvable.
   LDFLAGS += -lpthread -ldl
