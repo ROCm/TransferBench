@@ -15,8 +15,8 @@ Error and warning messages
 
 This section describes common TransferBench error and warning messages and how to resolve them.
 
-[ERROR] Unexpected mismatch at index...
------------------------------------------
+Unexpected mismatch at index
+-----------------------------
 
 TransferBench validates each transfer to ensure that data has been moved correctly. This
 error indicates that the destination (DST) memory doesn't match the expected value.
@@ -56,8 +56,8 @@ For IOMMU configuration guidance, see
 
 .. _gpu-max-hw-queues:
 
-[WARN] ... attempting X parallel transfers, however GPU_MAX_HW_QUEUES only set to 4
--------------------------------------------------------------------------------------
+Attempting X parallel transfers, however GPU_MAX_HW_QUEUES only set to 4
+-------------------------------------------------------------------------
 
 The HIP runtime limits the number of independent hardware queues each GPU can use per
 process. This limit is controlled by the ``GPU_MAX_HW_QUEUES`` environment variable. For
@@ -311,7 +311,7 @@ example bandwidth values (in GB/s):
 
     * - ``GFX_UNROLL``
       - Local copy with 4 CUs (``1 4 G0->G0->G0``)
-      - Remote 1 subexecutor copy (``1 1 G0->G0->G1``)
+      - Remote 1 SubExecutor copy (``1 1 G0->G0->G1``)
 
     * - 1
       - 20.297

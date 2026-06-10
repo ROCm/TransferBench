@@ -2,6 +2,9 @@ defaults:
   numbered: False
 root: index
 subtrees:
+- entries:
+  - file: what-is-transferbench.rst
+
 - caption: Install
   entries:
   - file: install/install.rst
@@ -9,7 +12,6 @@ subtrees:
 - caption: How to
   entries:
   - file: how to/running-transferbench-customized.rst
-    title: Run custom tests using TransferBench
 
 - caption: Conceptual
   entries:

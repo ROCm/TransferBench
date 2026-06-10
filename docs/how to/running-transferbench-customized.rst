@@ -8,11 +8,11 @@
 Running custom tests using TransferBench
 ========================================
 
-You can run custom transfer tests using TransferBench by defining them in a configuration file. This topic describes the configuration file format and how to run tests using a file or the command line.
+Define custom transfer tests in a configuration file and run them with TransferBench. This topic describes the configuration file format and how to run tests using a file or the command line.
 
 .. seealso::
 
-  :ref:`transfer-definition-syntax` — complete reference for simple and advanced mode syntax, memory and executor letter codes, and wildcards.
+  :ref:`transfer-definition-syntax` — complete reference for simple and advanced mode syntax, memory and Executor letter codes, and wildcards.
 
 Running TransferBench with a configuration file
 ================================================
@@ -27,7 +27,7 @@ The command accepts the following arguments:
 
 - ``config_file``: Path to a configuration file that defines the transfers to run.
 
-- ``num_bytes``: Number of bytes per transfer. You can suffix this value with ``K``, ``M``, or ``G`` (for example, ``128M``). The value must be a multiple of 4. You can omit this argument.
+- ``num_bytes``: Number of bytes per transfer. You can suffix this value with ``K``, ``M``, or ``G`` (for example, ``128M``); the value must be a multiple of 4. This argument is optional.
 
 .. note::
 
@@ -128,4 +128,4 @@ The following configuration file shows a range of transfer types using both simp
   # Multi-rank: GPU 0 on rank 0 to GPU 1 on rank 1
   1 4 (R0G0->R0G0->R1G1)
 
-For information on how to define transfers in the configuration file, including how to specify what memory to use, which executor runs the transfer, and how many subexecutors to use, see :ref:`transfer-definition-syntax`.
+For information on how to define transfers in the configuration file, including how to specify what memory to use, which Executor runs the transfer, and how many SubExecutors to use, see :ref:`transfer-definition-syntax`.

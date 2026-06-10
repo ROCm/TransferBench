@@ -30,7 +30,7 @@ General options
       - Default value
 
     * - ``NUM_ITERATIONS``
-      - Number of timed iterations per test. If negative, runs for that many seconds instead.
+      - Number of timed iterations per test. If negative, runs for that many seconds instead. For example, ``-30`` runs for 30 seconds.
       - ``10``
 
     * - ``NUM_SUBITERATIONS``
@@ -66,7 +66,7 @@ General options
       - ``0``
 
     * - ``SAMPLING_FACTOR``
-      - Affects auto-generated N values when N is ``0``.
+      - Controls how many transfer sizes are sampled per power-of-2 range when ``num_bytes`` is set to ``0``. For example, ``SAMPLING_FACTOR=4`` produces four evenly spaced sizes between each power of 2.
       - ``1``
 
 .. _data-validation-var:
@@ -180,7 +180,7 @@ GFX and kernel options
     * - ``GFX_SE_TYPE``
       - Subexecutor granularity. ``0`` = threadblock, ``1`` = warp.
 
-        By default, each subexecutor consists of one threadblock. Setting this to ``1`` makes each subexecutor consist of one warp instead. On some architectures such as AMD Instinct™ MI355X, this can impact performance, especially when used together with ``GFX_BLOCK_ORDER``.
+        By default, each SubExecutor consists of one threadblock. Setting this to ``1`` makes each SubExecutor consist of one warp instead. On some architectures such as AMD Instinct™ MI355X, this can impact performance, especially when used together with ``GFX_BLOCK_ORDER``.
       - ``0``
 
     * - ``GFX_TEMPORAL``
@@ -192,7 +192,7 @@ GFX and kernel options
       - (architecture-dependent)
 
     * - ``GFX_SINGLE_TEAM``
-      - Subexecutor memory access mode. ``1`` = subexecutors operate on the full array, ``0`` = subexecutors operate on disjoint subarrays.
+      - SubExecutor memory access mode. ``1`` = SubExecutors operate on the full array, ``0`` = SubExecutors operate on disjoint subarrays.
       - ``1``
 
     * - ``GFX_WAVE_ORDER``
@@ -230,10 +230,10 @@ DMA options
       - Default value
 
     * - ``USE_HSA_DMA``
-      - DMA implementation. ``1`` = use ``hsa_amd_async_copy``, ``0`` = use ``hipMemcpy``.
+      - DMA implementation. ``1`` = use ``hsa_amd_async_copy`` for direct HSA control, ``0`` = use ``hipMemcpy`` for the standard HIP path.
       - ``0``
 
-Variable subexecutor options
+Variable SubExecutor options
 ------------------------------
 
 .. list-table::
@@ -244,17 +244,17 @@ Variable subexecutor options
       - Default value
 
     * - ``MIN_VAR_SUBEXEC``
-      - Minimum number of subexecutors for variable subexecutor transfers.
+      - Minimum number of SubExecutors for variable SubExecutor transfers.
       - ``1``
 
     * - ``MAX_VAR_SUBEXEC``
-      - Maximum number of subexecutors. Set to ``0`` to use the device limit.
+      - Maximum number of SubExecutors. Set to ``0`` to use the device limit.
       - ``0``
 
 NIC options
 -----------
 
-The following environment variables apply only when NIC support is enabled.
+The following environment variables apply only when NIC support is enabled. To enable NIC support, use ``DISABLE_NIC_EXEC=0`` (Makefile) or ``-DENABLE_NIC_EXEC=ON`` (CMake). For details, see :ref:`source-build`.
 
 .. list-table::
     :header-rows: 1
@@ -410,4 +410,4 @@ HSA runtime variables
     * - ``HSA_ENABLE_SDMA``
       - Enables SDMA when set to ``1``. To disable, set to ``0``.
 
-        This is a HIP runtime environment variable. When SDMA is disabled, the DMA executor falls back to using blit kernels (GFX) internally.
+        This is a HIP runtime environment variable. When SDMA is disabled, the DMA Executor falls back to using blit kernels (GFX) internally.

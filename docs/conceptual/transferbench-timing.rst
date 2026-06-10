@@ -1,6 +1,6 @@
 .. meta::
-  :description: Explains how TransferBench measures performance at the test, executor, and transfer levels using HIP events and CPU wall-clock timing.
-  :keywords: TransferBench timing, TransferBench measurement, HIP events, CPU wall-clock, executor timing, transfer timing, overhead
+  :description: Explains how TransferBench measures performance at the test, Executor, and transfer levels using HIP events and CPU wall-clock timing.
+  :keywords: TransferBench timing, TransferBench measurement, HIP events, CPU wall-clock, Executor timing, transfer timing, overhead
 
 .. _transferbench-timing:
 
@@ -30,15 +30,15 @@ The following table provides a quick summary of the three timing levels:
       - How it is timed
 
     * - Test
-      - All Transfers across all executors and all ranks
+      - All transfers across all executors and all ranks
       - CPU wall-clock (``std::chrono::high_resolution_clock``)
 
     * - Executor
-      - All Transfers that run on this executor
+      - All transfers that run on this executor
       - Varies by executor type (see :ref:`timing-methods`)
 
     * - Transfer
-      - A single Transfer
+      - A single transfer
       - Varies by executor type (see :ref:`timing-methods`)
 
 .. _timing-methods:
@@ -46,7 +46,7 @@ The following table provides a quick summary of the three timing levels:
 Timing methods
 ==============
 
-The timing method used for each executor and transfer depends on the executor type and the value of
+The timing method used for each Executor and transfer depends on the Executor type and the value of
 ``USE_HIP_EVENTS``.
 
 Executor timing
@@ -98,19 +98,19 @@ Overhead
 ========
 
 Overhead is the difference between the total CPU wall-clock time (Test time) and the elapsed time of
-the slowest executor:
+the slowest Executor:
 
 .. code-block:: text
 
   Overhead = Test Time - MAX(Executor 0 Time, Executor 1 Time, ...)
 
-Overhead captures scheduling and synchronization costs that fall outside of executor-measured time,
+Overhead captures scheduling and synchronization costs that fall outside of Executor-measured time,
 such as barrier waits and thread management.
 
 Example output
 ==============
 
-The following example shows TransferBench output for a test with two executors (CPU and GPU) and
+The following example shows TransferBench output for a test with two Executors (CPU and GPU) and
 four transfers:
 
 .. code-block:: text
@@ -142,5 +142,5 @@ In this example:
 
 - **Executor 0** (CPU) runs Transfers 0 and 1 and takes 77.492 ms (dominated by Transfer 1 at 77.359 ms).
 - **Executor 1** (GPU) runs Transfers 2 and 3 and takes 0.689 ms.
-- **Test Time** is 77.688 ms, measured by the CPU wall-clock across all executors.
+- **Test Time** is 77.688 ms, measured by the CPU wall-clock across all Executors.
 - **Overhead** is 0.197 ms, calculated as ``77.688 - MAX(77.492, 0.689)``.

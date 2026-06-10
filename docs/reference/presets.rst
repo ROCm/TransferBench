@@ -8,7 +8,7 @@
 TransferBench presets
 =======================
 
-Presets are a predefined series of Transfers that can be used instead of manually configuring the Transfers.
+Presets are a predefined series of transfers that can be used instead of manually configuring the transfers.
 
 The following table lists the presets available on TransferBench 1.66.03:
 
@@ -24,11 +24,11 @@ The following table lists the presets available on TransferBench 1.66.03:
       - ✅
 
     * - :ref:`All-to-all via nearest NIC preset (a2a_n) <a2a_n>`
-      - Tests parallel transfers between all pairs of GPU devices using nearest NIC RDMA
+      - Tests parallel transfers between all pairs of GPU devices using nearest NIC RDMA.
       - ❌
 
     * - :ref:`All-to-all sweep preset (a2asweep) <a2asweep>`
-      - Performs a parameter sweep of GFX-based all-to-all transfers across different subexecutor counts, unroll factors, and thread block sizes.
+      - Performs a parameter sweep of GFX-based all-to-all transfers across different SubExecutor counts, unroll factors, and thread block sizes.
       - ❌
 
     * - :ref:`NIC rings preset (nicrings) <nicrings>`
@@ -56,7 +56,7 @@ The following table lists the presets available on TransferBench 1.66.03:
       - ❌
 
     * - :ref:`Sweep or random sweep preset (sweep/rsweep) <sweep>`
-      - Tests combinations of source (SRC), executor, and destination (DST) with varying parallelism.
+      - Tests combinations of source (SRC), Executor, and destination (DST) with varying parallelism.
       - ❌
 
 .. note::
@@ -68,11 +68,11 @@ The following table lists the presets available on TransferBench 1.66.03:
 All-to-all preset (a2a)
 ========================
 
-The a2a preset tests parallel transfers between all pairs of GPU devices. It measures bidirectional bandwidth across every GPU-to-GPU combination on a single node or multinode system. It supports GFX (compute kernel) and DMA all-to-all, and allows for NIC executor ring in parallel.
+The a2a preset tests parallel transfers between all pairs of GPU devices. It measures bidirectional bandwidth across every GPU-to-GPU combination on a single node or multinode system. It supports GFX (compute kernel) and DMA all-to-all, and optionally adds a parallel NIC executor ring (when ``NUM_QUEUE_PAIRS`` > 0).
 
 **Key features:**
 
-- **GFX/DMA mode:** Creates transfers for every (src GPU to dst GPU) pair on each rank. Optionally restricts to directly connected XGMI links (A2A_DIRECT=1).
+- **GFX or DMA mode:** Creates transfers for every (src GPU to dst GPU) pair on each rank. Optionally restricts to directly connected XGMI links (A2A_DIRECT=1).
 
 - **Transfer modes:** Copy (1 src → 1 dst), read-only (1 src → null), write-only (null → 1 dst), or custom (numSrcs:numDsts).
 
@@ -105,7 +105,7 @@ To modify the behavior of a2a preset, use the following environment variables:
       - Default value
 
     * - ``A2A_DIRECT``
-      - To use only directly connected XGMI links (hop count = 1). 0 = full all-to-all. This can be useful on older MI2XX hardware that doesn't feature full all-to-all XGMI connectivity, and running the standard all-to-all between all pairs of GPUs ends up utilizing XGMI links more than once.
+      - To use only directly connected XGMI links (hop count = 1). 0 = full all-to-all. This can be useful on older MI2XX hardware that doesn't feature full all-to-all XGMI connectivity, and running the standard all-to-all between all pairs of GPUs ends up using XGMI links more than once.
       - ``1``
 
     * - ``A2A_LOCAL``
@@ -145,7 +145,7 @@ To modify the behavior of a2a preset, use the following environment variables:
       - ``0``
 
     * - ``USE_DMA_EXEC``
-      - To use DMA executor instead of GFX. Valid only for A2A_MODE=0 (copy).
+      - To use DMA Executor instead of GFX. Valid only for A2A_MODE=0 (copy).
       - ``0``
 
     * - ``USE_FINE_GRAIN``
@@ -153,7 +153,7 @@ To modify the behavior of a2a preset, use the following environment variables:
       - (deprecated)
 
     * - ``USE_REMOTE_READ``
-      - To use DST GPU as executor (remote read) instead of SRC GPU (local read).
+      - To use DST GPU as Executor (remote read) instead of SRC GPU (local read).
       - ``0``
 
 Example output
@@ -179,15 +179,15 @@ The table in the output shows the transfer rate for each pair of GPUs, as measur
 
 - ``RTotal``: Indicates the total receive bandwidth as a sum of DST GPU's bandwidth.
 
-- ``Actual``: Reflects the actual time for the kernel to finish executing the slowest transfer. Because one GFX kernel is launched to handle all Transfers to other GPUs, the kernel doesn't finish until the slowest transfer completes.
+- ``Actual``: Reflects the actual time for the kernel to finish executing the slowest transfer. Because one GFX kernel is launched to handle all transfers to other GPUs, the kernel doesn't finish until the slowest transfer completes.
 
-- ``CPU Timed``: Measures all the Transfers.
+- ``CPU Timed``: Measures all the transfers.
 
 .. note::
 
     To rule out any possibility of serialization, check if the CPU Timed bandwidth is close to the aggregate GPU Timed bandwidth.
 
-    To avoid serialization when running with DMA executor, increase the number of hardware queues available.
+    To avoid serialization when running with DMA Executor, increase the number of hardware queues available.
 
     As the following output shows, ``GPU_MAX_HW_QUEUES`` defaults to just 4 if not set:
 
@@ -206,13 +206,13 @@ The a2a_n preset tests parallel transfers between all pairs of GPU devices using
 
 **Key features:**
 
-- Creates Transfers for every SRC GPU and DST GPU pair using the NIC closest to the SRC GPU to read, and the NIC closest to the DST GPU to write.
+- Creates transfers for every SRC GPU and DST GPU pair using the NIC closest to the SRC GPU to read, and the NIC closest to the DST GPU to write.
 
 - Prints a SRC x DST bandwidth matrix with row totals, column totals, and aggregate bandwidth.
 
 - Reports average and aggregate bandwidth (Tx-thread timed and CPU timed).
 
-- Supports single node only: Multinode is not supported.
+- Single-node only.
 
 **Usage:**
 
@@ -253,7 +253,7 @@ To modify the behavior of a2a_n preset, use the following environment variables:
 All-to-all sweep preset (a2asweep)
 ===================================
 
-The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers across different subexecutor counts, unroll factors, and thread block sizes. It helps find optimal configurations for GPU all-to-all bandwidth on your hardware.
+The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers across different SubExecutor counts, unroll factors, and thread block sizes. It helps find optimal configurations for GPU all-to-all bandwidth on your hardware.
 
 **Key features:**
 
@@ -263,17 +263,17 @@ The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers
 
 - Sweep order: Outer loop over ``BLOCKSIZES``, then table of (``NUM_SUB_EXECS`` x ``UNROLLS``).
 
-- By default reports only the slowest GPU's bandwidth (min bandwidth) per CU-Unroll combination. To include the fastest GPU's bandwidth (max bandwidth) per config, set ``SHOW_MIN_ONLY`` = 0.
+- By default, reports only the slowest GPU's bandwidth (min bandwidth) per CU-Unroll combination. To include the fastest GPU's bandwidth (max bandwidth) per config, set ``SHOW_MIN_ONLY`` = 0.
 
 - Uses same transfer topology as a2a preset, such as direct links, A2A_MODE, and others.
 
 **Restrictions:**
 
-- Supports single node only: Multinode is not supported.
+- Single-node only.
 
-- Forced single-stream: ``useSingleStream`` = 1.
+- Forces ``USE_SINGLE_STREAM=1``.
 
-- Can't use ``USE_SPRAY`` with multiple destination buffers (``numDsts`` > 1).
+- ``USE_SPRAY`` is incompatible with multiple destination buffers (``numDsts`` > 1).
 
 **Usage:**
 
@@ -324,7 +324,7 @@ To modify the behavior of a2asweep preset, use the following environment variabl
       - (all detected)
 
     * - ``NUM_SUB_EXECS``
-      - Comma-separated subexecutor (CU or WGP) counts to sweep.
+      - Comma-separated SubExecutor (CU or WGP) counts to sweep.
       - ``4,8,12,16,24,32``
 
     * - ``SHOW_MIN_ONLY``
@@ -336,11 +336,11 @@ To modify the behavior of a2asweep preset, use the following environment variabl
       - ``1,2,3,4,6,8``
 
     * - ``USE_REMOTE_READ``
-      - To use the executor on DST, set to ``1``. To use the executor on SRC, set to ``0``.
+      - To use the Executor on DST, set to ``1``. To use the Executor on SRC, set to ``0``.
       - ``0``
 
     * - ``USE_SPRAY``
-      - To configure each subexecutor to target all GPUs, set to ``1``. To target only one GPU, set to ``0``. Invalid for multiple DST.
+      - To configure each SubExecutor to target all GPUs, set to ``1``. To target only one GPU, set to ``0``. Invalid for multiple DST.
       - ``0``
 
     * - ``VERBOSE``
@@ -387,7 +387,7 @@ The following image shows the ring topology:
 
 - Supports RDMA read or write. To choose the rank for RDMA read or write in multirank systems, use ``USE_RDMA_READ``.
 
-- Homogeneous ranks required: Supports multinode provided that all ranks are homogeneous (same topology). Use ``NIC_FILTER`` to limit NIC visibility if needed.
+- Multinode supported with homogeneous ranks (same topology). Use ``TB_NIC_FILTER`` to limit NIC visibility if needed.
 
 - Transfer direction: ``currRank`` sends to (``currRank`` + 1) % ``numRanks``.
 
@@ -469,11 +469,11 @@ The nicp2p preset runs a multinode peer-to-peer RDMA transfer test between all N
 
 - Round-robin and combination schedule: Node pairs are scheduled in round-robin. Within each node pair, NIC pairs use combination schedule with ``NIC_PARALLEL_LEVEL``.
 
-- Output: Full matrix or column format, including top 10 fastest or slowest connections.
+- Output: Full matrix or column format, including top 10 fastest and slowest connections.
 
 - Progress report: Prints progress to stderr. For example, "Completed X/Y pairs in Zs, estimated remaining time Ws".
 
-- Homogeneous ranks required: Supports multinode provided that all ranks are homogeneous (same topology). Use ``NIC_FILTER`` to limit NIC visibility if needed.
+- Multinode supported with homogeneous ranks (same topology). Use ``TB_NIC_FILTER`` to limit NIC visibility if needed.
 
 - NICs required: Exits with error if no NICs are detected.
 
@@ -506,7 +506,7 @@ To modify the behavior of nicp2p preset, use the following environment variables
       - ``1``
 
     * - ``USE_REMOTE_READ``
-      - To use DST GPU as executor (remote read) instead of SRC GPU (local read).
+      - To use DST GPU as Executor (remote read) instead of SRC GPU (local read).
       - ``0``
 
     * - ``OUTPUT_FORMAT``
@@ -623,11 +623,11 @@ Example output
 One-to-all preset (one2all)
 ============================
 
-The one2all preset tests all subsets of parallel transfers from one GPU to the others. It sweeps over varying numbers of DST peers (from ``SWEEP_MIN`` to ``SWEEP_MAX``), and for each count, tests every combination of DST GPUs from a single SRC or executor GPU.
+The one2all preset tests all subsets of parallel transfers from one GPU to the others. It sweeps over varying numbers of DST peers (from ``SWEEP_MIN`` to ``SWEEP_MAX``), and for each count, tests every combination of DST GPUs from a single SRC or Executor GPU.
 
 **Key features:**
 
-- Minimum two GPUs: Requires at least two GPUs. Uses one GPU (``EXE_INDEX``) as SRC and executor.
+- Requires at least two GPUs. Uses one GPU (``EXE_INDEX``) as SRC and Executor.
 
 - Sweeps over all combinations of 1, 2, ..., N DST GPUs (excluding the SRC).
 
@@ -635,11 +635,14 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 - For each combination, runs parallel transfers and reports bandwidth per DST.
 
-- Supports GFX or DMA executor. SRC or DST can either be GPU or Null.
+- Supports GFX or DMA Executor. SRC or DST can either be GPU or Null.
 
 - Supports single node only: Multinode is not supported.
 
-- Invalid configs skipped: Skips when (``exe`` = DMA and ( ``src`` = N or ``dst`` = N)) or ( ``src`` = N and ``dst`` = N).
+- Invalid configs are skipped in two cases:
+
+  - ``exe`` = DMA and (``src`` = N or ``dst`` = N)
+  - ``src`` = N and ``dst`` = N
 
 - Output format: Each line shows bandwidth per DST GPU, ``p``, ``numSubExecs``, and transfer triplets.
 
@@ -676,7 +679,7 @@ To modify the behavior of one2all preset, use the following environment variable
       - ``4``
 
     * - ``EXE_INDEX``
-      - GPU index to use as executor or SRC.
+      - GPU index to use as Executor or SRC.
       - ``0``
 
     * - ``SWEEP_DIR``
@@ -1013,20 +1016,20 @@ The p2p preset measures device memory bandwidth between all pairs of CPU NUMA no
 
 - Supports both unidirectional and bidirectional transfers (``P2P_MODE``).
 
-- Uses GFX or DMA as GPU executor (``USE_GPU_DMA``).
+- Uses GFX or DMA as GPU Executor (``USE_GPU_DMA``).
 
-- Supports remote read (DST GPU as executor) instead of source-side execution.
+- Supports remote read (DST GPU as Executor) instead of source-side execution.
 
 - Prints bandwidth matrix with row and column labels. Optionally shows min/max/stddev per iteration.
 
 
 **Restrictions:**
 
-- Supports single node only: Multinode is not supported.
+- Single-node only.
 
-- ``USE_FINE_GRAIN`` deprecated: Returns error if ``USE_FINE_GRAIN`` is set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
+- ``USE_FINE_GRAIN`` is deprecated: Returns error if ``USE_FINE_GRAIN`` is set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
 
-- NVIDIA CPU: On NVIDIA, CPU executors can't access GPU memory; those pairs are skipped.
+- **NVIDIA platforms:** CPU executors can't access GPU memory; those pairs are skipped.
 
 - Self-transfers skipped: CPU i-to-i and GPU i-to-i are skipped in bidirectional mode.
 
@@ -1087,11 +1090,11 @@ To modify the behavior of p2p preset, use the following environment variables:
       - ``0``
 
     * - ``USE_GPU_DMA``
-      - To use DMA for GPU executor, set to ``1``. To use GFX, set to ``0``.
+      - To use DMA for GPU Executor, set to ``1``. To use GFX, set to ``0``.
       - ``0``
 
     * - ``USE_REMOTE_READ``
-      - To place the executor on DST, set to ``1``. To place on SRC, set to ``0``.
+      - To place the Executor on DST, set to ``1``. To place on SRC, set to ``0``.
       - ``0``
 
 Example output
@@ -1232,13 +1235,13 @@ Example output
 Scaling preset (scaling)
 =========================
 
-The scaling preset runs a scaling test from one GPU to all other devices (CPUs and GPUs). It varies the number of subexecutors (CUs) from SWEEP_MIN to SWEEP_MAX and reports bandwidth for each target device. It helps find optimal CU count per transfer.
+The scaling preset runs a scaling test from one GPU to all other devices (CPUs and GPUs). It varies the number of SubExecutors (CUs) from SWEEP_MIN to SWEEP_MAX and reports bandwidth for each target device. It helps find optimal CU count per transfer.
 
 **Key feature:**
 
 - Uses one GPU (``LOCAL_IDX``) as source.
 
-- Single transfer per target: Performs only one transfer at a time (one SRC to one DST) per cell.
+- Runs one transfer per target at a time (one SRC to one DST per cell).
 
 - Copies to each CPU NUMA node and every other GPU.
 
@@ -1246,13 +1249,13 @@ The scaling preset runs a scaling test from one GPU to all other devices (CPUs a
 
 - Prints a table: rows = CU count, columns = target device.
 
-- Reports best row: Shows peak bandwidth and optimal CU count per target.
+- Adds a ``Best`` row to the output showing peak bandwidth and optimal CU count per target.
 
 **Restrictions:**
 
-- Supports single node only: Multinode is not supported.
+- Single-node only.
 
-- ``USE_FINE_GRAIN`` deprecated: Returns error if set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
+- ``USE_FINE_GRAIN`` is deprecated: Returns error if set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
 
 **Usage:**
 
@@ -1299,11 +1302,11 @@ To modify the behavior of scaling preset, use the following environment variable
       - (all detected)
 
     * - ``SWEEP_MIN``
-      - Minimum subexecutors (CUs).
+      - Minimum SubExecutors (CUs).
       - ``1``
 
     * - ``SWEEP_MAX``
-      - Maximum subexecutors.
+      - Maximum SubExecutors.
       - ``32``
 
 Example output
@@ -1516,7 +1519,7 @@ Example output
 Sweep (sweep) and random sweep preset (rsweep)
 ===============================================
 
-The sweep preset performs an ordered sweep through sets of transfers. It systematically tests combinations of (SRC, executor, DST) with varying parallelism (from ``SWEEP_MIN`` simultaneous transfers up to ``SWEEP_MAX``) using lexicographic permutation order. The rsweep preset performs similar functions as sweep preset, but in a random order.
+The sweep preset performs an ordered sweep through sets of transfers. It systematically tests combinations of (SRC, Executor, DST) with varying parallelism (from ``SWEEP_MIN`` simultaneous transfers up to ``SWEEP_MAX``) using lexicographic order (alphabetized by source-executor-destination triplet). The rsweep preset performs the same sweep in a random order.
 
 .. note::
 
@@ -1524,11 +1527,11 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 
 **Key features:**
 
-- Possible set: Builds all possible sets of triplets (SRC, EXE, DST) from ``SWEEP_SRC``, ``SWEEP_EXE``, ``SWEEP_DST``, and device counts, as Cartesian product (``srcList`` x ``exeList`` x ``dstList``) with filters such as XGMI hop, and CPU-on-GPU skip on NVIDIA.
+- **Test set construction:** Builds all possible triplets (SRC, EXE, DST) from ``SWEEP_SRC``, ``SWEEP_EXE``, ``SWEEP_DST``, and device counts, as a Cartesian product (``srcList`` x ``exeList`` x ``dstList``) with filters such as XGMI hop count and CPU-on-GPU skip on NVIDIA.
 
 - Optionally filters using XGMI hop count (``SWEEP_XGMI_MIN``, ``SWEEP_XGMI_MAX``).
 
-- M increment: Selects M transfers for each test. M starts at ``SWEEP_MIN``, and increments until M > ``SWEEP_MAX`` (or ``SWEEP_MAX`` = 0 for no limit) when all M-combinations are exhausted.
+- **Parallelism sweep:** Starts at ``SWEEP_MIN`` simultaneous transfers, exhausts all combinations at that count, then increments up to ``SWEEP_MAX`` (set to ``0`` for no limit).
 
 - Ordered permutation: Uses ``std::prev_permutation`` to iterate through M-combinations of the possible transfer set in a deterministic order.
 
@@ -1538,11 +1541,11 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 
 - Default executors: ``SWEEP_EXE`` = CDG includes CPU, DMA, and GFX for broad coverage.
 
-- Supports single node only: Multinode is not supported.
+- Single-node only.
 
 .. note::
 
-  Running the default sweep might never finish executing, especially on configurations with large number of devices. It is highly recommended to set either ``SWEEP_TEST_LIMIT`` or ``SWEEP_TIME_LIMIT``.
+  On systems with many devices, set ``SWEEP_TEST_LIMIT`` or ``SWEEP_TIME_LIMIT`` to bound the runtime. Without these limits, the default sweep may never finish.
 
 **Usage:**
 
@@ -1550,7 +1553,7 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 
   ./TransferBench sweep
 
-To run with memory and executor limited to GPU only, and XGMI:
+To run with memory and Executor limited to GPU only, and XGMI:
 
 .. code-block:: shell
 
@@ -1719,4 +1722,4 @@ Example output
      Aggregate (CPU) │ 295.108 GB/s │  12.735 ms │  3758096384 bytes │ Overhead 0.372 ms
   -------------------┴--------------┴------------┴-------------------┴--------------------
 
-The exact format depends on ``OUTPUT_TO_CSV`` and ``PrintResults``. Typically shows test number, transfer count, bandwidth, and timing per test.
+The exact format depends on ``OUTPUT_TO_CSV``. Typically shows test number, transfer count, bandwidth, and timing per test.

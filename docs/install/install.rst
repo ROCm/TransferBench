@@ -8,11 +8,11 @@
 Install TransferBench
 -----------------------
 
-To install TransferBench, you have the following options:
+To install TransferBench, choose one of the following methods:
 
 - :ref:`Build from source <source-build>`
 
-- :ref:`Use package manager <package-manager>`
+- :ref:`Install from the package manager <package-manager>`
 
 .. _source-build:
 
@@ -47,7 +47,7 @@ Optional dependencies
 
 Depending on your requirement, you can install these optional dependencies:
 
-- ``libibverbs``: Required for enabling NIC executor for RDMA transfers.
+- ``libibverbs``: Required for enabling NIC Executor for RDMA transfers.
 
   - For Ubuntu/Debian:
 
@@ -152,12 +152,12 @@ To modify the Makefile behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>HIPCC</code></td>
-              <td>HIP compiler. Falls back to <code>hipcc</code>, if not found.</td>
+              <td>HIP compiler. Falls back to <code>hipcc</code> if not found.</td>
               <td><code>$(ROCM_PATH)/bin/amdclang++</code></td>
             </tr>
             <tr>
               <td><code>NVCC</code></td>
-              <td>NVIDIA CUDA compiler (for building <code>TransferBenchCuda</code>)</td>
+              <td>NVIDIA CUDA compiler (for building <code>TransferBenchCuda</code>).</td>
               <td><code>$(CUDA_PATH)/bin/nvcc</code></td>
             </tr>
             <tr>
@@ -173,12 +173,12 @@ To modify the Makefile behavior, use the following environment variables:
             <tr>
               <td rowspan="5"><b>Feature flags</b> - To control enabling features that require compile-time support. By default, these are enabled under the right conditions.</td>
               <td><code>DISABLE_NIC_EXEC</code></td>
-              <td>Disables NIC executor support.</td>
+              <td>Disables NIC Executor support.</td>
               <td><code>0</code></td>
             </tr>
             <tr>
               <td><code>DISABLE_DMA_BUF</code></td>
-              <td>Disables <code>DMA-BUF</code> for GPU Direct RDMA. Requires NIC executor support.</td>
+              <td>Disables <code>DMA-BUF</code> for GPU Direct RDMA. Requires NIC Executor support.</td>
               <td><code>1</code></td>
             </tr>
             <tr>
@@ -188,7 +188,7 @@ To modify the Makefile behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>DISABLE_AMD_SMI</code></td>
-              <td>Disables AMDI-SMI pod membership checks.</td>
+              <td>Disables AMD-SMI pod membership checks.</td>
               <td><code>0</code></td>
             </tr>
             <tr>
@@ -282,7 +282,7 @@ To modify the CMake behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>ENABLE_NIC_EXEC</code></td>
-              <td>Enables RDMA NIC executor.</td>
+              <td>Enables RDMA NIC Executor.</td>
               <td><code>OFF</code></td>
             </tr>
             <tr>
@@ -353,10 +353,10 @@ Here are some commonly encountered build errors and their fix:
 
 .. _package-manager:
 
-Installing TransferBench using package manager
-===============================================
+Installing TransferBench from the package manager
+=================================================
 
-To install TransferBench using package, install ROCm first and then run:
+To install TransferBench from the package manager, install ROCm first and then run:
 
 .. code-block:: shell
 
@@ -371,7 +371,7 @@ This installs in ``/opt/{rocm-version}/bin/TransferBench``. To check, use:
 
 .. note::
 
-  Pre-packaged installation doesn't support any enabled features, such as NIC executor, MPI support, pod support, and others.
+  The pre-packaged installation includes only the default features. NIC Executor, MPI support, and pod support require a source build.
 
 Building TransferBenchCuda
 ===========================
@@ -381,7 +381,7 @@ To build TransferBenchCuda from the source code, install the required dependenci
 Required dependencies
 ----------------------
 
-- CUDA: The installed CUDA version might impact support for some features such MNNVL support.
+- CUDA: The installed CUDA version might impact support for some features such as MNNVL support.
 
 - libnuma: Used for allocating memory or spawning threads on the right NUMA nodes. Here are the install instructions based on the OS:
 

@@ -8,7 +8,7 @@
 TransferBench workflow
 =======================
 
-Transfers enter the system either through presets or configuration (config) file, both of which ultimately call
+Transfers enter the system either through presets or a configuration (config) file, both of which ultimately call
 ``RunTransfers()``, which is the main utility function within TransferBench.
 
 Entry points
@@ -32,7 +32,7 @@ Entry points
 RunTransfers workflow
 =====================
 
-``RunTransfers()`` is the main entry point into the backend TransferBench library:
+``RunTransfers()`` is the entry point into the backend TransferBench library:
 
 .. code-block:: cpp
 
@@ -75,29 +75,29 @@ Prepare transfers
 
 Here are the steps involved in the second phase:
 
-1. **Prepare executors:** Perform all executor-specific setup, such as creating HIP streams, allocating SRC and DST memory, and exchanging fabric handles for pod communication support. This step also divides the work across subexecutors.
+1. **Prepare Executors:** Perform all Executor-specific setup, such as creating HIP streams, allocating SRC and DST memory, and exchanging fabric handles for pod communication support. This step also divides the work across SubExecutors.
 
 2. **Initialize memory:** Initializes SRC memory buffers with data patterns and computes reference results used for later validation.
 
    .. note::
 
-    For GPU SRC memory locations, data is copied onto the GPUs via DMA (``hipMemcpy``). If profiling, this copy appears as part of the profiling trace, which is why setting ``USE_INTERACTIVE`` = 1 is recommended when profiling.
+    For GPU SRC memory locations, data is copied onto the GPUs via DMA (``hipMemcpy``). If profiling, this copy appears as part of the profiling trace, which is why setting ``USE_INTERACTIVE=1`` is recommended when profiling.
 
 3. **Optional pause:** When ``USE_INTERACTIVE`` = 1, TransferBench pauses for user input after all memory has been initialized. Virtual addresses are printed at this point, which is useful for attaching a profiler before any transfers execute.
 
 Iteration loop
 --------------
 
-In the third phase, iteration loop runs for the number of iterations specified by ``NUM_ITERATIONS``.
+In the third phase, the iteration loop runs for the number of iterations specified by ``NUM_ITERATIONS``.
 Each iteration proceeds through the following steps:
 
 1. **Barrier (pre):** Synchronizes all ranks before transfers begin, ensuring that every rank is ready before any rank starts executing transfers.
 
 2. **Start CPU timing:** Starts a CPU timer on the current rank, capturing the total elapsed time across all transfers on this rank.
 
-3. **Execute:** Spawns one CPU thread per executor. Each executor runs all the transfers it is assigned and is responsible for its own per-transfer timing.
+3. **Execute:** Spawns one CPU thread per Executor. Each Executor runs all the transfers it is assigned and is responsible for its own per-transfer timing.
 
-4. **Barrier (post):** Waits for all executors across all ranks to finish before proceeding.
+4. **Barrier (post):** Waits for all Executors across all ranks to finish before proceeding.
 
 5. **Stop CPU timing:** Stops the CPU timer.
 
@@ -112,6 +112,6 @@ Finalize
 
 Here are the steps involved in the last phase:
 
-1. **Validate all transfers:** Checks all transfers to confirm that the DST memory matches the expected reference results computed during the Initialize Memory step.
+1. **Validate all transfers:** Check that the DST memory matches the expected reference results computed during the Initialize Memory step.
 
-2. **Prepare results:** Collects timing data from each executor and assembles the final ``TestResults`` output returned to the caller.
+2. **Prepare results:** Collect timing data from each Executor and assemble the final ``TestResults`` output returned to the caller.

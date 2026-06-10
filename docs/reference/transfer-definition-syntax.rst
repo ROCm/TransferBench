@@ -1,20 +1,20 @@
 .. meta::
-  :description: Reference for TransferBench transfer definition syntax, including simple and advanced modes, memory and executor letter codes, and wildcard syntax.
-  :keywords: TransferBench transfer definition, TransferBench syntax, TransferBench memory types, TransferBench executor types, TransferBench wildcards
+  :description: Reference for TransferBench transfer definition syntax, including simple and advanced modes, memory and Executor letter codes, and wildcard syntax.
+  :keywords: TransferBench transfer definition, TransferBench syntax, TransferBench memory types, TransferBench Executor types, TransferBench wildcards
 
 .. _transfer-definition-syntax:
 
 Transfer definition syntax
 ==========================
 
-A transfer is a single operation where an executor reads and adds values from source (SRC) memory, then writes the sum to destination (DST) memory. When a transfer has a single SRC and a single DST, it is a copy operation.
+A transfer is a single operation where an Executor reads and adds values from source (SRC) memory, then writes the sum to destination (DST) memory. When a transfer has a single SRC and a single DST, it is a copy operation.
 
 TransferBench supports two modes for defining transfers: simple mode and advanced mode.
 
 Simple mode
 -----------
 
-Use simple mode when all transfers in a test share the same number of subexecutors. The format is:
+Use simple mode when all transfers in a test share the same number of SubExecutors. The format is:
 
 .. code-block:: shell
 
@@ -23,7 +23,7 @@ Use simple mode when all transfers in a test share the same number of subexecuto
 The format uses the following fields:
 
 - ``#Transfers``: A positive integer that specifies the number of parallel transfers.
-- ``#SEs``: The number of subexecutors (CUs, threads, or queue pairs) used by all transfers.
+- ``#SEs``: The number of SubExecutors (CUs, threads, or queue pairs) used by all transfers.
 - ``(srcMem Executor dstMem)``: A triplet that describes one transfer.
 
 The transfer size comes from the ``num_bytes`` command-line argument.
@@ -39,7 +39,7 @@ The following examples show valid simple mode definitions:
 Advanced mode
 -------------
 
-Use advanced mode when transfers in a test require different subexecutor counts or sizes. The format is:
+Use advanced mode when transfers in a test require different SubExecutor counts or sizes. The format is:
 
 .. code-block:: shell
 
@@ -51,16 +51,16 @@ The format uses the following fields:
 - ``(srcMem Executor dstMem #SEs Bytes)``: A quintuplet that describes one transfer.
 - ``Bytes``: The per-transfer size. Set to ``0`` to use the command-line ``num_bytes`` value. You can suffix this value with ``K``, ``M``, or ``G``. A non-zero value overrides the command-line value for that transfer only.
 
-The following example runs two transfers with different sizes and subexecutor counts:
+The following example runs two transfers with different sizes and SubExecutor counts:
 
 .. code-block:: shell
 
     -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M)   # 1 MB GPU 0 to GPU 1 with 4 CUs; 2 MB GPU 1 to GPU 0 with 2 CUs
 
-Memory and executor letter codes
+Memory and Executor letter codes
 ==================================
 
-The memory locations and executors use a format consisting of letters indicating the memory or executor type, and index. The following tables indicate what these letters stand for.
+The memory locations and Executors use a format consisting of letters indicating the memory or Executor type, and index. The following tables indicate what these letters stand for.
 
 Memory location letters
 ------------------------
@@ -127,7 +127,7 @@ Executor letters
 
 Executors use the format ``[R<rank>]<ExeType><Index>[Slot][.<SubIndex>][SubSlot]``.
 
-The following table lists the supported executor type letters:
+The following table lists the supported Executor type letters:
 
 .. list-table::
     :header-rows: 1
@@ -162,7 +162,7 @@ The following table lists the supported executor type letters:
       - Queue pair
       - GPU. Uses the closest NIC for SRC and DST. SubIndex is optional.
 
-The optional executor fields have the following meanings:
+The optional Executor fields have the following meanings:
 
 - ``Slot`` (``A``, ``B``, ...): Selects which closest NIC to use, where ``A`` is the first and ``B`` is the second, and so on. Used for ``EXE_NIC_NEAREST``.
 - ``SubIndex`` (after ``.``): Specifies the queue pair or sub-index for the NIC.
@@ -176,7 +176,7 @@ Wildcards expand a single configuration file line into multiple concrete transfe
 Numeric wildcards
 ------------------
 
-Numeric wildcards apply to ranks (``R``), device indices (for example, ``G0`` or ``C1``), and executor indices.
+Numeric wildcards apply to ranks (``R``), device indices (for example, ``G0`` or ``C1``), and Executor indices.
 
 The following table describes the supported numeric wildcard syntax:
 
@@ -212,7 +212,7 @@ The following list shows additional examples:
 Alpha wildcards
 ----------------
 
-Alpha wildcards apply to executor slots and subslots (``A``, ``B``, ``C``, ...).
+Alpha wildcards apply to Executor slots and subslots (``A``, ``B``, ``C``, ...).
 
 The following table describes the supported alpha wildcard syntax:
 
@@ -242,7 +242,7 @@ The following table describes the supported alpha wildcard syntax:
 Rank prefix (multinode)
 -------------------------
 
-The ``R`` prefix is optional and specifies the rank index for a memory location or executor:
+The ``R`` prefix is optional and specifies the rank index for a memory location or Executor:
 
 - ``R2G3``: GPU 3 on rank 2.
 - ``G3`` (no ``R``): GPU 3 on the local rank.
@@ -252,7 +252,7 @@ The rank prefix accepts the same numeric wildcards as device indices, such as ``
 Nearest NIC wildcard
 ---------------------
 
-For the ``N`` (Nearest NIC) executor, you can omit the executor index and sub-index. TransferBench resolves the correct NICs for the SRC and DST memory locations at runtime.
+For the ``N`` (Nearest NIC) Executor, you can omit the Executor index and sub-index. TransferBench resolves the correct NICs for the SRC and DST memory locations at runtime.
 
 For example, the following definition:
 
