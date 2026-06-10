@@ -13,7 +13,7 @@ The source code is hosted at `<https://github.com/ROCm/TransferBench>`_.
 .. grid:: 2
   :gutter: 3
 
-    .. grid-item-card:: Install
+  .. grid-item-card:: Install
 
     * :ref:`install-transferbench`
 
