@@ -23,6 +23,7 @@ THE SOFTWARE.
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -489,12 +490,12 @@ namespace TransferBench::Utils
     }
   }
 
-  // Macro for use in presets that will return 1 if a value is not uniform across ranks
+  // Macro for use in presets that will return ERR_FATAL if a value is not uniform across ranks
 #define IS_UNIFORM(val, name)                                                      \
   do {                                                                             \
     if (!Utils::IsUniform(val)) {                                                  \
-      Utils::Print("[ERROR] %s must be uniform across all ranks\n", name); \
-      return 1;                                                                    \
+      Utils::Print("[ERROR] %s must be uniform across all ranks\n", name);         \
+      return ERR_FATAL;                                                            \
     }                                                                              \
   } while(0)
 

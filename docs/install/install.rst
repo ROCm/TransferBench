@@ -83,3 +83,9 @@ TransferBench looks for NVCC in ``/usr/local/cuda`` by default. To modify the lo
 .. code-block:: bash
 
   CUDA_PATH=/usr/local/cuda make
+
+Installing from the relocatable TGZ archive
+-------------------------------------------
+
+If you want to install a pre-built TransferBench binary on a system where
+you cannot install the DEB or RPM package, see :ref:`install-transferbench-tgz`.

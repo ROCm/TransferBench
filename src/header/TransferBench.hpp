@@ -279,6 +279,8 @@ namespace TransferBench
     int         queueSize       = 100;          ///< Completion queue size
     int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
     int         useRelaxedOrder = 1;            ///< Use relaxed ordering
+    uint8_t     serviceLevel    = 0;            ///< IB service level (sl) for InfiniBand QPs
+    uint8_t     trafficClass    = 0;            ///< DSCP/traffic class byte for RoCE GRH
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
@@ -1444,8 +1446,6 @@ namespace {
     }
 
     prop.requestedHandleTypes = hipMemHandleTypeFabric;
-//  at this point shouldn't have any memtype other than device
-//    ERR_CHECK(GetMemLocation(memDevice, prop.location));
     prop.location.type = hipMemLocationTypeDevice;
     prop.location.id = memDevice.memIndex;
     return ERR_NONE;
@@ -1511,6 +1511,15 @@ namespace {
       deviceIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
     }
 
+    if (IsCpuMemType(memType)) {
+      // Set NUMA policy prior to call to hipHostMalloc
+      numa_set_preferred(deviceIdx);
+    } else if (IsGpuMemType(memType)) {
+      // Switch to the appropriate GPU
+      // IMP: if the remapping above changes, remember to modify this!
+      ERR_CHECK(hipSetDevice(deviceIdx));
+    }
+
     // If memHandle is provided, allocate sharable memory
     if (memHandle != NULL) {
 #ifdef POD_COMM_ENABLED
@@ -1535,7 +1544,6 @@ namespace {
 
       // Specify memory access descriptor to enable local read/write
       hipMemAccessDesc desc;
-//      ERR_CHECK(GetMemLocation(memDevice, desc.location));
       desc.location.type = hipMemLocationTypeDevice;
       desc.location.id = memDevice.memIndex;
       desc.flags = hipMemAccessFlagsProtReadWrite;
@@ -1548,13 +1556,14 @@ namespace {
         memset(*memPtr, 0, roundedUpBytes);
         // Check that the allocated pages are actually on the correct NUMA node
         ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
+        numa_set_preferred(-1);
       } else if (IsGpuMemType(memType)) {
-        ERR_CHECK(hipSetDevice(memDevice.memIndex));
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
         ERR_CHECK(hipDeviceSynchronize());
       }
       return ERR_NONE;
 #else
+      if (IsCpuMemType(memType)) numa_set_preferred(-1);
       return {ERR_FATAL, "Unable to allocate sharable memory if not compiled with pod communication support"};
 #endif
     } else {
@@ -1562,9 +1571,6 @@ namespace {
     }
 
     if (IsCpuMemType(memType)) {
-
-      // Set NUMA policy prior to call to hipHostMalloc
-      numa_set_preferred(deviceIdx);
 
       // Allocate host-pinned memory (should respect NUMA mem policy)
       int flags = 0;
@@ -1606,8 +1612,6 @@ namespace {
       // Reset to default numa mem policy
       numa_set_preferred(-1);
     } else if (IsGpuMemType(memType)) {
-      // Switch to the appropriate GPU
-      ERR_CHECK(hipSetDevice(memDevice.memIndex));
 
       if (memType == MEM_GPU) {
         // Allocate GPU memory on appropriate device
@@ -1875,6 +1879,11 @@ namespace {
       if (memDevice.memIndex < 0 || memDevice.memIndex >= numCpus)
         return {ERR_FATAL,
                 "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
+
+      if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), memDevice.memIndex)) {
+        return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
+          memDevice.memIndex, memDevice.memRank};
+      }
       return ERR_NONE;
     }
 
@@ -1884,9 +1893,13 @@ namespace {
         return {ERR_FATAL,
                 "GPU index must be between 0 and %d (instead of %d) on rank %d", numGpus - 1, memDevice.memIndex, memDevice.memRank};
       if (memDevice.memType == MEM_CPU_CLOSEST) {
-        if (GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank) == -1) {
+        int actualNumaIdx = GetClosestCpuNumaToGpu(memDevice.memIndex, memDevice.memRank);
+        if (actualNumaIdx == -1) {
           return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
+        if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), actualNumaIdx))
+          return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
+            memDevice.memIndex, memDevice.memRank};
       }
       return ERR_NONE;
     }
@@ -2008,6 +2021,8 @@ namespace {
       if (nic.maxSendWorkReq  != cfg.nic.maxSendWorkReq)  ADD_ERROR("cfg.nic.maxSendWorkReq");
       // nic.queueSize   is permitted to be different across ranks
       if (nic.roceVersion     != cfg.nic.roceVersion)     ADD_ERROR("cfg.nic.roceVersion");
+      if (nic.serviceLevel    != cfg.nic.serviceLevel)    ADD_ERROR("cfg.nic.serviceLevel");
+      if (nic.trafficClass    != cfg.nic.trafficClass)    ADD_ERROR("cfg.nic.trafficClass");
       if (nic.useRelaxedOrder != cfg.nic.useRelaxedOrder) ADD_ERROR("cfg.nic.useRelaxedOrder");
       if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
     }
@@ -2604,6 +2619,37 @@ namespace {
           errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
               i, t.exeDevice.exeRank});
           break;
+        }
+
+        // Pod (cross-rank) transfers with a GPU executor are exchanged via CUDA/HIP fabric handles,
+        // which, for current version, only support device backed allocations.
+        // Reject host memory allocations up front.
+        if (IsGpuExeType(t.exeDevice.exeType)) {
+          bool hasRemoteCpuMem = false;
+          MemDevice offender = {};
+          char const* role = nullptr;
+          for (auto const& src : t.srcs) {
+            if (src.memRank != t.exeDevice.exeRank && IsCpuMemType(src.memType)) {
+              hasRemoteCpuMem = true; offender = src; role = "SRC"; break;
+            }
+          }
+          if (!hasRemoteCpuMem) {
+            for (auto const& dst : t.dsts) {
+              if (dst.memRank != t.exeDevice.exeRank && IsCpuMemType(dst.memType)) {
+                hasRemoteCpuMem = true; offender = dst; role = "DST"; break;
+              }
+            }
+          }
+          if (hasRemoteCpuMem) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
+                i, t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                role, offender.memRank, GetMemTypeName(offender.memType), t.exeDevice.exeRank});
+            hasFatalError = true;
+            break;
+          }
         }
       }
 
@@ -3330,7 +3376,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                      ConnInfo const& connInfo,
                                      uint8_t  const& port,
                                      bool     const& isRoCE,
-                                     ibv_mtu  const& mtu)
+                                     ibv_mtu  const& mtu,
+                                     uint8_t  const& trafficClass,
+                                     uint8_t  const& serviceLevel)
   {
     // Prepare QP attributes
     struct ibv_qp_attr attr = {};
@@ -3346,11 +3394,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       attr.ah_attr.grh.flow_label                = 0;
       attr.ah_attr.grh.sgid_index                = connInfo.gidIdx;
       attr.ah_attr.grh.hop_limit                 = 255;
+      attr.ah_attr.grh.traffic_class             = trafficClass;
     } else {
       attr.ah_attr.is_global = 0;
       attr.ah_attr.dlid      = connInfo.lid;
     }
-    attr.ah_attr.sl            = 0;
+    attr.ah_attr.sl            = serviceLevel;
     attr.ah_attr.src_path_bits = 0;
     attr.ah_attr.port_num      = port;
     attr.dest_qp_num           = connInfo.qpn;
@@ -3634,7 +3683,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       static_assert(std::is_trivially_copyable<QpTransitionResult>::value, "QpTransitionResult must be trivially copyable for MPI broadcast");
       QpTransitionResult srcQpResult = {ERR_NONE, false};
       if (GetRank() == srcMemRank) {
-        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu);
+        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
         srcQpResult.rtrFailed = (err.errType != ERR_NONE);
         if (err.errType == ERR_NONE) {
           err = TransitionQpToRts(rss.srcQueuePairs[i]);
@@ -3649,7 +3698,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
       QpTransitionResult dstQpResult = {ERR_NONE, false};
       if (GetRank() == dstMemRank) {
-        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu);
+        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
         dstQpResult.rtrFailed = (err.errType != ERR_NONE);
         if (err.errType == ERR_NONE) {
           err = TransitionQpToRts(rss.dstQueuePairs[i]);
@@ -8147,29 +8196,50 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
       hsa_amd_pointer_info_t info;
       info.size = sizeof(info);
 
-      ErrResult err;
-      int32_t* tempBuffer;
+      // Callback to process each agent
+      auto cpuAgentCallback = [](hsa_agent_t agent, void* data) -> hsa_status_t {
+        std::map<int, hsa_agent_t>* agents = static_cast<std::map<int, hsa_agent_t>*>(data);
 
-      // Index CPU agents
-      cpuAgents.clear();
-      int numCpus = numa_num_configured_nodes();
-      for (int i = 0; i < numCpus; i++) {
-        AllocateMemory({MEM_CPU, i}, 1024, (void**)&tempBuffer);
-        hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
-        cpuAgents.push_back(info.agentOwner);
-        DeallocateMemory(MEM_CPU, tempBuffer, 1024);
-      }
+        hsa_device_type_t deviceType;
+        hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &deviceType);
+        if (status != HSA_STATUS_SUCCESS) return status;
+
+        if (deviceType == HSA_DEVICE_TYPE_CPU) {
+          uint32_t nodeId;
+          status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NODE, &nodeId);
+          if (status == HSA_STATUS_SUCCESS) {
+            (*agents)[nodeId] = agent;
+          } else {
+            return status;
+          }
+        }
+        return HSA_STATUS_SUCCESS;
+      };
 
       // Index GPU agents
       int numGpus = 0;
       hipError_t status = hipGetDeviceCount(&numGpus);
       if (status != hipSuccess) numGpus = 0;
       gpuAgents.clear();
+      char *tempBuffer;
       for (int i = 0; i < numGpus; i++) {
         AllocateMemory({MEM_GPU, i}, 1024, (void**)&tempBuffer);
         hsa_amd_pointer_info(tempBuffer, &info, NULL, NULL, NULL);
         gpuAgents.push_back(info.agentOwner);
         DeallocateMemory(MEM_GPU, tempBuffer, 1024);
+      }
+
+      // Index CPU agents (done after HIP initialization)
+      std::map<int, hsa_agent_t> cpuAgentMap;
+      hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
+
+      cpuAgents.clear();
+      int numCpus = numa_num_configured_nodes();
+      cpuAgents.resize(numCpus);
+      for (int i = 0; i < numCpus; i++) {
+        if (cpuAgentMap.count(i)) {
+          cpuAgents[i] = cpuAgentMap[i];
+        }
       }
     }
 #endif
