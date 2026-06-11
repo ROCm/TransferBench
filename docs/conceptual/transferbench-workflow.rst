@@ -66,7 +66,7 @@ Here are the steps involved in the first phase:
 
 1. **Check ConfigOptions:** Verify that the provided ``ConfigOptions`` are valid. ``ConfigOptions`` control how TransferBench runs (for example, GFX unroll factor and number of warmup iterations). When running in multinode mode, consistency across ranks is also checked.
 
-2. **Check transfers:** Verify that the provided ``Transfers`` are properly specified. Checks include confirming that requested devices exist and that each transfer has an appropriate number of source (SRC) and destination (DST) endpoints. When running in multinode mode, consistency across ranks is also checked.
+2. **Check transfers:** Verify that the provided transfers are properly specified. Checks include confirming that requested devices exist and that each transfer has an appropriate number of source (SRC) and destination (DST) endpoints. When running in multinode mode, consistency across ranks is also checked.
 
 3. **Log transfers (optional):** If ``TB_DUMP_CFG_FILE`` is set, log the transfers to a config file that can be re-executed by TransferBench. This is useful for capturing the exact transfers run by a preset so they can be modified and replayed.
 

@@ -98,7 +98,7 @@ Data and validation options
     * - ``FILL_COMPRESS``
       - Comma-separated percentages for 64-byte line fill across five bins: random, 1B0, 2B0, 4B0, and 32B0.
 
-        This feature tests various compressible data patterns supported by XGMI. The integer values must sum to 100 and correspond to the following bins:
+        These patterns produce data with varying compressibility, used to test XGMI compression behavior. The integer values must sum to 100 and correspond to the following bins:
 
         .. list-table::
             :header-rows: 1
@@ -298,7 +298,7 @@ Backend and runtime options (client-read)
       - Default value
 
     * - ``GPU_MAX_HW_QUEUES``
-      - A HIP runtime environment variable that determines the maximum number of hardware queues each GPU has access to per process. When more than four GPU-executed transfers run simultaneously, they might serialize while waiting for available hardware queues. In this case, increase the value of this environment variable from the default ``4`` when ``USE_SINGLE_STREAM=0``. See :ref:`gpu-max-hw-queues`.
+      - A HIP runtime environment variable that sets the maximum number of hardware queues per GPU per process. When more than four GPU-executed transfers run simultaneously with ``USE_SINGLE_STREAM=0``, they may serialize while waiting for available queues; increase this value beyond the default ``4`` to avoid serialization. See :ref:`gpu-max-hw-queues`.
       - ``4``
 
 Backend environment variables
@@ -373,6 +373,7 @@ Backend variables
           # Without filter:
           > mlx5_0, mlx5_1, mlx5_2, mlx5_3, mlx5_4, mlx5_5, mlx5_6, mlx5_7
 
+          # With filter (> shows the resulting visible NICs):
           TB_NIC_FILTER="mlx5_1|mlx5_3"    > mlx5_1, mlx5_3
           TB_NIC_FILTER="mlx5_[1,4,5]"     > mlx5_1, mlx5_4, mlx5_5
           TB_NIC_FILTER="mlx5_[1-3,7]"     > mlx5_1, mlx5_2, mlx5_3, mlx5_7

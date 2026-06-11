@@ -59,7 +59,7 @@ In addition to configuration file mode, TransferBench supports the following alt
 
     ./TransferBench cmdline 1G "1 1 (G0->G0->G1)"
 
-  Running the preceding command produces the same result as using a configuration file that contains the following line:
+  This produces the same result as a configuration file containing:
 
   .. code-block:: shell
 

@@ -199,7 +199,7 @@ To modify the Makefile behavior, use the following environment variables:
             <tr>
               <td rowspan="3"><b>Build options</b></td>
               <td><code>SINGLE_KERNEL</code></td>
-              <td>To compile with a single GFX kernel (faster build, but fewer kernel variants), set to 1. Used mostly for development and debug.</td>
+              <td>To compile with a single GFX kernel (faster build, but fewer kernel variants), set to <code>1</code>. Used mostly for development and debug.</td>
               <td><code>0</code></td>
             </tr>
             <tr>
@@ -209,7 +209,7 @@ To modify the Makefile behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>DEBUG</code></td>
-              <td>To build in debug mode with debug symbols (-O0, -g), set to 1. Runs otherwise in the release mode (-O3).</td>
+              <td>To build in debug mode with debug symbols (-O0, -g), set to <code>1</code>. Runs otherwise in the release mode (-O3).</td>
               <td><code>0</code></td>
             </tr>
         </tbody>
@@ -376,7 +376,7 @@ This installs in ``/opt/{rocm-version}/bin/TransferBench``. To check, use:
 Building TransferBenchCuda
 ===========================
 
-To build TransferBenchCuda from the source code, install the required dependencies first.
+TransferBenchCuda is the NVIDIA build target. To build it on a system with NVIDIA CUDA installed, install the required dependencies first.
 
 Required dependencies
 ----------------------

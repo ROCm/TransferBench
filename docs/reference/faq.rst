@@ -33,26 +33,24 @@ In this example, the first element of the DST memory was expected to hold
 This error is generally not a TransferBench issue. It's usually a sign of a system
 configuration problem.
 
-Common causes include:
+Common causes and resolutions:
 
-- Improperly configured IOMMU
-- A ROCm runtime and driver version mismatch
+- **Improperly configured IOMMU** — IOMMU must be set to pass-through mode in the BIOS. To verify, check for ``iommu=pt`` in the kernel command line:
 
-IOMMU must be set to pass-through mode in the BIOS. To verify, check for ``iommu=pt``
-in the kernel command line:
+  .. code-block:: shell
 
-.. code-block:: shell
+    # Check for iommu=pt in the output
+    cat /proc/cmdline
 
-  # Check for iommu=pt in the output
-  cat /proc/cmdline
+    BOOT_IMAGE=/boot/vmlinuz-5.15.0-70-generic root=UUID=7489cc43-aaab-4b61-8c63-86a419728dea
+    ro panic=0 nowatchdog msr.allow_writes=on nokaslr amdgpu.noretry=1 pci=realloc=off
+    modprobe.blacklist=amdgpu intel_iommu=on iommu=pt numa_balancing=disable console=tty0
+    console=ttyS0,115200n8
 
-  BOOT_IMAGE=/boot/vmlinuz-5.15.0-70-generic root=UUID=7489cc43-aaab-4b61-8c63-86a419728dea
-  ro panic=0 nowatchdog msr.allow_writes=on nokaslr amdgpu.noretry=1 pci=realloc=off
-  modprobe.blacklist=amdgpu intel_iommu=on iommu=pt numa_balancing=disable console=tty0
-  console=ttyS0,115200n8
+  For IOMMU configuration guidance, see
+  `AMD Instinct MI300X system optimization <https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html>`_.
 
-For IOMMU configuration guidance, see
-`AMD Instinct MI300X system optimization <https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html>`_.
+- **ROCm runtime and driver version mismatch** — Ensure the installed ROCm runtime and GPU driver versions are compatible. Refer to the ROCm compatibility matrix for supported combinations.
 
 .. _gpu-max-hw-queues:
 
@@ -153,10 +151,31 @@ To query current XGMI settings on AMD Instinct machines, use ``amd-smi xgmi``:
   amd-smi xgmi
 
   LINK METRIC TABLE:
-  bdf             bit_rate  max_bandwidth  link_type  GPU0     GPU1     GPU2     GPU3     GPU4     GPU5     GPU6     GPU7
-  GPU0  0000:0c:00.0  38 Gb/s  608 Gb/s  XGMI
-    Read   N/A       39.61 TB  15.40 TB  15.47 TB  5.349 TB  4.993 TB  5.078 TB  5.952 TB
-    Write  N/A       41.96 TB  15.32 TB  15.00 TB  5.332 TB  4.859 TB  4.979 TB  5.448 TB
+         bdf           bit_rate  max_bandwidth  link_type  GPU0      GPU1      GPU2      GPU3      GPU4      GPU5      GPU6      GPU7
+  GPU0   0000:0c:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    N/A       39.61 TB  15.40 TB  15.47 TB  5.349 TB  4.993 TB  5.078 TB  5.952 TB
+   Write                                                   N/A       41.96 TB  15.32 TB  15.00 TB  5.332 TB  4.859 TB  4.979 TB  5.448 TB
+  GPU1   0000:22:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    41.69 TB  N/A       16.93 TB  16.61 TB  5.498 TB  5.850 TB  5.368 TB  5.261 TB
+   Write                                                   39.38 TB  N/A       17.81 TB  16.70 TB  5.419 TB  5.842 TB  5.366 TB  5.371 TB
+  GPU2   0000:38:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    15.28 TB  17.82 TB  N/A       16.96 TB  5.529 TB  5.402 TB  5.781 TB  5.194 TB
+   Write                                                   15.40 TB  16.93 TB  N/A       17.81 TB  5.513 TB  5.475 TB  5.666 TB  5.263 TB
+  GPU3   0000:5c:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    15.02 TB  16.66 TB  17.79 TB  N/A       5.791 TB  5.350 TB  5.131 TB  5.755 TB
+   Write                                                   15.47 TB  16.61 TB  16.86 TB  N/A       6.251 TB  5.425 TB  5.244 TB  5.673 TB
+  GPU4   0000:9f:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    5.346 TB  5.427 TB  5.524 TB  6.279 TB  N/A       5.797 TB  5.522 TB  5.454 TB
+   Write                                                   5.349 TB  5.498 TB  5.531 TB  5.791 TB  N/A       6.243 TB  5.568 TB  5.336 TB
+  GPU5   0000:af:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    4.861 TB  5.858 TB  5.471 TB  5.435 TB  6.233 TB  N/A       5.789 TB  5.727 TB
+   Write                                                   4.995 TB  5.850 TB  5.402 TB  5.351 TB  5.771 TB  N/A       6.213 TB  5.711 TB
+  GPU6   0000:bf:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    4.980 TB  5.348 TB  5.664 TB  5.249 TB  5.556 TB  6.208 TB  N/A       6.020 TB
+   Write                                                   5.079 TB  5.368 TB  5.780 TB  5.134 TB  5.505 TB  5.791 TB  N/A       6.450 TB
+  GPU7   0000:df:00.0  38 Gb/s   608 Gb/s       XGMI
+   Read                                                    5.434 TB  5.372 TB  5.260 TB  5.651 TB  5.315 TB  5.650 TB  6.446 TB  N/A
+   Write                                                   5.952 TB  5.261 TB  5.197 TB  5.755 TB  5.433 TB  5.686 TB  6.020 TB  N/A
 
 Environment variable questions
 ================================

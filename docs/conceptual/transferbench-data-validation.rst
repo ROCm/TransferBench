@@ -14,9 +14,7 @@ precomputed expected values.
 Overview
 =========
 
-Validation verifies that for each transfer, the DST buffer contains the expected value:
-the sum of all source (SRC) buffers (or zero when there are no sources). A transfer is correct if, for
-every element ``i``, the value matches the expected value given in the following table:
+For each transfer, the DST buffer must equal the element-wise sum of all SRC buffers, or zero if there are no sources. A transfer is correct if, for every element ``i``, the value matches the expected value given in the following table:
 
 .. list-table::
     :header-rows: 1
@@ -38,8 +36,8 @@ Source data preparation
 
 Before any transfers run, TransferBench prepares the SRC and DST memories as discussed in the following sections:
 
-Expected source pattern (``PrepareReference``)
------------------------------------------------
+Expected source pattern
+-----------------------
 
 Before any transfers run, TransferBench builds reference SRC buffers on the host using
 ``PrepareReference(cfg, cpuBuffer, bufferIdx)``.
@@ -73,10 +71,10 @@ The expected destination is computed once before the iteration loop:
 
 .. code-block:: text
 
-  dstReference[0] = memset to MEMSET_CHAR          (used when numSrcs == 0)
-  dstReference[1] = srcReference[0]                (1 source)
-  dstReference[2] = dstReference[1] + srcReference[1]  (2 sources)
-  dstReference[k] = dstReference[k-1] + srcReference[k-1]  (k sources)
+  dstReference[0] = memset to MEMSET_CHAR               # used when numSrcs == 0
+  dstReference[1] = srcReference[0]                     # 1 source
+  dstReference[2] = dstReference[1] + srcReference[1]   # 2 sources
+  dstReference[k] = dstReference[k-1] + srcReference[k-1]  # k sources
 
 ``dstReference[numSrcs]`` is the expected result for a transfer with ``numSrcs`` sources.
 
@@ -117,7 +115,7 @@ For each transfer and each DST, the following steps are performed:
 
 1. **Rank check:** Only the rank that owns the destination performs validation.
 
-2. **Getting actual output:**
+2. **Get the actual output:**
 
    - **CPU destination** or ``validateDirect = 1``: Point directly at the destination memory.
    - **GPU destination** and ``validateDirect = 0``: Copy destination to a host ``outputBuffer``
@@ -146,12 +144,12 @@ environment variables or in a configuration file.
 
     * - ``validateDirect``
       - ``VALIDATE_DIRECT``
-      - To compare GPU DST directly, set to ``1``. Supported on AMD hardware only; no host copy.
+      - To compare GPU DST directly, set to ``1``. Supported on AMD hardware only and requires no host copy.
         To copy to host and compare, set to ``0``.
 
     * - ``validateSource``
       - ``VALIDATE_SOURCE``
-      - To validate the SRC memory right after it's initialized, set to ``1``. (Optional early check).
+      - To validate the SRC memory right after it's initialized, set to ``1`` (optional early check).
 
 .. note::
 

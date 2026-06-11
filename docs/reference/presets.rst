@@ -78,7 +78,7 @@ The a2a preset tests parallel transfers between all pairs of GPU devices. It mea
 
 - **NIC rings:** When ``NUM_QUEUE_PAIRS`` > 0, adds NIC-based ring transfers (GPU i → GPU (i+1)%N) using nearest-NIC RDMA.
 
-- Prints a SRC x DST bandwidth matrix with row or column totals, aggregate bandwidth, and min/max/avg across ranks for multinode system.
+- Prints a SRC x DST bandwidth matrix with row totals or column totals (configurable), aggregate bandwidth, and min/max/avg across ranks for multinode systems.
 
 - Forces ``USE_SINGLE_STREAM=1`` for all-to-all.
 
@@ -352,13 +352,13 @@ Example output
 
 .. tab-set::
 
-    .. tab-item:: AMD Instinct MI300X
+    .. tab-item:: AMD Instinct™ MI300X
 
         .. image:: /data/a2asweep_MI300X.png
             :width: 100%
             :align: center
 
-    .. tab-item:: AMD Instinct MI350X
+    .. tab-item:: AMD Instinct™ MI350X
 
         .. image:: /data/a2asweep_MI350X.png
             :width: 100%
@@ -467,7 +467,7 @@ The nicp2p preset runs a multinode peer-to-peer RDMA transfer test between all N
 
 - Allows using RDMA read instead of write through ``USE_REMOTE_READ``.
 
-- Round-robin and combination schedule: Node pairs are scheduled in round-robin. Within each node pair, NIC pairs use combination schedule with ``NIC_PARALLEL_LEVEL``.
+- Round-robin and combination schedule: Node pairs are scheduled in round-robin. Within each node pair, NIC pairs are tested in all combinations (controlled by ``NIC_PARALLEL_LEVEL``).
 
 - Output: Full matrix or column format, including top 10 fastest and slowest connections.
 
@@ -530,7 +530,7 @@ To modify the behavior of nicp2p preset, use the following environment variables
       - ``2``
 
     * - ``PARALLEL_NODE``
-      - To execute node pairs in parallel, set to ``1``. For serial execution, set to ``0``. By default, nicp2p tries to run Transfers between node pairs in parallel to reduce the overall runtime. For example, (Rank 0->Rank 1) + (Rank 2->Rank 3) are run in parallel instead of (Rank 0->Rank 1) followed by (Rank 2->Rank 3).
+      - To execute node pairs in parallel, set to ``1``. For serial execution, set to ``0``. By default, nicp2p tries to run transfers between node pairs in parallel to reduce the overall runtime. For example, (Rank 0->Rank 1) + (Rank 2->Rank 3) are run in parallel instead of (Rank 0->Rank 1) followed by (Rank 2->Rank 3).
       - ``1``
 
     * - ``NIC_PARALLEL_LEVEL``
@@ -635,7 +635,7 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 - For each combination, runs parallel transfers and reports bandwidth per DST.
 
-- Supports GFX or DMA Executor. SRC or DST can either be GPU or Null.
+- Supports GFX or DMA executor. Each of SRC and DST can independently be GPU or Null, but not both Null simultaneously.
 
 - Supports single node only: Multinode is not supported.
 
@@ -711,7 +711,7 @@ Example output
 
 .. tab-set::
 
-  .. tab-item:: AMD Instinct MI300X
+  .. tab-item:: AMD Instinct™ MI300X
 
     .. code-block:: shell
 
@@ -857,7 +857,7 @@ Example output
                       33.003       37.075       33.068       36.900       32.971       36.937    6 4 (G0 G0 G2) (G0 G0 G3) (G0 G0 G4) (G0 G0 G5) (G0 G0 G6) (G0 G0 G7)
           38.626       41.000       38.632       41.087       38.518       40.911       38.775    7 4 (G0 G0 G1) (G0 G0 G2) (G0 G0 G3) (G0 G0 G4) (G0 G0 G5) (G0 G0 G6) (G0 G0 G7)
 
-  .. tab-item:: AMD Instinct MI355X
+  .. tab-item:: AMD Instinct™ MI355X
 
     .. code-block:: shell
 
