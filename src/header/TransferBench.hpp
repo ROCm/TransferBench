@@ -5056,13 +5056,17 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
   // Source for definitions: https://github.com/llvm/llvm-project/blob/4e3bac3ea2cc6fd778d53e317dd9fc27c1ddfc4f/clang/include/clang/Basic/BuiltinsAMDGPU.td#L956
   // and internal ISA documentation
   using uint32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+  // Loads 16 bytes/lane from global (src) into LDS (dst).
   __device__ void asyncLoadX4(float const* src, float* dst){
-    //__builtin_amdgcn_global_load_async_to_lds_b128 : AMDGPUBuiltin<"void(_ExtVector<4, int> address_space<1> *, _ExtVector<4, int> address_space<3> *, _Constant int, _Constant int)
-    __builtin_amdgcn_global_store_async_from_lds_b128((uint32x4*)src, (uint32x4*)dst, 0, 0);
+    __builtin_amdgcn_global_load_async_to_lds_b128(
+        (__attribute__((address_space(1))) uint32x4*)src,
+        (__attribute__((address_space(3))) uint32x4*)dst, 0, 0);
   }
+  // Stores 16 bytes/lane from LDS (src) to global (dst).
   __device__ void asyncStoreX4(float const* src, float* dst){
-    //__builtin_amdgcn_global_store_async_from_lds_b128 : AMDGPUBuiltin<"void(_ExtVector<4, int> address_space<1> *, _ExtVector<4, int> address_space<3> *, _Constant int, _Constant int)
-    __builtin_amdgcn_global_store_async_from_lds_b128((uint32x4*)dst, (uint32x4*)src, 0, 0);
+    __builtin_amdgcn_global_store_async_from_lds_b128(
+        (__attribute__((address_space(1))) uint32x4*)dst,
+        (__attribute__((address_space(3))) uint32x4*)src, 0, 0);
   }
 
   // numElementsPerTile should be a multiple of 128, given the asyncLoadX4 and asyncStoreX4 functions operate on a 32-lane warp and 4 elements per lane (512 bytes total)
@@ -5072,40 +5076,37 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
   int waveId = threadIdx.x / warpSize;
   int laneId = threadIdx.x % warpSize;
   int numWavesPerBlock = blockDim.x / warpSize;
-  size_t itemsProcessedPerGridIteration = numElementsPerTile * numWavesPerBlock * gridDim.x;
+  size_t itemsProcessedPerGridIteration = (size_t)numElementsPerTile * numWavesPerBlock * gridDim.x;
   constexpr size_t stride_per_lane = sizeof(float4) / sizeof(float); // 4 elements per lane
-  float* shmemPtr = static_cast<float*>(shmem) + numElementsPerTile * waveId + laneId * stride_per_lane;
-  // Local per-wave source and destination pointers
-  const float* srcPtr = src + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock) + laneId * stride_per_lane;
-  float* dstPtr = dst + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock) + laneId * stride_per_lane;
-
+  // Number of elements a full 32-lane warp moves per b128 async op (32 * 4 = 128).
   size_t elements_per_dwordx4_load_store = warpSize * stride_per_lane;
-  size_t elementsToProcess = numElementsPerTile;
-  while(srcPtr < src + numElements){
-    // Handle the last tile of the block, which may be less than num_elements_per_tile.
-    if(src + numElements - srcPtr < numElementsPerTile){
-      size_t remainingElements = src + numElements - srcPtr;
-      if constexpr(verbose) elementsToProcess = remainingElements;
-    }
-    // Copy from global memory to LDS
-    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Loading %zu elements from %p to shared memory at %p\n", blockIdx.x, waveId, elementsToProcess, srcPtr, shmemPtr);
-    //#pragma unroll
-    for (int i = 0; i < elementsToProcess; i += elements_per_dwordx4_load_store) {
-      asyncLoadX4(srcPtr + i * stride_per_lane, shmemPtr + i * stride_per_lane);
-      __builtin_amdgcn_s_wait_asynccnt(0);
-    }
-    
 
-    // write back from LDS to global
-    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Storing %zu elements from shared memory at %p to %p\n", blockIdx.x, waveId, elementsToProcess, shmemPtr, dstPtr);
-    //#pragma unroll
-    for (int i = 0; i < elementsToProcess; i += elements_per_dwordx4_load_store){
-      asyncStoreX4(shmemPtr + i * stride_per_lane, dstPtr + i * stride_per_lane);
+  float* shmemPtr = shmem + numElementsPerTile * waveId + laneId * stride_per_lane;
+  // Wave-tile base (lane-independent) used to gate the loop and compute the partial-tile size.
+  size_t tileBase = (size_t)numElementsPerTile * (waveId + (size_t)blockIdx.x * numWavesPerBlock);
+
+  while(tileBase < numElements){
+    // Handle the last tile, which may be less than numElementsPerTile.
+    size_t elementsToProcess = numElementsPerTile;
+    if(numElements - tileBase < (size_t)numElementsPerTile)
+      elementsToProcess = numElements - tileBase;
+
+    const float* srcPtr = src + tileBase + laneId * stride_per_lane;
+    float*       dstPtr = dst + tileBase + laneId * stride_per_lane;
+
+    // Copy from global memory to LDS
+    for (size_t i = 0; i < elementsToProcess; i += elements_per_dwordx4_load_store) {
+      asyncLoadX4(srcPtr + i, shmemPtr + i);
       __builtin_amdgcn_s_wait_asynccnt(0);
     }
-    
-    srcPtr += itemsProcessedPerGridIteration;
-    dstPtr += itemsProcessedPerGridIteration;
+
+    // Write back from LDS to global
+    for (size_t i = 0; i < elementsToProcess; i += elements_per_dwordx4_load_store){
+      asyncStoreX4(shmemPtr + i, dstPtr + i);
+      __builtin_amdgcn_s_wait_asynccnt(0);
+    }
+
+    tileBase += itemsProcessedPerGridIteration;
   }
 }
 
