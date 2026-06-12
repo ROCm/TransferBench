@@ -805,7 +805,7 @@ namespace TransferBench
   } while (0)
 #endif
 
-namespace TransferBench 
+namespace TransferBench
 {
 
 /// @cond
