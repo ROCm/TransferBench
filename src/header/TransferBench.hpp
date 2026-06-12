@@ -25,6 +25,10 @@ THE SOFTWARE.
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
+#include <barrier>
+#include <cassert>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -77,9 +81,9 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
+#include "tdm.h"
 #endif
 /// @endcond
-
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
 #if (defined(HIP_VERSION) && (HIP_VERSION >= 70100000)) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12080))
 #define BMA_EXEC_ENABLED
@@ -107,10 +111,15 @@ namespace TransferBench
     EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
+    EXE_GPU_ASYNC_TENSOR = 6,                   ///<  GPU async kernel — tensor-op path   (subExecutor — reserved; stub uses 1-D launch)
+    EXE_GPU_ASYNC_MEMOPS = 7,                   ///<  GPU async kernel — load/store path (subExecutor — reserved; stub uses 1-D launch)
   };
-  char const ExeTypeStr[7] = "CGDINB";
+  char const ExeTypeStr[9] = "CGDINBTL";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA; }
+  inline bool IsGpuExeType(ExeType e){
+    return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA
+        || e == EXE_GPU_ASYNC_TENSOR || e == EXE_GPU_ASYNC_MEMOPS;
+  }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
@@ -275,6 +284,13 @@ namespace TransferBench
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
+  struct TdmOptions
+  {
+    int blockSize = 256; ///< Size of each threadblock (must be multiple of 64)
+    int maxLDSBytes = INT_MAX; ///< Maximum number of bytes of __shared__ memory to use
+    int pipelined = 0; ///< Whether to call the pipelined TDM kernel
+  };
+
 
   /**
    * Configuration options for performing Transfers
@@ -287,6 +303,7 @@ namespace TransferBench
     GfxOptions     gfx;                         ///< GFX executor options
     DmaOptions     dma;                         ///< DMA executor options
     NicOptions     nic;                         ///< NIC executor options
+    TdmOptions     tdm;                         ///< TDM executor options
   };
 
   /**
@@ -2242,7 +2259,8 @@ namespace {
       // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
       // mean that some subexecutors might not have any work assigned to them if the amount to
       // transfer is small
-      if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU || t.exeDevice.exeType == EXE_GPU_BDMA) {
+      if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU || t.exeDevice.exeType == EXE_GPU_BDMA ||
+          t.exeDevice.exeType == EXE_GPU_ASYNC_TENSOR || t.exeDevice.exeType == EXE_GPU_ASYNC_MEMOPS) {
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
         int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
@@ -2297,6 +2315,27 @@ namespace {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: CPU index must be between 0 and %d (instead of %d) for rank %d",
                             i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+        }
+        break;
+      case EXE_GPU_ASYNC_TENSOR:
+      case EXE_GPU_ASYNC_MEMOPS:
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: Async GPU kernel executor requires exactly 1 SRC and 1 DST", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: Async GPU kernel device index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
+        }
+        if (t.exeSubIndex != -1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: Async GPU kernel executor does not support subindices yet", i});
           hasFatalError = true;
         }
         break;
@@ -2668,6 +2707,22 @@ namespace {
           errors.push_back({ERR_WARN,
                             "GPU %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
                             exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
+        }
+        break;
+      }
+      case EXE_GPU_ASYNC_TENSOR:
+      case EXE_GPU_ASYNC_MEMOPS:
+      {
+        int numGpuSubExec = GetNumSubExecutors(exeDevice);
+        if (totalSubExecs[exeDevice] > numGpuSubExec)
+          errors.push_back({ERR_WARN,
+                            "GPU %d (async kernel) requests %d total subexecutors however only %d CUs available. "
+                            "Serialization may occur",
+                            exeDevice.exeIndex, totalSubExecs[exeDevice], numGpuSubExec});
+        if (transferCount[exeDevice] > gpuMaxHwQueues) {
+          errors.push_back({ERR_WARN,
+                           "GPU %d (async kernel) attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
+                           exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
         }
         break;
       }
@@ -4327,13 +4382,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Prepare additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
+          exeDevice.exeType == EXE_GPU_ASYNC_TENSOR || exeDevice.exeType == EXE_GPU_ASYNC_MEMOPS)
         && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
-                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
+                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream) ||
+                                  exeDevice.exeType == EXE_GPU_ASYNC_TENSOR ||
+                                  exeDevice.exeType == EXE_GPU_ASYNC_MEMOPS)
                                   ? exeInfo.resources.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
 
@@ -4351,7 +4409,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
 
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents || exeDevice.exeType == EXE_GPU_ASYNC_TENSOR ||
+          exeDevice.exeType == EXE_GPU_ASYNC_MEMOPS) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4557,11 +4616,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Teardown additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
+          exeDevice.exeType == EXE_GPU_ASYNC_TENSOR || exeDevice.exeType == EXE_GPU_ASYNC_MEMOPS)
         && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents || exeDevice.exeType == EXE_GPU_ASYNC_TENSOR ||
+          exeDevice.exeType == EXE_GPU_ASYNC_MEMOPS) {
         for (auto event : exeInfo.startEvents)
           ERR_CHECK(hipEventDestroy(event));
         for (auto event : exeInfo.stopEvents)
@@ -4901,6 +4962,203 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       *dst = src;
     }
   }
+
+  //----------------------------------------------------------------------------
+#if defined(__NVCC__)
+  __global__ void GpuAsyncTensorOpsStubKernel(float const* __restrict__ src,
+                                               float* __restrict__ dst,
+                                               size_t numFloats)
+  {
+    size_t const gid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t const stride = gridDim.x * blockDim.x;
+    for (size_t i = gid; i < numFloats; i += stride)
+      dst[i] = src[i];
+  }
+#else
+// The TDM API does not have a function to set the transfer size, so we need to do it manually.
+__device__ void SetTransferSize(gfx1250_TDM_GROUP1& group1, int numElements){
+  group1.tensorDim0(numElements);
+  group1.tensorDim0Stride(numElements);
+  group1.tileDim0(numElements);
+}
+namespace {
+  __constant__ constexpr bool verbose = false; // Turn off to disable debug prints from kernel TDM kernels.
+}
+
+// numElementsPerTile is the number of elements to process per tile.  Its maximum value is the shared memory size / number of waves per workgroup.
+__global__ void  GpuAsyncTensorOpsKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numElements, int numElementsPerTile){
+  extern __shared__ __align__(128) float shmem[];
+  int waveId = threadIdx.x / warpSize;
+  int numWavesPerBlock = blockDim.x / warpSize;
+  size_t itemsProcessedPerGridIteration = numElementsPerTile * numWavesPerBlock * gridDim.x;
+
+  float* shmemPtr = static_cast<float*>(shmem) + numElementsPerTile * waveId;
+  // Local per-wave source and destination pointers
+  const float* srcPtr = src + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+  float* dstPtr = dst + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+  gfx1250_TDM_GROUP0 group0;
+
+  group0.ldsAddr((uintptr_t)shmemPtr);
+
+  gfx1250_TDM_GROUP1 group1;
+  group1.dataSize(2); // Log2 of the element size in bytes, so 2 for float
+  SetTransferSize(group1, numElementsPerTile);
+
+  constexpr __hip_uint32x4 empty_x4{};
+  constexpr __hip_uint32x8 empty_x8{};
+  size_t elementsToProcess = numElementsPerTile;
+  while(srcPtr < src + numElements){
+    // Handle the last tile of the block, which may be less than num_elements_per_tile.
+    if(src + numElements - srcPtr < numElementsPerTile){
+      size_t remainingElements = src + numElements - srcPtr;
+      SetTransferSize(group1, remainingElements);
+      if constexpr(verbose) elementsToProcess = remainingElements;
+    }
+    // Copy from global memory to LDS
+    group0.globalAddr((uintptr_t)srcPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Loading %zu elements from %p to shared memory at %p\n", blockIdx.x, waveId, elementsToProcess, srcPtr, shmemPtr);
+    __builtin_amdgcn_tensor_load_to_lds(group0.m_bitfield, group1.m_bitfield, empty_x4, empty_x4, empty_x8, 0);
+    __builtin_amdgcn_s_wait_tensorcnt(0);
+
+    // write back from LDS to global
+    group0.globalAddr((uintptr_t)dstPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Block %d, Wave %d: Storing %zu elements from shared memory at %p to %p\n", blockIdx.x, waveId, elementsToProcess, shmemPtr, dstPtr);
+    __builtin_amdgcn_tensor_store_from_lds(group0.m_bitfield, group1.m_bitfield, empty_x4, empty_x4, empty_x8, 0);
+    __builtin_amdgcn_s_wait_tensorcnt(0);
+    srcPtr += itemsProcessedPerGridIteration;
+    dstPtr += itemsProcessedPerGridIteration;
+  }
+}
+
+struct TileMover {
+  gfx1250_TDM_GROUP0 group0;
+  gfx1250_TDM_GROUP1 group1;
+  float* dstPtr{nullptr};
+  float* shmemPtr{nullptr}; // TODO: Remove this
+  int numElementsToProcess{0}; // TODO: Remove this
+
+  __device__ void LoadTile(float* shmemPtr, const float* srcPtr, float* dstPtr, int numElementsToProcess) {
+    group0.ldsAddr((uintptr_t)shmemPtr);
+    group0.globalAddr((uintptr_t)srcPtr);
+    group1.dataSize(2);
+    SetTransferSize(group1, numElementsToProcess);
+    this -> dstPtr = dstPtr;  this -> shmemPtr = shmemPtr; this -> numElementsToProcess = numElementsToProcess;
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Loading %d elements from %p to %p\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess, srcPtr, shmemPtr);
+    __builtin_amdgcn_tensor_load_to_lds(group0.m_bitfield, group1.m_bitfield, __hip_uint32x4{}, __hip_uint32x4{}, __hip_uint32x8{}, 0);
+  }
+  __device__ void StoreTile() {
+    assert(dstPtr != nullptr);
+    group0.globalAddr((uintptr_t)dstPtr);
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Storing %d elements from %p to %p\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess, shmemPtr, dstPtr);
+    __builtin_amdgcn_tensor_store_from_lds(group0.m_bitfield, group1.m_bitfield, __hip_uint32x4{}, __hip_uint32x4{}, __hip_uint32x8{}, 0);
+  }
+};
+
+// numElementsPerTile is the number of elements to process per tile.  Its maximum value is the shared memory size / number of waves per workgroup.
+__global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numElements, int numElementsPerSubtile){
+  extern __shared__ __align__(128) float shmem[];
+  int waveId = threadIdx.x / warpSize;
+  int numWavesPerBlock = blockDim.x / warpSize; // This only works because the blockDim.x is fixed.
+  constexpr int pipelineDepth = 2;
+  
+  int numElementsPerTile = pipelineDepth * numElementsPerSubtile;
+  size_t itemsProcessedPerGridIteration = numElementsPerTile * numWavesPerBlock * gridDim.x;
+
+  float* shmemPtr = static_cast<float*>(shmem) + numElementsPerTile * waveId;
+  // Local per-wave source and destination pointers
+  const float* srcPtr = src + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+  float* dstPtr = dst + numElementsPerTile * (waveId + blockIdx.x * numWavesPerBlock);
+
+  // Skip waves whose initial position is already past the end of the buffer.
+  if (srcPtr >= src + numElements){
+    if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Warp %d Block %d: Skipping wave %d\n", threadIdx.x / warpSize, blockIdx.x, waveId);
+    return;
+  }
+
+  int numElementsToProcess = std::min(numElementsPerSubtile, (int)(src + numElements - srcPtr));
+  TileMover tileMovers[pipelineDepth]{};
+  unsigned int slot = 0;
+  tileMovers[slot].LoadTile(shmemPtr, srcPtr, dstPtr, numElementsToProcess);
+  while(srcPtr + (slot ^ 1) * numElementsPerSubtile < src + numElements){
+    slot ^= 1;
+    // Handle the last tile of the block, which may be less than num_elements_per_tile.
+    if(src + numElements - (srcPtr + slot * numElementsPerSubtile) < numElementsPerSubtile){
+      numElementsToProcess = src + numElements - (srcPtr + slot * numElementsPerSubtile);
+      if constexpr(verbose) if (threadIdx.x % warpSize == 0) printf("Small Subtile: Warp %d Block %d: Num Elements To Process: %d\n", threadIdx.x / warpSize, blockIdx.x, numElementsToProcess);
+    }
+    // Copy from global memory to LDS
+    tileMovers[slot].LoadTile(shmemPtr + slot * numElementsPerSubtile, srcPtr + slot * numElementsPerSubtile, dstPtr + slot * numElementsPerSubtile, numElementsToProcess);
+    __builtin_amdgcn_s_wait_tensorcnt(1);
+
+    // write back from LDS to global for the other slot
+    tileMovers[slot^1].StoreTile();
+    __builtin_amdgcn_s_wait_tensorcnt(1);
+    srcPtr += itemsProcessedPerGridIteration * slot;
+    dstPtr += itemsProcessedPerGridIteration * slot;
+  }
+  __builtin_amdgcn_s_wait_tensorcnt(0);
+  tileMovers[slot].StoreTile();
+  __builtin_amdgcn_s_wait_tensorcnt(0);
+}
+#endif
+
+  // Source for definitions: https://github.com/llvm/llvm-project/blob/4e3bac3ea2cc6fd778d53e317dd9fc27c1ddfc4f/clang/include/clang/Basic/BuiltinsAMDGPU.td#L956
+  // and internal ISA documentation
+  using uint32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+  // Loads 16 bytes/lane from global (src) into LDS (dst).
+  __device__ void asyncLoadX4(float const* src, float* dst){
+    __builtin_amdgcn_global_load_async_to_lds_b128(
+        (__attribute__((address_space(1))) uint32x4*)src,
+        (__attribute__((address_space(3))) uint32x4*)dst, 0, 0);
+  }
+  // Stores 16 bytes/lane from LDS (src) to global (dst).
+  __device__ void asyncStoreX4(float const* src, float* dst){
+    __builtin_amdgcn_global_store_async_from_lds_b128(
+        (__attribute__((address_space(1))) uint32x4*)dst,
+        (__attribute__((address_space(3))) uint32x4*)src, 0, 0);
+  }
+
+  // numElementsPerTile should be a multiple of 128, given the asyncLoadX4 and asyncStoreX4 functions operate on a 32-lane warp and 4 elements per lane (512 bytes total)
+  __global__ void GpuAsyncLoadStoreKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numElements, int numElementsPerTile)
+  {
+  extern __shared__ __align__(128) float shmem[];
+  int waveId = threadIdx.x / warpSize;
+  int laneId = threadIdx.x % warpSize;
+  int numWavesPerBlock = blockDim.x / warpSize;
+  size_t itemsProcessedPerGridIteration = (size_t)numElementsPerTile * numWavesPerBlock * gridDim.x;
+  constexpr size_t stride_per_lane = sizeof(float4) / sizeof(float); // 4 elements per lane
+  // Number of elements a full 32-lane warp moves per b128 async op (32 * 4 = 128).
+  size_t elements_per_dwordx4_load_store = warpSize * stride_per_lane;
+
+  float* shmemPtr = shmem + numElementsPerTile * waveId + laneId * stride_per_lane;
+  // Wave-tile base (lane-independent) used to gate the loop and compute the partial-tile size.
+  size_t tileBase = (size_t)numElementsPerTile * (waveId + (size_t)blockIdx.x * numWavesPerBlock);
+
+  while(tileBase < numElements){
+    // Handle the last tile, which may be less than numElementsPerTile.
+    size_t elementsToProcess = numElementsPerTile;
+    if(numElements - tileBase < (size_t)numElementsPerTile)
+      elementsToProcess = numElements - tileBase;
+
+    const float* srcPtr = src + tileBase + laneId * stride_per_lane;
+    float*       dstPtr = dst + tileBase + laneId * stride_per_lane;
+
+    // Copy from global memory to LDS
+    for (size_t i = 0; i < elementsToProcess; i += elements_per_dwordx4_load_store) {
+      asyncLoadX4(srcPtr + i, shmemPtr + i);
+      __builtin_amdgcn_s_wait_asynccnt(0);
+    }
+
+    // Write back from LDS to global
+    for (size_t i = 0; i < elementsToProcess; i += elements_per_dwordx4_load_store){
+      asyncStoreX4(shmemPtr + i, dstPtr + i);
+      __builtin_amdgcn_s_wait_asynccnt(0);
+    }
+
+    tileBase += itemsProcessedPerGridIteration;
+  }
+}
+
 
   // Simplified Kernel for GFX execution for copies only
   template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
@@ -5489,6 +5747,132 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  static ErrResult ExecuteGpuAsyncKernelTransfer(int           const  iteration,
+                                                 ConfigOptions const& cfg,
+                                                 int           const  exeIndex,
+                                                 hipStream_t   const  stream,
+                                                 hipEvent_t    const  startEvent,
+                                                 hipEvent_t    const  stopEvent,
+                                                 bool          const  tensorFlavor,
+                                                 int           const  numSubExecs,
+                                                 TransferResources&   rss)
+  {
+    ERR_CHECK(hipSetDevice(exeIndex));
+    int const      initOffset = cfg.data.byteOffset / sizeof(float);
+    size_t const   numFloats  = rss.numBytes / sizeof(float);
+    float const* __restrict__ src = rss.srcMem[0] + initOffset;
+    float* __restrict__ dst       = rss.dstMem[0] + initOffset;
+
+    int const threads = tensorFlavor ? cfg.tdm.blockSize : cfg.gfx.blockSize;
+    int const blocks = numSubExecs;
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    int subIterations = 0;
+    do {
+      if (startEvent)
+        ERR_CHECK(hipEventRecord(startEvent, stream));
+#if defined(__NVCC__)
+      GpuAsyncTensorOpsStubKernel<<<dim3(blocks), dim3(threads), 0, stream>>>(src, dst, numFloats);
+#else
+      bool usePipelinedTensorOps = (cfg.tdm.pipelined != 0);
+      auto gpuKernel = tensorFlavor ? (usePipelinedTensorOps ? GpuAsyncPipelinedTensorOpsKernel : GpuAsyncTensorOpsKernel) : GpuAsyncLoadStoreKernel;
+      if (rss.numBytes % sizeof(float) != 0)
+        return {ERR_FATAL, "Async tensor executor (TDM): numBytes (%zu) must be a multiple of %zu", rss.numBytes, sizeof(float)};
+
+        
+      hipDeviceProp_t props{};
+      ERR_CHECK(hipGetDeviceProperties(&props, exeIndex));
+      int const warpSize = props.warpSize;
+      int maxShmem = 0;
+      ERR_CHECK(hipDeviceGetAttribute(&maxShmem, hipDeviceAttributeMaxSharedMemoryPerBlock, exeIndex));
+      maxShmem = std::min<int>(maxShmem, cfg.tdm.maxLDSBytes);
+      int kWavesPerWorkgroup = threads / warpSize;
+      int pipelineDepth = usePipelinedTensorOps ? 2 : 1;
+      int numFloatsPerTile = std::max<int>(1, maxShmem / (sizeof(float) *  kWavesPerWorkgroup * pipelineDepth));
+      unsigned int shmemBytes = numFloatsPerTile * kWavesPerWorkgroup * sizeof(float) * pipelineDepth;
+      hipLaunchKernelGGL(gpuKernel, dim3(blocks), dim3(threads),
+                           shmemBytes, stream, src, dst, numFloats,
+                           numFloatsPerTile);
+#endif
+      ERR_CHECK(hipGetLastError());
+      if (stopEvent)
+        ERR_CHECK(hipEventRecord(stopEvent, stream));
+      ERR_CHECK(hipStreamSynchronize(stream));
+    } while (++subIterations != cfg.general.numSubIterations);
+
+    if (iteration >= 0) {
+      double deltaMsec;
+      if (startEvent && stopEvent) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
+      } else {
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+                    / cfg.general.numSubIterations;
+      }
+      rss.totalDurationMsec += deltaMsec;
+      if (cfg.general.recordPerIteration)
+        rss.perIterMsec.push_back(deltaMsec);
+    }
+    return ERR_NONE;
+  }
+
+  static ErrResult RunGpuAsyncKernelExecutor(int           const  iteration,
+                                             ConfigOptions const& cfg,
+                                             int           const  exeIndex,
+                                             bool          const  tensorFlavor,
+                                             ExeInfo&             exeInfo)
+  {
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    ERR_CHECK(hipSetDevice(exeIndex));
+
+    vector<std::future<ErrResult>> asyncTransfers;
+    for (size_t i = 0; i < exeInfo.resources.size(); i++) {
+      hipEvent_t startEv = (!exeInfo.startEvents.empty()) ? exeInfo.startEvents[i] : nullptr;
+      hipEvent_t stopEv  = (!exeInfo.stopEvents.empty()) ? exeInfo.stopEvents[i] : nullptr;
+      int const numSubExecs =
+        static_cast<int>(exeInfo.resources[i].subExecParamCpu.size());
+      asyncTransfers.emplace_back(std::async(std::launch::async,
+                                               ExecuteGpuAsyncKernelTransfer,
+                                               iteration,
+                                               std::cref(cfg),
+                                               exeIndex,
+                                               exeInfo.streams[i],
+                                               startEv,
+                                               stopEv,
+                                               tensorFlavor,
+                                               numSubExecs,
+                                               std::ref(exeInfo.resources[i])));
+    }
+    for (auto& asyncTransfer : asyncTransfers)
+      ERR_CHECK(asyncTransfer.get());
+
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+                       / cfg.general.numSubIterations;
+    if (iteration >= 0)
+      exeInfo.totalDurationMsec += deltaMsec;
+    return ERR_NONE;
+  }
+
+  static ErrResult RunGpuAsyncTensorExecutor(int           const  iteration,
+                                             ConfigOptions const& cfg,
+                                             int           const  exeIndex,
+                                             ExeInfo&             exeInfo)
+  {
+    return RunGpuAsyncKernelExecutor(iteration, cfg, exeIndex, true, exeInfo);
+  }
+
+  static ErrResult RunGpuAsyncMemOpsExecutor(int           const  iteration,
+                                             ConfigOptions const& cfg,
+                                             int           const  exeIndex,
+                                             ExeInfo&             exeInfo)
+  {
+    return RunGpuAsyncKernelExecutor(iteration, cfg, exeIndex, false, exeInfo);
+  }
+
 // DMA Executor-related functions
 //========================================================================================
 
@@ -5713,6 +6097,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     switch (exeDevice.exeType) {
     case EXE_CPU:           return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_ASYNC_TENSOR: return RunGpuAsyncTensorExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_ASYNC_MEMOPS: return RunGpuAsyncMemOpsExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef NIC_EXEC_ENABLED
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
@@ -6409,6 +6795,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     } else if (wc.exe.exeSubIndices[0] == -2) {
       switch (wc.exe.exeType) {
       case EXE_CPU:
+        wc.exe.exeSubIndices[0] = -1;
+        result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
+        wc.exe.exeSubIndices[0] = -2;
+        return result;
+      case EXE_GPU_ASYNC_TENSOR:
+      case EXE_GPU_ASYNC_MEMOPS:
         wc.exe.exeSubIndices[0] = -1;
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
@@ -7300,6 +7692,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     topo.numExecutors[EXE_GPU_GFX] = numGpus;
     topo.numExecutors[EXE_GPU_DMA] = numGpus;
     topo.numExecutors[EXE_GPU_BDMA] = numGpus;
+    topo.numExecutors[EXE_GPU_ASYNC_TENSOR] = numGpus;
+    topo.numExecutors[EXE_GPU_ASYNC_MEMOPS] = numGpus;
 
     std::vector<std::string> gpuArchNames(numGpus);
 
@@ -7323,6 +7717,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_BDMA, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_ASYNC_TENSOR, exeIndex}] = gpuName + " [async tensor]";
+      topo.executorName[{EXE_GPU_ASYNC_MEMOPS, exeIndex}] = gpuName + " [async LD/ST]";
 
 #if !defined(__NVCC__)
       hsa_agent_t gpuAgent = gpuAgents[exeIndex];
@@ -7352,9 +7748,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}] = numXccs;
       topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
       topo.numExecutorSubIndices[{EXE_GPU_BDMA, exeIndex}] = 0;
+      topo.numExecutorSubIndices[{EXE_GPU_ASYNC_TENSOR, exeIndex}] = 0;
+      topo.numExecutorSubIndices[{EXE_GPU_ASYNC_MEMOPS, exeIndex}] = 0;
       topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
       topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
       topo.numSubExecutors[{EXE_GPU_BDMA, exeIndex}] = numDmaEngines;
+      topo.numSubExecutors[{EXE_GPU_ASYNC_TENSOR, exeIndex}] = numDeviceCUs;
+      topo.numSubExecutors[{EXE_GPU_ASYNC_MEMOPS, exeIndex}] = numDeviceCUs;
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
 
@@ -7775,6 +8175,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       agent = cpuAgents[exeDevice.exeIndex];
       break;
     case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
+    case EXE_GPU_ASYNC_TENSOR: case EXE_GPU_ASYNC_MEMOPS:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
