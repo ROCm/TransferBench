@@ -27,10 +27,10 @@ THE SOFTWARE.
 
 #include "IbvHeader.hpp"
 
-enum TbIbvLoadStatus {
-  TB_IBV_OK        = 0,
-  TB_IBV_NO_DMABUF = 1,
-  TB_IBV_NO_RDMA   = 2,
+enum IbvLoadStatus {
+  IBV_OK        = 0,
+  IBV_NO_DMABUF = 1,
+  IBV_NO_RDMA   = 2,
 };
 
 #define IBV_FN(name, rettype, arglist) rettype(*name)arglist = nullptr;
@@ -59,16 +59,18 @@ IBV_FN(ibv_query_port, int, (ibv_context*, uint8_t, ibv_port_attr*))
 // actually exists in the loaded libibverbs is decided at runtime by tryLoad().
 IBV_FN(ibv_reg_dmabuf_mr, ibv_mr*, (ibv_pd*, uint64_t, size_t, uint64_t, int, int))
 IBV_FN(ibv_reg_mr, ibv_mr*, (ibv_pd*, void*, size_t, int))
-} // namespace
+}
+
+#undef IBV_FN
 
 struct IbvDynloadState {
   std::once_flag   once{};
   void*            handle = nullptr;
-  TbIbvLoadStatus  status = TB_IBV_NO_RDMA;
+  IbvLoadStatus    status = IBV_NO_RDMA;
 
-  TbIbvLoadStatus tryLoad()
+  IbvLoadStatus tryLoad()
   {
-    status = TB_IBV_NO_RDMA;
+    status = IBV_NO_RDMA;
 
     handle = dlopen("libibverbs.so.1", RTLD_NOW);
     if (handle == nullptr)
@@ -77,7 +79,7 @@ struct IbvDynloadState {
     struct Symbol { void **ppfn; char const *name; };
 
     // Core RDMA symbols. Failure of any of these means RDMA is unusable, so we
-    // tear the whole library back down and report TB_IBV_NO_RDMA.
+    // tear the whole library back down and report IBV_NO_RDMA.
     Symbol coreSymbols[] = {
         {(void**)&ibv_alloc_pd, "ibv_alloc_pd"},
         {(void**)&ibv_close_device, "ibv_close_device"},
@@ -107,20 +109,20 @@ struct IbvDynloadState {
         for (Symbol const& r : coreSymbols) *r.ppfn = nullptr;
         dlclose(handle);
         handle = nullptr;
-        return status; // TB_IBV_NO_RDMA
+        return status; // IBV_NO_RDMA
       }
       *s.ppfn = sym;
     }
 
-    // DMA-BUF probe is independent: missing symbol downgrades to TB_IBV_NO_DMABUF
+    // DMA-BUF probe is independent: missing symbol downgrades to IBV_NO_DMABUF
     // but RDMA stays usable.
     void* dmabufSym = dlsym(handle, "ibv_reg_dmabuf_mr");
     if (dmabufSym != nullptr) {
       *((void**)&ibv_reg_dmabuf_mr) = dmabufSym;
-      status = TB_IBV_OK;
+      status = IBV_OK;
     } else {
       ibv_reg_dmabuf_mr = nullptr;
-      status = TB_IBV_NO_DMABUF;
+      status = IBV_NO_DMABUF;
     }
     return status;
   }
@@ -132,41 +134,41 @@ inline IbvDynloadState& ibvDynloadState()
   return s;
 }
 
-inline void TbIbvEnsureLoaded()
+inline void IbvEnsureLoaded()
 {
   IbvDynloadState& st = ibvDynloadState();
   std::call_once(st.once, [&]() { st.tryLoad(); });
 }
 
-inline TbIbvLoadStatus TbIbvGetLoadStatus()
+inline IbvLoadStatus IbvGetLoadStatus()
 {
-  TbIbvEnsureLoaded();
+  IbvEnsureLoaded();
   return ibvDynloadState().status;
 }
 
-inline bool TbIbvSymbolsReady()
+inline bool IsIbvSymbolsReady()
 {
-  return TbIbvGetLoadStatus() != TB_IBV_NO_RDMA;
+  return IbvGetLoadStatus() != IBV_NO_RDMA;
 }
 
-inline bool TbIbvDmabufPresent()
+inline bool IsIbvDmabufPresent()
 {
-  return TbIbvGetLoadStatus() == TB_IBV_OK;
+  return IbvGetLoadStatus() == IBV_OK;
 }
 
-inline void* TbIbvDlHandle()
+inline void* IbvDlHandle()
 {
-  TbIbvEnsureLoaded();
+  IbvEnsureLoaded();
   return ibvDynloadState().handle;
 }
 
-inline void TbIbvUnload()
+inline void IbvUnload()
 {
   IbvDynloadState& st = ibvDynloadState();
   if (st.handle != nullptr) {
     dlclose(st.handle);
     st.handle = nullptr;
-    st.status = TB_IBV_NO_RDMA;
+    st.status = IBV_NO_RDMA;
     ibv_alloc_pd = nullptr;
     ibv_close_device = nullptr;
     ibv_create_cq = nullptr;

@@ -1691,7 +1691,7 @@ namespace {
     // rocr and hsa_ext_amd header is always mandatory, so no need to check for them
     pfn_hsa_amd_portable_export_dmabuf =
         (hsa_status_t (*)(const void*, size_t, int*, uint64_t*))dlsym(RTLD_DEFAULT, "hsa_amd_portable_export_dmabuf");
-    if (pfn_hsa_amd_portable_export_dmabuf == nullptr || !TbIbvDmabufPresent()) {
+    if (pfn_hsa_amd_portable_export_dmabuf == nullptr || !IsIbvDmabufPresent()) {
       support = 0;
       return support;
     }
@@ -2126,7 +2126,7 @@ namespace {
     }
 
     // Check NIC options
-    if (TbIbvSymbolsReady()) {
+    if (IsIbvSymbolsReady()) {
       if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
         errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
       }
@@ -2504,7 +2504,7 @@ namespace {
         break;
 #endif
       case EXE_NIC: case EXE_NIC_NEAREST:
-      if (TbIbvSymbolsReady())
+      if (IsIbvSymbolsReady())
       {
         // NIC Executors can only execute a copy operation
         if (t.srcs.size() != 1 || t.dsts.size() != 1) {
@@ -2992,7 +2992,7 @@ namespace {
     static vector<IbvDevice> ibvDeviceList = {};
 
     // Build list on first use
-    if (TbIbvSymbolsReady() && !isInitialized) {
+    if (IsIbvSymbolsReady() && !isInitialized) {
 
       // Query the number of IBV devices
       int numIbvDevices = 0;
@@ -4437,7 +4437,7 @@ namespace {
 
     // Prepare for NIC-based executors
     if (IsNicExeType(exeDevice.exeType)) {
-      if (TbIbvSymbolsReady()) {
+      if (IsIbvSymbolsReady()) {
         for (auto& rss : exeInfo.resources) {
           Transfer const& t = transfers[rss.transferIdx];
           ERR_CHECK(PrepareNicTransferResources(cfg, exeDevice, t, rss));
@@ -4541,7 +4541,7 @@ namespace {
 #endif
 
       // Destroy NIC related resources
-      if (TbIbvSymbolsReady() && IsNicExeType(exeDevice.exeType)) {
+      if (IsIbvSymbolsReady() && IsNicExeType(exeDevice.exeType)) {
         ERR_CHECK(TeardownNicTransferResources(rss, t));
       }
     }
@@ -6599,14 +6599,6 @@ namespace {
       Log("[INFO] Running in single node mode\n");
     }
 
-    // Probe libibverbs at process start (idempotent via std::call_once inside
-    // TbIbvEnsureLoaded). The integer status maps directly onto the rdma /
-    // dmabuf feature flags consumed elsewhere in TransferBench:
-    //   TB_IBV_OK         -> rdma=true,  dmabuf=true
-    //   TB_IBV_NO_DMABUF  -> rdma=true,  dmabuf=false
-    //   TB_IBV_NO_RDMA    -> rdma=false, dmabuf=false
-    TbIbvLoadStatus const ibvStatus = TbIbvGetLoadStatus();
-
     // Collect topology and distribute across all ranks
     CollectTopology();
   }
@@ -7340,7 +7332,7 @@ namespace {
 
     // NIC Executor
     int numNics = 0;
-    if (TbIbvSymbolsReady())
+    if (IsIbvSymbolsReady())
     {
       numNics = GetIbvDeviceList().size();
       for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
@@ -7384,7 +7376,7 @@ namespace {
     // Build up list of NIC bus addresses
     std::vector<std::string> ibvAddressList;
     auto const& ibvDeviceList = GetIbvDeviceList();
-    if (TbIbvSymbolsReady()) {
+    if (IsIbvSymbolsReady()) {
       for (auto const& ibvDevice : ibvDeviceList)
         ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
 
@@ -7494,7 +7486,7 @@ namespace {
           Log("\n");
         }
       }
-      if (TbIbvSymbolsReady()) {
+      if (IsIbvSymbolsReady()) {
         for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
           Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
                             ibvDeviceList[nicIndex].name.c_str());
