@@ -4920,17 +4920,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   }
 
   //----------------------------------------------------------------------------
-#if defined(__NVCC__)
-  __global__ void GpuAsyncTensorOpsStubKernel(float const* __restrict__ src,
-                                               float* __restrict__ dst,
-                                               size_t numFloats)
-  {
+#if !defined(__gfx1250__)
+  __global__ void NonAsyncFallbackKernel(float const* __restrict__ src, float* __restrict__ dst, size_t numFloats){
     size_t const gid = blockIdx.x * blockDim.x + threadIdx.x;
     size_t const stride = gridDim.x * blockDim.x;
-    for (size_t i = gid; i < numFloats; i += stride)
+    for (size_t i = gid; i < numFloats; i += stride){
       dst[i] = src[i];
+    }
   }
-#else
+#else // __gfx1250__
 // The TDM API does not have a function to set the transfer size, so we need to do it manually.
 __device__ void SetTransferSize(gfx1250_TDM_GROUP1& group1, int numElements){
   group1.tensorDim0(numElements);
@@ -5056,7 +5054,6 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
   tileMovers[slot].StoreTile();
   __builtin_amdgcn_s_wait_tensorcnt(0);
 }
-#endif
 
   // Source for definitions: https://github.com/llvm/llvm-project/blob/4e3bac3ea2cc6fd778d53e317dd9fc27c1ddfc4f/clang/include/clang/Basic/BuiltinsAMDGPU.td#L956
   // and internal ISA documentation
@@ -5125,7 +5122,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     tileBase += itemsProcessedPerGridIteration;
   }
 }
-
+#endif // __gfx1250__
 
   // Simplified Kernel for GFX execution for copies only
   template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
@@ -5730,8 +5727,8 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     do {
       if (startEvent)
         ERR_CHECK(hipEventRecord(startEvent, stream));
-#if defined(__NVCC__)
-      GpuAsyncTensorOpsStubKernel<<<dim3(blocks), dim3(threads), 0, stream>>>(src, dst, numFloats);
+#if !defined(__gfx1250__) // NVIDIA and AMD Instinct GPUs prior to GFX1250
+      NonAsyncFallbackKernel<<<dim3(blocks), dim3(threads), 0, stream>>>(src, dst, numFloats);
 #else
       bool usePipelinedTensorOps = (cfg.tdm.pipelined != 0);
       auto gpuKernel = tensorFlavor ? (usePipelinedTensorOps ? GpuAsyncPipelinedTensorOpsKernel : GpuAsyncTensorOpsKernel) : GpuAsyncLoadStoreKernel;
