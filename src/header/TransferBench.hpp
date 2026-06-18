@@ -4888,18 +4888,21 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #define TEMPORAL_STORE 2
   #define TEMPORAL_BOTH  3
 
-  // T is expected to be float, float2, or float4 (all multiples of float).  The non-temporal
-  // path reinterprets the value as a clang ext_vector so that a float2/float4 -- which are
-  // structs in HIP -- can be moved with a single vectorized non-temporal instruction instead
-  // of one builtin per component.
   template <typename T>
-  using NonTemporalVec = float __attribute__((ext_vector_type(sizeof(T) / sizeof(float))));
+  struct VecCast {
+    static_assert(
+      std::is_same_v<T, float> || std::is_same_v<T, float2> || std::is_same_v<T, float4>,
+      "NonTemporalVec: T must be float, float2, or float4");
+    using type = float __attribute__((ext_vector_type(sizeof(T) / sizeof(float))));
+  };
+  template <typename T>
+  using VecCastType = typename VecCast<T>::type;
 
   template <int TEMPORAL_MODE, typename T>
   __device__ __forceinline__ void Load(T const* src, T& dst) {
-    if (TEMPORAL_MODE & TEMPORAL_LOAD) {
+    if constexpr (TEMPORAL_MODE & TEMPORAL_LOAD) {
 #if !defined(__NVCC__)
-      using Vec = NonTemporalVec<T>;
+      using Vec = VecCastType<T>;
       *reinterpret_cast<Vec*>(&dst) = __builtin_nontemporal_load(reinterpret_cast<Vec const*>(src));
 #endif
     } else {
@@ -4909,9 +4912,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
   template <int TEMPORAL_MODE, typename T>
   __device__ __forceinline__ void Store(T const& src, T* dst) {
-    if (TEMPORAL_MODE & TEMPORAL_STORE) {
+    if constexpr (TEMPORAL_MODE & TEMPORAL_STORE) {
 #if !defined(__NVCC__)
-      using Vec = NonTemporalVec<T>;
+      using Vec = VecCastType<T>;
       __builtin_nontemporal_store(*reinterpret_cast<Vec const*>(&src), reinterpret_cast<Vec*>(dst));
 #endif
     } else {
