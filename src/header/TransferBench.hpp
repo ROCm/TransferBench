@@ -4888,75 +4888,31 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   #define TEMPORAL_STORE 2
   #define TEMPORAL_BOTH  3
 
-  template <int TEMPORAL_MODE>
-  __device__ __forceinline__ void Load(float const* src, float& dst) {
+  // T is expected to be float, float2, or float4 (all multiples of float).  The non-temporal
+  // path reinterprets the value as a clang ext_vector so that a float2/float4 -- which are
+  // structs in HIP -- can be moved with a single vectorized non-temporal instruction instead
+  // of one builtin per component.
+  template <typename T>
+  using NonTemporalVec = float __attribute__((ext_vector_type(sizeof(T) / sizeof(float))));
+
+  template <int TEMPORAL_MODE, typename T>
+  __device__ __forceinline__ void Load(T const* src, T& dst) {
     if (TEMPORAL_MODE & TEMPORAL_LOAD) {
 #if !defined(__NVCC__)
-      dst = __builtin_nontemporal_load(src);
-
+      using Vec = NonTemporalVec<T>;
+      *reinterpret_cast<Vec*>(&dst) = __builtin_nontemporal_load(reinterpret_cast<Vec const*>(src));
 #endif
     } else {
       dst = *src;
     }
   }
 
-  template <int TEMPORAL_MODE>
-  __device__ __forceinline__ void Load(float2 const* src, float2& dst) {
-    if (TEMPORAL_MODE & TEMPORAL_LOAD) {
-#if !defined(__NVCC__)
-      dst.x = __builtin_nontemporal_load(&(src->x));
-      dst.y = __builtin_nontemporal_load(&(src->y));
-#endif
-    } else {
-      dst = *src;
-    }
-  }
-
-  template <int TEMPORAL_MODE>
-  __device__ __forceinline__ void Load(float4 const* src, float4& dst) {
-    if (TEMPORAL_MODE & TEMPORAL_LOAD) {
-#if !defined(__NVCC__)
-      dst.x = __builtin_nontemporal_load(&(src->x));
-      dst.y = __builtin_nontemporal_load(&(src->y));
-      dst.z = __builtin_nontemporal_load(&(src->z));
-      dst.w = __builtin_nontemporal_load(&(src->w));
-#endif
-    } else {
-      dst = *src;
-    }
-  }
-
-  template <int TEMPORAL_MODE>
-  __device__ __forceinline__ void Store(float const& src, float* dst) {
+  template <int TEMPORAL_MODE, typename T>
+  __device__ __forceinline__ void Store(T const& src, T* dst) {
     if (TEMPORAL_MODE & TEMPORAL_STORE) {
 #if !defined(__NVCC__)
-      __builtin_nontemporal_store(src, dst);
-#endif
-    } else {
-      *dst = src;
-    }
-  }
-
-  template <int TEMPORAL_MODE>
-  __device__ __forceinline__ void Store(float2 const& src, float2* dst) {
-    if (TEMPORAL_MODE & TEMPORAL_STORE) {
-#if !defined(__NVCC__)
-      __builtin_nontemporal_store(src.x, &(dst->x));
-      __builtin_nontemporal_store(src.y, &(dst->y));
-#endif
-    } else {
-      *dst = src;
-    }
-  }
-
-  template <int TEMPORAL_MODE>
-  __device__ __forceinline__ void Store(float4 const& src, float4* dst) {
-    if (TEMPORAL_MODE & TEMPORAL_STORE) {
-#if !defined(__NVCC__)
-      __builtin_nontemporal_store(src.x, &(dst->x));
-      __builtin_nontemporal_store(src.y, &(dst->y));
-      __builtin_nontemporal_store(src.z, &(dst->z));
-      __builtin_nontemporal_store(src.w, &(dst->w));
+      using Vec = NonTemporalVec<T>;
+      __builtin_nontemporal_store(*reinterpret_cast<Vec const*>(&src), reinterpret_cast<Vec*>(dst));
 #endif
     } else {
       *dst = src;
@@ -5104,18 +5060,29 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
 
   // Source for definitions: https://github.com/llvm/llvm-project/blob/4e3bac3ea2cc6fd778d53e317dd9fc27c1ddfc4f/clang/include/clang/Basic/BuiltinsAMDGPU.td#L956
   // and internal ISA documentation
-  using uint32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+  using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
   // Loads 16 bytes/lane from global (src) into LDS (dst).
   __device__ void asyncLoadX4(float const* src, float* dst){
     __builtin_amdgcn_global_load_async_to_lds_b128(
-        (__attribute__((address_space(1))) uint32x4*)src,
-        (__attribute__((address_space(3))) uint32x4*)dst, 0, 0);
+        (__attribute__((address_space(1))) int32x4*)src,
+        (__attribute__((address_space(3))) int32x4*)dst, 0, 0);
   }
   // Stores 16 bytes/lane from LDS (src) to global (dst).
   __device__ void asyncStoreX4(float const* src, float* dst){
     __builtin_amdgcn_global_store_async_from_lds_b128(
-        (__attribute__((address_space(1))) uint32x4*)dst,
-        (__attribute__((address_space(3))) uint32x4*)src, 0, 0);
+        (__attribute__((address_space(1))) int32x4*)dst,
+        (__attribute__((address_space(3))) int32x4*)src, 0, 0);
+  }
+
+  __device__ void asyncLoad(float const* src, float* dst){
+    __builtin_amdgcn_global_load_async_to_lds_b32(
+        (__attribute__((address_space(1))) int32_t*)src,
+        (__attribute__((address_space(3))) int32_t*)dst, 0, 0);
+  }
+  __device__ void asyncStore(float const* src, float* dst){
+    __builtin_amdgcn_global_store_async_from_lds_b32(
+        (__attribute__((address_space(1))) int32_t*)dst,
+        (__attribute__((address_space(3))) int32_t*)src, 0, 0);
   }
 
   // numElementsPerTile should be a multiple of 128, given the asyncLoadX4 and asyncStoreX4 functions operate on a 32-lane warp and 4 elements per lane (512 bytes total)
