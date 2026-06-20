@@ -3214,18 +3214,36 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #ifdef VERBS_DEBUG
       System::Get().Log("Invalid PCIe address format: %s\n", pcieAddress.c_str());
 #endif
-      return -1;
+      return {-1, -1};
     }
-    return bus;
+    return {domain, bus};
   }
 
-  // Function to compute the distance between two bus IDs
+  // Compute a proximity distance between two PCIe addresses, used as a secondary
+  // tiebreaker when candidates share the same LCA depth in the PCIe tree.
+  //
+  // Same domain (returns 0): within one PCIe domain all devices share a root
+  // complex, so the LCA tree already captures their true structural proximity.
+  // Bus numbers within a domain are firmware-assigned and do not reliably reflect
+  // physical closeness, so they are intentionally not used here (bus is extracted
+  // by ExtractDomainAndBus but unused in this function).
+  //
+  // Cross domain (returns |delta_domain| * 256): a PCIe domain holds at most 256
+  // bus numbers (0x00-0xFF), so scaling by 256 guarantees any cross-domain
+  // distance exceeds the maximum possible same-domain bus difference of 255.
+  // This creates a hard separation: a same-domain device is always ranked closer
+  // than any cross-domain device, regardless of individual bus numbers.
+  //
+  // On platforms where all devices share domain 0000 (standard x86), all
+  // distances collapse to 0 and the LCA tree is the sole proximity discriminator.
   static int GetBusIdDistance(std::string const& pcieAddress1,
                               std::string const& pcieAddress2)
   {
-    int bus1 = ExtractBusNumber(pcieAddress1);
-    int bus2 = ExtractBusNumber(pcieAddress2);
-    return (bus1 < 0 || bus2 < 0) ? -1 : std::abs(bus1 - bus2);
+    auto [domain1, bus1] = ExtractDomainAndBus(pcieAddress1);
+    auto [domain2, bus2] = ExtractDomainAndBus(pcieAddress2);
+    if (domain1 < 0 || domain2 < 0) return -1;
+    if (domain1 == domain2) return 0;
+    return std::abs(domain1 - domain2) * 256;
   }
 
   // Given a target busID and a set of candidate devices, returns a set of indices
@@ -3247,14 +3265,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       int depth = GetLcaDepth(lca->address, GetPCIeTreeRoot());
       int currDistance = GetBusIdDistance(targetBusId, candidateBusId);
 
-      // When more than one LCA match is found, choose the one with smallest busId difference
-      // NOTE: currDistance could be -1, which signals problem with parsing, however still
-      //       remains a valid "closest" candidate, so is included
       if (depth > maxDepth || (depth == maxDepth && depth >= 0 && currDistance < minDistance)) {
         maxDepth = depth;
+        // minDistance must be updated before matches.clear() so that any subsequent
+        // candidate at the same depth and distance correctly passes the == minDistance
+        // tie-check below.  With the old order (clear then update), a candidate
+        // arriving immediately after a depth-improving entry would compare against the
+        // stale minDistance from the previous depth level and be incorrectly excluded.
+        minDistance = currDistance;
         matches.clear();
         matches.insert(i);
-        minDistance = currDistance;
       } else if (depth == maxDepth && depth >= 0 && currDistance == minDistance) {
         matches.insert(i);
       }
@@ -7403,20 +7423,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     std::vector<std::string> ibvAddressList;
     auto const& ibvDeviceList = GetIbvDeviceList();
     for (auto const& ibvDevice : ibvDeviceList)
-      ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
-
-    // Track how many times a device has been assigned as "closest"
-    // This allows distributed work across devices using multiple ports (sharing the same busID)
-    // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
-    // Counter example:
-    //
-    //  G0 prefers (N0,N1), picks N0
-    //  G1 prefers (N1,N2), picks N1
-    //  G2 prefers N0,      picks N0
-    //
-    //  instead of G0->N1, G1->N2, G2->N0
-
-    std::vector<int> assignedCount(ibvDeviceList.size(), 0);
+      ibvAddressList.push_back(ibvDevice.busId);
 
     // Loop over each GPU to find the closest NIC(s) based on PCIe address
     for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
