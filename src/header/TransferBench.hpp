@@ -3202,8 +3202,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return -1;
   }
 
-  // Function to extract the bus number from a PCIe address (domain:bus:device.function)
-  static int ExtractBusNumber(std::string const& pcieAddress)
+  // Function to extract the domain and bus number from a PCIe address (domain:bus:device.function)
+  static std::pair<int,int> ExtractDomainAndBus(std::string const& pcieAddress)
   {
     int domain, bus, device, function;
     char delimiter;
@@ -7433,16 +7433,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Find closest NICs
       std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
 
-      // Pick the least-used NIC to assign as closest
-      int closestIdx = -1;
-      for (auto idx : closestNicIdxs) {
-        if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
-          closestIdx = idx;
-      }
-
       // The following will only use distance between bus IDs
       // to determine the closest NIC to GPU if the PCIe tree approach fails
-      if (closestIdx < 0) {
+      if (closestNicIdxs.empty()) {
 #ifdef VERBS_DEBUG
         Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
 #endif
@@ -7450,25 +7443,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
           if (ibvDeviceList[nicIndex].busId != "") {
             int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
-            if (distance < minDistance && distance >= 0) {
+            if (distance >= 0 && distance < minDistance) {
               minDistance = distance;
-              closestIdx = nicIndex;
+              closestNicIdxs.clear();
+              closestNicIdxs.insert(nicIndex);
+            } else if (distance >= 0 && distance == minDistance) {
+              closestNicIdxs.insert(nicIndex);
             }
           }
         }
       }
-      if (closestIdx != -1) {
-        topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
-        assignedCount[closestIdx]++;
-      }
+      for (auto idx : closestNicIdxs)
+        topo.closestNicsToGpu[gpuIndex].push_back(idx);
     }
 
     // Compute the reverse mapping: closest GPU(s) for each NIC
     // Loop over each NIC to find the closest GPU(s) based on PCIe address
     for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-      if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
-        continue;
-      }
+      if (ibvDeviceList[nicIndex].busId.empty()) continue;
 
       // Find closest GPUs using LCA algorithm
       std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
@@ -7476,26 +7468,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (closestGpuIdxs.empty()) {
         // Fallback: use bus ID distance
         int minDistance = std::numeric_limits<int>::max();
-        int closestIdx = -1;
-
         for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
           if (gpuAddressList[gpuIdx].empty()) continue;
-
           int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
           if (distance >= 0 && distance < minDistance) {
             minDistance = distance;
-            closestIdx = gpuIdx;
+            closestGpuIdxs.clear();
+            closestGpuIdxs.insert(gpuIdx);
+          } else if (distance >= 0 && distance == minDistance) {
+            closestGpuIdxs.insert(gpuIdx);
           }
         }
-
-        if (closestIdx != -1) {
-          topo.closestGpusToNic[nicIndex].push_back(closestIdx);
-        }
-      } else {
-        // Store all GPUs that are equally close
-        for (int idx : closestGpuIdxs) {
-          topo.closestGpusToNic[nicIndex].push_back(idx);
-        }
+      }
+      for (int idx : closestGpuIdxs) {
+        topo.closestGpusToNic[nicIndex].push_back(idx);
       }
     }
 #endif
