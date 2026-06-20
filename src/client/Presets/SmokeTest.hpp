@@ -177,7 +177,8 @@ int RunTest(int                        testNum,
         allPass = false;
       }
     }
-    Utils::Print("%s", allPass ? pass.c_str() : fail.c_str()); fflush(stdout);
+    bool skipTransfer = (getenv("TB_SKIP_TRANSFER") && atoi(getenv("TB_SKIP_TRANSFER")) == 1);
+    Utils::Print("%s", skipTransfer ? skip.c_str() : (allPass ? pass.c_str() : fail.c_str())); fflush(stdout);
     numFail += (allPass ? 0 : 1);
   }
   return numFail;

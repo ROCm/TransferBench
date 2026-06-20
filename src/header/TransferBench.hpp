@@ -5962,6 +5962,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     // Perform iterations
     size_t numTimedIterations = 0;
     double totalCpuTimeSec = 0.0;
+    // TB_SKIP_TRANSFER: If set to 1, skip actual transfers (only do alloc/exchange/dealloc)
+    bool skipTransfer = (getenv("TB_SKIP_TRANSFER") && atoi(getenv("TB_SKIP_TRANSFER")) == 1);
+    if (!skipTransfer)
     for (int iteration = -cfg.general.numWarmups; ; iteration++) {
       // Stop if number of iterations/seconds has reached limit
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
