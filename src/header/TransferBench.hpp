@@ -3128,7 +3128,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Add NICs to the tree
       auto const& ibvDeviceList = GetIbvDeviceList();
       for (IbvDevice const& ibvDevice : ibvDeviceList) {
-        if (!ibvDevice.hasActivePort || ibvDevice.busId == "") continue;
+        // Include all NICs in the PCIe proximity tree regardless of link state.
+        // PCIe proximity is a hardware property determined by physical wiring through
+        // root complexes and PCIe switches -- it does not depend on whether a port is
+        // currently active.  Excluding inactive NICs would cause GPUs that share the
+        // same root complex with them to find no LCA match, falling back to a coarser
+        // distance heuristic and potentially selecting a more distant NIC instead.
+        // hasActivePort is enforced separately: it is stored in topo.nicIsActive and
+        // checked via NicIsActive() during transfer validation, before any QP is set up.
+        if (ibvDevice.busId == "") continue;
         InsertPCIePathToTree(ibvDevice.busId, ibvDevice.name, pcieRoot);
       }
 
