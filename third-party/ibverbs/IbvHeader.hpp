@@ -117,11 +117,25 @@ struct ibv_device {
   char                    ibdev_path[IBV_SYSFS_PATH_MAX];
 };
 
-// We only ever read ->device (offset 0). The remaining fields (ops table,
-// fds, mutex, ...) are intentionally omitted - libibverbs allocates and
-// frees these objects and we never take sizeof(ibv_context).
+struct ibv_context_ops {
+  void *_reserved_pre[11];   // _compat_query_device .. _compat_create_cq
+  void *poll_cq;             // index 11
+  void *_reserved_mid[13];   // req_notify_cq .. _compat_destroy_qp
+  void *post_send;           // index 25
+};
+
+// We read ->device (offset 0) and dispatch through ->ops. 
+// The trailing fields(fds, mutex, ...) are intentionally omitted,
+// libibverbs allocates and frees these objects.
 struct ibv_context {
-  struct ibv_device *device;
+  struct ibv_device     *device;
+  struct ibv_context_ops ops;
+};
+
+// We only ever read ->context (offset 0) to reach the ops dispatch table.
+// The remaining fields are omitted since libibverbs owns the allocation.
+struct ibv_cq {
+  struct ibv_context *context;
 };
 
 // ---------------------------------------------------------------------------
@@ -556,4 +570,17 @@ struct ibv_wc {
   uint8_t              sl;
   uint8_t              dlid_path_bits;
 };
+
+static inline int ibv_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc)
+{
+  return ((int (*)(struct ibv_cq*, int, struct ibv_wc*))cq->context->ops.poll_cq)(
+      cq, num_entries, wc);
+}
+
+static inline int ibv_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
+                                struct ibv_send_wr **bad_wr)
+{
+  return ((int (*)(struct ibv_qp*, struct ibv_send_wr*, struct ibv_send_wr**))
+              qp->context->ops.post_send)(qp, wr, bad_wr);
+}
 }  // extern "C"

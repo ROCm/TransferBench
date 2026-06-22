@@ -50,8 +50,6 @@ IBV_FN(ibv_get_device_list, ibv_device**, (int*))
 IBV_FN(ibv_get_device_name, const char*, (ibv_device*))
 IBV_FN(ibv_modify_qp, int, (ibv_qp*, ibv_qp_attr*, int))
 IBV_FN(ibv_open_device, ibv_context*, (ibv_device*))
-IBV_FN(ibv_poll_cq, int, (ibv_cq*, int, ibv_wc*))
-IBV_FN(ibv_post_send, int, (ibv_qp*, ibv_send_wr*, ibv_send_wr**))
 IBV_FN(ibv_query_device, int, (ibv_context*, ibv_device_attr*))
 IBV_FN(ibv_query_gid, int, (ibv_context*, uint8_t, int, ibv_gid*))
 IBV_FN(ibv_query_port, int, (ibv_context*, uint8_t, ibv_port_attr*))
@@ -94,8 +92,6 @@ struct IbvDynloadState {
         {(void**)&ibv_get_device_name, "ibv_get_device_name"},
         {(void**)&ibv_modify_qp, "ibv_modify_qp"},
         {(void**)&ibv_open_device, "ibv_open_device"},
-        {(void**)&ibv_poll_cq, "ibv_poll_cq"},
-        {(void**)&ibv_post_send, "ibv_post_send"},
         {(void**)&ibv_query_device, "ibv_query_device"},
         {(void**)&ibv_query_gid, "ibv_query_gid"},
         {(void**)&ibv_query_port, "ibv_query_port"},
@@ -182,8 +178,6 @@ inline void IbvUnload()
     ibv_get_device_name = nullptr;
     ibv_modify_qp = nullptr;
     ibv_open_device = nullptr;
-    ibv_poll_cq = nullptr;
-    ibv_post_send = nullptr;
     ibv_query_device = nullptr;
     ibv_query_gid = nullptr;
     ibv_query_port = nullptr;
