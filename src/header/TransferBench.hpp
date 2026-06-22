@@ -59,9 +59,7 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <vector>
 
-#ifdef NIC_EXEC_ENABLED
-#include <infiniband/verbs.h>
-#endif
+#include "IbvDynLoad.hpp"
 
 #ifdef MPI_COMM_ENABLED
 #include <mpi.h>
@@ -1686,14 +1684,32 @@ namespace {
     return ERR_NONE;
   }
 
-#if defined(NIC_EXEC_ENABLED) && defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+#if defined(__NVCC__)
+  static bool CheckDmabufSupport()
+  {
+    return false;
+  }
+  static ErrResult ExportDmabuf(void* gpuPtr, size_t numBytes, int& dmabufFd, uint64_t& dmabufOffset)
+  {
+    return {ERR_FATAL, "DMA-BUF export not yet supported on NVIDIA platform"};
+  }
+#else
+  hsa_status_t (*pfn_hsa_amd_portable_export_dmabuf)(const void*, size_t, int*, uint64_t*);
   // Check kernel configuration for required DMA-BUF support
   // Returns true if kernel supports CONFIG_DMABUF_MOVE_NOTIFY and CONFIG_PCI_P2PDMA
-  static bool CheckKernelDmabufSupport()
+  static bool CheckDmabufSupport()
   {
     static int support = -1;  // -1: not checked, 0: disabled, 1: enabled
 
     if (support != -1) {
+      return support;
+    }
+    // Check hsa_amd_portable_export_dmabuf and ibv_reg_dmabuf_mr symbols are available
+    // rocr and hsa_ext_amd header is always mandatory, so no need to check for them
+    pfn_hsa_amd_portable_export_dmabuf =
+        (hsa_status_t (*)(const void*, size_t, int*, uint64_t*))dlsym(RTLD_DEFAULT, "hsa_amd_portable_export_dmabuf");
+    if (pfn_hsa_amd_portable_export_dmabuf == nullptr || !IsIbvDmabufPresent()) {
+      support = 0;
       return support;
     }
 
@@ -1819,7 +1835,7 @@ namespace {
 
     // Export the aligned GPU buffer as DMA-BUF
     uint64_t exportOffset = 0;
-    hsa_status_t status = hsa_amd_portable_export_dmabuf(alignedPtr, alignedSize, &dmabufFd, &exportOffset);
+    hsa_status_t status = pfn_hsa_amd_portable_export_dmabuf(alignedPtr, alignedSize, &dmabufFd, &exportOffset);
 
     if (status != HSA_STATUS_SUCCESS) {
       return {ERR_FATAL, "Failed to export DMA-BUF: hsa_amd_portable_export_dmabuf returned %d", status};
@@ -2127,14 +2143,14 @@ namespace {
     }
 
     // Check NIC options
-#ifdef NIC_EXEC_ENABLED
-    if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
-      errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    if (IsIbvSymbolsReady()) {
+      if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
+        errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+      }
+      if (cfg.nic.cqPollBatch <= 0) {
+        errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
+      }
     }
-    if (cfg.nic.cqPollBatch <= 0) {
-      errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
-    }
-#endif
 
     // NVIDIA specific
 #if defined(__NVCC__)
@@ -2527,7 +2543,7 @@ namespace {
         break;
 #endif
       case EXE_NIC: case EXE_NIC_NEAREST:
-#ifdef NIC_EXEC_ENABLED
+      if (IsIbvSymbolsReady())
       {
         // NIC Executors can only execute a copy operation
         if (t.srcs.size() != 1 || t.dsts.size() != 1) {
@@ -2581,11 +2597,10 @@ namespace {
           hasFatalError = true;
           break;
         }
+      } else {
+        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
+        hasFatalError = true;
       }
-#else
-      errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
-      hasFatalError = true;
-#endif
       break;
       }
 
@@ -2822,7 +2837,6 @@ namespace {
 #endif
 
     // For IBV executor
-#ifdef NIC_EXEC_ENABLED
     int                        srcNicIndex;       ///< SRC NIC index
     int                        dstNicIndex;       ///< DST NIC index
     ibv_context*               srcContext;        ///< Device context for SRC NIC
@@ -2847,7 +2861,6 @@ namespace {
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
-#endif
 
     // For BMA executor
 #ifdef BMA_EXEC_ENABLED
@@ -2905,7 +2918,6 @@ namespace {
     }
   };
 
-#ifdef NIC_EXEC_ENABLED
   // Structure to track information about IBV devices
   struct IbvDevice
   {
@@ -2918,12 +2930,11 @@ namespace {
     std::string gidDescriptor;
     bool        isRoce;
   };
-#endif
 
-#ifdef NIC_EXEC_ENABLED
 // Function to collect information about IBV devices
 //========================================================================================
-static bool IsConfiguredGid(union ibv_gid const& gid)
+
+  static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     const struct in6_addr *a = (struct in6_addr *) gid.raw;
     int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
@@ -3036,7 +3047,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     static vector<IbvDevice> ibvDeviceList = {};
 
     // Build list on first use
-    if (!isInitialized) {
+    if (IsIbvSymbolsReady() && !isInitialized) {
 
       // Query the number of IBV devices
       int numIbvDevices = 0;
@@ -3121,9 +3132,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     return ibvDeviceList;
   }
-#endif // NIC_EXEC_ENABLED
 
-#ifdef NIC_EXEC_ENABLED
 // PCIe-related functions
 //========================================================================================
 
@@ -3308,9 +3317,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     return matches;
   }
-#endif // NIC_EXEC_ENABLED
 
-#ifdef NIC_EXEC_ENABLED
 // IB Verbs-related functions
 //========================================================================================
 
@@ -3481,16 +3488,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (!dmabufStatusPrinted) {
         dmabufStatusPrinted = true;
         printf("[INFO] Rank %d DMA-BUF support: ", GetRank());
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-        bool kernelSupport = CheckKernelDmabufSupport();
+        bool kernelSupport = CheckDmabufSupport();
         if (kernelSupport) {
           printf("ENABLED\n");
         } else {
-          printf("DISABLED (kernel config missing, using standard ibv_reg_mr)\n");
+          printf("DISABLED (kernel config or export symbol missing, using standard ibv_reg_mr)\n");
         }
-#else
-        printf("DISABLED (using standard ibv_reg_mr)\n");
-#endif
       }
     }
 
@@ -3519,27 +3522,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
 
       // Export DMA-BUF for SRC memory if it's GPU memory
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-      if (!t.srcs.empty() && IsGpuMemType(t.srcs[0].memType) && CheckKernelDmabufSupport()) {
+      if (CheckDmabufSupport() && !t.srcs.empty() && IsGpuMemType(t.srcs[0].memType)) {
         ERR_CHECK(ExportDmabuf(rss.srcMem[0], rss.numBytes, rss.srcDmabufFd, rss.srcDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported SRC GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
                  GetRank(), rss.srcDmabufFd, rss.srcDmabufOffset);
         }
       }
-#endif
 
       // Register SRC memory region
-#ifdef HAVE_DMABUF_SUPPORT
       if (rss.srcDmabufFd >= 0) {
         IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_dmabuf_mr, rss.srcProtect, rss.srcDmabufOffset,
                      rss.numBytes, (uint64_t)rss.srcMem[0], rss.srcDmabufFd, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered SRC memory using ibv_reg_dmabuf_mr\n", GetRank());
         }
-      } else
-#endif
-      {
+      } else {
         IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered SRC memory using ibv_reg_mr (standard path)\n", GetRank());
@@ -3585,27 +3583,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
 
       // Export DMA-BUF for DST memory if it's GPU memory
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-      if (!t.dsts.empty() && IsGpuMemType(t.dsts[0].memType) && CheckKernelDmabufSupport()) {
+      if (CheckDmabufSupport() && !t.dsts.empty() && IsGpuMemType(t.dsts[0].memType)) {
         ERR_CHECK(ExportDmabuf(rss.dstMem[0], rss.numBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported DST GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
                  GetRank(), rss.dstDmabufFd, rss.dstDmabufOffset);
         }
       }
-#endif
 
       // Register DST memory region
-#ifdef HAVE_DMABUF_SUPPORT
       if (rss.dstDmabufFd >= 0) {
         IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_dmabuf_mr, rss.dstProtect, rss.dstDmabufOffset,
                      rss.numBytes, (uint64_t)rss.dstMem[0], rss.dstDmabufFd, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered DST memory using ibv_reg_dmabuf_mr\n", GetRank());
         }
-      } else
-#endif
-      {
+      } else {
         IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered DST memory using ibv_reg_mr (standard path)\n", GetRank());
@@ -3776,16 +3769,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (isDstRank) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
     // Close DMA-BUF file descriptors
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-    if (isSrcRank && rss.srcDmabufFd >= 0) {
-      close(rss.srcDmabufFd);
-      rss.srcDmabufFd = -1;
+    if (CheckDmabufSupport()) {
+      if (isSrcRank && rss.srcDmabufFd >= 0) {
+        close(rss.srcDmabufFd);
+        rss.srcDmabufFd = -1;
+      }
+      if (isDstRank && rss.dstDmabufFd >= 0) {
+        close(rss.dstDmabufFd);
+        rss.dstDmabufFd = -1;
+      }
     }
-    if (isDstRank && rss.dstDmabufFd >= 0) {
-      close(rss.dstDmabufFd);
-      rss.dstDmabufFd = -1;
-    }
-#endif
 
     // Destroy queue pairs
     if (isSrcRank) {
@@ -3813,7 +3806,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     return ERR_NONE;
   }
-#endif // NIC_EXEC_ENABLED
 
 // Data validation-related functions
 //========================================================================================
@@ -4504,14 +4496,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Prepare for NIC-based executors
     if (IsNicExeType(exeDevice.exeType)) {
-#ifdef NIC_EXEC_ENABLED
-      for (auto& rss : exeInfo.resources) {
-        Transfer const& t = transfers[rss.transferIdx];
-        ERR_CHECK(PrepareNicTransferResources(cfg, exeDevice, t, rss));
+      if (IsIbvSymbolsReady()) {
+        for (auto& rss : exeInfo.resources) {
+          Transfer const& t = transfers[rss.transferIdx];
+          ERR_CHECK(PrepareNicTransferResources(cfg, exeDevice, t, rss));
+        }
+      } else {
+        return {ERR_FATAL, "RDMA executor is not supported"};
       }
-#else
-      return {ERR_FATAL, "RDMA executor is not supported"};
-#endif
     }
 
     // Check that GPU wallclock rate is non-zero
@@ -4608,11 +4600,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
 
       // Destroy NIC related resources
-#ifdef NIC_EXEC_ENABLED
-      if (IsNicExeType(exeDevice.exeType)) {
+      if (IsIbvSymbolsReady() && IsNicExeType(exeDevice.exeType)) {
         ERR_CHECK(TeardownNicTransferResources(rss, t));
       }
-#endif
     }
 
     // Teardown additional requirements for GPU-based executors
@@ -4740,7 +4730,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
-#ifdef NIC_EXEC_ENABLED
   // Execution of a single NIC Transfer
   static ErrResult ExecuteNicTransfer(int           const  iteration,
                                       ConfigOptions const& cfg,
@@ -4841,7 +4830,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     return ERR_NONE;
   }
-#endif
+
 // GFX Executor-related functions
 //========================================================================================
 
@@ -6100,9 +6089,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     case EXE_GPU_ASYNC_TENSOR: return RunGpuAsyncTensorExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_ASYNC_MEMOPS: return RunGpuAsyncMemOpsExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-#ifdef NIC_EXEC_ENABLED
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-#endif
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
@@ -6509,11 +6496,7 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
 
           TransferResult& tfrResult      = results.tfrResults[transferIdx];
           tfrResult.exeDevice            = exeDevice;
-#ifdef NIC_EXEC_ENABLED
           tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-#else
-          tfrResult.exeDstDevice         = exeDevice;
-#endif
           tfrResult.numBytes             = rss.numBytes;
           tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
           tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
@@ -7762,22 +7745,23 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
 
     // NIC Executor
     int numNics = 0;
-#ifdef NIC_EXEC_ENABLED
-    numNics = GetIbvDeviceList().size();
-    for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
-      topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
-      topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
-      topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
-      if (verbose) {
-        auto const& nic = GetIbvDeviceList()[exeIndex];
-        Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s\n",
-            rank, exeIndex, numNics, nic.name.c_str(),
-            nic.busId.empty() ? "?" : nic.busId.c_str(),
-            topo.closestCpuNumaToNic[exeIndex],
-            nic.hasActivePort ? "yes" : "no");
+    if (IsIbvSymbolsReady())
+    {
+      numNics = GetIbvDeviceList().size();
+      for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+        topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+        topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
+        topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
+        if (verbose) {
+          auto const& nic = GetIbvDeviceList()[exeIndex];
+          Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s\n",
+              rank, exeIndex, numNics, nic.name.c_str(),
+              nic.busId.empty() ? "?" : nic.busId.c_str(),
+              topo.closestCpuNumaToNic[exeIndex],
+              nic.hasActivePort ? "yes" : "no");
+        }
       }
     }
-#endif
     topo.numExecutors[EXE_NIC] = topo.numExecutors[EXE_NIC_NEAREST] = numNics;
 
     for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
@@ -7802,101 +7786,100 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
     }
 
     // Figure out closest NICs to GPUs
-#ifdef NIC_EXEC_ENABLED
-
     // Build up list of NIC bus addresses
     std::vector<std::string> ibvAddressList;
     auto const& ibvDeviceList = GetIbvDeviceList();
-    for (auto const& ibvDevice : ibvDeviceList)
-      ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
+    if (IsIbvSymbolsReady()) {
+      for (auto const& ibvDevice : ibvDeviceList)
+        ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
 
-    // Track how many times a device has been assigned as "closest"
-    // This allows distributed work across devices using multiple ports (sharing the same busID)
-    // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
-    // Counter example:
-    //
-    //  G0 prefers (N0,N1), picks N0
-    //  G1 prefers (N1,N2), picks N1
-    //  G2 prefers N0,      picks N0
-    //
-    //  instead of G0->N1, G1->N2, G2->N0
+      // Track how many times a device has been assigned as "closest"
+      // This allows distributed work across devices using multiple ports (sharing the same busID)
+      // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
+      // Counter example:
+      //
+      //  G0 prefers (N0,N1), picks N0
+      //  G1 prefers (N1,N2), picks N1
+      //  G2 prefers N0,      picks N0
+      //
+      //  instead of G0->N1, G1->N2, G2->N0
 
-    std::vector<int> assignedCount(ibvDeviceList.size(), 0);
+      std::vector<int> assignedCount(ibvDeviceList.size(), 0);
 
-    // Loop over each GPU to find the closest NIC(s) based on PCIe address
-    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
-      if (gpuAddressList[gpuIndex].empty()) continue;
-      const char* hipPciBusId = gpuAddressList[gpuIndex].c_str();
+      // Loop over each GPU to find the closest NIC(s) based on PCIe address
+      for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+        if (gpuAddressList[gpuIndex].empty()) continue;
+        const char* hipPciBusId = gpuAddressList[gpuIndex].c_str();
 
-      // Find closest NICs
-      std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
+        // Find closest NICs
+        std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
 
-      // Pick the least-used NIC to assign as closest
-      int closestIdx = -1;
-      for (auto idx : closestNicIdxs) {
-        if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
-          closestIdx = idx;
-      }
+        // Pick the least-used NIC to assign as closest
+        int closestIdx = -1;
+        for (auto idx : closestNicIdxs) {
+          if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
+            closestIdx = idx;
+        }
 
-      // The following will only use distance between bus IDs
-      // to determine the closest NIC to GPU if the PCIe tree approach fails
-      if (closestIdx < 0) {
-#ifdef VERBS_DEBUG
-        Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
-#endif
-        int minDistance = std::numeric_limits<int>::max();
-        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-          if (ibvDeviceList[nicIndex].busId != "") {
-            int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
-            if (distance < minDistance && distance >= 0) {
-              minDistance = distance;
-              closestIdx = nicIndex;
+        // The following will only use distance between bus IDs
+        // to determine the closest NIC to GPU if the PCIe tree approach fails
+        if (closestIdx < 0) {
+  #ifdef VERBS_DEBUG
+          Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+  #endif
+          int minDistance = std::numeric_limits<int>::max();
+          for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+            if (ibvDeviceList[nicIndex].busId != "") {
+              int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
+              if (distance < minDistance && distance >= 0) {
+                minDistance = distance;
+                closestIdx = nicIndex;
+              }
             }
           }
         }
-      }
-      if (closestIdx != -1) {
-        topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
-        assignedCount[closestIdx]++;
-      }
-    }
-
-    // Compute the reverse mapping: closest GPU(s) for each NIC
-    // Loop over each NIC to find the closest GPU(s) based on PCIe address
-    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-      if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
-        continue;
+        if (closestIdx != -1) {
+          topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
+          assignedCount[closestIdx]++;
+        }
       }
 
-      // Find closest GPUs using LCA algorithm
-      std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
+      // Compute the reverse mapping: closest GPU(s) for each NIC
+      // Loop over each NIC to find the closest GPU(s) based on PCIe address
+      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+        if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
+          continue;
+        }
 
-      if (closestGpuIdxs.empty()) {
-        // Fallback: use bus ID distance
-        int minDistance = std::numeric_limits<int>::max();
-        int closestIdx = -1;
+        // Find closest GPUs using LCA algorithm
+        std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
 
-        for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-          if (gpuAddressList[gpuIdx].empty()) continue;
+        if (closestGpuIdxs.empty()) {
+          // Fallback: use bus ID distance
+          int minDistance = std::numeric_limits<int>::max();
+          int closestIdx = -1;
 
-          int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
-          if (distance >= 0 && distance < minDistance) {
-            minDistance = distance;
-            closestIdx = gpuIdx;
+          for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+            if (gpuAddressList[gpuIdx].empty()) continue;
+
+            int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
+            if (distance >= 0 && distance < minDistance) {
+              minDistance = distance;
+              closestIdx = gpuIdx;
+            }
+          }
+
+          if (closestIdx != -1) {
+            topo.closestGpusToNic[nicIndex].push_back(closestIdx);
+          }
+        } else {
+          // Store all GPUs that are equally close
+          for (int idx : closestGpuIdxs) {
+            topo.closestGpusToNic[nicIndex].push_back(idx);
           }
         }
-
-        if (closestIdx != -1) {
-          topo.closestGpusToNic[nicIndex].push_back(closestIdx);
-        }
-      } else {
-        // Store all GPUs that are equally close
-        for (int idx : closestGpuIdxs) {
-          topo.closestGpusToNic[nicIndex].push_back(idx);
-        }
       }
     }
-#endif
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
@@ -7916,20 +7899,20 @@ __global__ void  GpuAsyncPipelinedTensorOpsKernel(float const* __restrict__ src,
           Log("\n");
         }
       }
-#ifdef NIC_EXEC_ENABLED
-      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-        Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
-                          ibvDeviceList[nicIndex].name.c_str());
-        if (topo.closestGpusToNic[nicIndex].size() == 0) {
-          Log(" none");
-        } else {
-          for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
-            Log(" %d", gpuIndex);
+      if (IsIbvSymbolsReady()) {
+        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+          Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
+                            ibvDeviceList[nicIndex].name.c_str());
+          if (topo.closestGpusToNic[nicIndex].size() == 0) {
+            Log(" none");
+          } else {
+            for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
+              Log(" %d", gpuIndex);
+            }
           }
+          Log("\n");
         }
-        Log("\n");
       }
-#endif
     }
   }
 
