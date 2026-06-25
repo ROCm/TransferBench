@@ -86,7 +86,22 @@ Without setting ``GPU_MAX_HW_QUEUES``:
   GPU-DMA All-To-All benchmark:
   ==============================
   [268435456 bytes per Transfer] [DMA:8] [1 Read(s) 1 Write(s)] [MemType:uncached GPU] [NIC QueuePairs:0] [#Ranks:1]
-
+  ┌---------┬-----------------------------------------------------------------------┬-----------┬---------┐
+  │ SRC\DST │ GPU 00  GPU 01  GPU 02  GPU 03  GPU 04  GPU 05  GPU 06  GPU 07      │  STotal   │  Actual │
+  ├---------┼-----------------------------------------------------------------------┼-----------┼---------┤
+  │ GPU 00  │  N/A    60.99   60.95   60.94   61.01   61.01   60.99   60.95       │  426.83   │  426.59 │
+  │ GPU 01  │ 61.00    N/A    60.93   60.93   61.00   60.99   60.95   60.94       │  426.73   │  426.48 │
+  │ GPU 02  │ 60.94   60.93    N/A    60.97   61.01   60.98   60.99   60.92       │  426.74   │  426.43 │
+  │ GPU 03  │ 60.96   60.96   60.99    N/A    60.97   60.97   60.96   60.94       │  426.75   │  426.59 │
+  │ GPU 04  │ 60.99   60.99   61.01   60.98    N/A    60.98   61.01   60.99       │  426.96   │  426.87 │
+  │ GPU 05  │ 60.95   60.96   60.93   60.94   60.91    N/A    60.91   60.97       │  426.57   │  426.36 │
+  │ GPU 06  │ 60.84   60.84   60.80   60.87   60.89   60.84    N/A    60.83       │  425.91   │  425.59 │
+  │ GPU 07  │ 60.94   60.94   60.94   61.00   60.99   61.04   60.93    N/A        │  426.79   │  426.51 │
+  ├---------┼-----------------------------------------------------------------------┼-----------┼---------┤
+  │ RTotal  │426.62  426.61  426.55  426.64  426.78  426.82  426.72  426.54       │ 3413.29   │ 3411.43 │
+  └---------┴-----------------------------------------------------------------------┼-----------┼---------┤
+                                                                                    │CPU Timed: │ 1338.25 │
+                                                                                    └-----------┴---------┘
   Average bandwidth (GPU Timed): 60.952 GB/s
   Aggregate bandwidth (GPU Timed): 3413.290 GB/s
   Aggregate bandwidth (CPU Timed): 1338.252 GB/s
@@ -109,17 +124,35 @@ Setting ``GPU_MAX_HW_QUEUES=8``:
   GPU-DMA All-To-All benchmark:
   ==============================
   [268435456 bytes per Transfer] [DMA:8] [1 Read(s) 1 Write(s)] [MemType:uncached GPU] [NIC QueuePairs:0] [#Ranks:1]
-
+  ┌---------┬-----------------------------------------------------------------------┬-----------┬---------┐
+  │ SRC\DST │ GPU 00  GPU 01  GPU 02  GPU 03  GPU 04  GPU 05  GPU 06  GPU 07      │  STotal   │  Actual │
+  ├---------┼-----------------------------------------------------------------------┼-----------┼---------┤
+  │ GPU 00  │  N/A    60.52   60.38   60.41   60.96   60.98   60.93   60.97       │  425.15   │  422.69 │
+  │ GPU 01  │ 60.46    N/A    60.47   60.49   60.94   60.95   60.95   60.99       │  425.24   │  423.20 │
+  │ GPU 02  │ 57.91   58.13    N/A    58.28   58.77   58.80   58.88   58.89       │  409.66   │  405.36 │
+  │ GPU 03  │ 57.96   58.18   58.32    N/A    59.15   58.37   56.43   56.54       │  404.95   │  395.03 │
+  │ GPU 04  │ 60.32   60.43   60.48   60.97    N/A    60.96   61.02   60.99       │  425.17   │  422.25 │
+  │ GPU 05  │ 60.42   60.37   60.37   60.94   60.96    N/A    60.98   61.02       │  425.06   │  422.59 │
+  │ GPU 06  │ 60.40   60.27   60.37   60.96   61.00   60.95    N/A    60.96       │  424.91   │  421.90 │
+  │ GPU 07  │ 60.38   60.35   60.37   60.94   60.96   61.01   60.97    N/A        │  424.97   │  422.45 │
+  ├---------┼-----------------------------------------------------------------------┼-----------┼---------┤
+  │ RTotal  │417.84  418.25  420.76  422.99  422.75  422.01  420.16  420.35       │ 3365.11   │ 3335.47 │
+  └---------┴-----------------------------------------------------------------------┼-----------┼---------┤
+                                                                                    │CPU Timed: │ 2222.41 │
+                                                                                    └-----------┴---------┘
   Average bandwidth (GPU Timed): 60.091 GB/s
   Aggregate bandwidth (GPU Timed): 3365.111 GB/s
   Aggregate bandwidth (CPU Timed): 2222.415 GB/s
 
 .. note::
 
-  Individual transfer bandwidths are similar in both cases because each transfer is timed
-  from when it starts. However, the CPU wall-clock time is nearly double in the
-  ``GPU_MAX_HW_QUEUES=4`` case, because serialized transfers complete one after another
-  instead of running in parallel.
+  The per-cell bandwidth numbers in the SRC×DST matrix look similar in both cases because
+  each individual transfer is timed from when it starts — not from when the full test begins.
+  A serialized transfer still achieves full link speed; it just starts later than it would if
+  a hardware queue were available. The effect of serialization is therefore visible in the
+  CPU wall-clock time and the ``Actual`` column, not in the per-cell numbers. In the
+  ``GPU_MAX_HW_QUEUES=4`` case the CPU-timed aggregate bandwidth is roughly half the
+  GPU-timed aggregate, while in the ``GPU_MAX_HW_QUEUES=8`` case the two are much closer.
 
 Feature questions
 ==================
@@ -364,8 +397,16 @@ example bandwidth values (in GB/s):
       - 101.101
       - —
 
-For the remote copy case, performance doesn't scale monotonically beyond unroll 4 because
-the link becomes the bottleneck rather than register occupancy.
+For the local copy case, bandwidth scales steadily across all unroll values in the
+preceding table because the GPU has sufficient compute and memory bandwidth to keep higher
+unroll pipelines busy.
+
+For the remote copy case, the preceding table shows that performance doesn't scale
+monotonically beyond unroll 4. At that point the interconnect link — not register occupancy
+— becomes the bottleneck. Once the link is saturated, issuing more reads ahead of time
+provides no further benefit, and increased register pressure can hurt performance. The
+remote copy column has no entries beyond unroll 6 because the link saturates before higher
+unroll factors can show improvement.
 
 To configure the unroll factor, see :ref:`GFX_UNROLL environment variable <gfx-options>`.
 

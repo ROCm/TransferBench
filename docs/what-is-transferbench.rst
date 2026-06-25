@@ -17,6 +17,20 @@ A memory transfer is a single operation where an Executor (EXE) reads and adds v
 
 A memory device consists of a location (a specific device that owns the memory) and a memory type (usually some attribute about the memory). For example, fine-grained HBM memory (memory type) on GPU 0 (location), or pinned CPU memory on NUMA node 1 (location).
 
+A set of transfers to be run simultaneously is called a Test.
+
+Executors
+=========
+
+An Executor (EXE) is the specific device that performs a transfer — reading from SRC memory devices and writing to DST memory devices. TransferBench supports the following executor types:
+
+- **CPU threads**
+- **GPU compute kernels** (GFX)
+- **GPU DMA engines** (SDMA)
+- **NIC RDMA** (via Remote Direct Memory Access network interface cards)
+
+Some Executors support **SubExecutors**, which allow further partitioning of the data to be transferred across multiple execution units within the same device.
+
 Features
 ========
 

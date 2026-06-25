@@ -306,6 +306,17 @@ To modify the CMake behavior, use the following environment variables:
               <td><code>OFF</code></td>
             </tr>
             <tr>
+              <td rowspan="2"><b>Build options</b></td>
+              <td><code>SINGLE_KERNEL</code></td>
+              <td>To compile with a single GFX kernel (faster build, but fewer kernel variants), set to <code>1</code>. Used mostly for development and debug.</td>
+              <td><code>0</code></td>
+            </tr>
+            <tr>
+              <td><code>DEBUG</code></td>
+              <td>To build in debug mode with debug symbols (<code>-O0</code>, <code>-g</code>), set to <code>1</code>. Runs otherwise in release mode (<code>-O3</code>).</td>
+              <td><code>0</code></td>
+            </tr>
+            <tr>
               <td rowspan="3"><b>CMake cache variables</b></td>
               <td><code>GPU_TARGETS</code></td>
               <td>Semicolon-separated GPU architectures. Overridden if <code>BUILD_LOCAL_GPU_TARGET_ONLY</code> is <code>ON</code></td>
@@ -320,6 +331,7 @@ To modify the CMake behavior, use the following environment variables:
                 <td><code>HIPCONFIG_EXECUTABLE</code></td>
                 <td>Path to <code>hipconfig</code> for HIP version or pod check.</td>
                 <td><code>hipconfig</code></td>
+              </tr>
         </tbody>
     </table>
   </div>
@@ -356,7 +368,7 @@ Here are some commonly encountered build errors and their fix:
 Installing TransferBench from the package manager
 =================================================
 
-To install TransferBench from the package manager, install ROCm first and then run:
+To install TransferBench from the package manager, first configure the ROCm repository. For instructions, see `ROCm installation <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>`_. Then run:
 
 .. code-block:: shell
 

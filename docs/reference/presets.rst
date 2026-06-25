@@ -10,7 +10,7 @@ TransferBench presets
 
 Presets are a predefined series of transfers that can be used instead of manually configuring the transfers.
 
-The following table lists the presets available on TransferBench 1.66.03:
+The following table lists the presets available on TransferBench 1.67.0:
 
 .. list-table::
     :header-rows: 1
@@ -20,7 +20,7 @@ The following table lists the presets available on TransferBench 1.66.03:
       - Multinode support
 
     * - :ref:`All-to-all preset (a2a) <a2a>`
-      - Tests parallel transfers between all pairs of GPU devices.
+      - Tests parallel transfers between all pairs of GPU devices within a single node.
       - ✅
 
     * - :ref:`All-to-all via nearest NIC preset (a2a_n) <a2a_n>`
@@ -31,12 +31,16 @@ The following table lists the presets available on TransferBench 1.66.03:
       - Performs a parameter sweep of GFX-based all-to-all transfers across different SubExecutor counts, unroll factors, and thread block sizes.
       - ❌
 
-    * - :ref:`NIC rings preset (nicrings) <nicrings>`
-      - Tests NIC rings created across identical NIC indices across ranks.
+    * - NIC all-to-all preset (nica2a)
+      - NIC-executor all-to-all with plane/group partitioning via closest memory endpoint.
       - ✅
 
     * - :ref:`NIC peer-to-peer preset (nicp2p) <nicp2p>`
       - Tests multinode peer-to-peer RDMA transfer between all NICs across all ranks.
+      - ✅
+
+    * - :ref:`NIC rings preset (nicrings) <nicrings>`
+      - Tests NIC rings created across identical NIC indices across ranks.
       - ✅
 
     * - :ref:`One-to-all preset (one2all) <one2all>`
@@ -47,6 +51,18 @@ The following table lists the presets available on TransferBench 1.66.03:
       - Tests unidirectional and bidirectional transfers for CPU-to-CPU, CPU-to-GPU, and GPU-to-GPU combinations.
       - ❌
 
+    * - Pod all-to-all preset (poda2a)
+      - Pod-aware all-to-all across GPUs within a single pod via UALoE path, with optional concurrent NIC ring.
+      - ✅
+
+    * - Pod peer-to-peer preset (podp2p)
+      - Pod-aware peer-to-peer bandwidth between every GPU pair in a pod (unidirectional and bidirectional).
+      - ✅
+
+    * - Ring transfers preset (rings)
+      - Ring transfers within subgroups of ranks in a pod.
+      - ✅
+
     * - :ref:`Scaling preset (scaling) <scaling>`
       - Runs a scaling test from one GPU to all other devices (CPUs and GPUs).
       - ❌
@@ -56,7 +72,7 @@ The following table lists the presets available on TransferBench 1.66.03:
       - ❌
 
     * - :ref:`Sweep or random sweep preset (sweep/rsweep) <sweep>`
-      - Tests combinations of source (SRC), Executor, and destination (DST) with varying parallelism.
+      - Stress tests by running through combinations of transfers.
       - ❌
 
 .. note::
@@ -68,7 +84,7 @@ The following table lists the presets available on TransferBench 1.66.03:
 All-to-all preset (a2a)
 ========================
 
-The a2a preset tests parallel transfers between all pairs of GPU devices. It measures bidirectional bandwidth across every GPU-to-GPU combination on a single node or multinode system. It supports GFX (compute kernel) and DMA all-to-all, and optionally adds a parallel NIC executor ring (when ``NUM_QUEUE_PAIRS`` > 0).
+The a2a preset tests parallel transfers between all pairs of GPU devices within a single node. It measures bidirectional bandwidth across every GPU-to-GPU combination on a single node, which is performed simultaneously on all nodes in a multinode system. It supports GFX (compute kernel) and DMA all-to-all, and optionally adds a parallel NIC executor ring (when ``NUM_QUEUE_PAIRS`` > 0).
 
 **Key features:**
 
@@ -105,7 +121,9 @@ To modify the behavior of a2a preset, use the following environment variables:
       - Default value
 
     * - ``A2A_DIRECT``
-      - To use only directly connected XGMI links (hop count = 1). 0 = full all-to-all. This can be useful on older MI2XX hardware that doesn't feature full all-to-all XGMI connectivity, and running the standard all-to-all between all pairs of GPUs ends up using XGMI links more than once.
+      - To use only directly connected XGMI links (hop count = 1). 0 = full all-to-all.
+
+        This can be useful on older MI2XX hardware that doesn't feature full all-to-all XGMI connectivity. Running the standard all-to-all between all pairs of GPUs on that hardware ends up using XGMI links more than once.
       - ``1``
 
     * - ``A2A_LOCAL``
@@ -113,7 +131,9 @@ To modify the behavior of a2a preset, use the following environment variables:
       - ``0``
 
     * - ``A2A_MODE``
-      - Transfer mode: 0=Copy, 1=Read-Only, 2=Write-Only, or numSrcs:numDsts for custom. Systems with multiple sources or destinations mimic the behavior of some collective algorithms such as RingReduce, which sometimes require reading from two local buffers, adding them together, then writing to a local output buffer and remote temp buffer.
+      - Transfer mode: 0=Copy, 1=Read-Only, 2=Write-Only, or numSrcs:numDsts for custom.
+
+        Having multiple sources or destinations mimics the behavior of some collective algorithms such as RingReduce, which sometimes require reading from two local buffers, adding them together, then writing to a local output buffer and remote temp buffer.
       - ``0``
 
     * - ``GFX_UNROLL``
@@ -181,11 +201,11 @@ The table in the output shows the transfer rate for each pair of GPUs, as measur
 
 - ``Actual``: Reflects the actual time for the kernel to finish executing the slowest transfer. Because one GFX kernel is launched to handle all transfers to other GPUs, the kernel doesn't finish until the slowest transfer completes.
 
-- ``CPU Timed``: Measures all the transfers.
+- ``CPU Timed``: A CPU timer used to measure all transfers being done.
 
 .. note::
 
-    To rule out any possibility of serialization, check if the CPU Timed bandwidth is close to the aggregate GPU Timed bandwidth.
+    To rule out serialization, check that the CPU Timed bandwidth remains close to the aggregate GPU Timed bandwidth.
 
     To avoid serialization when running with DMA Executor, increase the number of hardware queues available.
 
@@ -211,6 +231,8 @@ The a2a_n preset tests parallel transfers between all pairs of GPU devices using
 - Prints a SRC x DST bandwidth matrix with row totals, column totals, and aggregate bandwidth.
 
 - Reports average and aggregate bandwidth (Tx-thread timed and CPU timed).
+
+**Restrictions:**
 
 - Single-node only.
 
@@ -246,7 +268,7 @@ To modify the behavior of a2a_n preset, use the following environment variables:
 
 .. note::
 
-    The a2a_n preset divides the available NIC bandwidth into the number of GPU peers.
+    In general, the a2a_n preset divides the available NIC bandwidth by the number of GPU peers.
 
 .. _a2asweep:
 
@@ -263,7 +285,7 @@ The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers
 
 - Sweep order: Outer loop over ``BLOCKSIZES``, then table of (``NUM_SUB_EXECS`` x ``UNROLLS``).
 
-- By default, reports only the slowest GPU's bandwidth (min bandwidth) per CU-Unroll combination. To include the fastest GPU's bandwidth (max bandwidth) per config, set ``SHOW_MIN_ONLY`` = 0.
+- Reports min (and optionally max) bandwidth per (CU, Unroll) combination. By default, reports only the slowest GPU's bandwidth. To include the fastest GPU's bandwidth per config, set ``SHOW_MIN_ONLY=0``.
 
 - Uses same transfer topology as a2a preset, such as direct links, A2A_MODE, and others.
 
@@ -358,11 +380,424 @@ Example output
             :width: 100%
             :align: center
 
+        .. code-block:: shell
+
+          [AllToAll Related]
+          A2A_DIRECT             =            1 : Only using direct links
+          A2A_LOCAL              =            0 : Exclude local transfers
+          A2A_MODE               =            0 : Copy
+          BLOCKSIZES             =            1 : 256
+          MEM_TYPE               =            2 : Using uncached GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
+          NUM_GPU_DEVICES        =            8 : Using 8 GPUs
+          NUM_SUB_EXECS          =            6 : 4,8,12,16,24,32
+          SHOW_MIN_ONLY          =            1 : Showing only slowest GPU results
+          UNROLLS                =            6 : 1,2,3,4,6,8
+          USE_REMOTE_READ        =            0 : Using SRC as executor
+          USE_SPRAY              =            0 : One target per SubExecutor
+          VERBOSE                =            0 : Display summary only
+
+          GPU-GFX All-To-All Sweep benchmark:
+          ==========================
+          - Copying 268435456 bytes between directly connected pairs of GPUs
+          Blocksize: 256
+          #CUs\Unroll  1(Min)  2(Min)  3(Min)  4(Min)  6(Min)  8(Min)
+                  4   120.38  209.89  269.09  299.24  296.78  294.77
+                  8   229.32  314.99  313.20  306.51  311.09  311.60
+                 12   305.80  320.60  311.18  315.30  316.70  309.50
+                 16   318.49  318.79  319.95  322.11  310.53  306.66
+                 24   324.85  324.33  324.36  315.62  298.20  281.21
+                 32   324.08  325.88  319.59  303.75  269.17  275.38
+
     .. tab-item:: AMD Instinct™ MI350X
 
         .. image:: /data/a2asweep_MI350X.png
             :width: 100%
             :align: center
+
+        .. code-block:: shell
+
+          [AllToAll Related]
+          A2A_DIRECT             =            1 : Only using direct links
+          A2A_LOCAL              =            0 : Exclude local transfers
+          A2A_MODE               =            0 : Copy
+          BLOCKSIZES             =            1 : 256
+          MEM_TYPE               =            2 : Using uncached GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
+          NUM_GPU_DEVICES        =            8 : Using 8 GPUs
+          NUM_SUB_EXECS          =            6 : 4,8,12,16,24,32
+          SHOW_MIN_ONLY          =            1 : Showing only slowest GPU results
+          UNROLLS                =            6 : 1,2,3,4,6,8
+          USE_REMOTE_READ        =            0 : Using SRC as executor
+          USE_SPRAY              =            0 : One target per SubExecutor
+          VERBOSE                =            0 : Display summary only
+
+          GPU-GFX All-To-All Sweep benchmark:
+          ==========================
+          - Copying 268435456 bytes between directly connected pairs of GPUs
+          Blocksize: 256
+          #CUs\Unroll  1(Min)  2(Min)  3(Min)  4(Min)  6(Min)  8(Min)
+                  4   107.82  196.18  265.01  323.90  339.33  333.61
+                  8   210.40  359.69  375.68  361.36  367.45  361.38
+                 12   307.32  382.42  371.92  375.84  379.00  360.03
+                 16   386.55  377.12  385.07  390.31  384.06  367.46
+                 24   404.03  395.28  398.00  391.28  376.55  370.55
+                 32   393.80  403.51  395.81  382.75  350.72  366.56
+
+.. _rings:
+
+Intra-pod ring preset (rings)
+==============================
+
+The rings preset runs parallel ring transfers across the GPUs of a single pod. The full pod-wide device list is permuted by ``STRIDE`` and then sliced into equal-sized rings of length ``RING_SIZE``. Within each ring, every GPU sends data to its successor (with wrap-around), so each device acts as both a SRC and a DST in exactly one transfer. All rings execute concurrently — useful for sustaining ring-collective-like traffic patterns at a configurable granularity, with an optional concurrent NIC ring.
+
+**Key features:**
+
+- **Grouping:** Builds a global device list ``[0..numRanks * numGpus - 1]``, mapped onto pod-wide GPUs in rank-major order, then passes it through ``StrideGenerate(list, STRIDE)``. With ``STRIDE`` coprime to the total device count, the reordering fully interleaves ranks; otherwise the list is partitioned into ``gcd(STRIDE, n)`` orbits.
+
+- **Ring construction:** Slices the permuted list into ``numRings = totalGpus / RING_SIZE`` consecutive chunks. Each chunk becomes one ring: Transfer ``i`` is ``device[ringBase + i]`` → ``device[ringBase + (i+1) % ringSize]``.
+
+- **GFX/DMA executor:** The executor is placed on either the SRC GPU (default) or the DST GPU (``USE_REMOTE_READ=1``).
+
+- **NIC ring overlay:** With ``NUM_QUEUE_PAIRS`` > 0, each transfer is duplicated as a parallel NIC ring using ``EXE_NIC_NEAREST``. The NIC ring traffic shares the same ring topology and runs concurrently with the GFX/DMA ring.
+
+- **Results:** Prints a per-ring summary table with one column per ring showing the device list, per-edge bandwidth, and MIN/AVG/MAX/SUM aggregates (and a separate NIC BW column per ring if ``NUM_QUEUE_PAIRS`` > 0).
+
+**Restrictions:**
+
+- **Homogeneous ranks required.** All ranks must have the same topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
+
+- **Single-pod only for multirank.** All ranks must be in a single pod. Override with ``TB_FORCE_SINGLE_POD=1`` when pod detection via amd-smi is unavailable.
+
+- **``RING_SIZE`` must evenly divide** ``numRanks x NUM_GPU_DEVICES``.
+
+- **Duplicate-hostname warning.** A trailing ``[WARN]`` is emitted if two ranks share a hostname.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench rings [numBytes]
+
+Multi-rank (sockets):
+
+.. code-block:: shell
+
+    ./LaunchTransferBench.sh hostA,hostB -- rings 1G
+
+Multi-rank (MPI):
+
+.. code-block:: shell
+
+    mpirun -np <N> ./TransferBench rings 1G
+
+.. note::
+
+    When pod detection via amd-smi is unavailable, prefix with ``TB_FORCE_SINGLE_POD=1`` to treat all participating ranks as one pod.
+
+Environment variables
+----------------------
+
+To modify the behavior of the rings preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``MEM_TYPE``
+      - GPU memory type: 0=default, 1=fine-grained, 2=uncached, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``NUM_GPU_DEVICES``
+      - Number of GPUs per rank to include. Must not exceed the detected GPU count on every rank.
+      - (detected)
+
+    * - ``NUM_QUEUE_PAIRS``
+      - Queue pairs per NIC ring transfer. 0=no NIC traffic. NIC results are excluded from the bandwidth matrix; to see them, set ``SHOW_DETAILS=1``.
+      - ``0``
+
+    * - ``NUM_SUB_EXEC``
+      - SubExecutors (CUs for GFX, batch items for DMA) per transfer.
+      - ``8``
+
+    * - ``RING_SIZE``
+      - Number of GPUs per ring. Must evenly divide ``numRanks x NUM_GPU_DEVICES``. Default is one ring covering the whole pod.
+      - ``numRanks x NUM_GPU_DEVICES``
+
+    * - ``SHOW_DETAILS``
+      - To show the full per-transfer result table in addition to the summarized matrix, set to ``1``.
+      - ``0``
+
+    * - ``STRIDE``
+      - Stride used to permute the global device list before slicing into rings. Coprime strides give one big orbit and rank-interleaved rings; non-coprime strides keep certain rank/device subsets together.
+      - ``1``
+
+    * - ``USE_DMA_EXEC``
+      - To use DMA Executor instead of GFX. Valid only for copy mode.
+      - ``0``
+
+    * - ``USE_REMOTE_READ``
+      - To use DST GPU as Executor (remote read) instead of SRC GPU (local read). Switches the matrix header between ``SRC+EXE\DST`` and ``SRC\DST+EXE``.
+      - ``0``
+
+Example output
+---------------
+
+.. code-block:: shell
+
+  [Rings Related]
+  MEM_TYPE               =            0 : Using default GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
+  NUM_GPU_DEVICES        =            4 : Using 4 GPUs
+  NUM_QUEUE_PAIRS        =            0 : Using 0 queue pairs for NIC transfers
+  NUM_SUB_EXEC           =            8 : Using 8 subExecutors/CUs per Transfer
+  USE_DMA_EXEC           =            0 : Using GFX executor
+  USE_REMOTE_READ        =            0 : Using SRC as executor
+  STRIDE                 =            1 : Reordering devices by taking 1 steps
+  RING_SIZE              =            8 : Building rings of size 8
+
+  GPU-GFX Rings benchmark:
+  ==============================
+  [268435456 bytes per Transfer] [GFX:8] [MemType:default GPU] [NIC QueuePairs:0] [#Ranks:2]
+  Running 1 parallel ring(s) each of 8 devices.  All numbers in GB/s:
+  ┌--------------┐
+  │Ring00  Ring00│
+  │Device  GFX BW│
+  ├--------------┤
+  │ R00:0  177.37│
+  │ R00:1  174.45│
+  │ R00:2  178.56│
+  │ R00:3  186.18│
+  │ R01:0  173.52│
+  │ R01:1  172.14│
+  │ R01:2  192.12│
+  │ R01:3  192.68│
+  ├--------------┤
+  │   MIN  172.14│
+  │   AVG  180.88│
+  │   MAX  192.68│
+  ├--------------┤
+  │   SUM 1447.04│
+  └--------------┘
+  Aggregate bandwidth (CPU Timed): 555.494 GB/s
+
+The output table shows:
+
+- ``Device``: The SRC of each edge in the ring. The DST is the next row, with wrap-around from the last row to the first. The format is ``R<rank>:<gpu>`` for multirank and ``<gpu>`` for single-rank.
+
+- ``MIN`` / ``AVG`` / ``MAX`` / ``SUM``: Summarize per-ring edge bandwidths.
+
+- When ``NUM_QUEUE_PAIRS`` > 0, each ring gets an extra ``NIC BW`` column showing the concurrent NIC ring's bandwidth.
+
+- When there are too many rings to fit (more than 24 / cols-per-ring), the output is paginated into multiple tables stacked vertically.
+
+- ``Aggregate bandwidth (CPU Timed)`` is the wall-clock sum across all rings and is the primary number to compare run-to-run.
+
+.. _nica2a:
+
+NIC all-to-all preset (nica2a)
+================================
+
+The nica2a preset runs an all-to-all over NIC Executors instead of GPU Executors, with every NIC sourcing and sinking via its closest memory endpoint (GPU device memory by default, or CPU NUMA memory with ``USE_CPU_MEM=1``). NICs are aggregated rank-major into a global pool of size ``numRanks x numNicsPerRank``, then partitioned twice — first into planes (intended for physically distinct fabric planes), then into groups within each plane (independent all-to-all units running concurrently). The two-stage partition is controlled by ``PLANE_STRIDE`` and ``NUM_PLANES`` for the plane split, and ``GROUP_STRIDE`` and ``NUM_GROUPS`` for the group split. This preset is designed for multinode use.
+
+**Key features:**
+
+- **NIC pool:** Builds a global NIC list ``nicId = rank * numNicsPerRank + nic``, of size ``N = numRanks x numNicsPerRank``.
+
+- **Plane split:** Permutes the NIC list by ``PLANE_STRIDE`` using ``StrideGenerate``, then chunks consecutively into ``NUM_PLANES`` planes of ``N / NUM_PLANES`` NICs each. Planes are independent measurement units.
+
+  .. image:: /data/nica2a_plane_split.png
+      :width: 100%
+      :align: center
+
+- **Group split (per plane):** Inside each plane, further partitions NICs into groups by permuting by ``GROUP_STRIDE``, then chunking into ``NUM_GROUPS`` groups of ``planeSize / NUM_GROUPS`` NICs each. Each group runs an internal all-to-all between its member NICs.
+
+- **Concurrent execution:** All groups across all planes run in a single ``RunTransfers`` call, so the reported numbers reflect concurrent fabric contention across the entire pool.
+
+- **Endpoint binding:** For each NIC, the preset queries ``GetClosestGpuToNic`` (or ``GetClosestCpuNumaToNic`` when ``USE_CPU_MEM=1``) and pins the SRC and DST memory to that device. Multiple NICs can share one closest GPU/NUMA — that is normal on systems with more NICs than GPU sockets.
+
+- **Direction:** ``USE_RDMA_READ=0`` (default) issues RDMA writes (Executor on SRC NIC). ``USE_RDMA_READ=1`` issues RDMA reads (Executor on DST NIC).
+
+- **Self transfers:** Excluded by default. To include NIC loopback, set ``A2A_LOCAL=1``.
+
+**Usage:**
+
+Multi-rank (MPI):
+
+.. code-block:: shell
+
+    mpirun -np <N> ./TransferBench nica2a [numBytes]
+
+Multi-rank (sockets):
+
+.. code-block:: shell
+
+    ./LaunchTransferBench.sh host1,host2,host3,host4 -- nica2a 256M
+
+Single-node:
+
+.. code-block:: shell
+
+    ./TransferBench nica2a 1G
+
+.. note::
+
+    To filter visible NICs, use ``TB_NIC_FILTER='<regex>'``. This is useful on nodes that have a mix of scale-out and storage NICs when you only want the scale-out fabric measured.
+
+Environment variables
+----------------------
+
+To modify the behavior of the nica2a preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``A2A_LOCAL``
+      - To include local transfers (i→i), set to ``1``. Useful to expose a pure-HBM baseline alongside the cross-GPU bandwidth.
+      - ``0``
+
+    * - ``A2A_MODE``
+      - Transfer mode: 0=Copy, 1=Read-Only, 2=Write-Only, or ``numSrcs:numDsts`` for custom. Extra DSTs beyond the first are local writes to the SRC GPU, useful for stressing SRC bandwidth without adding remote traffic.
+      - ``0``
+
+    * - ``GFX_UNROLL``
+      - GFX kernel unroll factor. Overrides global default. Forced to ``2`` unless explicitly set, to match a2a for direct comparison. See :ref:`gfx-unroll`.
+      - ``2``
+
+    * - ``GROUP_STRIDE``
+      - Stride used to permute NICs within each plane before splitting into groups. Coprime strides interleave ranks within each group; non-coprime strides keep certain rank/NIC subsets together.
+      - ``1``
+
+    * - ``MEM_TYPE``
+      - Memory type for the NIC endpoint buffers. GPU memory types when binding to GPUs; CPU memory types when binding to CPU NUMA. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``NUM_GPU_DEVICES``
+      - Number of GPUs per rank to include. Must not exceed the detected GPU count on every rank.
+      - (detected)
+
+    * - ``NUM_GROUPS``
+      - Number of groups per plane. Default ``1`` means one group per plane (full all-to-all within each plane). Must evenly divide ``planeSize``.
+      - ``1``
+
+    * - ``NUM_PLANES``
+      - Number of planes. Must evenly divide the total NIC count ``N``.
+      - ``1``
+
+    * - ``NUM_QUEUE_PAIRS``
+      - Queue pairs per NIC transfer. Higher counts increase per-NIC concurrency; required by some RDMA stacks to reach line rate.
+      - ``1``
+
+    * - ``PLANE_STRIDE``
+      - Stride used to permute the global NIC list before splitting into planes.
+      - ``1``
+
+    * - ``SHOW_DETAILS``
+      - To show the full per-transfer result table in addition to the per-group summary matrices, set to ``1``.
+      - ``0``
+
+    * - ``USE_CPU_MEM``
+      - To bind NIC endpoints to closest CPU NUMA memory instead of closest GPU memory, set to ``1``. Useful to isolate NIC fabric from GPU PCIe/XGMI bandwidth.
+      - ``0``
+
+    * - ``USE_RDMA_READ``
+      - To issue RDMA reads (Executor on DST NIC) instead of RDMA writes (Executor on SRC NIC), set to ``1``. Switches the matrix header between ``SRC+EXE\DST`` and ``SRC\DST+EXE``.
+      - ``0``
+
+Example output
+---------------
+
+Example run:
+
+.. code-block:: shell
+
+    mpirun -x PLANE_STRIDE=2 -x NUM_PLANES=2 -x GROUP_STRIDE=2 -x NUM_GROUPS=2 -x TB_NIC_FILTER='mlx5_[2-5]' -np 2 ./TransferBench nica2a
+
+.. code-block:: shell
+
+  [NIC A2A Related]
+  USE_CPU_MEM            =            0 : Using closest GPU memory
+  MEM_TYPE               =            0 : Using default GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
+  PLANE_STRIDE           =            2 : Stride permutation on global NIC list before splitting into planes
+  NUM_PLANES             =            2 : Splitting 8 total NICs into 2 plane(s) of 4 NICs each
+  GROUP_STRIDE           =            2 : Stride permutation within each plane before splitting into groups
+  NUM_GROUPS             =            2 : Splitting each plane into 2 group(s) of 2 NICs each
+  A2A_LOCAL              =            0 : Exclude self NIC endpoint transfers
+  NUM_QUEUE_PAIRS        =            1 : Using 1 queue pairs for NIC transfers
+  SHOW_DETAILS           =            0 : Hiding full Test details
+  USE_RDMA_READ          =            0 : Performing RDMA writes
+
+  NIC All-To-All benchmark
+  ========================
+  [268435456 bytes per Transfer] [Total Transfers: 8] [MemType:default GPU] [NIC QueuePairs:1] [#Ranks:2]
+  Running 2 parallel a2a group(s) each of 2 devices.  All numbers in GB/s:
+  8 total NICs (rank-major) split into 2 plane(s) of 4 NICs (PLANE_STRIDE=2).
+  Each plane split into 2 group(s) of 2 NICs (GROUP_STRIDE=2).
+  [Plane / Group breakdown]
+  Plane 00 (4 NICs):
+    Group 00 (2 NICs): -> 2 transfers
+      Rank 00: mlx5_2
+      Rank 01: mlx5_2
+    Group 01 (2 NICs): -> 2 transfers
+      Rank 00: mlx5_4
+      Rank 01: mlx5_4
+  Plane 01 (4 NICs):
+    Group 00 (2 NICs): -> 2 transfers
+      Rank 00: mlx5_3
+      Rank 01: mlx5_3
+    Group 01 (2 NICs): -> 2 transfers
+      Rank 00: mlx5_5
+      Rank 01: mlx5_5
+
+  --- NIC AllToAll Plane 00 Group 00 (2 NICs) ---
+  ┌---------------------┬-------------┬---------┬---------┬--------┬--------┐
+  │ Mem Device          │             │ Rank 00 │ Rank 01 │        │        │
+  │                     │             │  GPU 01 │  GPU 01 │        │        │
+  ├---------------------┼-------------┼---------┼---------┼--------┼--------┤
+  │                     │ SRC+EXE\DST │  mlx5_2 │  mlx5_2 │ STotal │ Actual │
+  ├---------------------┼-------------┼---------┼---------┼--------┼--------┤
+  │ Rank 00      GPU 01 │      mlx5_2 │     N/A │   48.95 │  48.95 │  48.95 │
+  ├---------------------┼-------------┼---------┼---------┼--------┼--------┤
+  │ Rank 01      GPU 01 │      mlx5_2 │   48.94 │     N/A │  48.94 │  48.94 │
+  ├---------------------┼-------------┼---------┼---------┼--------┼--------┤
+  │                     │      RTotal │   48.94 │   48.95 │  97.88 │  97.88 │
+  └---------------------┴-------------┴---------┴---------┴--------┴--------┘
+
+  Aggregate bandwidth (CPU Timed): 383.995 GB/s
+
+The output has two parts:
+
+- **Pre-run breakdown** — the ``[Plane / Group breakdown]`` block is printed before any transfer runs, so you can verify the NIC-to-rank-to-GPU layout before the measurement begins. Each group lists its NIC names grouped by rank.
+
+- **Per-group matrix** — one table per (plane, group). Rows are SRC NICs, columns are DST NICs, both grouped by rank and tagged with the backing memory device (GPU index or CPU NUMA index).
+
+  - ``STotal`` — per-SRC-NIC row sum (total bandwidth out of that NIC).
+  - ``RTotal`` — per-DST-NIC column sum (total bandwidth into that NIC).
+  - ``Actual`` — ``rowCount x min(row)``, lower-bound on what the row achieves if the slowest peer link saturates first.
+  - The grand totals under ``STotal`` and ``Actual`` aggregate the whole group.
+  - ``Aggregate bandwidth (CPU Timed)`` sums across all groups and is the primary number to compare run-to-run.
+
+**Restrictions:**
+
+- **Homogeneous ranks required.** All ranks must have the same NIC topology; otherwise the preset exits with ``[ERROR] NIC all-to-all preset can only be run across ranks that are homogenous``. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed (for example, ``TB_NIC_FILTER='mlx5_[0-7]'`` to keep only scale-out NICs).
+
+- **At least one NIC required.** If no NICs are detected, the preset exits with ``[ERROR] No NIC detected. This preset requires NIC executors``.
+
+- **Memory device must exist.** If ``USE_CPU_MEM=0``, requires at least one GFX-capable GPU. If ``USE_CPU_MEM=1``, requires at least one CPU Executor. Exits with ``[ERROR] No <GPU GFX|CPU> executors detected for NIC all-to-all``.
+
+- **Plane and group divisibility.** ``NUM_PLANES`` must evenly divide the total NIC count ``N``. ``NUM_GROUPS`` must evenly divide ``planeSize = N / NUM_PLANES``. Off-by-one configurations are rejected with an error pointing at the constraint.
+
+- **All groups run concurrently.** All groups across all planes run in a single ``RunTransfers`` call — measurements reflect the contention you would see in a real collective. To run one group at a time per plane, set ``NUM_GROUPS=1``, but planes still run concurrently.
+
+- **Closest-endpoint binding is fixed per NIC.** The preset always binds each NIC to its closest memory device. To exercise alternative NIC-to-memory mappings, use a command-line transfer definition with explicit ``R<rank>I<nic>.<sub>`` syntax instead.
+
+- **Duplicate-hostname warning.** A trailing ``[WARN]`` is emitted if two ranks share a hostname, as running multiple ranks per host can cause Executor aliasing.
+
+- **Bandwidth orientation flips with** ``USE_RDMA_READ``. With reads, the Executor is on the DST; row labels still represent the SRC (data flow direction stays the same), but the header changes from ``SRC+EXE\DST`` to ``SRC\DST+EXE``.
 
 .. _nicrings:
 
@@ -387,11 +822,15 @@ The following image shows the ring topology:
 
 - Supports RDMA read or write. To choose the rank for RDMA read or write in multirank systems, use ``USE_RDMA_READ``.
 
-- Multinode supported with homogeneous ranks (same topology). Use ``TB_NIC_FILTER`` to limit NIC visibility if needed.
+- Multinode supported.
 
 - Transfer direction: ``currRank`` sends to (``currRank`` + 1) % ``numRanks``.
 
 - Executor placement: Executor is placed on the SRC rank for RDMA write and DST rank for RDMA read.
+
+**Restrictions:**
+
+- **Homogeneous ranks required.** All ranks must have identical NIC topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
 
 **Usage:**
 
@@ -448,9 +887,34 @@ Example output
 
 Here is an example output collected on four MI350X nodes with 8 NICs:
 
-.. image:: /data/nicrings_MI350X.png
-  :width: 100%
-  :align: center
+.. code-block:: shell
+
+  [NIC-Rings Related]
+  NUM_QUEUE_PAIRS        =            1 : Using 1 queue pairs for NIC transfers
+  SHOW_DETAILS           =            0 : Hiding full Test details
+  USE_CPU_MEM            =            0 : Using closest GPU memory
+  MEM_TYPE               =            0 : Using default GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
+  USE_RDMA_READ          =            0 : Performing RDMA writes
+
+  NIC Rings benchmark
+  ==============================
+  8 parallel RDMA-write rings(s) using default GPU memory across 4 ranks
+  1 queue pairs per NIC.  268435456 bytes per Transfer.  All numbers are GB/s
+
+                                 │  GPU 00  │  GPU 01  │  GPU 02  │  GPU 03  │  GPU 04  │  GPU 05  │  GPU 06  │  GPU 07  │
+                                 │  NIC 00  │  NIC 01  │  NIC 02  │  NIC 03  │  NIC 04  │  NIC 05  │  NIC 06  │  NIC 07  │  TOTAL
+  Rank  Name                     │ bnxt_re0 │ bnxt_re1 │ bnxt_re2 │ bnxt_re3 │ bnxt_re4 │ bnxt_re5 │ bnxt_re6 │ bnxt_re7 │  (GB/s)
+  ---------------------------------┼----------┼----------┼----------┼----------┼----------┼----------┼----------┼----------┼---------
+     0  cv350-zts-gtu-g27a-08    │    31.32 │    31.32 │    31.33 │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │  250.57
+     1  cv350-zts-gtu-h32-08     │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │    31.33 │  250.58
+     2  cv350-zts-gtu-h32a-18    │    31.33 │    31.33 │    31.33 │    31.33 │    31.33 │    31.33 │    31.32 │    31.33 │  250.62
+     3  cv350-zts-gtu-h32a-08    │    31.33 │    31.34 │    31.33 │    31.33 │    31.33 │    31.32 │    31.33 │    31.33 │  250.64
+  ---------------------------------┼----------┼----------┼----------┼----------┼----------┼----------┼----------┼----------┼---------
+  MAX (GB/s)                     │    31.33 │    31.34 │    31.33 │    31.33 │    31.33 │    31.33 │    31.33 │    31.33 │  250.64
+  AVG (GB/s)                     │    31.32 │    31.33 │    31.33 │    31.33 │    31.32 │    31.32 │    31.33 │    31.33 │  250.60
+  MIN (GB/s)                     │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │    31.32 │  250.57
+
+  Aggregate bandwidth (CPU Timed): 960.620 GB/s
 
 .. _nicp2p:
 
@@ -473,9 +937,13 @@ The nicp2p preset runs a multinode peer-to-peer RDMA transfer test between all N
 
 - Progress report: Prints progress to stderr. For example, "Completed X/Y pairs in Zs, estimated remaining time Ws".
 
-- Multinode supported with homogeneous ranks (same topology). Use ``TB_NIC_FILTER`` to limit NIC visibility if needed.
+- Multinode supported.
 
-- NICs required: Exits with error if no NICs are detected.
+**Restrictions:**
+
+- **Homogeneous ranks required.** All ranks must have identical NIC topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
+
+- **NICs required.** Exits with error if no NICs are detected.
 
 **Usage:**
 
@@ -627,7 +1095,7 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 **Key features:**
 
-- Requires at least two GPUs. Uses one GPU (``EXE_INDEX``) as SRC and Executor.
+- Uses one GPU (``EXE_INDEX``) as SRC and Executor. Requires at least two GPUs.
 
 - Sweeps over all combinations of 1, 2, ..., N DST GPUs (excluding the SRC).
 
@@ -637,14 +1105,18 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 - Supports GFX or DMA executor. Each of SRC and DST can independently be GPU or Null, but not both Null simultaneously.
 
-- Supports single node only: Multinode is not supported.
-
 - Invalid configs are skipped in two cases:
 
   - ``exe`` = DMA and (``src`` = N or ``dst`` = N)
   - ``src`` = N and ``dst`` = N
 
 - Output format: Each line shows bandwidth per DST GPU, ``p``, ``numSubExecs``, and transfer triplets.
+
+**Restrictions:**
+
+- Single-node only.
+
+- Requires at least two GPUs.
 
 **Usage:**
 
@@ -1022,16 +1494,19 @@ The p2p preset measures device memory bandwidth between all pairs of CPU NUMA no
 
 - Prints bandwidth matrix with row and column labels. Optionally shows min/max/stddev per iteration.
 
+.. note::
+
+    The Executor used is either the same device as SRC, or DST if ``USE_REMOTE_READ=1``. For example, a transfer from CPU 01 to GPU 2 uses CPU threads to copy to GPU 2, which is equivalent to ``C0→C0→G2``.
 
 **Restrictions:**
 
 - Single-node only.
 
-- ``USE_FINE_GRAIN`` is deprecated: Returns error if ``USE_FINE_GRAIN`` is set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
+- ``USE_FINE_GRAIN`` **is deprecated:** Returns error if ``USE_FINE_GRAIN`` is set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
 
 - **NVIDIA platforms:** CPU executors can't access GPU memory; those pairs are skipped.
 
-- Self-transfers skipped: CPU i-to-i and GPU i-to-i are skipped in bidirectional mode.
+- **Self-transfers skipped:** CPU i-to-i and GPU i-to-i are skipped in bidirectional mode.
 
 **Usage:**
 
@@ -1230,6 +1705,325 @@ Example output
                                 CPU->CPU  CPU->GPU  GPU->CPU  GPU->GPU
       Averages (During  BiDir):     80.22     47.49     47.51     54.66
 
+.. _poda2a:
+
+Pod all-to-all preset (poda2a)
+===============================
+
+The poda2a preset is the pod-aware sibling of :ref:`a2a`. It creates groups within a virtual pod, then conducts all-to-all among devices within a group through the UALoE path. It expands the all-to-all matrix beyond a single node so GFX and DMA Executors can reach SRC and DST memory on remote-rank GPUs that share the pod. It supports GFX or DMA as the Executor and an optional concurrent NIC ring, and is available since v1.67.
+
+**Key features:**
+
+- **GFX or DMA mode and transfer modes:** Behaves the same as the :ref:`a2a` preset. ``USE_SINGLE_STREAM=1`` is always set so all transfers from a source GPU are coalesced into a single kernel launch. ``GFX_UNROLL`` defaults to ``2`` unless the user exports an explicit value, for parity with a2a.
+
+- **Grouping:** With ``NUM_GROUPS`` > 1, the pod devices are permuted by ``GROUP_STRIDE`` and partitioned into ``NUM_GROUPS`` equally-sized groups.
+
+- **Execution:** Each group runs its own all-to-all and all groups execute concurrently inside a single ``RunTransfers`` call. This measures how partitioned traffic patterns share fabric bandwidth.
+
+- **NIC rings:** When ``NUM_QUEUE_PAIRS`` > 0, each source GPU gets a supplementary NIC ring (GPU ``i`` → GPU ``(i+1)%groupSize`` via nearest-NIC RDMA). These transfers add load but are intentionally excluded from the reported bandwidth matrix.
+
+- **Results:** Prints one SRC×DST bandwidth matrix per group, with per-rank and per-GPU rows and columns, row and column totals (``STotal``, ``RTotal``), and an ``Actual`` column derived from ``rowCount x min(row)``, similar to regular a2a output.
+
+**Restrictions:**
+
+- **Single-pod only.** Multi-pod topologies are rejected with ``[ERROR] PodAllToAll preset currently requires all ranks to be in a single pod``. Multi-pod support is not yet implemented.
+
+- **Pod detection required.** If amd-smi does not return a non-empty pod map, the preset exits with ``[ERROR] No pods detected``. Use ``TB_FORCE_SINGLE_POD=1`` to override.
+
+- **DMA Executor is copy-only.** ``USE_DMA_EXEC=1`` combined with any non-copy ``A2A_MODE`` (including custom ``N:M``) fails immediately.
+
+- **Equal GPU count per rank.** All participating ranks must report the same ``NUM_GPU_DEVICES``; a mismatch is a fatal error.
+
+- **``NUM_GROUPS`` divisibility.** ``NUM_GROUPS`` must evenly divide ``numRanks x NUM_GPU_DEVICES``, otherwise the preset exits with ``[ERROR] NUM_GROUPS (X) must divide pod device count``.
+
+- **NIC config mismatch is a warning.** Differing NIC counts across ranks produce ``[WARN] Not all ranks have the same number of NICs`` but do not abort the run.
+
+- **Duplicate-hostname warning.** A trailing ``[WARN]`` is emitted if two ranks share a hostname — running more than one rank per host can alias Executors and skew results.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench poda2a [numBytes]
+
+Multi-rank (sockets):
+
+.. code-block:: shell
+
+    ./LaunchTransferBench.sh hostA,hostB -- poda2a 1G
+
+Multi-rank (MPI):
+
+.. code-block:: shell
+
+    mpirun -np <N> ./TransferBench poda2a 1G
+
+.. note::
+
+    When pod detection via amd-smi is unavailable, prefix with ``TB_FORCE_SINGLE_POD=1`` to treat all participating ranks as one pod.
+
+Environment variables
+----------------------
+
+To modify the behavior of the poda2a preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``A2A_LOCAL``
+      - To include local transfers (i→i), set to ``1``. Useful to expose a pure-HBM baseline alongside the cross-GPU bandwidth.
+      - ``0``
+
+    * - ``A2A_MODE``
+      - Transfer mode: 0=Copy, 1=Read-Only, 2=Write-Only, or ``numSrcs:numDsts`` for custom. Extra DSTs beyond the first are local writes to the SRC GPU, useful for stressing SRC bandwidth without adding remote traffic.
+      - ``0``
+
+    * - ``GFX_UNROLL``
+      - GFX kernel unroll factor. Overrides global default. Forced to ``2`` unless explicitly set, for parity with a2a. See :ref:`gfx-unroll`.
+      - ``2``
+
+    * - ``GROUP_STRIDE``
+      - Stride used to permute the per-pod device list before splitting into groups. Larger strides break up rank-local clustering so each group spans more ranks.
+      - ``1``
+
+    * - ``MEM_TYPE``
+      - GPU memory type: 0=default, 1=fine-grained, 2=uncached, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``NUM_GPU_DEVICES``
+      - Number of GPUs per rank to include. Must not exceed the detected GPU count on every rank.
+      - (detected)
+
+    * - ``NUM_GROUPS``
+      - Number of independent all-to-all groups per pod. Must evenly divide ``numRanks x NUM_GPU_DEVICES``.
+      - ``1``
+
+    * - ``NUM_QUEUE_PAIRS``
+      - Queue pairs per NIC ring transfer. 0=no NIC traffic. NIC results are excluded from the bandwidth matrix; to see them, set ``SHOW_DETAILS=1``.
+      - ``0``
+
+    * - ``NUM_SUB_EXEC``
+      - SubExecutors (CUs for GFX, batch items for DMA) per transfer.
+      - ``8``
+
+    * - ``SHOW_DETAILS``
+      - To show the full per-transfer result table in addition to the summarized matrix, set to ``1``.
+      - ``0``
+
+    * - ``USE_DMA_EXEC``
+      - To use DMA Executor instead of GFX, set to ``1``. Valid only for copy mode.
+      - ``0``
+
+    * - ``USE_REMOTE_READ``
+      - To use DST GPU as Executor (remote read) instead of SRC GPU (local read), set to ``1``. Switches the matrix header between ``SRC+EXE\DST`` and ``SRC\DST+EXE``.
+      - ``0``
+
+Example output
+---------------
+
+.. code-block:: shell
+
+  [AllToAll Related]
+  A2A_LOCAL              =            0 : Exclude local transfers
+  A2A_MODE               =            0 : Copy
+  MEM_TYPE               =            0 : Using default GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
+  NUM_GPU_DEVICES        =            4 : Using 4 GPUs
+  NUM_QUEUE_PAIRS        =            0 : Using 0 queue pairs for NIC transfers
+  NUM_SUB_EXEC           =            8 : Using 8 subExecutors/CUs per Transfer
+  USE_DMA_EXEC           =            0 : Using GFX executor
+  USE_REMOTE_READ        =            0 : Using SRC as executor
+  GROUP_STRIDE           =            2 : Stride permutation on device list before splitting into groups
+  NUM_GROUPS             =            2 : Splitting each pod into 2 group(s) for a2a
+
+  GPU-GFX IntraPod All-To-All benchmark:
+  ==============================
+  [268435456 bytes per Transfer] [GFX:8] [1 Read(s) 1 Write(s)] [MemType:default GPU] [NIC QueuePairs:0] [#Ranks:2]
+  A2A group 0: R0:G0, R0:G2, R1:G0, R1:G2
+  A2A group 1: R0:G1, R0:G3, R1:G1, R1:G3
+
+  --- Pod AllToAll Group 0 ---
+  ┌-------------┬------------┬-----------------┬-----------------┬---------┬---------┐
+  │ SRC+EXE\DST │            │     Rank 00     │     Rank 01     │ STotal  │ Actual  │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │             │ Mem Device │  GPU 00  GPU 02  │  GPU 00  GPU 02 │         │         │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │ Rank 00     │ GPU 00     │  N/A    106.23   │ 106.38  106.78  │  319.39 │  318.69 │
+  │             │ GPU 02     │ 106.51    N/A    │ 106.46  107.10  │  320.07 │  319.38 │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │ Rank 01     │ GPU 00     │ 105.84  106.56   │  N/A    106.39  │  318.79 │  317.52 │
+  │             │ GPU 02     │ 105.77  105.30   │ 106.07    N/A   │  317.13 │  315.89 │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │             │ RTotal     │ 318.12  318.09   │ 318.90  320.27  │ 1275.38 │ 1271.49 │
+  └-------------┴------------┴-----------------┴-----------------┴---------┴---------┘
+
+  --- Pod AllToAll Group 1 ---
+  ┌-------------┬------------┬-----------------┬-----------------┬---------┬---------┐
+  │ SRC+EXE\DST │            │     Rank 00     │     Rank 01     │ STotal  │ Actual  │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │             │ Mem Device │  GPU 01  GPU 03  │  GPU 01  GPU 03 │         │         │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │ Rank 00     │ GPU 01     │  N/A    105.90   │ 105.73  106.09  │  317.73 │  317.20 │
+  │             │ GPU 03     │ 107.34    N/A    │ 108.22  108.86  │  324.42 │  322.02 │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │ Rank 01     │ GPU 01     │ 105.97  106.28   │  N/A    106.44  │  318.69 │  317.90 │
+  │             │ GPU 03     │ 106.02  106.06   │ 106.51    N/A   │  318.60 │  318.07 │
+  ├-------------┼------------┼-----------------┼-----------------┼---------┼---------┤
+  │             │ RTotal     │ 319.33  318.24   │ 320.47  321.39  │ 1279.43 │ 1275.20 │
+  └-------------┴------------┴-----------------┴-----------------┴---------┴---------┘
+
+.. _podp2p:
+
+Pod peer-to-peer preset (podp2p)
+==================================
+
+The podp2p preset measures pair-wise peer-to-peer bandwidth between every pair of GPUs that belong to the same pod, including cross-rank pairs reachable over XGMI fabric. Each pair can be measured unidirectionally (one direction at a time), bidirectionally (both directions concurrently), or both. Two parallelism modes are supported: serialized pair-at-a-time (the default, which yields the cleanest peak numbers) or node-pair-parallel (faster wall time, more realistic interference). The podp2p preset is the pod-aware sibling of :ref:`p2p` — instead of restricting the matrix to one node, it expands to all ranks in a single pod.
+
+**Key features:**
+
+- **Pair enumeration:** For each ordered pair (``srcGPU``, ``dstGPU``) across all pod-wide devices, runs a transfer from ``srcGPU`` to ``dstGPU``. Self-pairs are included in the unidirectional matrix as a loopback measurement and excluded from the bidirectional matrix.
+
+- **Direction modes:** ``P2P_MODE`` selects unidirectional only (``1``), bidirectional only (``2``), or both back-to-back (``0``).
+
+- **Parallelism modes:**
+
+  - ``PARALLEL_LVL=0`` (default): runs exactly one transfer (or one pair of transfers for bidirectional) at a time — every other GPU pair is idle. Produces the cleanest peak-bandwidth matrix.
+
+  - ``PARALLEL_LVL=1``: node-pair-parallel mode using the internal ``RoundRobinSchedule``. Each round picks a set of disjoint rank-pairs and runs all (``srcDev``, ``dstDev``) pairs for those rank-pairs concurrently. Faster but introduces cross-pair fabric contention.
+
+- **GFX or DMA executor:** Uses either GFX (default) or DMA (``USE_GPU_DMA=1``). The Executor is placed on either the SRC GPU (default) or the DST GPU (``USE_REMOTE_READ=1``). Unlike :ref:`poda2a`, DMA works for any ``P2P_MODE`` — bidirectional DMA runs two SDMA engines back-to-back.
+
+- **Results:** Prints one bandwidth table per direction mode. Output is either a full ``N×N`` matrix (``OUTPUT_FORMAT=1``, default) with bidirectional showing three rows per SRC GPU (``->``, ``<-``, ``<->``), or a flat list (``OUTPUT_FORMAT=0``) with one row per (SRC, DST, direction).
+
+- **Pair iteration order:** Pairs are iterated in (``srcRank``, ``srcDev``, ``dstRank``, ``dstDev``) order. With ``PARALLEL_LVL=1``, the outer iteration is replaced by a round-robin tournament over rank-pairs so that no rank participates in more than one pair per round.
+
+- **``NUM_GPU_SE`` default differs by executor:** For GFX, defaults to the full CU count of GPU 0 (giving each pair a fully owned GPU). For DMA, defaults to ``1`` since SDMA engines are not subdivided by SubExecutor.
+
+**Restrictions:**
+
+- **Homogeneous ranks required:** All ranks must have the same physical and virtual pod membership; otherwise exits with ``[ERROR] Pod p2p preset can only be run across ranks that are homogenous``.
+
+- **Pod detection required:** If amd-smi returns an empty pod map, exits with ``[ERROR] No pods detected``. Override with ``TB_FORCE_SINGLE_POD=1``.
+
+.. note::
+
+    This preset uses different environment variable names than :ref:`poda2a` for memory type and SubExecutors: ``GPU_MEM_TYPE``, ``NUM_GPU_SE``, and ``USE_GPU_DMA`` rather than ``MEM_TYPE``, ``NUM_SUB_EXEC``, and ``USE_DMA_EXEC``.
+
+.. note::
+
+    When pod detection via amd-smi is unavailable, prefix with ``TB_FORCE_SINGLE_POD=1`` to treat all participating ranks as one pod.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench podp2p [numBytes]
+
+Multi-rank (sockets):
+
+.. code-block:: shell
+
+    ./LaunchTransferBench.sh hostA,hostB -- podp2p 1G
+
+Multi-rank (MPI):
+
+.. code-block:: shell
+
+    mpirun -np <N> ./TransferBench podp2p 1G
+
+Environment variables
+----------------------
+
+To modify the behavior of the podp2p preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``GPU_MEM_TYPE``
+      - GPU memory type: 0=default, 1=fine-grained, 2=uncached, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``NUM_GPU_DEVICES``
+      - Number of GPUs per rank to include.
+      - (detected)
+
+    * - ``NUM_GPU_SE``
+      - SubExecutors per transfer. For GFX, defaults to the full CU count so each pair has the GPU all to itself. For DMA, defaults to ``1`` since SDMA engines are not subdivided by SubExecutor.
+      - (hardware CU count or ``1`` for DMA)
+
+    * - ``OUTPUT_FORMAT``
+      - To output a full ``N×N`` matrix per direction, set to ``1``. For a flat one-row-per-pair table, set to ``0``. The flat format is recommended for large pods where the matrix becomes unreadable.
+      - ``1``
+
+    * - ``P2P_MODE``
+      - Direction mode: 0=unidirectional and bidirectional (both, back-to-back), 1=unidirectional only, 2=bidirectional only.
+      - ``0``
+
+    * - ``PARALLEL_LVL``
+      - Parallelism level: 0=one pair at a time, 1=node-pairs concurrent. Level 1 reduces wall time but per-cell numbers may dip from cross-pair contention.
+      - ``0``
+
+    * - ``USE_GPU_DMA``
+      - To use DMA Executor instead of GFX, set to ``1``. Works for any ``P2P_MODE``.
+      - ``0``
+
+    * - ``USE_REMOTE_READ``
+      - To use DST GPU as Executor (remote read) instead of SRC GPU (local read), set to ``1``. Switches the matrix header between ``SRC+EXE\DST`` and ``SRC\DST+EXE``.
+      - ``0``
+
+Example output
+---------------
+
+.. code-block:: shell
+
+  [P2P Related]
+  GPU_MEM_TYPE           =            0 : Using default GPU (0=default, 1=fine-grained, 2=uncached, 3=managed)
+  NUM_GPU_DEVICES        =            4 : Using 4 GPUs per rank
+  NUM_GPU_SE             =          152 : Using 152 GPU subExecutors/CUs per Transfer
+  P2P_MODE               =            0 : Running Uni + Bi transfers
+  PARALLEL_LVL           =            0 : Executing p2p in parallel level 0 (0: no parallel, 1: node pairs in parallel)
+  USE_GPU_DMA            =            0 : Using GPU-GFX as GPU executor
+  USE_REMOTE_READ        =            0 : Using SRC as executor
+
+  Bytes Per Direction 268435456
+  Unidirectional copy peak bandwidth GB/s [Local read / Remote write] (GPU-Executor: GFX)
+  ┌-------------┬------------┬---------------------------------------┬---------------------------------------┐
+  │ SRC+EXE\DST │            │             Rank 00                  │             Rank 01                  │
+  ├-------------┼------------┼---------------------------------------┼---------------------------------------┤
+  │             │ Mem Device │ GPU 00  GPU 01  GPU 02  GPU 03       │ GPU 00  GPU 01  GPU 02  GPU 03       │
+  ├-------------┼------------┼---------------------------------------┼---------------------------------------┤
+  │ Rank 00     │ GPU 00     │ 1683.68  631.82  621.12  615.64      │  621.32  623.75  617.52  616.44      │
+  │             │ GPU 01     │  606.28 1563.20  613.56  615.22      │  613.53  613.71  613.49  615.39      │
+  │             │ GPU 02     │  608.66  618.81 1611.71  626.64      │  621.54  622.20  625.34  617.71      │
+  │             │ GPU 03     │  614.25  621.75  624.77 1652.70      │  628.94  601.20  624.25  623.78      │
+  ├-------------┼------------┼---------------------------------------┼---------------------------------------┤
+  │ Rank 01     │ GPU 00     │  615.06  622.32  621.86  620.58      │ 1639.94  620.94  613.57  617.17      │
+  │             │ GPU 01     │  614.84  618.22  620.67  621.07      │  622.79 1589.99  613.92  613.48      │
+  │             │ GPU 02     │  617.73  618.69  618.10  618.10      │  619.35  614.28 1590.92  619.23      │
+  │             │ GPU 03     │  618.77  622.42  625.30  624.11      │  622.33  626.28  625.73 1621.71      │
+  └-------------┴------------┴---------------------------------------┴---------------------------------------┘
+
+The output table shows:
+
+- ``Rows``: SRC GPU, grouped by rank. In the bidirectional table each SRC GPU spans three rows: ``->`` (forward bandwidth), ``<-`` (reverse bandwidth), and ``<->`` (their sum). The unidirectional table has one row per SRC.
+
+- ``Columns``: DST GPU, grouped by rank.
+
+- ``Diagonal cells (N/A)``: Self-pairs are not measured in the bidirectional table; the unidirectional table includes them.
+
+- ``Header label``: ``SRC+EXE\DST`` when the Executor is on the SRC (default), ``SRC\DST+EXE`` when ``USE_REMOTE_READ=1``.
+
+- ``Bytes Per Direction``: For bidirectional measurements, both directions transfer this many bytes concurrently; aggregate bandwidth can therefore exceed link peak by approximately two times if the link is full-duplex.
+
+- ``OUTPUT_FORMAT=0`` (flat): The same data is rendered as one row per (SRC, DST, direction), with columns ``SRC Rank | SRC MEM | (Dir) | DST Rank | DST MEM | bw (GB/s)``.
+
 .. _scaling:
 
 Scaling preset (scaling)
@@ -1237,7 +2031,7 @@ Scaling preset (scaling)
 
 The scaling preset runs a scaling test from one GPU to all other devices (CPUs and GPUs). It varies the number of SubExecutors (CUs) from SWEEP_MIN to SWEEP_MAX and reports bandwidth for each target device. It helps find optimal CU count per transfer.
 
-**Key feature:**
+**Key features:**
 
 - Uses one GPU (``LOCAL_IDX``) as source.
 
@@ -1425,9 +2219,9 @@ The schmoo preset runs scaling tests for local and remote read, write, and copy 
 
 **Key features:**
 
-- Minimum 2 GPUs: Requires at least two GPUs: ``LOCAL_IDX`` (local) and ``REMOTE_IDX`` (remote).
+- Uses two GPUs: ``LOCAL_IDX`` (local) and ``REMOTE_IDX`` (remote).
 
-- Fixed topology: Always two GPUs (local and remote). No sweep over device count.
+- Fixed topology: Always two GPUs (local and remote); no sweep over device count.
 
 - For each CU count, runs the following six tests. Each test measures bandwidth for the corresponding operation pattern:
 
@@ -1445,7 +2239,11 @@ The schmoo preset runs scaling tests for local and remote read, write, and copy 
 
 - Outputs a table: rows = #CUs, columns = the 6 operation types.
 
-- Supports single node only: Multinode is not supported.
+**Restrictions:**
+
+- Single-node only.
+
+- Requires at least two GPUs.
 
 **Usage:**
 
@@ -1508,11 +2306,103 @@ Example output
       :width: 100%
       :align: center
 
+    .. code-block:: shell
+
+      [Schmoo Related]
+      LOCAL_IDX              =            0 : Local GPU index
+      REMOTE_IDX             =            1 : Remote GPU index
+      SWEEP_MAX              =           32 : Max number of subExecutors to use
+      SWEEP_MIN              =            1 : Min number of subExecutors to use
+      USE_FINE_GRAIN         =            0 : Using coarse-grained memory
+
+      Bytes to transfer: 268435456  Local GPU: 0  Remote GPU: 1
+               | Local Read  | Local Write | Local Copy  | Remote Read | Remote Write| Remote Copy |
+      #CUs |G00->G00->N00|N00->G00->G00|G00->G00->G00|G01->G00->N00|N00->G00->G01|G00->G00->G01|
+      |------|-------------|-------------|-------------|-------------|-------------|-------------|
+           1     51.037       53.012       53.762       23.204       46.208       25.919
+           2    101.532      104.000      106.908       45.954       49.012       48.511
+           3    153.172      160.430      155.587       49.119       49.000       48.515
+           4    204.086      211.594      208.435       49.420       49.015       48.978
+           5    256.109      262.338      251.753       49.648       48.873       45.222
+           6    307.136      308.372      295.809       49.383       49.014       48.800
+           7    360.041      346.673      352.816       49.619       49.209       49.178
+           8    413.266      399.531      393.937       49.843       49.426       49.412
+           9    466.896      438.429      439.352       49.183       48.870       48.865
+          10    476.217      478.565      491.344       49.725       49.400       49.336
+          11    574.845      543.872      522.368       49.573       49.330       49.301
+          12    630.188      574.289      554.644       49.407       49.183       49.139
+          13    685.999      625.135      607.760       49.489       49.103       49.079
+          14    737.719      628.946      634.839       49.225       48.917       48.895
+          15    795.374      667.816      673.621       49.608       49.360       49.276
+          16    849.834      724.657      717.113       49.475       49.175       49.099
+          17    901.907      739.877      753.509       49.338       49.094       48.998
+          18    957.395      795.402      780.286       49.850       49.428       49.360
+          19   1010.702      869.258      877.458       49.870       49.603       49.518
+          20   1064.781      892.518      858.842       49.730       49.561       49.467
+          21    946.525      959.054      884.443       49.752       49.415       49.371
+          22   1169.169      951.487      957.266       49.734       49.475       49.397
+          23   1223.308      981.540     1016.227       49.220       48.926       48.874
+          24   1276.598     1014.258     1048.556       49.484       49.323       49.271
+          25   1331.670     1158.243     1072.181       49.365       49.141       49.088
+          26   1379.783     1189.800     1129.175       49.671       49.419       49.368
+          27   1434.226     1164.508     1168.762       49.753       49.427       49.378
+          28   1489.157     1261.949     1221.166       49.300       49.076       49.002
+          29   1540.581     1306.211     1311.738       49.605       49.235       49.190
+          30   1601.357     1299.206     1295.013       49.769       49.433       49.369
+          31   1653.141     1351.537     1405.414       49.856       49.616       49.527
+          32   1692.585     1419.625     1426.634       49.608       49.434       49.386
+
   .. tab-item:: AMD Instinct MI350X
 
     .. image:: /data/schmoo_MI350X.png
       :width: 100%
       :align: center
+
+    .. code-block:: shell
+
+      [Schmoo Related]
+      LOCAL_IDX              =            0 : Local GPU index
+      REMOTE_IDX             =            1 : Remote GPU index
+      SWEEP_MAX              =           32 : Max number of subExecutors to use
+      SWEEP_MIN              =            1 : Min number of subExecutors to use
+      USE_FINE_GRAIN         =            0 : Using coarse-grained memory
+
+      Bytes to transfer: 268435456  Local GPU: 0  Remote GPU: 1
+               | Local Read  | Local Write | Local Copy  | Remote Read | Remote Write| Remote Copy |
+      #CUs |G00->G00->N00|N00->G00->G00|G00->G00->G00|G01->G00->N00|N00->G00->G01|G00->G00->G01|
+      |------|-------------|-------------|-------------|-------------|-------------|-------------|
+           1     31.275       56.947       54.649       23.250       56.354       16.008
+           2     63.360      111.062      111.648       42.510       61.841       32.069
+           3     94.786      159.915      157.217       58.491       61.574       47.758
+           4    125.263      206.254      215.890       67.051       61.683       58.118
+           5    154.284      247.049      250.347       65.372       61.129       49.033
+           6    187.071      312.830      308.607       66.833       61.480       59.549
+           7    215.486      350.307      354.566       67.416       60.972       58.593
+           8    246.444      410.437      394.129       67.913       62.747       61.175
+           9    277.144      444.415      455.422       67.842       61.290       59.632
+          10    308.084      484.421      499.521       67.880       61.232       60.124
+          11    336.616      549.631      557.121       67.856       61.551       59.818
+          12    369.013      593.980      583.503       67.885       61.407       59.615
+          13    397.772      634.416      631.802       67.936       60.917       61.034
+          14    429.556      688.752      675.656       67.898       61.209       60.205
+          15    463.523      719.647      737.079       67.944       61.154       60.210
+          16    492.962      786.956      764.987       67.852       62.921       61.556
+          17    524.163      813.451      822.919       67.959       61.181       60.190
+          18    542.562      857.169      862.646       67.951       61.439       60.465
+          19    580.838      905.857      921.543       67.965       61.183       60.895
+          20    606.689      986.007      949.209       67.950       60.991       60.555
+          21    635.903     1012.960     1021.343       67.976       60.967       60.942
+          22    663.815     1048.666     1043.773       67.952       61.644       61.512
+          23    690.147     1118.677     1091.516       68.005       61.263       60.845
+          24    719.361     1140.178     1152.880       67.957       62.712       62.428
+          25    750.207     1187.300     1192.013       68.014       61.365       61.175
+          26    786.751     1229.900     1227.538       67.958       61.040       61.112
+          27    815.247     1283.177     1278.599       68.012       61.220       61.362
+          28    855.279     1319.975     1335.241       67.958       61.277       61.600
+          29    865.201     1367.699     1362.437       67.975       61.296       61.569
+          30    916.368     1412.692     1421.783       68.003       61.315       61.514
+          31    932.003     1460.826     1460.643       68.007       61.867       62.011
+          32    949.888     1499.941     1497.281       67.917       62.874       62.825
 
 .. _sweep:
 
@@ -1540,6 +2430,8 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 - Follows ``SWEEP_TEST_LIMIT`` and ``SWEEP_TIME_LIMIT``.
 
 - Default executors: ``SWEEP_EXE`` = CDG includes CPU, DMA, and GFX for broad coverage.
+
+**Restrictions:**
 
 - Single-node only.
 
