@@ -31,7 +31,7 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Performs a parameter sweep of GFX-based all-to-all transfers across different SubExecutor counts, unroll factors, and thread block sizes.
       - ❌
 
-    * - NIC all-to-all preset (nica2a)
+    * - :ref:`NIC all-to-all preset (nica2a) <nica2a>`
       - NIC-executor all-to-all with plane/group partitioning via closest memory endpoint.
       - ✅
 
@@ -51,15 +51,15 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Tests unidirectional and bidirectional transfers for CPU-to-CPU, CPU-to-GPU, and GPU-to-GPU combinations.
       - ❌
 
-    * - Pod all-to-all preset (poda2a)
+    * - :ref:`Pod all-to-all preset (poda2a) <poda2a>`
       - Pod-aware all-to-all across GPUs within a single pod via UALoE path, with optional concurrent NIC ring.
       - ✅
 
-    * - Pod peer-to-peer preset (podp2p)
+    * - :ref:`Pod peer-to-peer preset (podp2p) <podp2p>`
       - Pod-aware peer-to-peer bandwidth between every GPU pair in a pod (unidirectional and bidirectional).
       - ✅
 
-    * - Ring transfers preset (rings)
+    * - :ref:`Intra-pod ring preset (rings) <rings>`
       - Ring transfers within subgroups of ranks in a pod.
       - ✅
 
@@ -283,7 +283,7 @@ The a2asweep preset performs a parameter sweep of GFX-based all-to-all transfers
 
 - For each block size, sweeps ``NUM_SUB_EXECS`` (CU count) x ``UNROLLS`` (unroll factor).
 
-- Sweep order: Outer loop over ``BLOCKSIZES``, then table of (``NUM_SUB_EXECS`` x ``UNROLLS``).
+- **Sweep order:** Outer loop over ``BLOCKSIZES``, then table of (``NUM_SUB_EXECS`` x ``UNROLLS``).
 
 - Reports min (and optionally max) bandwidth per (CU, Unroll) combination. By default, reports only the slowest GPU's bandwidth. To include the fastest GPU's bandwidth per config, set ``SHOW_MIN_ONLY=0``.
 
@@ -463,13 +463,13 @@ The rings preset runs parallel ring transfers across the GPUs of a single pod. T
 
 **Restrictions:**
 
-- **Homogeneous ranks required.** All ranks must have the same topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
+- **Homogeneous ranks required:** All ranks must have the same topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
 
-- **Single-pod only for multirank.** All ranks must be in a single pod. Override with ``TB_FORCE_SINGLE_POD=1`` when pod detection via amd-smi is unavailable.
+- **Single-pod only for multirank:** All ranks must be in a single pod. Override with ``TB_FORCE_SINGLE_POD=1`` when pod detection via amd-smi is unavailable.
 
-- **``RING_SIZE`` must evenly divide** ``numRanks x NUM_GPU_DEVICES``.
+- **``RING_SIZE`` divisibility:** ``RING_SIZE`` must evenly divide ``numRanks x NUM_GPU_DEVICES``.
 
-- **Duplicate-hostname warning.** A trailing ``[WARN]`` is emitted if two ranks share a hostname.
+- **Duplicate-hostname warning:** A trailing ``[WARN]`` is emitted if two ranks share a hostname.
 
 **Usage:**
 
@@ -606,10 +606,6 @@ The nica2a preset runs an all-to-all over NIC Executors instead of GPU Executors
 
 - **Plane split:** Permutes the NIC list by ``PLANE_STRIDE`` using ``StrideGenerate``, then chunks consecutively into ``NUM_PLANES`` planes of ``N / NUM_PLANES`` NICs each. Planes are independent measurement units.
 
-  .. image:: /data/nica2a_plane_split.png
-      :width: 100%
-      :align: center
-
 - **Group split (per plane):** Inside each plane, further partitions NICs into groups by permuting by ``GROUP_STRIDE``, then chunking into ``NUM_GROUPS`` groups of ``planeSize / NUM_GROUPS`` NICs each. Each group runs an internal all-to-all between its member NICs.
 
 - **Concurrent execution:** All groups across all planes run in a single ``RunTransfers`` call, so the reported numbers reflect concurrent fabric contention across the entire pool.
@@ -619,6 +615,12 @@ The nica2a preset runs an all-to-all over NIC Executors instead of GPU Executors
 - **Direction:** ``USE_RDMA_READ=0`` (default) issues RDMA writes (Executor on SRC NIC). ``USE_RDMA_READ=1`` issues RDMA reads (Executor on DST NIC).
 
 - **Self transfers:** Excluded by default. To include NIC loopback, set ``A2A_LOCAL=1``.
+
+The following image shows an example of how NICs are split into planes across racks and pods:
+
+.. image:: /data/nica2a-plane-split.png
+    :width: 100%
+    :align: center
 
 **Usage:**
 
@@ -783,21 +785,21 @@ The output has two parts:
 
 **Restrictions:**
 
-- **Homogeneous ranks required.** All ranks must have the same NIC topology; otherwise the preset exits with ``[ERROR] NIC all-to-all preset can only be run across ranks that are homogenous``. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed (for example, ``TB_NIC_FILTER='mlx5_[0-7]'`` to keep only scale-out NICs).
+- **Homogeneous ranks required:** All ranks must have the same NIC topology; otherwise the preset exits with ``[ERROR] NIC all-to-all preset can only be run across ranks that are homogenous``. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed (for example, ``TB_NIC_FILTER='mlx5_[0-7]'`` to keep only scale-out NICs).
 
-- **At least one NIC required.** If no NICs are detected, the preset exits with ``[ERROR] No NIC detected. This preset requires NIC executors``.
+- **At least one NIC required:** If no NICs are detected, the preset exits with ``[ERROR] No NIC detected. This preset requires NIC executors``.
 
-- **Memory device must exist.** If ``USE_CPU_MEM=0``, requires at least one GFX-capable GPU. If ``USE_CPU_MEM=1``, requires at least one CPU Executor. Exits with ``[ERROR] No <GPU GFX|CPU> executors detected for NIC all-to-all``.
+- **Memory device must exist:** If ``USE_CPU_MEM=0``, requires at least one GFX-capable GPU. If ``USE_CPU_MEM=1``, requires at least one CPU Executor. Exits with ``[ERROR] No <GPU GFX|CPU> executors detected for NIC all-to-all``.
 
-- **Plane and group divisibility.** ``NUM_PLANES`` must evenly divide the total NIC count ``N``. ``NUM_GROUPS`` must evenly divide ``planeSize = N / NUM_PLANES``. Off-by-one configurations are rejected with an error pointing at the constraint.
+- **Plane and group divisibility:** ``NUM_PLANES`` must evenly divide the total NIC count ``N``. ``NUM_GROUPS`` must evenly divide ``planeSize = N / NUM_PLANES``. Off-by-one configurations are rejected with an error pointing at the constraint.
 
-- **All groups run concurrently.** All groups across all planes run in a single ``RunTransfers`` call — measurements reflect the contention you would see in a real collective. To run one group at a time per plane, set ``NUM_GROUPS=1``, but planes still run concurrently.
+- **All groups run concurrently:** All groups across all planes run in a single ``RunTransfers`` call — measurements reflect the contention you would see in a real collective. To run one group at a time per plane, set ``NUM_GROUPS=1``, but planes still run concurrently.
 
-- **Closest-endpoint binding is fixed per NIC.** The preset always binds each NIC to its closest memory device. To exercise alternative NIC-to-memory mappings, use a command-line transfer definition with explicit ``R<rank>I<nic>.<sub>`` syntax instead.
+- **Closest-endpoint binding is fixed per NIC:** The preset always binds each NIC to its closest memory device. To exercise alternative NIC-to-memory mappings, use a command-line transfer definition with explicit ``R<rank>I<nic>.<sub>`` syntax instead.
 
-- **Duplicate-hostname warning.** A trailing ``[WARN]`` is emitted if two ranks share a hostname, as running multiple ranks per host can cause Executor aliasing.
+- **Duplicate-hostname warning:** A trailing ``[WARN]`` is emitted if two ranks share a hostname, as running multiple ranks per host can cause Executor aliasing.
 
-- **Bandwidth orientation flips with** ``USE_RDMA_READ``. With reads, the Executor is on the DST; row labels still represent the SRC (data flow direction stays the same), but the header changes from ``SRC+EXE\DST`` to ``SRC\DST+EXE``.
+- **Bandwidth orientation flips with** ``USE_RDMA_READ``: With reads, the Executor is on the DST; row labels still represent the SRC (data flow direction stays the same), but the header changes from ``SRC+EXE\DST`` to ``SRC\DST+EXE``.
 
 .. _nicrings:
 
@@ -814,9 +816,9 @@ The following image shows the ring topology:
 
 **Key features:**
 
-- Ring construction: Creates parallel RDMA rings across all ranks with one ring per GPU/CPU-to-NIC pair (memIndex-nicIndex), where that NIC is the closest to that memory.
+- **Ring construction:** Creates parallel RDMA rings across all ranks with one ring per GPU/CPU-to-NIC pair (memIndex-nicIndex), where that NIC is the closest to that memory.
 
-- Topology of each ring: Rank 0->1->2->...->N-1->0.
+- **Topology of each ring:** Rank 0->1->2->...->N-1->0.
 
 - Can use GPU memory or CPU memory (NUMA nearest to NIC) as buffer.
 
@@ -824,13 +826,13 @@ The following image shows the ring topology:
 
 - Multinode supported.
 
-- Transfer direction: ``currRank`` sends to (``currRank`` + 1) % ``numRanks``.
+- **Transfer direction:** ``currRank`` sends to (``currRank`` + 1) % ``numRanks``.
 
-- Executor placement: Executor is placed on the SRC rank for RDMA write and DST rank for RDMA read.
+- **Executor placement:** Executor is placed on the SRC rank for RDMA write and DST rank for RDMA read.
 
 **Restrictions:**
 
-- **Homogeneous ranks required.** All ranks must have identical NIC topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
+- **Homogeneous ranks required:** All ranks must have identical NIC topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
 
 **Usage:**
 
@@ -927,23 +929,23 @@ The nicp2p preset runs a multinode peer-to-peer RDMA transfer test between all N
 
 - Tests all (``srcRank``, ``srcNic``) -> (``dstRank``, ``dstNic``) pairs.
 
-- Device selection: Uses ``GetClosestDeviceToNic()`` to pick CPU NUMA or GPU closest to each NIC based on ``SRC_MEM_TYPE`` or ``DST_MEM_TYPE``, and ``USE_CPU_*`` flags.
+- **Device selection:** Uses ``GetClosestDeviceToNic()`` to pick CPU NUMA or GPU closest to each NIC based on ``SRC_MEM_TYPE`` or ``DST_MEM_TYPE``, and ``USE_CPU_*`` flags.
 
-- Allows using RDMA read instead of write through ``USE_REMOTE_READ``.
+- **RDMA mode:** Allows using RDMA read instead of write through ``USE_REMOTE_READ``.
 
-- Round-robin and combination schedule: Node pairs are scheduled in round-robin. Within each node pair, NIC pairs are tested in all combinations (controlled by ``NIC_PARALLEL_LEVEL``).
+- **Round-robin and combination schedule:** Node pairs are scheduled in round-robin. Within each node pair, NIC pairs are tested in all combinations (controlled by ``NIC_PARALLEL_LEVEL``).
 
-- Output: Full matrix or column format, including top 10 fastest and slowest connections.
+- **Output:** Full matrix or column format, including top 10 fastest and slowest connections.
 
-- Progress report: Prints progress to stderr. For example, "Completed X/Y pairs in Zs, estimated remaining time Ws".
+- **Progress report:** Prints progress to stderr. For example, "Completed X/Y pairs in Zs, estimated remaining time Ws".
 
 - Multinode supported.
 
 **Restrictions:**
 
-- **Homogeneous ranks required.** All ranks must have identical NIC topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
+- **Homogeneous ranks required:** All ranks must have identical NIC topology. Use ``TB_NIC_FILTER`` to limit NIC visibility and force homogeneity if needed.
 
-- **NICs required.** Exits with error if no NICs are detected.
+- **NICs required:** Exits with error if no NICs are detected.
 
 **Usage:**
 
@@ -1099,18 +1101,18 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 - Sweeps over all combinations of 1, 2, ..., N DST GPUs (excluding the SRC).
 
-- Combination sweep: For each peer count ``p``, iterates over all bitmasks with exactly ``p`` bits set (excluding ``EXE_INDEX``).
+- **Combination sweep:** For each peer count ``p``, iterates over all bitmasks with exactly ``p`` bits set (excluding ``EXE_INDEX``).
 
 - For each combination, runs parallel transfers and reports bandwidth per DST.
 
 - Supports GFX or DMA executor. Each of SRC and DST can independently be GPU or Null, but not both Null simultaneously.
 
-- Invalid configs are skipped in two cases:
+- **Invalid configs skipped:** The following configurations are skipped:
 
   - ``exe`` = DMA and (``src`` = N or ``dst`` = N)
   - ``src`` = N and ``dst`` = N
 
-- Output format: Each line shows bandwidth per DST GPU, ``p``, ``numSubExecs``, and transfer triplets.
+- **Output format:** Each line shows bandwidth per DST GPU, ``p``, ``numSubExecs``, and transfer triplets.
 
 **Restrictions:**
 
@@ -1726,19 +1728,19 @@ The poda2a preset is the pod-aware sibling of :ref:`a2a`. It creates groups with
 
 **Restrictions:**
 
-- **Single-pod only.** Multi-pod topologies are rejected with ``[ERROR] PodAllToAll preset currently requires all ranks to be in a single pod``. Multi-pod support is not yet implemented.
+- **Single-pod only:** Multi-pod topologies are rejected with ``[ERROR] PodAllToAll preset currently requires all ranks to be in a single pod``. Multi-pod support isn't yet implemented.
 
-- **Pod detection required.** If amd-smi does not return a non-empty pod map, the preset exits with ``[ERROR] No pods detected``. Use ``TB_FORCE_SINGLE_POD=1`` to override.
+- **Pod detection required:** If amd-smi doesn't return a non-empty pod map, the preset exits with ``[ERROR] No pods detected``. Use ``TB_FORCE_SINGLE_POD=1`` to override.
 
-- **DMA Executor is copy-only.** ``USE_DMA_EXEC=1`` combined with any non-copy ``A2A_MODE`` (including custom ``N:M``) fails immediately.
+- **DMA Executor is copy-only:** ``USE_DMA_EXEC=1`` combined with any non-copy ``A2A_MODE`` (including custom ``N:M``) fails immediately.
 
-- **Equal GPU count per rank.** All participating ranks must report the same ``NUM_GPU_DEVICES``; a mismatch is a fatal error.
+- **Equal GPU count per rank:** All participating ranks must report the same ``NUM_GPU_DEVICES``; a mismatch is a fatal error.
 
-- **``NUM_GROUPS`` divisibility.** ``NUM_GROUPS`` must evenly divide ``numRanks x NUM_GPU_DEVICES``, otherwise the preset exits with ``[ERROR] NUM_GROUPS (X) must divide pod device count``.
+- **``NUM_GROUPS`` divisibility:** ``NUM_GROUPS`` must evenly divide ``numRanks x NUM_GPU_DEVICES``, otherwise the preset exits with ``[ERROR] NUM_GROUPS (X) must divide pod device count``.
 
-- **NIC config mismatch is a warning.** Differing NIC counts across ranks produce ``[WARN] Not all ranks have the same number of NICs`` but do not abort the run.
+- **NIC config mismatch is a warning:** Differing NIC counts across ranks produce ``[WARN] Not all ranks have the same number of NICs`` but don't abort the run.
 
-- **Duplicate-hostname warning.** A trailing ``[WARN]`` is emitted if two ranks share a hostname — running more than one rank per host can alias Executors and skew results.
+- **Duplicate-hostname warning:** A trailing ``[WARN]`` is emitted if two ranks share a hostname — running more than one rank per host can alias Executors and skew results.
 
 **Usage:**
 
@@ -1900,13 +1902,13 @@ The podp2p preset measures pair-wise peer-to-peer bandwidth between every pair o
 
 - **Pair iteration order:** Pairs are iterated in (``srcRank``, ``srcDev``, ``dstRank``, ``dstDev``) order. With ``PARALLEL_LVL=1``, the outer iteration is replaced by a round-robin tournament over rank-pairs so that no rank participates in more than one pair per round.
 
-- **``NUM_GPU_SE`` default differs by executor:** For GFX, defaults to the full CU count of GPU 0 (giving each pair a fully owned GPU). For DMA, defaults to ``1`` since SDMA engines are not subdivided by SubExecutor.
+- **``NUM_GPU_SE`` default differs by executor:** For GFX, defaults to the full CU count of GPU 0 (giving each pair a fully owned GPU). For DMA, defaults to ``1`` since SDMA engines aren't subdivided by SubExecutor.
 
 **Restrictions:**
 
-- **Homogeneous ranks required:** All ranks must have the same physical and virtual pod membership; otherwise exits with ``[ERROR] Pod p2p preset can only be run across ranks that are homogenous``.
+- **Homogeneous ranks required:** All ranks must have the same physical and virtual pod membership; otherwise the preset exits with ``[ERROR] Pod p2p preset can only be run across ranks that are homogenous``.
 
-- **Pod detection required:** If amd-smi returns an empty pod map, exits with ``[ERROR] No pods detected``. Override with ``TB_FORCE_SINGLE_POD=1``.
+- **Pod detection required:** If amd-smi returns an empty pod map, the preset exits with ``[ERROR] No pods detected``. Override with ``TB_FORCE_SINGLE_POD=1``.
 
 .. note::
 
@@ -1955,7 +1957,7 @@ To modify the behavior of the podp2p preset, use the following environment varia
       - (detected)
 
     * - ``NUM_GPU_SE``
-      - SubExecutors per transfer. For GFX, defaults to the full CU count so each pair has the GPU all to itself. For DMA, defaults to ``1`` since SDMA engines are not subdivided by SubExecutor.
+      - SubExecutors per transfer. For GFX, defaults to the full CU count so each pair has the GPU all to itself. For DMA, defaults to ``1`` since SDMA engines aren't subdivided by SubExecutor.
       - (hardware CU count or ``1`` for DMA)
 
     * - ``OUTPUT_FORMAT``
@@ -2016,7 +2018,7 @@ The output table shows:
 
 - ``Columns``: DST GPU, grouped by rank.
 
-- ``Diagonal cells (N/A)``: Self-pairs are not measured in the bidirectional table; the unidirectional table includes them.
+- ``Diagonal cells (N/A)``: Self-pairs aren't measured in the bidirectional table; the unidirectional table includes them.
 
 - ``Header label``: ``SRC+EXE\DST`` when the Executor is on the SRC (default), ``SRC\DST+EXE`` when ``USE_REMOTE_READ=1``.
 
@@ -2041,7 +2043,7 @@ The scaling preset runs a scaling test from one GPU to all other devices (CPUs a
 
 - For each CU count (``SWEEP_MIN`` to ``SWEEP_MAX``), runs one transfer per target and reports bandwidth.
 
-- Prints a table: rows = CU count, columns = target device.
+- **Output table:** Rows = CU count, columns = target device.
 
 - Adds a ``Best`` row to the output showing peak bandwidth and optimal CU count per target.
 
@@ -2219,25 +2221,25 @@ The schmoo preset runs scaling tests for local and remote read, write, and copy 
 
 **Key features:**
 
-- Uses two GPUs: ``LOCAL_IDX`` (local) and ``REMOTE_IDX`` (remote).
+- **GPUs used:** Uses two GPUs: ``LOCAL_IDX`` (local) and ``REMOTE_IDX`` (remote).
 
-- Fixed topology: Always two GPUs (local and remote); no sweep over device count.
+- **Fixed topology:** Always two GPUs (local and remote); no sweep over device count.
 
-- For each CU count, runs the following six tests. Each test measures bandwidth for the corresponding operation pattern:
+- **Six tests per CU count:** For each CU count, runs the following six tests. Each test measures bandwidth for the corresponding operation pattern:
 
-  - Local Read: Local GPU reads from local memory (SRC->G->null).
+  - **Local Read:** Local GPU reads from local memory (SRC->G->null).
 
-  - Local Write: Local GPU writes to local memory (null->G->DST).
+  - **Local Write:** Local GPU writes to local memory (null->G->DST).
 
-  - Local Copy: Local GPU copies (local->local).
+  - **Local Copy:** Local GPU copies (local->local).
 
-  - Remote Read: Local GPU reads from remote memory.
+  - **Remote Read:** Local GPU reads from remote memory.
 
-  - Remote Write: Local GPU writes to remote memory.
+  - **Remote Write:** Local GPU writes to remote memory.
 
-  - Remote Copy: Local GPU copies (local->remote).
+  - **Remote Copy:** Local GPU copies (local->remote).
 
-- Outputs a table: rows = #CUs, columns = the 6 operation types.
+- **Output table:** Rows = #CUs, columns = the 6 operation types.
 
 **Restrictions:**
 
@@ -2419,17 +2421,17 @@ The sweep preset performs an ordered sweep through sets of transfers. It systema
 
 - **Test set construction:** Builds all possible triplets (SRC, EXE, DST) from ``SWEEP_SRC``, ``SWEEP_EXE``, ``SWEEP_DST``, and device counts, as a Cartesian product (``srcList`` x ``exeList`` x ``dstList``) with filters such as XGMI hop count and CPU-on-GPU skip on NVIDIA.
 
-- Optionally filters using XGMI hop count (``SWEEP_XGMI_MIN``, ``SWEEP_XGMI_MAX``).
+- **XGMI filtering:** Optionally filters by XGMI hop count (``SWEEP_XGMI_MIN``, ``SWEEP_XGMI_MAX``).
 
 - **Parallelism sweep:** Starts at ``SWEEP_MIN`` simultaneous transfers, exhausts all combinations at that count, then increments up to ``SWEEP_MAX`` (set to ``0`` for no limit).
 
-- Ordered permutation: Uses ``std::prev_permutation`` to iterate through M-combinations of the possible transfer set in a deterministic order.
+- **Ordered permutation:** Uses ``std::prev_permutation`` to iterate through M-combinations of the possible transfer set in a deterministic order.
 
-- Log format: Logs each test's transfers to ``SWEEP_FILE``. The ``SWEEP_FILE`` contains lines such as "# Test N" and "-M (src->exe->dst CUs bytes)...".
+- **Log format:** Logs each test's transfers to ``SWEEP_FILE``. The ``SWEEP_FILE`` contains lines such as "# Test N" and "-M (src->exe->dst CUs bytes)...".
 
-- Follows ``SWEEP_TEST_LIMIT`` and ``SWEEP_TIME_LIMIT``.
+- **Limits:** Respects ``SWEEP_TEST_LIMIT`` and ``SWEEP_TIME_LIMIT``.
 
-- Default executors: ``SWEEP_EXE`` = CDG includes CPU, DMA, and GFX for broad coverage.
+- **Default executors:** ``SWEEP_EXE`` = CDG includes CPU, DMA, and GFX for broad coverage.
 
 **Restrictions:**
 

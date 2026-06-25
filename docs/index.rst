@@ -30,6 +30,7 @@ The source code is hosted at `<https://github.com/ROCm/TransferBench>`_.
   .. grid-item-card:: Reference
 
     * :ref:`running-presets`
+    * :ref:`transfer-definition-syntax`
     * :ref:`environment-variables`
     * :ref:`faq`
 

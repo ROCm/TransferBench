@@ -4,6 +4,7 @@
 
 .. _transfer-definition-syntax:
 
+==========================
 Transfer definition syntax
 ==========================
 
@@ -12,7 +13,7 @@ A transfer is a single operation where an Executor reads and adds values from so
 TransferBench supports two modes for defining transfers: simple mode and advanced mode.
 
 Simple mode
------------
+===========
 
 Use simple mode when all transfers in a test share the same number of SubExecutors. The format is:
 
@@ -37,7 +38,7 @@ The following examples show valid simple mode definitions:
     1 4 (G0->G0->G0G1G2G3)            # Reads GPU 0 then writes to GPU 0, GPU 1, GPU 2, and GPU 3
 
 Advanced mode
--------------
+=============
 
 Use advanced mode when transfers in a test require different SubExecutor counts or sizes. The format is:
 
@@ -58,12 +59,12 @@ The following example runs two transfers with different sizes and SubExecutor co
     -2 (G0 G0 G1 4 1M) (G1 G1 G0 2 2M)   # 1 MB GPU 0 to GPU 1 with 4 CUs; 2 MB GPU 1 to GPU 0 with 2 CUs
 
 Memory and Executor letter codes
-==================================
+================================
 
 The memory locations and Executors use a format consisting of letters indicating the memory or Executor type, and index. The following tables indicate what these letters stand for.
 
 Memory location letters
-------------------------
+-----------------------
 
 Memory locations use the format ``[R<rank>]<MemType><Index>``, where ``MemType`` is a single letter and ``Index`` is the zero-based device index. If you omit the rank prefix ``R``, TransferBench uses the local rank.
 
@@ -123,7 +124,7 @@ The following table lists the supported memory type letters:
 You can concatenate multiple memory locations for broadcast or reduce operations. For example, ``G0G1`` refers to GPU 0 and GPU 1.
 
 Executor letters
------------------
+----------------
 
 Executors use the format ``[R<rank>]<ExeType><Index>[Slot][.<SubIndex>][SubSlot]``.
 
@@ -169,12 +170,12 @@ The optional Executor fields have the following meanings:
 - ``SubSlot``: Specifies the alpha range for sub-slot selection.
 
 Wildcards
-==========
+=========
 
 Wildcards expand a single configuration file line into multiple concrete transfers at runtime.
 
 Numeric wildcards
-------------------
+-----------------
 
 Numeric wildcards apply to ranks (``R``), device indices (for example, ``G0`` or ``C1``), and Executor indices.
 
@@ -210,7 +211,7 @@ The following list shows additional examples:
 - ``R[1..3]G0``: GPU 0 on ranks 1, 2, and 3
 
 Alpha wildcards
-----------------
+---------------
 
 Alpha wildcards apply to Executor slots and subslots (``A``, ``B``, ``C``, ...).
 
