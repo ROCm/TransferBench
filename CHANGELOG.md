@@ -5,8 +5,9 @@ Documentation for TransferBench is available at
 
 ## v1.68.00
 ### Fixed
-- Improper draining of writes introduced in v1.67 that impacts GFX executor timing
+- Improper draining of writes that could artificially inflate transfer timing
 - Potential timing bug when running GFX Executor in warp-subexecutor mode with small data sizes
+- Keeping subiteration threads in sync per subiteration
 
 ## v1.67.00
 ### Added

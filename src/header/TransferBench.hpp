@@ -5036,24 +5036,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
+
+      // Drain every thread's writes out to system scope
+      __threadfence_system();
+
+      // Wait for all threads to finish this subiteration
+      if (seType == 1) {
+        // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+        __builtin_amdgcn_wave_barrier();
+#else
+        __syncwarp();
+#endif
+      } else {
+        // For threadblock-level, sync all threads
+        __syncthreads();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
-    }
-
-    // Drain every thread's writes out to system scope
-    __threadfence_system();
-
-    // Wait for all threads to finish
-    if (seType == 1) {
-      // For warp-level, sync within warp only
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
-      __builtin_amdgcn_wave_barrier();
-#else
-      __syncwarp();
-#endif
-    } else {
-      // For threadblock-level, sync all threads
-      __syncthreads();
     }
 
     if (shouldRecordTiming) {
@@ -5216,25 +5217,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
+
+      // Drain every thread's writes out to system scope
+      __threadfence_system();
+
+      // Wait for all threads to finish this subiteration
+      if (seType == 1) {
+        // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+        __builtin_amdgcn_wave_barrier();
+#else
+        __syncwarp();
+#endif
+      } else {
+        // For threadblock-level, sync all threads
+        __syncthreads();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
-    }
-
-    // Drain every thread's writes out to system scope
-    __threadfence_system();
-
-    // Wait for all threads to finish
-    if (seType == 1) {
-      // For warp-level, sync within warp only
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
-      __builtin_amdgcn_wave_barrier();
-#else
-
-      __syncwarp();
-#endif
-    } else {
-      // For threadblock-level, sync all threads
-      __syncthreads();
     }
 
     if (shouldRecordTiming) {
@@ -5406,8 +5407,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    ERR_CHECK(hipSetDevice(exeIndex));
     auto cpuStart = std::chrono::high_resolution_clock::now();
+    ERR_CHECK(hipSetDevice(exeIndex));
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
@@ -5465,14 +5466,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           std::set<std::pair<int, int>> CUs;
 
           for (auto subExecIdx : rss.subExecIdx) {
-	    if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
-	      minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-	      maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
-	      if (cfg.general.recordPerIteration) {
-		CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-					  GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
-	      }
-	    }
+            if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
+              minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+                                          GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+              }
+            }
           }
 
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
