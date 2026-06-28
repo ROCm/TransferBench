@@ -5973,10 +5973,10 @@ namespace {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int numDsts = (int)resources.dstMem.size();
+    size_t const initOffsetBytes = cfg.data.byteOffset;
+    uint8_t* const srcBase = reinterpret_cast<uint8_t*>(resources.srcMem[0]);
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
-    size_t const initOffset = cfg.data.byteOffset / sizeof(float);
-    float* const src = resources.srcMem[0] + initOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
@@ -5990,13 +5990,13 @@ namespace {
       do {
         // Queue for each output location
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-          float* const dst = resources.dstMem[dstIdx] + initOffset;
+          uint8_t* dstBase = reinterpret_cast<uint8_t*>(resources.dstMem[dstIdx]);
 #if defined(CUMEM_ENABLED)
-          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)dst,
-                                  (CUdeviceptr)src,
+          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)(dstBase + initOffsetBytes),
+                                  (CUdeviceptr)(srcBase + initOffsetBytes),
                                   resources.numBytes, stream));
 #else
-          ERR_CHECK(hipMemcpyAsync(dst, src, resources.numBytes,
+          ERR_CHECK(hipMemcpyAsync(dstBase + initOffsetBytes, srcBase + initOffsetBytes, resources.numBytes,
                                    memcpyKind, stream));
 #endif
         }
@@ -6013,15 +6013,15 @@ namespace {
       do {
         hsa_signal_store_screlease(resources.signal, numDsts);
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-          float* const dst = resources.dstMem[dstIdx] + initOffset;
+          uint8_t* dstBase = reinterpret_cast<uint8_t*>(resources.dstMem[dstIdx]);
           if (!useSubIndices) {
-            ERR_CHECK(hsa_amd_memory_async_copy(dst, resources.dstAgent[dstIdx],
-                                                src, resources.srcAgent,
+            ERR_CHECK(hsa_amd_memory_async_copy(dstBase + initOffsetBytes, resources.dstAgent[dstIdx],
+                                                srcBase + initOffsetBytes, resources.srcAgent,
                                                 resources.numBytes, 0, NULL,
                                                 resources.signal));
           } else {
-            HSA_CALL(hsa_amd_memory_async_copy_on_engine(dst, resources.dstAgent[dstIdx],
-                                                         src, resources.srcAgent,
+            HSA_CALL(hsa_amd_memory_async_copy_on_engine(dstBase + initOffsetBytes, resources.dstAgent[dstIdx],
+                                                         srcBase + initOffsetBytes, resources.srcAgent,
                                                          resources.numBytes, 0, NULL,
                                                          resources.signal,
                                                          resources.sdmaEngineId, true));
@@ -6398,8 +6398,9 @@ namespace {
       anvil::SdmaQueueDeviceHandle* handle =
         reinterpret_cast<anvil::SdmaQueueDeviceHandle*>(qi.deviceHandle);
 
-      void*       dst    = rss.dstMem[0];
-      void const* src    = rss.srcMem[0];
+      size_t const initOffsetBytes = cfg.data.byteOffset;
+      void*       dst    = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
+      void const* src    = reinterpret_cast<uint8_t const*>(rss.srcMem[0]) + initOffsetBytes;
       size_t      nbytes = rss.numBytes;
 
       hipLaunchKernelGGL(AnvilTransferKernel,
