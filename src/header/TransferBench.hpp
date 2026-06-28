@@ -92,7 +92,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.67";
+  constexpr char VERSION[] = "1.68";
 
   /**
    * Enumeration of supported Executor types
@@ -5040,6 +5040,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (++subIterations == numSubIterations) break;
     }
 
+    // Drain every thread's writes out to system scope
+    __threadfence_system();
+
     // Wait for all threads to finish
     if (seType == 1) {
       // For warp-level, sync within warp only
@@ -5216,6 +5219,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
     }
+
+    // Drain every thread's writes out to system scope
+    __threadfence_system();
 
     // Wait for all threads to finish
     if (seType == 1) {
@@ -5400,8 +5406,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
+    auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
@@ -5459,12 +5465,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           std::set<std::pair<int, int>> CUs;
 
           for (auto subExecIdx : rss.subExecIdx) {
-            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
-            if (cfg.general.recordPerIteration) {
-              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
-            }
+	    if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
+	      minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+	      maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+	      if (cfg.general.recordPerIteration) {
+		CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+					  GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+	      }
+	    }
           }
 
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
