@@ -12,7 +12,7 @@ Define custom transfer tests in a configuration file and run them with TransferB
 
 .. seealso::
 
-  :ref:`transfer-definition-syntax` — complete reference for simple and advanced mode syntax, memory and Executor letter codes, and wildcards.
+  :ref:`transfer-definition-syntax` — for information on how to specify what memory to use, which Executor runs the transfer, how many SubExecutors to use, and the complete simple and advanced mode syntax, letter codes, and wildcards.
 
 Running TransferBench with a configuration file
 ================================================
@@ -127,5 +127,3 @@ The following configuration file shows a range of transfer types using both simp
 
   # Multi-rank: GPU 0 on rank 0 to GPU 1 on rank 1
   1 4 (R0G0->R0G0->R1G1)
-
-For information on how to define transfers in the configuration file, including how to specify what memory to use, which Executor runs the transfer, and how many SubExecutors to use, see :ref:`transfer-definition-syntax`.

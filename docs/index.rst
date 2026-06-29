@@ -15,7 +15,8 @@ The source code is hosted at `<https://github.com/ROCm/TransferBench>`_.
 
   .. grid-item-card:: Install
 
-    * :ref:`install-transferbench`
+    * :ref:`package-manager`
+    * :ref:`source-build`
 
   .. grid-item-card:: How to
 

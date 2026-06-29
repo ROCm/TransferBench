@@ -1,28 +1,17 @@
 .. meta::
-  :description: Instructions for installing TransferBench from source or using a package manager on supported platforms.
-  :keywords: Build TransferBench, Install TransferBench, TransferBench package manager, TransferBench source build
-
-.. _install-transferbench:
-
------------------------
-Install TransferBench
------------------------
-
-To install TransferBench, choose one of the following methods:
-
-- :ref:`Build from source <source-build>`
-
-- :ref:`Install from the package manager <package-manager>`
+  :description: Instructions for building TransferBench from source using Makefile or CMake, including required and optional dependencies.
+  :keywords: Build TransferBench, TransferBench source build, TransferBench Makefile, TransferBench CMake, TransferBench dependencies
 
 .. _source-build:
 
+===================================
 Building TransferBench from source
 ===================================
 
 First, install the following required dependencies.
 
 Required dependencies
-----------------------
+======================
 
 * `ROCm stack <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>`_ to obtain :doc:`HIP runtime <hip:index>`.
 
@@ -43,7 +32,7 @@ Required dependencies
       sudo yum install numactl-devel
 
 Optional dependencies
-----------------------
+======================
 
 Depending on your requirement, you can install these optional dependencies:
 
@@ -96,7 +85,7 @@ You can build TransferBench from source using two methods: :ref:`Makefile <makef
 .. _makefile:
 
 Method 1: Building from source using Makefile
-----------------------------------------------
+==============================================
 
 To build TransferBench from source using Makefile, run:
 
@@ -113,7 +102,7 @@ To build TransferBench from source using Makefile, run:
 .. _menv-var:
 
 Makefile environment variables
-+++++++++++++++++++++++++++++++
+-------------------------------
 
 To modify the Makefile behavior, use the following environment variables:
 
@@ -219,7 +208,7 @@ To modify the Makefile behavior, use the following environment variables:
 .. _cmake:
 
 Method 2: Building from source using CMake
--------------------------------------------
+============================================
 
 To build TransferBench from source using CMake, run:
 
@@ -232,7 +221,7 @@ To build TransferBench from source using CMake, run:
   make
 
 CMake environment variables
-++++++++++++++++++++++++++++
+----------------------------
 
 To modify the CMake behavior, use the following environment variables:
 
@@ -351,7 +340,7 @@ To modify the CMake behavior, use the following environment variables:
   make
 
 Troubleshooting common build errors
-------------------------------------
+====================================
 
 Here are some commonly encountered build errors and their fix:
 
@@ -362,28 +351,6 @@ Here are some commonly encountered build errors and their fix:
 - ``Could not find standard C++ header 'cmath'``
 
   Normally occurs if the standard C++ headers aren't installed. Try installing ``g++-12`` or ``g++-14`` based on the OS version. For example, ``apt-get install g++-12``.
-
-.. _package-manager:
-
-Installing TransferBench from the package manager
-=================================================
-
-To install TransferBench from the package manager, first configure the ROCm repository. For instructions, see `ROCm installation <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>`_. Then run:
-
-.. code-block:: shell
-
-  ## Install the transferbench-dev package
-  sudo apt-get install transferbench-dev
-
-This installs in ``/opt/{rocm-version}/bin/TransferBench``. To check, use:
-
-.. code-block:: shell
-
-  dpkg -L transferbench-dev
-
-.. note::
-
-  The pre-packaged installation includes only the default features. NIC Executor, MPI support, and pod support require a source build.
 
 Building TransferBenchCuda
 ===========================
