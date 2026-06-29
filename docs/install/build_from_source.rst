@@ -8,7 +8,7 @@
 Building TransferBench from source
 ===================================
 
-First, install the following required dependencies.
+To build TransferBench from source, install the following required dependencies first:
 
 Required dependencies
 ======================

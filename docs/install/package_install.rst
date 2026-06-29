@@ -8,14 +8,14 @@
 Installing TransferBench from the package manager
 ==================================================
 
-To install TransferBench from the package manager, first configure the ROCm repository. For instructions, see `ROCm installation <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>`_. Then run:
+To install TransferBench from the package manager, first configure the ROCm repository (for instructions, see `ROCm installation <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>`_), then run:
 
 .. code-block:: shell
 
   ## Install the transferbench-dev package
   sudo apt-get install transferbench-dev
 
-This installs in ``/opt/{rocm-version}/bin/TransferBench``. To check, use:
+This installs in ``/opt/{rocm-version}/bin/TransferBench``. To check, run:
 
 .. code-block:: shell
 
