@@ -5037,9 +5037,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
 
-      // Drain every thread's writes out to system scope
-      __threadfence_system();
-
       // Wait for all threads to finish this subiteration
       if (seType == 1) {
         // For warp-level, sync within warp only
@@ -5058,6 +5055,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     if (shouldRecordTiming) {
+      // Previous sync ensures data from all threads in this subexecutor has landed in cache
+      // so only one thread needs to do system level threadfence.
+      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5218,9 +5218,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
 
-      // Drain every thread's writes out to system scope
-      __threadfence_system();
-
       // Wait for all threads to finish this subiteration
       if (seType == 1) {
         // For warp-level, sync within warp only
@@ -5239,6 +5236,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     if (shouldRecordTiming) {
+      // Previous sync ensures data from all threads in this subexecutor has landed in cache
+      // so only one thread needs to do system level threadfence.
+      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
