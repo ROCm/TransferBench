@@ -92,7 +92,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.67";
+  constexpr char VERSION[] = "1.68";
 
   /**
    * Enumeration of supported Executor types
@@ -5036,24 +5036,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
+
+      // Wait for all threads to finish this subiteration
+      if (seType == 1) {
+        // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+        __builtin_amdgcn_wave_barrier();
+#else
+        __syncwarp();
+#endif
+      } else {
+        // For threadblock-level, sync all threads
+        __syncthreads();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
     }
 
-    // Wait for all threads to finish
-    if (seType == 1) {
-      // For warp-level, sync within warp only
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
-      __builtin_amdgcn_wave_barrier();
-#else
-      __syncwarp();
-#endif
-    } else {
-      // For threadblock-level, sync all threads
-      __syncthreads();
-    }
-
     if (shouldRecordTiming) {
+      // Previous sync ensures data from all threads in this subexecutor has landed in cache
+      // so only one thread needs to do system level threadfence.
+      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5213,25 +5217,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
+
+      // Wait for all threads to finish this subiteration
+      if (seType == 1) {
+        // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+        __builtin_amdgcn_wave_barrier();
+#else
+        __syncwarp();
+#endif
+      } else {
+        // For threadblock-level, sync all threads
+        __syncthreads();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
     }
 
-    // Wait for all threads to finish
-    if (seType == 1) {
-      // For warp-level, sync within warp only
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
-      __builtin_amdgcn_wave_barrier();
-#else
-
-      __syncwarp();
-#endif
-    } else {
-      // For threadblock-level, sync all threads
-      __syncthreads();
-    }
-
     if (shouldRecordTiming) {
+      // Previous sync ensures data from all threads in this subexecutor has landed in cache
+      // so only one thread needs to do system level threadfence.
+      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5459,11 +5466,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           std::set<std::pair<int, int>> CUs;
 
           for (auto subExecIdx : rss.subExecIdx) {
-            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
-            if (cfg.general.recordPerIteration) {
-              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+            if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
+              minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
+                                          GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+              }
             }
           }
 
