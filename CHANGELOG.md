@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.68.00
+### Fixed
+- Improper draining of writes that could artificially inflate transfer timing
+- Potential timing bug when running GFX Executor in warp-subexecutor mode with small data sizes
+- Keeping subiteration threads in sync per subiteration
+
 ## v1.67.00
 ### Added
 - Added NIC_TRAFFIC_CLASS to set the DSCP/traffic class byte in the RoCE GRH for QPs (RoCE only)
