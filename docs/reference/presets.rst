@@ -169,7 +169,7 @@ To modify the behavior of a2a preset, use the following environment variables:
       - ``0``
 
     * - ``USE_FINE_GRAIN``
-      - To use MEM_TYPE.
+      - Deprecated. Use ``MEM_TYPE=1`` for fine-grained GPU memory instead.
       - (deprecated)
 
     * - ``USE_REMOTE_READ``
@@ -799,7 +799,7 @@ The output has two parts:
 
 - **Duplicate-hostname warning:** A trailing ``[WARN]`` is emitted if two ranks share a hostname, as running multiple ranks per host can cause Executor aliasing.
 
-- **Bandwidth orientation flips with** ``USE_RDMA_READ``: With reads, the Executor is on the DST; row labels still represent the SRC (data flow direction stays the same), but the header changes from ``SRC+EXE\DST`` to ``SRC\DST+EXE``.
+- **Bandwidth orientation flips with** ``USE_RDMA_READ``**:** With reads, the Executor is on the DST; row labels still represent the SRC (data flow direction stays the same), but the header changes from ``SRC+EXE\DST`` to ``SRC\DST+EXE``.
 
 .. _nicrings:
 
@@ -1107,7 +1107,7 @@ The one2all preset tests all subsets of parallel transfers from one GPU to the o
 
 - Supports GFX or DMA executor. Each of SRC and DST can independently be GPU or Null, but not both Null simultaneously.
 
-- **Invalid configs skipped:** The following configurations are skipped:
+- Invalid configs are skipped in two cases:
 
   - ``exe`` = DMA and (``src`` = N or ``dst`` = N)
   - ``src`` = N and ``dst`` = N
@@ -1504,7 +1504,7 @@ The p2p preset measures device memory bandwidth between all pairs of CPU NUMA no
 
 - Single-node only.
 
-- ``USE_FINE_GRAIN`` **is deprecated:** Returns error if ``USE_FINE_GRAIN`` is set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
+- **``USE_FINE_GRAIN`` is deprecated:** Returns error if ``USE_FINE_GRAIN`` is set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
 
 - **NVIDIA platforms:** CPU executors can't access GPU memory; those pairs are skipped.
 
@@ -2043,7 +2043,7 @@ The scaling preset runs a scaling test from one GPU to all other devices (CPUs a
 
 - For each CU count (``SWEEP_MIN`` to ``SWEEP_MAX``), runs one transfer per target and reports bandwidth.
 
-- **Output table:** Rows = CU count, columns = target device.
+- Prints a table: rows = CU count, columns = target device.
 
 - Adds a ``Best`` row to the output showing peak bandwidth and optimal CU count per target.
 
@@ -2051,7 +2051,7 @@ The scaling preset runs a scaling test from one GPU to all other devices (CPUs a
 
 - Single-node only.
 
-- ``USE_FINE_GRAIN`` is deprecated: Returns error if set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
+- **``USE_FINE_GRAIN`` is deprecated:** Returns error if set. Use ``CPU_MEM_TYPE`` and ``GPU_MEM_TYPE`` instead.
 
 **Usage:**
 
@@ -2221,25 +2221,25 @@ The schmoo preset runs scaling tests for local and remote read, write, and copy 
 
 **Key features:**
 
-- **GPUs used:** Uses two GPUs: ``LOCAL_IDX`` (local) and ``REMOTE_IDX`` (remote).
+- Uses two GPUs: ``LOCAL_IDX`` (local) and ``REMOTE_IDX`` (remote).
 
 - **Fixed topology:** Always two GPUs (local and remote); no sweep over device count.
 
-- **Six tests per CU count:** For each CU count, runs the following six tests. Each test measures bandwidth for the corresponding operation pattern:
+- For each CU count, runs the following six tests. Each test measures bandwidth for the corresponding operation pattern:
 
-  - **Local Read:** Local GPU reads from local memory (SRC->G->null).
+  - Local Read: Local GPU reads from local memory (SRC->G->null).
 
-  - **Local Write:** Local GPU writes to local memory (null->G->DST).
+  - Local Write: Local GPU writes to local memory (null->G->DST).
 
-  - **Local Copy:** Local GPU copies (local->local).
+  - Local Copy: Local GPU copies (local->local).
 
-  - **Remote Read:** Local GPU reads from remote memory.
+  - Remote Read: Local GPU reads from remote memory.
 
-  - **Remote Write:** Local GPU writes to remote memory.
+  - Remote Write: Local GPU writes to remote memory.
 
-  - **Remote Copy:** Local GPU copies (local->remote).
+  - Remote Copy: Local GPU copies (local->remote).
 
-- **Output table:** Rows = #CUs, columns = the 6 operation types.
+- Outputs a table: rows = #CUs, columns = the 6 operation types.
 
 **Restrictions:**
 
@@ -2615,5 +2615,3 @@ Example output
   -------------------┼--------------┼------------┼-------------------┼--------------------
      Aggregate (CPU) │ 295.108 GB/s │  12.735 ms │  3758096384 bytes │ Overhead 0.372 ms
   -------------------┴--------------┴------------┴-------------------┴--------------------
-
-The exact format depends on ``OUTPUT_TO_CSV``. Typically shows test number, transfer count, bandwidth, and timing per test.

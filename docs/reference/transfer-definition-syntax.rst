@@ -266,3 +266,5 @@ This definition expands to:
 .. code-block:: shell
 
   (R0G0 N0.4 R2G4)
+
+Here, ``.4`` is the NIC sub-index resolved from the NIC closest to GPU 4 on rank 2.

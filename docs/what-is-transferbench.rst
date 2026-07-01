@@ -36,7 +36,7 @@ Features
 
 TransferBench supports the following features:
 
-- **Multiple Executors:** CPU threads, GPU compute kernels, GPU Direct Memory Access (DMA) or System DMA (SDMA), and Remote Direct Memory Access (RDMA) network interface cards (RNICs).
+- **Multiple Executors:** CPU threads, GPU compute kernels (GFX), GPU DMA engines (SDMA), and NIC RDMA.
 
 - **Multi-input or multi-output (MIMO) transfers:** Element-wise sum from multiple SRCs to multiple DSTs.
 

@@ -97,7 +97,7 @@ To build TransferBench from source using Makefile, run:
 
 .. note::
 
-  By default, building with ``make`` only builds for the GPU detected on the machine being used for compilation. To specifically target GPU architectures to compile for, set ``GPU_TARGETS``. See :ref:`menv-var`.
+  By default, ``make`` targets the GPU architecture detected on the build machine (``GPU_TARGETS=native``). To target specific architectures, set ``GPU_TARGETS``. See :ref:`menv-var`.
 
 .. _menv-var:
 
@@ -327,7 +327,7 @@ To modify the CMake behavior, use the following environment variables:
 
 .. note::
 
-  CMake uses ``opt-in`` for optional features, which is ``OFF`` by default, whereas Makefile uses ``opt-out``, which is ``ON`` by default. To set cache variables, pass ``-DVAR=value`` to CMake.
+  CMake requires optional features to be explicitly enabled (all default to ``OFF``). Makefile enables features automatically when their dependencies are detected; use ``DISABLE_*`` flags to turn them off. To set cache variables, pass ``-DVAR=value`` to CMake.
 
 **Example: building with MPI and NIC support**
 
@@ -342,7 +342,7 @@ To modify the CMake behavior, use the following environment variables:
 Troubleshooting common build errors
 ====================================
 
-Here are some commonly encountered build errors and their fix:
+Here are some commonly encountered build errors and their fixes:
 
 - ``Could not find /opt/rocm/bin/amdclang++ or /opt/rocm/bin/hipcc. Check if the path is correct if you want to build TransferBench``
 

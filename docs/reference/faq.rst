@@ -70,8 +70,8 @@ This commonly occurs with DMA-executed transfers, because each DMA transfer requ
 hardware queue. It is frequently seen when running the :ref:`all-to-all preset <a2a>`.
 
 To resolve this, set ``GPU_MAX_HW_QUEUES`` to a value greater than the number of
-transfers. It is recommended to set at least one extra queue beyond the number of
-transfers.
+simultaneous DMA transfers. For example, set ``GPU_MAX_HW_QUEUES=8`` when running 7
+parallel DMA transfers per GPU in an 8-GPU all-to-all.
 
 The following examples show the effect on an 8-GPU system running the all-to-all preset
 with DMA execution enabled.

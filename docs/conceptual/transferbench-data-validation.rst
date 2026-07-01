@@ -9,12 +9,7 @@ TransferBench data validation
 ==============================
 
 TransferBench validates the transfer results by comparing the destination (DST) memory to
-precomputed expected values.
-
-Overview
-=========
-
-For each transfer, the DST buffer must equal the element-wise sum of all SRC buffers, or zero if there are no sources. A transfer is correct if, for every element ``i``, the value matches the expected value given in the following table:
+precomputed expected values. For each transfer, the DST buffer must equal the element-wise sum of all SRC buffers, or zero if there are no sources. A transfer is correct if, for every element ``i``, the value matches the expected value given in the following table:
 
 .. list-table::
     :header-rows: 1

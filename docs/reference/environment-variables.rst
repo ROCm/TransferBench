@@ -142,7 +142,7 @@ Data and validation options
     * - ``VALIDATE_SOURCE``
       - Specifies whether to validate the source immediately after preparation. Set to ``1`` to validate, ``0`` to skip.
 
-        This was introduced to help debug issues where the initial copy of source data to the GPU didn't meet expectations, due to a hardware DMA issue.
+        Validates that source memory matches the expected pattern immediately after initialization. Useful when debugging DMA anomalies that affect the initial copy to the GPU.
       - ``0``
 
 .. _gfx-options:
@@ -287,8 +287,10 @@ The following environment variables apply only when NIC support is enabled. To e
       - RoCE version.
       - ``2``
 
-Backend and runtime options (client-read)
-------------------------------------------
+HIP runtime variables (client-read)
+-------------------------------------
+
+The following variable is a HIP runtime environment variable, not a TransferBench variable. Set it in your shell before running TransferBench.
 
 .. list-table::
     :header-rows: 1

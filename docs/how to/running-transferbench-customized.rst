@@ -51,7 +51,7 @@ In addition to configuration file mode, TransferBench supports the following alt
 
     * - ``dryrun``
       - ``./TransferBench dryrun [num_bytes] <transfer_definitions...>``
-      - Parses and prints the expanded transfers without executing them. Use this mode to validate wildcard expansion.
+      - Parses and prints the expanded transfers without executing them. Like ``cmdline``, transfer definitions must be provided as command-line arguments, not as a file path. Use this mode to validate wildcard expansion.
 
 - Using ``cmdline`` mode:
 
