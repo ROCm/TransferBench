@@ -23,4 +23,4 @@ This installs in ``/opt/{rocm-version}/bin/TransferBench``. To check, run:
 
 .. note::
 
-  The pre-packaged installation includes only the default features. NIC Executor, MPI support, and pod support require a source build.
+  The pre-packaged installation includes only the default features. NIC Executor, MPI support, and pod support require a :ref:`source build <source-build>`.
