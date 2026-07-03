@@ -92,7 +92,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.68";
+  constexpr char VERSION[] = "1.69";
 
   /**
    * Enumeration of supported Executor types
@@ -5507,6 +5507,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int numDsts = (int)resources.dstMem.size();
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
+    size_t const initOffset = cfg.data.byteOffset / sizeof(float);
+    float* const src = resources.srcMem[0] + initOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
@@ -5520,12 +5522,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         // Queue for each output location
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+          float* const dst = resources.dstMem[dstIdx] + initOffset;
 #if defined(CUMEM_ENABLED)
-          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[dstIdx],
-                                  (CUdeviceptr)resources.srcMem[0],
+          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)dst,
+                                  (CUdeviceptr)src,
                                   resources.numBytes, stream));
 #else
-          ERR_CHECK(hipMemcpyAsync(resources.dstMem[dstIdx], resources.srcMem[0], resources.numBytes,
+          ERR_CHECK(hipMemcpyAsync(dst, src, resources.numBytes,
                                    memcpyKind, stream));
 #endif
         }
@@ -5542,14 +5545,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         hsa_signal_store_screlease(resources.signal, numDsts);
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+          float* const dst = resources.dstMem[dstIdx] + initOffset;
           if (!useSubIndices) {
-            ERR_CHECK(hsa_amd_memory_async_copy(resources.dstMem[dstIdx], resources.dstAgent[dstIdx],
-                                                resources.srcMem[0], resources.srcAgent,
+            ERR_CHECK(hsa_amd_memory_async_copy(dst, resources.dstAgent[dstIdx],
+                                                src, resources.srcAgent,
                                                 resources.numBytes, 0, NULL,
                                                 resources.signal));
           } else {
-            HSA_CALL(hsa_amd_memory_async_copy_on_engine(resources.dstMem[dstIdx], resources.dstAgent[dstIdx],
-                                                         resources.srcMem[0], resources.srcAgent,
+            HSA_CALL(hsa_amd_memory_async_copy_on_engine(dst, resources.dstAgent[dstIdx],
+                                                         src, resources.srcAgent,
                                                          resources.numBytes, 0, NULL,
                                                          resources.signal,
                                                          resources.sdmaEngineId, true));

@@ -259,7 +259,7 @@ void DisplayVersion()
 #ifndef TB_GIT_COMMIT
 #define TB_GIT_COMMIT "unknown"
 #endif
-  Print("TransferBench v%s.%s (%s:%s)%s%s\n", VERSION, CLIENT_VERSION, TB_GIT_BRANCH, TB_GIT_COMMIT, support.c_str(), multiNodeMode.c_str());
+  Print("TransferBench v%s.%sC (%s:%s)%s%s\n", VERSION, CLIENT_VERSION, TB_GIT_BRANCH, TB_GIT_COMMIT, support.c_str(), multiNodeMode.c_str());
   Print("=============================================================================================================\n");
 }
 
