@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.69.00
+### Fixed
+- Fix for non-zero byte offsets used with DMA executor
+
 ## v1.68.00
 ### Fixed
 - Improper draining of writes that could artificially inflate transfer timing
