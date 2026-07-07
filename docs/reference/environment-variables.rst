@@ -300,7 +300,7 @@ The following variable is a HIP runtime environment variable, not a TransferBenc
       - Default value
 
     * - ``GPU_MAX_HW_QUEUES``
-      - A HIP runtime environment variable that sets the maximum number of hardware queues per GPU per process. When more than four GPU-executed transfers run simultaneously with ``USE_SINGLE_STREAM=0``, they may serialize while waiting for available queues; increase this value beyond the default ``4`` to avoid serialization. See :ref:`gpu-max-hw-queues`.
+      - A HIP runtime environment variable that sets the maximum number of hardware queues per GPU per process. When more than four GPU-executed transfers run simultaneously with ``USE_SINGLE_STREAM=0``, they might serialize while waiting for available queues; increase this value beyond the default ``4`` to avoid serialization. See :ref:`gpu-max-hw-queues`.
       - ``4``
 
 Backend environment variables

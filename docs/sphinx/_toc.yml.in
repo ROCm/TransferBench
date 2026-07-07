@@ -7,7 +7,6 @@ subtrees:
 
 - caption: Install
   entries:
-  - file: install/package_install.rst
   - file: install/build_from_source.rst
 
 - caption: How to

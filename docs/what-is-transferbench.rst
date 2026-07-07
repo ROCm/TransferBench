@@ -46,6 +46,16 @@ TransferBench supports the following features:
 
 - **Flexible hardware:** Runs HIP and CUDA programs on both AMD and NVIDIA hardware.
 
+Supported hardware
+==================
+
+TransferBench is tested on all AMD Instinct™ GPUs supported by the current ROCm release. For the full list, see
+`ROCm system requirements <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html#supported-gpus>`_.
+
+.. note::
+
+   TransferBench is not tested on AMD Radeon GPUs.
+
 Frontend and backend
 ====================
 

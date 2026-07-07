@@ -17,13 +17,13 @@ precomputed expected values. For each transfer, the DST buffer must equal the el
     * - Number of sources
       - Expected value
 
-    * - 0 sources
+    * - 0
       - ``dst[i] == 0`` (or memset value)
 
-    * - 1 source
+    * - 1
       - ``dst[i] == src0[i]``
 
-    * - N sources
+    * - N
       - ``dst[i] == src0[i] + src1[i] + ... + srcN-1[i]``
 
 Source data preparation

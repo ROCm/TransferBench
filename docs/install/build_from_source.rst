@@ -131,7 +131,7 @@ To modify the Makefile behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>CUDA_PATH</code></td>
-              <td>CUDA installation path for NVCC when building <code>TransferBenchCuda</code>.</td>
+              <td>CUDA installation path for NVCC when building <code>TransferBench for CUDA</code>.</td>
               <td><code>/usr/local/cuda</code></td>
             </tr>
             <tr>
@@ -146,7 +146,7 @@ To modify the Makefile behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>NVCC</code></td>
-              <td>NVIDIA CUDA compiler (for building <code>TransferBenchCuda</code>).</td>
+              <td>CUDA compiler (for building <code>TransferBench for CUDA</code>).</td>
               <td><code>$(CUDA_PATH)/bin/nvcc</code></td>
             </tr>
             <tr>
@@ -204,6 +204,14 @@ To modify the Makefile behavior, use the following environment variables:
         </tbody>
     </table>
   </div>
+
+.. note::
+
+   The Makefile looks for MPI headers at ``$(MPI_PATH)/include`` (default: ``/usr/local/openmpi``). System package managers typically install MPI to a different location, so you must set ``MPI_PATH`` when building with MPI support. To find the correct path, run ``mpicc --showme:incdirs`` after installing MPI, then pass it explicitly:
+
+   .. code-block:: shell
+
+      MPI_PATH=<path-to-mpi> make
 
 .. _cmake:
 
@@ -352,17 +360,17 @@ Here are some commonly encountered build errors and their fixes:
 
   Normally occurs if the standard C++ headers aren't installed. Try installing ``g++-12`` or ``g++-14`` based on the OS version. For example, ``apt-get install g++-12``.
 
-Building TransferBenchCuda
-===========================
+Building TransferBench for CUDA
+=================================
 
-TransferBenchCuda is the NVIDIA build target. To build it on a system with NVIDIA CUDA installed, install the required dependencies first.
+To build TransferBench on a system with CUDA installed, install the required dependencies first.
 
 Required dependencies
 ----------------------
 
-- CUDA: The installed CUDA version might impact support for some features such as MNNVL support.
+- **CUDA:** The installed CUDA version might impact support for some features such as MNNVL support.
 
-- libnuma: Used for allocating memory or spawning threads on the right NUMA nodes. Here are the install instructions based on the OS:
+- **libnuma:** Used for allocating memory or spawning threads on the right NUMA nodes. Here are the install instructions based on the OS:
 
   - Ubuntu/Debian:
 
@@ -376,10 +384,10 @@ Required dependencies
 
       sudo yum install numactl-devel
 
-Building TransferBenchCuda from source code
---------------------------------------------
+Build steps
+-----------
 
-To build TransferBenchCuda, run:
+To build TransferBench on a system with CUDA installed, run:
 
 .. code-block:: shell
 
