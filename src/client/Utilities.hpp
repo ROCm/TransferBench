@@ -439,8 +439,8 @@ namespace TransferBench::Utils
     case EXE_NIC:           return "NIC";
     case EXE_NIC_NEAREST:   return "NIC";
     case EXE_GPU_BDMA:      return "BMA";
-    case EXE_GPU_ASYNC_TENSOR: return "AT"; // async tensor kernel path
-    case EXE_GPU_ASYNC_MEMOPS: return "AL"; // async load/store kernel path
+    case EXE_GPU_TDM:       return "TDM";
+    case EXE_GPU_ALS:       return "ALS";
     default:                return "N/A";
     }
   }
