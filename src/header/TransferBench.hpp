@@ -4717,6 +4717,7 @@ namespace {
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
+                                   exeDevice.exeType == EXE_GPU_INITIATED_DMA ||
                                    (cfg.general.useMultiStream && (exeDevice.exeType == EXE_GPU_GFX ||
                                                                    exeDevice.exeType == EXE_GPU_TDM)))
                                   ? exeInfo.resources.size() : 1;
@@ -6389,9 +6390,12 @@ namespace {
   {
     ERR_CHECK(hipSetDevice(deviceIdx));
 
-    ERR_CHECK(hipEventRecord(exeInfo.startEvents[0], exeInfo.streams[0]));
+    int const numResources = (int)exeInfo.resources.size();
 
-    for (int i = 0; i < (int)exeInfo.resources.size(); ++i) {
+    // Launch each transfer on its own stream so they execute concurrently and
+    // contend for the fabric/SDMA engines, matching how the DMA/BMA executors
+    // are measured. Each transfer is timed individually via its own event pair.
+    for (int i = 0; i < numResources; ++i) {
       TransferResources const& rss = exeInfo.resources[i];
       sdma_ep::SdmaQueueInfo const& qi = exeInfo.anvilQueues[i];
 
@@ -6403,22 +6407,28 @@ namespace {
       void const* src    = reinterpret_cast<uint8_t const*>(rss.srcMem[0]) + initOffsetBytes;
       size_t      nbytes = rss.numBytes;
 
+      ERR_CHECK(hipEventRecord(exeInfo.startEvents[i], exeInfo.streams[i]));
       hipLaunchKernelGGL(AnvilTransferKernel,
-                         dim3(1), dim3(1), 0, exeInfo.streams[0],
+                         dim3(1), dim3(1), 0, exeInfo.streams[i],
                          handle, dst, const_cast<void*>(src), nbytes);
       ERR_CHECK(hipGetLastError());
+      ERR_CHECK(hipEventRecord(exeInfo.stopEvents[i], exeInfo.streams[i]));
     }
 
-    ERR_CHECK(hipEventRecord(exeInfo.stopEvents[0], exeInfo.streams[0]));
-    ERR_CHECK(hipStreamSynchronize(exeInfo.streams[0]));
-
-    float deltaMsec = 0.0f;
-    ERR_CHECK(hipEventElapsedTime(&deltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+    // Wait for all concurrent transfers to complete, then record per-transfer times
+    for (int i = 0; i < numResources; ++i)
+      ERR_CHECK(hipStreamSynchronize(exeInfo.streams[i]));
 
     if (iteration >= 0) {
-      exeInfo.totalDurationMsec += deltaMsec;
-      for (auto& rss : exeInfo.resources)
-        rss.totalDurationMsec += deltaMsec / exeInfo.resources.size();
+      float maxDeltaMsec = 0.0f;
+      for (int i = 0; i < numResources; ++i) {
+        float deltaMsec = 0.0f;
+        ERR_CHECK(hipEventElapsedTime(&deltaMsec, exeInfo.startEvents[i], exeInfo.stopEvents[i]));
+        exeInfo.resources[i].totalDurationMsec += deltaMsec;
+        maxDeltaMsec = std::max(maxDeltaMsec, deltaMsec);
+      }
+      // Executor wall time is bounded by the slowest concurrent transfer
+      exeInfo.totalDurationMsec += maxDeltaMsec;
     }
 
     return ERR_NONE;
