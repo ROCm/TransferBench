@@ -3161,7 +3161,8 @@ namespace {
 
     // For EXE_GPU_INITIATED_DMA (anvil)
 #ifdef ANVIL_EXEC_ENABLED
-    vector<sdma_ep::SdmaQueueInfo> anvilQueues; ///< One KFD SDMA queue per transfer
+    vector<sdma_ep::SdmaQueueInfo> anvilQueues;   ///< One KFD SDMA queue per transfer
+    vector<uint64_t*>              anvilSignals;  ///< Per-transfer completion signal (uncached device mem)
 #endif
   };
 
@@ -4515,6 +4516,7 @@ namespace {
 
       int const numResources = exeInfo.resources.size();
       exeInfo.anvilQueues.resize(numResources);
+      exeInfo.anvilSignals.assign(numResources, nullptr);
 
       for (int i = 0; i < numResources; ++i) {
         Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
@@ -4547,6 +4549,22 @@ namespace {
         exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
         exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
         exeInfo.anvilQueues[i].channelIdx   = channelIdx;
+
+        // Per-transfer completion signal: uncached device memory the SDMA
+        // engine atomically increments after the copy, and the kernel polls
+        // via waitSignal. Uncached so the kernel's atomic loads observe the
+        // engine's write without stale cache lines.
+        {
+          uint64_t* signal = nullptr;
+          if (hipExtMallocWithFlags((void**)&signal, sizeof(uint64_t),
+                                    hipDeviceMallocUncached) != hipSuccess || !signal) {
+            return {ERR_FATAL,
+                    "PrepareAnvilExecutor: signal alloc failed for src=%d dst=%d",
+                    srcDeviceId, dstDeviceId};
+          }
+          ERR_CHECK(hipMemset(signal, 0, sizeof(uint64_t)));
+          exeInfo.anvilSignals[i] = signal;
+        }
 
         if (verbose) {
           System::Get().Log("[ANVIL]   resource[%d]: channelIdx %d  deviceHandle %p\n",
@@ -5012,6 +5030,12 @@ namespace {
                             (void*)exeInfo.anvilQueues[i].deviceHandle);
         }
       }
+      // Free per-transfer completion signals.
+      for (uint64_t* signal : exeInfo.anvilSignals) {
+        if (signal) ERR_CHECK(hipFree(signal));
+      }
+      exeInfo.anvilSignals.clear();
+
       // SdmaQueue objects are owned by the AnvilLib singleton and are destroyed
       // at process exit. Clear the info vector to drop our references.
       exeInfo.anvilQueues.clear();
@@ -6056,14 +6080,24 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
-  // Single-thread kernel: writes one SDMA linear-copy packet to the KFD ring buffer
-  // via the SdmaQueue device handle, then spin-polls until the SDMA engine completes.
+  // Single-thread kernel: submits one SDMA copy packet fused with an atomic
+  // increment of `signal` (put_signal), then spin-polls that signal until the
+  // engine has retired the copy (waitSignal).
+  //
+  // Completion is detected via the signal atomic (ordered by the engine AFTER
+  // the copy) rather than the ring read pointer (rptr). rptr only reflects
+  // ring-space reclamation and can advance before the copy's writes retire, so
+  // the previous put + quiet(rptr) approach could report completion early. This
+  // ordering fix is fabric-independent (needed even on coherent IFoE); it does
+  // NOT include HDP flush / GCR cache ops, which are only required for
+  // non-coherent host-data-path/aperture consumers (see plan: hdp-gcr-conditional).
   // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
   __global__ void AnvilTransferKernel(anvil::SdmaQueueDeviceHandle* handlePtr,
-                                      void* dst, void const* src, size_t numBytes)
+                                      void* dst, void const* src, size_t numBytes,
+                                      uint64_t* signal, uint64_t expected)
   {
-    anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
-    anvil::quiet(*handlePtr);
+    anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
+    anvil::waitSignal(signal, expected);
   }
 #endif // ANVIL_EXEC_ENABLED
 
@@ -6409,6 +6443,12 @@ namespace {
       void*       dst    = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
       void const* src    = reinterpret_cast<uint8_t const*>(rss.srcMem[0]) + initOffsetBytes;
       size_t      nbytes = rss.numBytes;
+      uint64_t*   signal = exeInfo.anvilSignals[i];
+
+      // Reset the completion signal to 0 on this stream before the kernel so it
+      // is ordered ahead of the launch but outside the start/stop timing window.
+      // The kernel's put_signal increments it once, so we wait for exactly 1.
+      ERR_CHECK(hipMemsetAsync(signal, 0, sizeof(uint64_t), exeInfo.streams[i]));
 
       // Anvil is AMD-only (no NVCC path), so use hipExtLaunchKernelGGL to bracket
       // the kernel with start/stop events as part of the launch, matching the GFX
@@ -6416,7 +6456,8 @@ namespace {
       hipExtLaunchKernelGGL(AnvilTransferKernel,
                             dim3(1), dim3(1), 0, exeInfo.streams[i],
                             exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,
-                            handle, dst, const_cast<void*>(src), nbytes);
+                            handle, dst, const_cast<void*>(src), nbytes,
+                            signal, (uint64_t)1);
       ERR_CHECK(hipGetLastError());
     }
 
