@@ -484,13 +484,34 @@ int AnvilLib::getOamId(int deviceId) {
   return xgmi_physical_id;
 }
 
-int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+// Return the index of the n-th (0-based) set bit in mask, or -1 if fewer than
+// n+1 bits are set. Used to spread transfers across the preferred engine set.
+static int NthSetBit(uint32_t mask, int n) {
+  for (int i = 0; i < 32; ++i) {
+    if (mask & (1u << i)) {
+      if (n == 0) return i;
+      --n;
+    }
+  }
+  return -1;
+}
+
+int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId, int rotation) {
   // ANVIL_USE_HSA_ENGINE=1 (default): query hsa_amd_memory_get_preferred_copy_engine
-  // for the src->dst pair and return the lowest-set-bit engine index.
+  // for the src->dst pair and return an engine index from the preferred mask.
   // ANVIL_USE_HSA_ENGINE=0: use the hardcoded MI300X OAM lookup table.
   static bool useHsaEngine = [] {
     char const* v = getenv("ANVIL_USE_HSA_ENGINE");
     return !v || atoi(v) != 0;
+  }();
+
+  // ANVIL_ENGINE_ROUND_ROBIN=1: distribute successive transfers across the set
+  // bits of the preferred-engine mask (rotation selects the k-th engine).
+  // Default (0): always use the lowest-set-bit engine (legacy deterministic).
+  // Neutral on gfx1250 (bandwidth/latency-bound); opt-in for other topologies.
+  static bool roundRobin = [] {
+    char const* v = getenv("ANVIL_ENGINE_ROUND_ROBIN");
+    return v && atoi(v) != 0;
   }();
 
   if (useHsaEngine) {
@@ -498,8 +519,12 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
     hsa_status_t status = hsa_amd_memory_get_preferred_copy_engine(
       gpuAgents_[dstDeviceId], gpuAgents_[srcDeviceId], &mask);
     if (status == HSA_STATUS_SUCCESS && mask != 0) {
-      // Return the index of the lowest set bit (engine 0..15)
-      return __builtin_ctz(mask);
+      int const numEngines = __builtin_popcount(mask);
+      int const slot = roundRobin ? (((rotation % numEngines) + numEngines) % numEngines) : 0;
+      int const engine = NthSetBit(mask, slot);
+      ANVIL_LOG("getSdmaEngineId: src=%d dst=%d mask=0x%x numEngines=%d rotation=%d -> engine=%d\n",
+                srcDeviceId, dstDeviceId, mask, numEngines, rotation, engine);
+      return engine;
     }
     ANVIL_LOG("getSdmaEngineId: HSA preferred engine query failed or returned 0 "
               "(src=%d dst=%d status=%u mask=%u), falling back to OAM map\n",

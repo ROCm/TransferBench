@@ -50,7 +50,7 @@ public:
   SdmaQueue* getSdmaQueue(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
                              uint32_t engineId, int* channelIdx = nullptr);
-  int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
+  int getSdmaEngineId(int srcDeviceId, int dstDeviceId, int rotation = 0);
 
 private:
   /*

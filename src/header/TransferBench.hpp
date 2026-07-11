@@ -4520,11 +4520,14 @@ namespace {
         Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
         int const dstDeviceId = t.dsts[0].memIndex;
 
-        // Enable peer access and resolve XGMI-optimal SDMA engine; create queue
+        // Enable peer access and resolve XGMI-optimal SDMA engine; create queue.
+        // Pass the resource index as the round-robin rotation so concurrent
+        // transfers on this source GPU spread across the preferred engine set
+        // instead of all funneling onto the lowest-index engine.
         int channelIdx = -1;
         anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
         uint32_t const engineId = static_cast<uint32_t>(
-          anvilLib.getSdmaEngineId(srcDeviceId, dstDeviceId));
+          anvilLib.getSdmaEngineId(srcDeviceId, dstDeviceId, i));
 
         if (verbose) {
           System::Get().Log("[ANVIL]   resource[%d]: transfer %d  dst GPU %d  SDMA engine %u\n",
