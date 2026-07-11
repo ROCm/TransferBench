@@ -6410,12 +6410,14 @@ namespace {
       void const* src    = reinterpret_cast<uint8_t const*>(rss.srcMem[0]) + initOffsetBytes;
       size_t      nbytes = rss.numBytes;
 
-      ERR_CHECK(hipEventRecord(exeInfo.startEvents[i], exeInfo.streams[i]));
-      hipLaunchKernelGGL(AnvilTransferKernel,
-                         dim3(1), dim3(1), 0, exeInfo.streams[i],
-                         handle, dst, const_cast<void*>(src), nbytes);
+      // Anvil is AMD-only (no NVCC path), so use hipExtLaunchKernelGGL to bracket
+      // the kernel with start/stop events as part of the launch, matching the GFX
+      // executor's timing path instead of separate hipEventRecord calls.
+      hipExtLaunchKernelGGL(AnvilTransferKernel,
+                            dim3(1), dim3(1), 0, exeInfo.streams[i],
+                            exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,
+                            handle, dst, const_cast<void*>(src), nbytes);
       ERR_CHECK(hipGetLastError());
-      ERR_CHECK(hipEventRecord(exeInfo.stopEvents[i], exeInfo.streams[i]));
     }
 
     // Wait for all concurrent transfers to complete, then record per-transfer times
