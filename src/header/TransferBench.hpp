@@ -6126,16 +6126,29 @@ namespace {
   // `doWait` gates the completion wait (ANVIL_WAIT_SIGNAL). When true (default)
   // the kernel spins until the copy completes, so the stop event captures the
   // full transfer. When false the kernel returns right after submitting the
-  // packet, measuring submission-only time - useful to isolate the waitSignal
-  // cost, but the copy is then still in flight (NOT safe for validation).
+  // packet, measuring submission-only time - useful to isolate the wait cost,
+  // but the copy is then still in flight (NOT safe for validation).
+  //
+  // `useLegacy` selects the completion mechanism (ANVIL_LEGACY):
+  //   false (default): put_signal + waitSignal (engine-ordered atomic signal).
+  //   true (legacy):   put + quiet (polls the ring rptr). Kept for comparison;
+  //                    quiet can report completion early (see note above), so
+  //                    prefer the signal path for correctness.
+  // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
   __global__ void AnvilTransferKernel(anvil::SdmaQueueDeviceHandle* handlePtr,
                                       void* dst, void const* src, size_t numBytes,
                                       uint64_t* signal, uint64_t expected,
-                                      bool doWait)
+                                      bool doWait, bool useLegacy)
   {
-    anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
-    if (doWait)
-      anvil::waitSignal(signal, expected);
+    if (useLegacy) {
+      anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
+      if (doWait)
+        anvil::quiet(*handlePtr);
+    } else {
+      anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
+      if (doWait)
+        anvil::waitSignal(signal, expected);
+    }
   }
 #endif // ANVIL_EXEC_ENABLED
 
@@ -6477,6 +6490,14 @@ namespace {
       return !v || atoi(v) != 0;
     }();
 
+    // ANVIL_LEGACY=1: use the legacy put + quiet (rptr-poll) completion instead
+    // of put_signal + waitSignal. For comparison only; quiet can report
+    // completion before the copy's writes retire, so the signal path is default.
+    static bool const useLegacy = [] {
+      char const* v = getenv("ANVIL_LEGACY");
+      return v && atoi(v) != 0;
+    }();
+
     // Launch each transfer on its own stream so they execute concurrently and
     // contend for the fabric/SDMA engines, matching how the DMA/BMA executors
     // are measured. Each transfer is timed individually via its own event pair.
@@ -6505,7 +6526,7 @@ namespace {
                             dim3(1), dim3(1), 0, exeInfo.streams[i],
                             exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,
                             handle, dst, const_cast<void*>(src), nbytes,
-                            signal, (uint64_t)1, doWait);
+                            signal, (uint64_t)1, doWait, useLegacy);
       ERR_CHECK(hipGetLastError());
     }
 
