@@ -283,7 +283,7 @@ namespace TransferBench
 
   struct TdmOptions
   {
-    int blockSize    = 256; ///< Size of each threadblock (must be multiple of 64)
+    int blockSize    = 256; ///< Size of each threadblock (must be multiple of 32)
     int maxLDSBytes  = INT_MAX; ///< Maximum number of bytes of __shared__ memory to use
     int useHipEvents = 1; ///< Use HIP events for timing the TDM executor (0=CPU wall-clock)
 
@@ -638,6 +638,7 @@ namespace TransferBench
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
   #define hipDeviceAttributeMultiprocessorCount              cudaDevAttrMultiProcessorCount
+  #define hipDeviceAttributeMaxSharedMemoryPerBlock          cudaDevAttrMaxSharedMemoryPerBlock
   #define hipDeviceAttributeWarpSize                         cudaDevAttrWarpSize
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
@@ -667,6 +668,7 @@ namespace TransferBench
   #define hipGetDeviceCount                                  cudaGetDeviceCount
   #define hipGetDeviceProperties                             cudaGetDeviceProperties
   #define hipGetErrorString                                  cudaGetErrorString
+  #define hipGetLastError                                    cudaGetLastError
   #define hipHostFree                                        cudaFreeHost
   #define hipHostMalloc                                      cudaMallocHost
   #define hipMalloc                                          cudaMalloc
@@ -2396,12 +2398,18 @@ namespace {
           hasFatalError = true;
           break;
         }
+#if defined(__NVCC__)
+        errors.push_back({ERR_FATAL,
+                          "Transfer %d: GPU TDM kernel is not supported on NVIDIA hardware", i});
+        hasFatalError = true;
+#else
         if (!tdm::IsTdmCopySupported(t.exeDevice.exeIndex)) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: GPU TDM kernel requires gfx1250 hardware, but GPU %d is not supported",
                             i, t.exeDevice.exeIndex});
           hasFatalError = true;
         }
+#endif
         break;
       case EXE_GPU_GFX:
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
@@ -5833,6 +5841,7 @@ namespace {
     int subIterations = 0;
     while (1) {
       tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+      __syncthreads();
       if (++subIterations == numSubIterations) break;
     }
 
@@ -8407,6 +8416,7 @@ namespace {
 // Enumerations
 #undef hipDeviceAttributeClockRate
 #undef hipDeviceAttributeMultiprocessorCount
+#undef hipDeviceAttributeMaxSharedMemoryPerBlock
 #undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
 #undef hipFuncCachePreferShared
@@ -8437,6 +8447,7 @@ namespace {
 #undef hipGetDeviceCount
 #undef hipGetDeviceProperties
 #undef hipGetErrorString
+#undef hipGetLastError
 #undef hipHostFree
 #undef hipHostMalloc
 #undef hipMalloc

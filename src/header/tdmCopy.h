@@ -23,7 +23,7 @@ THE SOFTWARE.
 ///
 ///        This is introduced via __device__ level memcpy-like API which can be
 ///        either blocking or asynchronous, and utilize all warps, or a team of
-///        congtigous warps, to allow for other warps to do other tasks
+///        contiguous warps, to allow for other warps to do other tasks
 ///
 /// \par Quick start
 /// \code

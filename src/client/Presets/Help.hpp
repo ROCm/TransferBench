@@ -113,11 +113,11 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("## Single DMA executed Transfer between GPUs 0 and 1\n");
   printf("1 1 (G0->D0->G1)\n");
   printf("\n");
-  printf("## Single GPU-executed Transfer between GPUs 0 and 1 using 1 CU for tensor-op path\n");
+  printf("## Single GPU-executed Transfer between GPUs 0 and 1 using 1 CU for TDM path\n");
   printf("1 1 (G0->T0->G1)\n");
   printf("\n");
   printf("## Single GPU-executed Transfer between GPUs 0 and 1 using 1 CU for async load/store path\n");
-  printf("1 1 (G0->L0->G1)\n");
+  printf("1 1 (G0->A0->G1)\n");
   printf("\n");
   printf("## Copy 1Mb from GPU0 to GPU1 with 4 CUs, and 2Mb from GPU1 to GPU0 with 8 CUs\n");
   printf("-2 (G0->G0->G1 4 1M) (G1->G1->G0 8 2M)\n");
