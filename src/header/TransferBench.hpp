@@ -30,10 +30,13 @@ THE SOFTWARE.
 #include <ifaddrs.h>
 #include <filesystem>
 #include <fstream>
+#include <condition_variable>
 #include <functional>
 #include <future>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <queue>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -5401,11 +5404,106 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  // Persistent worker-thread pool.
+
+  class ThreadPool {
+  public:
+    explicit ThreadPool(size_t numThreads) : stop_(false) {
+      for (size_t i = 0; i < numThreads; ++i) {
+        workers_.emplace_back([this] {
+          for (;;) {
+            std::function<void()> task;
+            {
+              std::unique_lock<std::mutex> lock(mutex_);
+              cv_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
+              if (stop_ && tasks_.empty()) return;
+              task = std::move(tasks_.front());
+              tasks_.pop();
+            }
+            task();
+          }
+        });
+      }
+    }
+
+    ThreadPool(ThreadPool const&)            = delete;
+    ThreadPool& operator=(ThreadPool const&) = delete;
+
+    ~ThreadPool() {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+      }
+      cv_.notify_all();
+      for (auto& w : workers_)
+        w.join();
+    }
+
+    size_t size() const { return workers_.size(); }
+
+    std::future<ErrResult> submit(std::function<ErrResult()> fn) {
+      auto task = std::make_shared<std::packaged_task<ErrResult()>>(std::move(fn));
+      std::future<ErrResult> fut = task->get_future();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.emplace([task] { (*task)(); });
+      }
+      cv_.notify_one();
+      return fut;
+    }
+
+  private:
+    std::vector<std::thread>          workers_;
+    std::queue<std::function<void()>> tasks_;
+    std::mutex                        mutex_;
+    std::condition_variable           cv_;
+    bool                              stop_;
+  };
+
+  // Pools are created once per RunTransfers call (sized from the run's executor/transfer counts)
+  // and destroyed when it returns. Two separate pools avoid a nested-blocking deadlock: executor
+  // workers submit their transfers to the transfer pool and block on the results, so the two
+  // levels must never share threads. Pools are passed explicitly through the call chain to avoid
+  // global state (reentrancy/thread-safety).
+
+  // Runs "count" units of work. Falls to serial execution if the pool is unavailable/empty.
+  // Keeps the most severe error across all units (ERR_FATAL > ERR_WARN > ERR_NONE).
+  template <typename MakeTask>
+  static inline ErrResult ParallelRun(ThreadPool* pool, size_t count, MakeTask makeTask) {
+    if (count == 0) return ERR_NONE;
+
+    bool const usePool = (pool != nullptr && pool->size() > 0 && count > 1);
+
+    std::vector<std::future<ErrResult>> futures;
+    if (usePool) {
+      futures.reserve(count - 1);
+      for (size_t i = 1; i < count; ++i)
+        futures.emplace_back(pool->submit(makeTask(i)));
+    }
+
+    // Unit 0 always runs inline on the calling thread.
+    ErrResult result = makeTask(0)();
+
+    if (usePool) {
+      for (auto& f : futures) {
+        ErrResult const r = f.get();
+        if (r.errType > result.errType) result = r;
+      }
+    } else {
+      for (size_t i = 1; i < count; ++i) {
+        ErrResult const r = makeTask(i)();
+        if (r.errType > result.errType) result = r;
+      }
+    }
+    return result;
+  }
+
   // Execute a single GPU executor
   static ErrResult RunGpuExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
                                   int           const  exeIndex,
-                                  ExeInfo&             exeInfo)
+                                  ExeInfo&             exeInfo,
+                                  ThreadPool*          transferPool)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
@@ -5413,24 +5511,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
     if (cfg.gfx.useMultiStream) {
-      // Launch one thread per Transfer in separate streams
-      vector<std::future<ErrResult>> asyncTransfers;
-      for (int i = 0; i < exeInfo.streams.size(); i++) {
-        asyncTransfers.emplace_back(std::async(std::launch::async,
-                                               ExecuteGpuTransfer,
-                                               iteration,
-                                               exeInfo.totalSubExecs,
-                                               exeInfo.subExecParamGpu,
-                                               exeInfo.streams[i],
-                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
-                                               xccDim,
-                                               std::cref(cfg),
-                                               exeInfo.gfxKernelToUse,
-                                               std::ref(exeInfo.resources[i])));
-      }
-      for (auto& asyncTransfer : asyncTransfers)
-        ERR_CHECK(asyncTransfer.get());
+      // Launch one Transfer per stream
+      ERR_CHECK(ParallelRun(transferPool, exeInfo.streams.size(),
+                            [&](size_t i) -> std::function<ErrResult()> {
+                              return [&, i] {
+                                return ExecuteGpuTransfer(iteration,
+                                                          exeInfo.totalSubExecs,
+                                                          exeInfo.subExecParamGpu,
+                                                          exeInfo.streams[i],
+                                                          cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                                          cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                                          xccDim,
+                                                          cfg,
+                                                          exeInfo.gfxKernelToUse,
+                                                          exeInfo.resources[i]);
+                              };
+                            }));
     } else {
       // Launch all Transfers in one kernel launch (avoid extra thread creation)
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
@@ -5587,27 +5683,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   static ErrResult RunDmaExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
                                   int           const  exeIndex,
-                                  ExeInfo&             exeInfo)
+                                  ExeInfo&             exeInfo,
+                                  ThreadPool*          transferPool)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteDmaTransfer,
-                                             iteration,
-                                             exeInfo.useSubIndices,
-                                             exeIndex,
-                                             exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
-
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+    ERR_CHECK(ParallelRun(transferPool, exeInfo.resources.size(),
+                          [&](size_t i) -> std::function<ErrResult()> {
+                            return [&, i] {
+                              return ExecuteDmaTransfer(iteration,
+                                                        exeInfo.useSubIndices,
+                                                        exeIndex,
+                                                        exeInfo.streams[i],
+                                                        cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                                        cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                                        cfg,
+                                                        exeInfo.resources[i]);
+                            };
+                          }));
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5674,26 +5768,24 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   static ErrResult RunBmaExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
                                   int           const  exeIndex,
-                                  ExeInfo&             exeInfo)
+                                  ExeInfo&             exeInfo,
+                                  ThreadPool*          transferPool)
   {
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteBatchDmaTransfer,
-                                             iteration,
-                                             exeIndex,
-                                             exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
-
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+    ERR_CHECK(ParallelRun(transferPool, exeInfo.resources.size(),
+                          [&](size_t i) -> std::function<ErrResult()> {
+                            return [&, i] {
+                              return ExecuteBatchDmaTransfer(iteration,
+                                                             exeIndex,
+                                                             exeInfo.streams[i],
+                                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                                             cfg,
+                                                             exeInfo.resources[i]);
+                            };
+                          }));
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5708,17 +5800,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
   static ErrResult RunExecutor(int           const  iteration,
                                ConfigOptions const& cfg,
                                ExeDevice     const& exeDevice,
-                               ExeInfo&             exeInfo)
+                               ExeInfo&             exeInfo,
+                               ThreadPool*          transferPool)
   {
     switch (exeDevice.exeType) {
     case EXE_CPU:           return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-    case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo, transferPool);
+    case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo, transferPool);
 #ifdef NIC_EXEC_ENABLED
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
 #ifdef BMA_EXEC_ENABLED
-    case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo, transferPool);
 #endif
     default:            return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
@@ -5978,6 +6071,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       System::Get().Barrier();
     }
 
+    // Create persistent worker pools once for this run (see ThreadPool). Sized so every executor
+    // and every transfer can run concurrently without the two levels sharing threads:
+    //   - executor pool: one worker per local executor (unit 0 runs inline, so N-1 are farmed)
+    //   - transfer pool: one worker per local transfer across all executors
+    size_t numLocalExecutors = localExecutors.size();
+    size_t numLocalTransfers = 0;
+    for (auto const& exeDevice : localExecutors)
+      numLocalTransfers += executorMap[exeDevice].resources.size();
+
+    ThreadPool executorPool(numLocalExecutors);
+    ThreadPool transferPool(numLocalTransfers);
+
     // Perform iterations
     size_t numTimedIterations = 0;
     double totalCpuTimeSec = 0.0;
@@ -5996,20 +6101,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
-      // Execute all Transfers in parallel
-      std::vector<std::future<ErrResult>> asyncExecutors;
-      for (auto const& exeDevice : localExecutors) {
-        asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
-                                               iteration,
-                                               std::cref(cfg),
-                                               std::cref(exeDevice),
-                                               std::ref(executorMap[exeDevice])));
-      }
-
-      // Wait for all threads to finish
-      for (auto& asyncExecutor : asyncExecutors) {
-        ERR_APPEND(asyncExecutor.get(), errResults);
-      }
+      // Execute all executors in parallel via the persistent executor pool. Each ExeInfo& is
+      // resolved on the calling thread (inside makeTask) to keep std::map access single-threaded,
+      // matching the previous behaviour.
+      ERR_APPEND(ParallelRun(&executorPool, localExecutors.size(),
+                             [&](size_t i) -> std::function<ErrResult()> {
+                               ExeDevice const& exeDevice = localExecutors[i];
+                               ExeInfo&         exeInfo    = executorMap[exeDevice];
+                               return [&cfg, &exeDevice, &exeInfo, &transferPool, iteration] {
+                                 return RunExecutor(iteration, cfg, exeDevice, exeInfo, &transferPool);
+                               };
+                             }),
+                 errResults);
 
       // Wait for all ranks to finish
       System::Get().Barrier();
