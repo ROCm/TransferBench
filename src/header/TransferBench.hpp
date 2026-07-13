@@ -6110,45 +6110,61 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
-  // Single-thread kernel: submits one SDMA copy packet fused with an atomic
-  // increment of `signal` (put_signal), then spin-polls that signal until the
-  // engine has retired the copy (waitSignal).
+  // Single-thread GISDMA kernels, launched as <<<dim3(1), dim3(1)>>> on the
+  // source GPU. To avoid any runtime branching inside the kernel, the four
+  // (completion mechanism) x (wait) combinations are separate kernels selected
+  // on the host (ANVIL_LEGACY x ANVIL_WAIT_SIGNAL). All share one signature so
+  // the launch site is uniform; the legacy kernels ignore signal/expected.
   //
-  // Completion is detected via the signal atomic (ordered by the engine AFTER
-  // the copy) rather than the ring read pointer (rptr). rptr only reflects
-  // ring-space reclamation and can advance before the copy's writes retire, so
-  // the previous put + quiet(rptr) approach could report completion early. This
-  // ordering fix is fabric-independent (needed even on coherent IFoE); it does
-  // NOT include HDP flush / GCR cache ops, which are only required for
-  // non-coherent host-data-path/aperture consumers (see plan: hdp-gcr-conditional).
-  // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
+  // Completion mechanism:
+  //   signal (default): put_signal + waitSignal. Completion is detected via the
+  //     signal atomic, which the engine orders AFTER the copy. rptr only
+  //     reflects ring-space reclamation and can advance before the copy's
+  //     writes retire, so it is not a correct completion barrier.
+  //   legacy:           put + quiet (polls the ring rptr). Kept for comparison;
+  //     can report completion early, so the signal path is the default.
+  // (Neither path issues HDP flush / GCR ops; those are only needed for
+  // non-coherent host-data-path/aperture consumers - see plan hdp-gcr-conditional.)
   //
-  // `doWait` gates the completion wait (ANVIL_WAIT_SIGNAL). When true (default)
-  // the kernel spins until the copy completes, so the stop event captures the
-  // full transfer. When false the kernel returns right after submitting the
-  // packet, measuring submission-only time - useful to isolate the wait cost,
-  // but the copy is then still in flight (NOT safe for validation).
-  //
-  // `useLegacy` selects the completion mechanism (ANVIL_LEGACY):
-  //   false (default): put_signal + waitSignal (engine-ordered atomic signal).
-  //   true (legacy):   put + quiet (polls the ring rptr). Kept for comparison;
-  //                    quiet can report completion early (see note above), so
-  //                    prefer the signal path for correctness.
-  // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
-  __global__ void AnvilTransferKernel(anvil::SdmaQueueDeviceHandle* handlePtr,
-                                      void* dst, void const* src, size_t numBytes,
-                                      uint64_t* signal, uint64_t expected,
-                                      bool doWait, bool useLegacy)
+  // Wait variants: the "Wait" kernels block until completion so the stop event
+  // captures the full transfer; the "NoWait" kernels return right after
+  // submitting (submission-only timing; copy still in flight, NOT validation-safe).
+
+  // signal + wait (default correctness path).
+  __global__ void AnvilKernelSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                        void* dst, void const* src, size_t numBytes,
+                                        uint64_t* signal, uint64_t expected)
   {
-    if (useLegacy) {
-      anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
-      if (doWait)
-        anvil::quiet(*handlePtr);
-    } else {
-      anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
-      if (doWait)
-        anvil::waitSignal(signal, expected);
-    }
+    anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
+    anvil::waitSignal(signal, expected);
+  }
+
+  // signal + no wait (submission-only timing).
+  __global__ void AnvilKernelSignalNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                          void* dst, void const* src, size_t numBytes,
+                                          uint64_t* signal, uint64_t expected)
+  {
+    (void)expected;
+    anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
+  }
+
+  // legacy (put + quiet) + wait.
+  __global__ void AnvilKernelLegacyWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                        void* dst, void const* src, size_t numBytes,
+                                        uint64_t* signal, uint64_t expected)
+  {
+    (void)signal; (void)expected;
+    anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
+    anvil::quiet(*handlePtr);
+  }
+
+  // legacy (put) + no wait (submission-only timing).
+  __global__ void AnvilKernelLegacyNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                          void* dst, void const* src, size_t numBytes,
+                                          uint64_t* signal, uint64_t expected)
+  {
+    (void)signal; (void)expected;
+    anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
   }
 #endif // ANVIL_EXEC_ENABLED
 
@@ -6521,12 +6537,22 @@ namespace {
 
       // Anvil is AMD-only (no NVCC path), so use hipExtLaunchKernelGGL to bracket
       // the kernel with start/stop events as part of the launch, matching the GFX
-      // executor's timing path instead of separate hipEventRecord calls.
-      hipExtLaunchKernelGGL(AnvilTransferKernel,
-                            dim3(1), dim3(1), 0, exeInfo.streams[i],
-                            exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,
-                            handle, dst, const_cast<void*>(src), nbytes,
-                            signal, (uint64_t)1, doWait, useLegacy);
+      // executor's timing path instead of separate hipEventRecord calls. Select
+      // one of the four specialized kernels on the host so the kernel itself does
+      // no runtime branching; all share the same argument list.
+#define ANVIL_LAUNCH_KERNEL(KERNEL)                                             \
+  hipExtLaunchKernelGGL(KERNEL, dim3(1), dim3(1), 0, exeInfo.streams[i],        \
+                        exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,       \
+                        handle, dst, const_cast<void*>(src), nbytes,           \
+                        signal, (uint64_t)1)
+      if (useLegacy) {
+        if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyWait);
+        else        ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyNoWait);
+      } else {
+        if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelSignalWait);
+        else        ANVIL_LAUNCH_KERNEL(AnvilKernelSignalNoWait);
+      }
+#undef ANVIL_LAUNCH_KERNEL
       ERR_CHECK(hipGetLastError());
     }
 
