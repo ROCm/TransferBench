@@ -4518,6 +4518,27 @@ namespace {
       exeInfo.anvilQueues.resize(numResources);
       exeInfo.anvilSignals.assign(numResources, nullptr);
 
+      // ANVIL_REMOTE_DOORBELL=1: place the completion signal ("doorbell") in
+      // DESTINATION memory instead of the source. The SDMA engine then rings a
+      // doorbell that travels the same fabric path to the same endpoint as the
+      // copied data, and the source kernel remote-polls it via waitSignal - a
+      // more direct proof that the data actually landed at the destination.
+      // Default (0): local (source) doorbell, cheaper to poll; sound on a
+      // coherent link where engine-retire implies remote visibility.
+      // NOTE: the remote doorbell's correctness relies on the copy's writes
+      // becoming visible at the destination before the atomic signal write. On
+      // this coherent, in-order single-queue path that holds; if a future
+      // non-coherent path reorders them, a fence packet between copy and atomic
+      // would be required (see plan: hdp-gcr-conditional / completion modes).
+      static bool const remoteDoorbell = [] {
+        char const* v = getenv("ANVIL_REMOTE_DOORBELL");
+        return v && atoi(v) != 0;
+      }();
+      if (verbose) {
+        System::Get().Log("[ANVIL] PrepareAnvilExecutor: doorbell mode = %s\n",
+                          remoteDoorbell ? "REMOTE (dst)" : "LOCAL (src)");
+      }
+
       for (int i = 0; i < numResources; ++i) {
         Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
         int const dstDeviceId = t.dsts[0].memIndex;
@@ -4552,15 +4573,24 @@ namespace {
 
         // Per-transfer completion signal: uncached device memory the SDMA
         // engine atomically increments after the copy, and the kernel polls
-        // via waitSignal. Uncached so the kernel's atomic loads observe the
-        // engine's write without stale cache lines.
+        // via waitSignal. Uncached so the poller observes the engine's write
+        // without stale cache lines. Placed on src (local) or dst (remote)
+        // per remoteDoorbell; remote requires peer access (enabled above) so
+        // the source kernel can poll it.
         {
+          int const signalDevice = remoteDoorbell ? dstDeviceId : srcDeviceId;
+          if (remoteDoorbell) ERR_CHECK(hipSetDevice(signalDevice));
+
           uint64_t* signal = nullptr;
-          if (hipExtMallocWithFlags((void**)&signal, sizeof(uint64_t),
-                                    hipDeviceMallocUncached) != hipSuccess || !signal) {
+          hipError_t const allocErr = hipExtMallocWithFlags(
+            (void**)&signal, sizeof(uint64_t), hipDeviceMallocUncached);
+
+          if (remoteDoorbell) ERR_CHECK(hipSetDevice(srcDeviceId));
+
+          if (allocErr != hipSuccess || !signal) {
             return {ERR_FATAL,
-                    "PrepareAnvilExecutor: signal alloc failed for src=%d dst=%d",
-                    srcDeviceId, dstDeviceId};
+                    "PrepareAnvilExecutor: signal alloc failed for src=%d dst=%d (device=%d)",
+                    srcDeviceId, dstDeviceId, signalDevice};
           }
           ERR_CHECK(hipMemset(signal, 0, sizeof(uint64_t)));
           exeInfo.anvilSignals[i] = signal;
@@ -6092,12 +6122,20 @@ namespace {
   // NOT include HDP flush / GCR cache ops, which are only required for
   // non-coherent host-data-path/aperture consumers (see plan: hdp-gcr-conditional).
   // Must be launched as <<<dim3(1), dim3(1)>>> on the source GPU.
+  //
+  // `doWait` gates the completion wait (ANVIL_WAIT_SIGNAL). When true (default)
+  // the kernel spins until the copy completes, so the stop event captures the
+  // full transfer. When false the kernel returns right after submitting the
+  // packet, measuring submission-only time - useful to isolate the waitSignal
+  // cost, but the copy is then still in flight (NOT safe for validation).
   __global__ void AnvilTransferKernel(anvil::SdmaQueueDeviceHandle* handlePtr,
                                       void* dst, void const* src, size_t numBytes,
-                                      uint64_t* signal, uint64_t expected)
+                                      uint64_t* signal, uint64_t expected,
+                                      bool doWait)
   {
     anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
-    anvil::waitSignal(signal, expected);
+    if (doWait)
+      anvil::waitSignal(signal, expected);
   }
 #endif // ANVIL_EXEC_ENABLED
 
@@ -6429,6 +6467,16 @@ namespace {
 
     int const numResources = (int)exeInfo.resources.size();
 
+    // ANVIL_WAIT_SIGNAL=0: skip the in-kernel completion wait so the kernel
+    // returns right after submitting the copy packet. Lets us measure the
+    // waitSignal cost by comparing kernel time with it on (default) vs off.
+    // WARNING: with the wait off the copy is still in flight when the kernel
+    // returns - timing-only, not correctness-safe.
+    static bool const doWait = [] {
+      char const* v = getenv("ANVIL_WAIT_SIGNAL");
+      return !v || atoi(v) != 0;
+    }();
+
     // Launch each transfer on its own stream so they execute concurrently and
     // contend for the fabric/SDMA engines, matching how the DMA/BMA executors
     // are measured. Each transfer is timed individually via its own event pair.
@@ -6457,7 +6505,7 @@ namespace {
                             dim3(1), dim3(1), 0, exeInfo.streams[i],
                             exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,
                             handle, dst, const_cast<void*>(src), nbytes,
-                            signal, (uint64_t)1);
+                            signal, (uint64_t)1, doWait);
       ERR_CHECK(hipGetLastError());
     }
 
