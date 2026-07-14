@@ -6025,9 +6025,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Pause for interactive mode - validation is a separate stage triggered by user input.
     // Only for mode 0 (validate at end); mode 1 already validates inline each iteration,
-    // and mode -1 disables validation entirely.
+    // and mode -1 disables validation entirely. When the interactive stage validates a rank's
+    // local destinations here, the end-of-run ValidateAllTransfers is skipped for that rank to
+    // avoid validating twice.
+    bool interactiveValidated = false;
     if (cfg.general.useInteractive && cfg.data.alwaysValidate == 0) {
       if (localRank == 0) {
+        interactiveValidated = true;
         System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
         fflush(stdout);
         if (scanf("%*c") != 0) {
@@ -6069,12 +6073,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
               size_t firstErr = 0;
               for (; firstErr < N; firstErr++)
                 if (output[firstErr] != expected[firstErr]) break;
-              if (firstErr < N)
+              if (firstErr < N) {
                 System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
                                   dstIdx, firstErr, expected[firstErr], output[firstErr]);
-              else
+                errResults.push_back({ERR_FATAL,
+                  "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
+                  transferIdx, firstErr, dstIdx, t.dsts[dstIdx].memRank, expected[firstErr], output[firstErr]});
+              } else {
                 System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
                                   dstIdx);
+                errResults.push_back({ERR_FATAL,
+                  "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx});
+              }
               transferOk = false;
             }
           }
@@ -6087,8 +6097,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       System::Get().Barrier();
     }
 
-    // Validate results
-    if (cfg.data.alwaysValidate == 0) {
+    // Validate results (skip on ranks already validated by the interactive stage above)
+    if (cfg.data.alwaysValidate == 0 && !interactiveValidated) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }

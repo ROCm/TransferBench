@@ -149,7 +149,7 @@ public:
     else if (archName == "gfx942") defaultGfxUnroll = 4;
     else if (archName == "gfx950") defaultGfxUnroll = 4;
 
-    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
+    alwaysValidate    = NormalizeValidateMode(GetEnvVar("ALWAYS_VALIDATE", 0));
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
@@ -586,6 +586,18 @@ public:
       return val;
     }
     return defaultValue;
+  }
+
+  // Validates ALWAYS_VALIDATE is one of the supported modes (-1/0/1); warns and clamps otherwise
+  static int NormalizeValidateMode(int value)
+  {
+    if (value < -1 || value > 1) {
+      int clamped = (value < -1) ? -1 : 1;
+      printf("[WARN] ALWAYS_VALIDATE=%d is invalid; expected -1 (disabled), 0 (validate at end), "
+             "or 1 (validate each iteration). Clamping to %d\n", value, clamped);
+      value = clamped;
+    }
+    return value;
   }
 
   // Returns comma-split tokens for varname, or an empty optional if unset/empty (use default).
