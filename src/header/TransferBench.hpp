@@ -6023,10 +6023,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Pause for interactive mode - run validation and show per-transfer result before prompt
-    if (cfg.general.useInteractive) {
+    // Pause for interactive mode - validation is a separate stage triggered by user input.
+    // Only for mode 1 (validate at end); mode 2 already validates inline each iteration,
+    // and mode 0 disables validation entirely.
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate == 1) {
       if (localRank == 0) {
-        System::Get().Log("Transfers complete. Validation results:\n");
+        System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
+        fflush(stdout);
+        if (scanf("%*c") != 0) {
+          System::Get().Log("[ERROR] Unexpected input\n");
+          exit(1);
+        }
+        System::Get().Log("\nValidation results:\n");
 
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
         int numPass = 0, numFail = 0;
@@ -6074,13 +6082,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
         }
         System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
-        System::Get().Log("Hit <Enter> to continue: ");
-        fflush(stdout);
-        if (scanf("%*c") != 0)  {
-          System::Get().Log("[ERROR] Unexpected input\n");
-          exit(1);
-        }
-        System::Get().Log("\n");
         fflush(stdout);
       }
       System::Get().Barrier();
