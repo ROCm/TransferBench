@@ -6043,7 +6043,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
           System::Get().Log("\nValidation results:\n");
         } else {
-          System::Get().Log("Validation results:\n");
+          System::Get().Log("Transfers complete.\nValidation results:\n");
         }
 
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
@@ -6094,6 +6094,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
         fflush(stdout);
       }
+      System::Get().Barrier();
+    } else if (cfg.general.useInteractive) {
+      if (localRank == 0)
+        System::Get().Log("Transfers complete. Validation disabled (ALWAYS_VALIDATE < 0)\n");
       System::Get().Barrier();
     }
 
