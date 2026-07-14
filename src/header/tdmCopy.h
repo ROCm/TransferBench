@@ -77,9 +77,23 @@ THE SOFTWARE.
 #ifndef __has_include
 #  define __has_include(x) 0
 #endif
+// Host-evaluable toolchain capability. TDM_SUPPORTED (below) keys on device arch
+// macros (e.g. __gfx1250__) that are never defined during the host pass, so it is
+// always 0 in host code and cannot gate the host-side IsTdmCopySupported() check.
+// The descriptor header's presence is the reliable host-visible proxy for toolchain
+// support (__has_builtin for the amdgcn intrinsic is unreliable in the host/x86
+// pass), and it is also a prerequisite of TDM_SUPPORTED, so it is factored out here.
+// Without this host gate, a build whose device pass fell back to the no-op TDM stub
+// would still report support on gfx1250 hardware and silently dispatch a no-op copy.
+#if __has_include(<hip/amd_detail/amd_gfx1250_TDM.h>)
+#  define TDM_TOOLCHAIN_AVAILABLE 1
+#else
+#  define TDM_TOOLCHAIN_AVAILABLE 0
+#endif
+
 #if defined(__gfx1250__) && \
     __has_builtin(__builtin_amdgcn_tensor_load_to_lds) && \
-    __has_include(<hip/amd_detail/amd_gfx1250_TDM.h>)
+    TDM_TOOLCHAIN_AVAILABLE
                                   /* extend: || (defined(__gfxNNNN__) && ...) */
 #  define TDM_SUPPORTED 1
 #else
@@ -133,7 +147,10 @@ __host__ __device__ inline bool IsTdmCopySupported(int deviceId = 0) {
     const char* arch = prop.gcnArchName;
     const char* p    = "gfx1250";
     while (*p && *arch == *p) { ++arch; ++p; }
-    return *p == '\0';
+    // Require BOTH a TDM-capable arch AND a toolchain that actually built TDM
+    // (otherwise the device pass emitted a no-op stub and enabling the path here
+    // would silently produce wrong results).
+    return TDM_TOOLCHAIN_AVAILABLE && (*p == '\0');
 #endif
 }
 
