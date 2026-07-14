@@ -551,7 +551,7 @@ namespace TransferBench::Utils
     if (!RankDoesOutput()) return;
 
     if (!ev.outputToCsv) printf("Test %d:\n", testNum);
-    if (ev.alwaysValidate < 0 && !ev.outputToCsv)
+    if (ev.alwaysValidate < 0 && !ev.outputToCsv && !ev.useInteractive)
       printf("Validation disabled (ALWAYS_VALIDATE < 0)\n");
 
     bool isMultiRank = TransferBench::GetNumRanks() > 1;
