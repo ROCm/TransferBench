@@ -6023,15 +6023,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Show per-transfer validation results in interactive mode (skipped for mode -1, disabled).
-    // For mode 0 (validate at end) this stage is the validation path: it is gated behind an
-    // <Enter> keypress, records failures into errResults, and lets the end-of-run
-    // ValidateAllTransfers be skipped for the rank to avoid validating twice.
-    // For mode 1 (validate each iteration) validation already ran inline; this stage only
-    // displays the results and does not require an <Enter> keypress.
+    // Interactive per-transfer validation display (skipped for mode -1)
     bool interactiveValidated = false;
     if (cfg.general.useInteractive && cfg.data.alwaysValidate != -1) {
-      // Mode 0 uses this stage as the authoritative validation path
+      // Mode 0 validates here (<Enter>-gated); mode 1 already validated inline, only display
       bool const isValidationPath = (cfg.data.alwaysValidate == 0);
       if (localRank == 0) {
         if (isValidationPath) {

@@ -588,7 +588,7 @@ public:
     return defaultValue;
   }
 
-  // Validates ALWAYS_VALIDATE is one of the supported modes (-1/0/1); warns and clamps otherwise
+  // Clamps ALWAYS_VALIDATE to a supported mode (-1/0/1), warning on invalid input
   static int NormalizeValidateMode(int value)
   {
     if (value < -1 || value > 1) {
