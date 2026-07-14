@@ -6023,22 +6023,29 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Pause for interactive mode - validation is a separate stage triggered by user input.
-    // Only for mode 0 (validate at end); mode 1 already validates inline each iteration,
-    // and mode -1 disables validation entirely. When the interactive stage validates a rank's
-    // local destinations here, the end-of-run ValidateAllTransfers is skipped for that rank to
-    // avoid validating twice.
+    // Show per-transfer validation results in interactive mode (skipped for mode -1, disabled).
+    // For mode 0 (validate at end) this stage is the validation path: it is gated behind an
+    // <Enter> keypress, records failures into errResults, and lets the end-of-run
+    // ValidateAllTransfers be skipped for the rank to avoid validating twice.
+    // For mode 1 (validate each iteration) validation already ran inline; this stage only
+    // displays the results and does not require an <Enter> keypress.
     bool interactiveValidated = false;
-    if (cfg.general.useInteractive && cfg.data.alwaysValidate == 0) {
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate != -1) {
+      // Mode 0 uses this stage as the authoritative validation path
+      bool const isValidationPath = (cfg.data.alwaysValidate == 0);
       if (localRank == 0) {
-        interactiveValidated = true;
-        System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
-        fflush(stdout);
-        if (getchar() == EOF) {
-          System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
-          exit(1);
+        if (isValidationPath) {
+          interactiveValidated = true;
+          System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
+          fflush(stdout);
+          if (getchar() == EOF) {
+            System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
+            exit(1);
+          }
+          System::Get().Log("\nValidation results:\n");
+        } else {
+          System::Get().Log("Validation results:\n");
         }
-        System::Get().Log("\nValidation results:\n");
 
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
         int numPass = 0, numFail = 0;
@@ -6076,14 +6083,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
               if (firstErr < N) {
                 System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
                                   dstIdx, firstErr, expected[firstErr], output[firstErr]);
-                errResults.push_back({ERR_FATAL,
-                  "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
-                  transferIdx, firstErr, dstIdx, t.dsts[dstIdx].memRank, expected[firstErr], output[firstErr]});
+                if (isValidationPath)
+                  errResults.push_back({ERR_FATAL,
+                    "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
+                    transferIdx, firstErr, dstIdx, t.dsts[dstIdx].memRank, expected[firstErr], output[firstErr]});
               } else {
                 System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
                                   dstIdx);
-                errResults.push_back({ERR_FATAL,
-                  "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx});
+                if (isValidationPath)
+                  errResults.push_back({ERR_FATAL,
+                    "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx});
               }
               transferOk = false;
             }
