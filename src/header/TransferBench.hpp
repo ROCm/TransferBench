@@ -217,7 +217,7 @@ namespace TransferBench
    */
   struct DataOptions
   {
-    int           alwaysValidate   = 1;         ///< 0 = disable validation, 1 = validate once at end, 2 = validate after each iteration
+    int           alwaysValidate   = 0;         ///< -1 = disable validation, 0 = validate once at end, 1 = validate after each iteration
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
@@ -6012,7 +6012,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
-      if (cfg.data.alwaysValidate == 2) {
+      if (cfg.data.alwaysValidate == 1) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
       }
@@ -6024,9 +6024,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Pause for interactive mode - validation is a separate stage triggered by user input.
-    // Only for mode 1 (validate at end); mode 2 already validates inline each iteration,
-    // and mode 0 disables validation entirely.
-    if (cfg.general.useInteractive && cfg.data.alwaysValidate == 1) {
+    // Only for mode 0 (validate at end); mode 1 already validates inline each iteration,
+    // and mode -1 disables validation entirely.
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate == 0) {
       if (localRank == 0) {
         System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
         fflush(stdout);
@@ -6088,7 +6088,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Validate results
-    if (cfg.data.alwaysValidate == 1) {
+    if (cfg.data.alwaysValidate == 0) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }
