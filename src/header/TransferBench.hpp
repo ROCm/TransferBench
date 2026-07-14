@@ -217,7 +217,7 @@ namespace TransferBench
    */
   struct DataOptions
   {
-    int           alwaysValidate   = 0;         ///< Validate after each iteration instead of once at end
+    int           alwaysValidate   = 1;         ///< 0 = disable validation, 1 = validate once at end, 2 = validate after each iteration
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
@@ -6012,7 +6012,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
-      if (cfg.data.alwaysValidate) {
+      if (cfg.data.alwaysValidate == 2) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
       }
@@ -6087,7 +6087,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Validate results
-    if (!cfg.data.alwaysValidate) {
+    if (cfg.data.alwaysValidate == 1) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }
