@@ -6029,23 +6029,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Interactive per-transfer validation display (skipped when validation disabled). Actual
-    // validation is done by ValidateAllTransfers (mode 0) or inline each iteration (mode >0);
-    // this only displays.
+    // Interactive per-transfer PASS/FAIL display (skipped when validation disabled). This does its
+    // own comparison pass to show results; authoritative error reporting still comes from
+    // ValidateAllTransfers (mode 0) or the inline per-iteration validation (mode >0).
     if (cfg.general.useInteractive && cfg.data.alwaysValidate >= 0) {
+      bool inputOk = true;
       if (localRank == 0) {
         if (cfg.data.alwaysValidate == 0) {
           System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
           fflush(stdout);
           if (getchar() == EOF) {
             System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
-            exit(1);
+            inputOk = false;
+          } else {
+            System::Get().Log("\nValidation results:\n");
           }
-          System::Get().Log("\nValidation results:\n");
         } else {
           System::Get().Log("Transfers complete.\nValidation results:\n");
         }
+      }
 
+      // Coordinate any EOF abort so no rank is left waiting at the Barrier below
+      System::Get().Broadcast(0, sizeof(inputOk), &inputOk);
+      if (!inputOk)
+        ERR_APPEND((ErrResult{ERR_FATAL, "Unexpected EOF while waiting for interactive input"}), errResults);
+
+      if (localRank == 0) {
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
         int numPass = 0, numFail = 0;
         for (auto rss : transferResources) {
