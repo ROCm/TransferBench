@@ -5500,12 +5500,25 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       hipEvent_t    const  startEvent,
                                       hipEvent_t    const  stopEvent,
                                       ConfigOptions const& cfg,
-                                      TransferResources&   resources)
+                                      TransferResources&   resources,
+                                      std::atomic<int>*    readyBarrier,
+                                      int           const  numTransfers)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-
     int numDsts = (int)resources.dstMem.size();
-    ERR_CHECK(hipSetDevice(exeIndex));
+    hipError_t setDevErr = hipSetDevice(exeIndex);
+
+    // Signal readiness and wait for all peer threads before starting the timer.
+    // Always signal even on failure to prevent deadlocking peer threads.
+    if (readyBarrier) {
+      readyBarrier->fetch_add(1, std::memory_order_release);
+      while (readyBarrier->load(std::memory_order_acquire) < numTransfers)
+        std::this_thread::yield();
+    }
+
+    if (setDevErr != hipSuccess)
+      return ErrResult(setDevErr);
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
     int subIterations = 0;
     size_t const initOffset = cfg.data.byteOffset / sizeof(float);
     float* const src = resources.srcMem[0] + initOffset;
@@ -5589,11 +5602,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
+    ERR_CHECK(hipDeviceSynchronize());
+
+    int const numTransfers = (int)exeInfo.resources.size();
+    std::atomic<int> readyBarrier(0);
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
 
     vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
+    for (int i = 0; i < numTransfers; i++) {
       asyncTransfers.emplace_back(std::async(std::launch::async,
                                              ExecuteDmaTransfer,
                                              iteration,
@@ -5603,7 +5621,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                              cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
                                              cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
                                              std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
+                                             std::ref(exeInfo.resources[i]),
+                                             &readyBarrier,
+                                             numTransfers));
     }
 
     for (auto& asyncTransfer : asyncTransfers)
