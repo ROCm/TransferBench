@@ -79,7 +79,7 @@ public:
   int useInteractive;                // Pause for user-input before starting transfer loop
 
   // Data options
-  int alwaysValidate;                // -1 = disable validation, 0 = validate once after all iterations, 1 = validate after each iteration
+  int alwaysValidate;                // <0 = disable validation, 0 = validate once after all iterations, >0 = validate after each iteration
   int blockBytes;                    // Each subexecutor, except the last, gets a multiple of this many bytes to copy
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
@@ -149,7 +149,7 @@ public:
     else if (archName == "gfx942") defaultGfxUnroll = 4;
     else if (archName == "gfx950") defaultGfxUnroll = 4;
 
-    alwaysValidate    = NormalizeValidateMode(GetEnvVar("ALWAYS_VALIDATE", 0));
+    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
@@ -352,7 +352,7 @@ public:
   {
     printf("Environment variables (client):\n");
     printf("======================\n");
-    printf(" ALWAYS_VALIDATE     - Data validation mode: -1=disabled, 0=validate once after all iterations (default), 1=validate after each iteration\n");
+    printf(" ALWAYS_VALIDATE     - Data validation mode: <0=disabled, 0=validate once after all iterations (default), >0=validate after each iteration\n");
     printf(" BLOCK_BYTES         - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET         - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
     printf(" CU_MASK             - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
@@ -455,7 +455,7 @@ public:
 
     Print("ALWAYS_VALIDATE", alwaysValidate,
           "Validation %s", (alwaysValidate < 0 ? "disabled" :
-                            alwaysValidate == 1 ? "after each iteration" : "after all iterations"));
+                            alwaysValidate > 0 ? "after each iteration" : "after all iterations"));
     Print("BLOCK_BYTES", blockBytes,
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,
@@ -586,18 +586,6 @@ public:
       return val;
     }
     return defaultValue;
-  }
-
-  // Clamps ALWAYS_VALIDATE to a supported mode (-1/0/1), warning on invalid input
-  static int NormalizeValidateMode(int value)
-  {
-    if (value < -1 || value > 1) {
-      int clamped = (value < -1) ? -1 : 1;
-      printf("[WARN] ALWAYS_VALIDATE=%d is invalid; expected -1 (disabled), 0 (validate at end), "
-             "or 1 (validate each iteration). Clamping to %d\n", value, clamped);
-      value = clamped;
-    }
-    return value;
   }
 
   // Returns comma-split tokens for varname, or an empty optional if unset/empty (use default).

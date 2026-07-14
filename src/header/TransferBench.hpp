@@ -217,7 +217,7 @@ namespace TransferBench
    */
   struct DataOptions
   {
-    int           alwaysValidate   = 0;         ///< -1 = disable validation, 0 = validate once at end, 1 = validate after each iteration
+    int           alwaysValidate   = 0;         ///< <0 = disable validation, 0 = validate once at end, >0 = validate after each iteration
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
@@ -5878,24 +5878,30 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Prepare reference src/dst arrays - only once for largest size
+    // Prepare reference src/dst arrays - only once for largest size.
+    // dstReference (expected results) is only needed when validation is enabled.
+    bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
     size_t maxN = maxNumBytes / sizeof(float);
-    vector<float> outputBuffer(maxN);
-    vector<vector<float>> dstReference(maxNumSrcs + 1, vector<float>(maxN));
+    vector<float> outputBuffer(validateEnabled ? maxN : 0);
+    vector<vector<float>> dstReference;
     {
       size_t initOffset = cfg.data.byteOffset / sizeof(float);
       vector<vector<float>> srcReference(maxNumSrcs, vector<float>(maxN));
-      memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
 
+      if (validateEnabled) {
+        dstReference.assign(maxNumSrcs + 1, vector<float>(maxN));
+        memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
+      }
       for (int numSrcs = 0; numSrcs < maxNumSrcs; numSrcs++) {
         PrepareReference(cfg, srcReference[numSrcs], numSrcs);
-        for (int i = 0; i < maxN; i++) {
-          dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
-        }
+        if (validateEnabled)
+          for (int i = 0; i < maxN; i++)
+            dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
       }
       // Release un-used partial sums
-      for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
-        dstReference[numSrcs].clear();
+      if (validateEnabled)
+        for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
+          dstReference[numSrcs].clear();
 
       // Initialize all src memory buffers (if on local rank)
       bool const verbose = System::Get().IsVerbose();
@@ -6012,7 +6018,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
-      if (cfg.data.alwaysValidate == 1) {
+      if (cfg.data.alwaysValidate > 0) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
       }
@@ -6023,14 +6029,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Interactive per-transfer validation display (skipped for mode -1)
-    bool interactiveValidated = false;
-    if (cfg.general.useInteractive && cfg.data.alwaysValidate != -1) {
-      // Mode 0 validates here (<Enter>-gated); mode 1 already validated inline, only display
-      bool const isValidationPath = (cfg.data.alwaysValidate == 0);
+    // Interactive per-transfer validation display (skipped when validation disabled). Actual
+    // validation is done by ValidateAllTransfers (mode 0) or inline each iteration (mode >0);
+    // this only displays.
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate >= 0) {
       if (localRank == 0) {
-        if (isValidationPath) {
-          interactiveValidated = true;
+        if (cfg.data.alwaysValidate == 0) {
           System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
           fflush(stdout);
           if (getchar() == EOF) {
@@ -6075,20 +6079,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
               size_t firstErr = 0;
               for (; firstErr < N; firstErr++)
                 if (output[firstErr] != expected[firstErr]) break;
-              if (firstErr < N) {
+              if (firstErr < N)
                 System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
                                   dstIdx, firstErr, expected[firstErr], output[firstErr]);
-                if (isValidationPath)
-                  errResults.push_back({ERR_FATAL,
-                    "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
-                    transferIdx, firstErr, dstIdx, t.dsts[dstIdx].memRank, expected[firstErr], output[firstErr]});
-              } else {
+              else
                 System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
                                   dstIdx);
-                if (isValidationPath)
-                  errResults.push_back({ERR_FATAL,
-                    "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx});
-              }
               transferOk = false;
             }
           }
@@ -6101,8 +6097,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       System::Get().Barrier();
     }
 
-    // Validate results (skip on ranks already validated by the interactive stage above)
-    if (cfg.data.alwaysValidate == 0 && !interactiveValidated) {
+    // Validate results
+    if (cfg.data.alwaysValidate == 0) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }

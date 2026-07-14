@@ -211,7 +211,7 @@ int SmokeTestPreset(EnvVars&          ev,
   }
 
   // Modify defaults unless they were set
-  ev.alwaysValidate = EnvVars::NormalizeValidateMode(EnvVars::GetEnvVar("ALWAYS_VALIDATE", 1));
+  ev.alwaysValidate = EnvVars::GetEnvVar("ALWAYS_VALIDATE", 1);
   ev.numIterations  = EnvVars::GetEnvVar("NUM_ITERATIONS",  2);
   ev.numWarmups     = EnvVars::GetEnvVar("NUM_WARMUPS",     0);
 
