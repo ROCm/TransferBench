@@ -6034,8 +6034,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         interactiveValidated = true;
         System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
         fflush(stdout);
-        if (scanf("%*c") != 0) {
-          System::Get().Log("[ERROR] Unexpected input\n");
+        if (getchar() == EOF) {
+          System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
           exit(1);
         }
         System::Get().Log("\nValidation results:\n");
