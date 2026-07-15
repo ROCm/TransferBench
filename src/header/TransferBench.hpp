@@ -217,7 +217,7 @@ namespace TransferBench
    */
   struct DataOptions
   {
-    int           alwaysValidate   = 0;         ///< Validate after each iteration instead of once at end
+    int           alwaysValidate   = 0;         ///< <0 = disable validation, 0 = validate once at end, >0 = validate after each iteration
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
@@ -5878,24 +5878,30 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Prepare reference src/dst arrays - only once for largest size
+    // Prepare reference src/dst arrays - only once for largest size.
+    // dstReference (expected results) is only needed when validation is enabled.
+    bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
     size_t maxN = maxNumBytes / sizeof(float);
-    vector<float> outputBuffer(maxN);
-    vector<vector<float>> dstReference(maxNumSrcs + 1, vector<float>(maxN));
+    vector<float> outputBuffer(validateEnabled ? maxN : 0);
+    vector<vector<float>> dstReference;
     {
       size_t initOffset = cfg.data.byteOffset / sizeof(float);
       vector<vector<float>> srcReference(maxNumSrcs, vector<float>(maxN));
-      memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
 
+      if (validateEnabled) {
+        dstReference.assign(maxNumSrcs + 1, vector<float>(maxN));
+        memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
+      }
       for (int numSrcs = 0; numSrcs < maxNumSrcs; numSrcs++) {
         PrepareReference(cfg, srcReference[numSrcs], numSrcs);
-        for (int i = 0; i < maxN; i++) {
-          dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
-        }
+        if (validateEnabled)
+          for (int i = 0; i < maxN; i++)
+            dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
       }
       // Release un-used partial sums
-      for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
-        dstReference[numSrcs].clear();
+      if (validateEnabled)
+        for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
+          dstReference[numSrcs].clear();
 
       // Initialize all src memory buffers (if on local rank)
       bool const verbose = System::Get().IsVerbose();
@@ -6012,7 +6018,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
-      if (cfg.data.alwaysValidate) {
+      if (cfg.data.alwaysValidate > 0) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
       }
@@ -6023,11 +6029,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Pause for interactive mode - run validation and show per-transfer result before prompt
-    if (cfg.general.useInteractive) {
+    // Interactive per-transfer PASS/FAIL display (skipped when validation disabled). This does its
+    // own comparison pass to show results; authoritative error reporting still comes from
+    // ValidateAllTransfers (mode 0) or the inline per-iteration validation (mode >0).
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate >= 0) {
+      bool inputOk = true;
       if (localRank == 0) {
-        System::Get().Log("Transfers complete. Validation results:\n");
+        if (cfg.data.alwaysValidate == 0) {
+          System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
+          fflush(stdout);
+          if (getchar() == EOF) {
+            System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
+            inputOk = false;
+          } else {
+            System::Get().Log("\nValidation results:\n");
+          }
+        } else {
+          System::Get().Log("Transfers complete.\nValidation results:\n");
+        }
+      }
 
+      // Coordinate any EOF abort so no rank is left waiting at the Barrier below
+      System::Get().Broadcast(0, sizeof(inputOk), &inputOk);
+      if (!inputOk)
+        ERR_APPEND((ErrResult{ERR_FATAL, "Unexpected EOF while waiting for interactive input"}), errResults);
+
+      if (localRank == 0) {
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
         int numPass = 0, numFail = 0;
         for (auto rss : transferResources) {
@@ -6074,20 +6101,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
         }
         System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
-        System::Get().Log("Hit <Enter> to continue: ");
-        fflush(stdout);
-        if (scanf("%*c") != 0)  {
-          System::Get().Log("[ERROR] Unexpected input\n");
-          exit(1);
-        }
-        System::Get().Log("\n");
         fflush(stdout);
       }
+      System::Get().Barrier();
+    } else if (cfg.general.useInteractive) {
+      if (localRank == 0)
+        System::Get().Log("Transfers complete. Validation disabled (ALWAYS_VALIDATE < 0)\n");
       System::Get().Barrier();
     }
 
     // Validate results
-    if (!cfg.data.alwaysValidate) {
+    if (cfg.data.alwaysValidate == 0) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }
