@@ -5,7 +5,7 @@ Documentation for TransferBench is available at
 
 ## v1.69.00
 ### Added
-- Added -1 option for `ALWAYS_VALIDATE` to disable validation
+- Added support for `ALWAYS_VALIDATE=-1` to disable validation
 ### Fixed
 - Fix for non-zero byte offsets used with DMA executor
 - Explicit copy back to host for GPU subExecParam on platforms without large BAR
