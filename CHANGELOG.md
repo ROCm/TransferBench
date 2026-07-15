@@ -10,6 +10,12 @@ Documentation for TransferBench is available at
 - Fix for non-zero byte offsets used with DMA executor
 - Explicit copy back to host for GPU subExecParam on platforms without large BAR
 - Add missing device synchronization after `hipMemcpy` in `RunTransfers()`
+### Modified
+- TransferBench now dynamically loads IB verbs, and its dependency and support for NIC executor is checked in runtime
+  - Created a top level third-party/ folder for ibverbs related files. Will also harbor future external source which TransferBench depends
+  - Created a separate minimal header IbvHeader.hpp for ib verbs structs and IbvDynLoad.hpp for dynamic loading and status report for ib verbs functionality.
+  - Dynamic loading is a singleton and done once per process, and TransferBench header will probe in runtime if basic ibverbs function as well as dmabuf export is supported.
+  - Also got rid HAVE_DMABUF_SUPPORT macro. Got rid of redundant dependency check on hsa header and rocr binaries (they are mandatory for AMD platform) in build process. Similar to ibv, it now dynamically checks for hsa_amd_portable_export_dmabuf symbol as part of check kernel support, and returns dmabuf support in runtime.
 
 ## v1.68.00
 ### Fixed
