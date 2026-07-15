@@ -5951,6 +5951,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
+            ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
         }
       }
