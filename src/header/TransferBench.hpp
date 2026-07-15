@@ -1478,6 +1478,22 @@ namespace {
     return "?";
   }
 
+  // Returns whether a memory allocation can be directly read by host code.
+  static ErrResult GetMemHostAccessibility(MemDevice const& memDevice, bool& hostAccessible)
+  {
+    hostAccessible = IsCpuMemType(memDevice.memType) || memDevice.memType == MEM_MANAGED;
+    if (hostAccessible || !IsGpuMemType(memDevice.memType)) return ERR_NONE;
+
+#if defined(__NVCC__)
+    return ERR_NONE;
+#else
+    int isLargeBar = 0;
+    ERR_CHECK(hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, memDevice.memIndex));
+    hostAccessible = (isLargeBar != 0);
+    return ERR_NONE;
+#endif
+  }
+
   // Allocate memory
   static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr,
                                   size_t* actualBytes = NULL,
@@ -2820,6 +2836,7 @@ namespace {
 
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
     vector<hipStream_t>        streams;           ///< HIP streams to launch on
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
@@ -4372,6 +4389,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
                                (void**)&exeInfo.subExecParamGpu));
+      ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
 
       // Create subexecutor parameter array for entire executor
       exeInfo.subExecParamCpu.clear();
@@ -5334,6 +5352,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       int           const  xccDim,
                                       ConfigOptions const& cfg,
                                       int           const  gfxKernelIdx,
+                                      bool          const  subExecParamHostAccessible,
                                       TransferResources&   rss)
   {
     // Determine which kernel to launch
@@ -5390,9 +5409,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (cfg.general.recordPerIteration) {
           rss.perIterMsec.push_back(deltaMsec);
           std::set<std::pair<int,int>> CUs;
+          std::vector<SubExecParam> subExecParamHost;
+          SubExecParam const* subExecParam = rss.subExecParamGpuPtr;
+          if (!subExecParamHostAccessible) {
+            subExecParamHost.resize(numSubExecs);
+            ERR_CHECK(hipMemcpy(subExecParamHost.data(), rss.subExecParamGpuPtr,
+                                numSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+            subExecParam = subExecParamHost.data();
+          }
           for (int i = 0; i < numSubExecs; i++) {
-            CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
-                                      GetId(rss.subExecParamGpuPtr[i].hwId)));
+            CUs.insert(std::make_pair(subExecParam[i].xccId,
+                                      GetId(subExecParam[i].hwId)));
           }
           rss.perIterCUs.push_back(CUs);
         }
@@ -5427,6 +5454,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                                xccDim,
                                                std::cref(cfg),
                                                exeInfo.gfxKernelToUse,
+                                               exeInfo.subExecParamHostAccessible,
                                                std::ref(exeInfo.resources[i])));
       }
       for (auto& asyncTransfer : asyncTransfers)
@@ -5436,7 +5464,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
                          cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                          cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                         xccDim, cfg, exeInfo.gfxKernelToUse, exeInfo.resources[0]);
+                         xccDim, cfg, exeInfo.gfxKernelToUse,
+                         exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
     }
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
@@ -5459,6 +5488,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // If Transfers were combined into a single launch, figure out per-Transfer timing
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
+        std::vector<SubExecParam> subExecParamHost;
+        SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
+        if (!exeInfo.subExecParamHostAccessible) {
+          subExecParamHost.resize(exeInfo.totalSubExecs);
+          ERR_CHECK(hipMemcpy(subExecParamHost.data(), exeInfo.subExecParamGpu,
+                              exeInfo.totalSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+          subExecParam = subExecParamHost.data();
+        }
+
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
           int64_t minStartCycle = std::numeric_limits<int64_t>::max();
@@ -5467,11 +5505,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
           for (auto subExecIdx : rss.subExecIdx) {
             if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
-              minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-              maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+              minStartCycle = std::min(minStartCycle, subExecParam[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
               if (cfg.general.recordPerIteration) {
-                CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                          GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+                CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
+                                          GetId(subExecParam[subExecIdx].hwId)));
               }
             }
           }
@@ -5923,6 +5961,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
+            ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
         }
       }
