@@ -8,11 +8,7 @@ import re
 
 from rocm_docs import ROCmDocs
 
-with open('../src/header/TransferBench.hpp', encoding='utf-8') as f:
-    match = re.search(r'constexpr char VERSION\[\] = "([0-9.]+)[^0-9.]+', f.read())
-    if not match:
-        raise ValueError("VERSION not found!")
-    version_number = match[1]
+version_number = "1.66.02"
 left_nav_title = f"TransferBench {version_number} Documentation"
 
 # for PDF output on Read the Docs
