@@ -15,8 +15,9 @@ Documentation for TransferBench is available at
 
 ## v1.67.00
 ### Added
-- Added NIC_TRAFFIC_CLASS to set the DSCP/traffic class byte in the RoCE GRH for QPs (RoCE only)
-- Added NIC_SERVICE_LEVEL to set the IB service level (sl) for QPs (IB and RoCE)
+- Added NIC_TRAFFIC_CLASS to set the DSCP/traffic class byte in the RoCE GRH for QPs (equivalent to NCCL_IB_TC)
+- Added NIC_TRAFFIC_CLASS_FIFO to set a DSCP/traffic class to steer the control traffic into another priority queue (equivalent to NCCL_IB_FIFO_TC)
+- Added NIC_SERVICE_LEVEL to set the IB service level (sl) for QPs (equivalent to NCCL_IB_SL)
 - Initial support for pod communication.  Requires compatible hardware / ROCm version and subject to further testing
   - This potentially enables GFX/DMA executors to access SRC/DST memory locations on GPUs within the same pod
   - Pod membership requires amd-smi however can be skipped by setting TB_FORCE_SINGLE_POD=1

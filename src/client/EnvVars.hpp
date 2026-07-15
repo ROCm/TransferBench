@@ -120,6 +120,7 @@ public:
   int nicChunkBytes;                 // Number of bytes to send per chunk for RDMA operations
   int nicCqPollBatch;                // Number of CQ entries to poll per ibv_poll_cq call
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
+  int nicFifoTrafficClass;           // DSCP/traffic class byte for control (FIFO) QPs
   int nicServiceLevel;               // IB service level (sl) for InfiniBand QPs
   int nicTrafficClass;               // DSCP/traffic class byte for RoCE GRH
   int roceVersion;                   // RoCE version number
@@ -186,11 +187,20 @@ public:
     ipAddressFamily   = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
     nicChunkBytes     = GetEnvVar("NIC_CHUNK_BYTES"     , 1073741824);
     nicCqPollBatch    = GetEnvVar("NIC_CQ_POLL_BATCH"   , 4);
-    nicRelaxedOrder   = GetEnvVar("NIC_RELAX_ORDER"     , 1);
-    nicServiceLevel   = GetEnvVar("NIC_SERVICE_LEVEL"   , 0);
-    nicTrafficClass   = GetEnvVar("NIC_TRAFFIC_CLASS"   , 0);
+    nicFifoTrafficClass = GetEnvVar("NIC_TRAFFIC_CLASS_FIFO", 0);
+    nicRelaxedOrder     = GetEnvVar("NIC_RELAX_ORDER"    , 1);
+    nicServiceLevel     = GetEnvVar("NIC_SERVICE_LEVEL"  , 0);
+    nicTrafficClass     = GetEnvVar("NIC_TRAFFIC_CLASS"  , 0);
 
     // Check that NIC service level and traffic class are in valid ranges
+    if (nicFifoTrafficClass < 0 || nicFifoTrafficClass > 255) {
+      printf("[ERROR] NIC_TRAFFIC_CLASS_FIFO must be in range 0..255 (got %d)\n", nicFifoTrafficClass);
+      exit(1);
+    }
+    if (nicFifoTrafficClass != 0 && numIterations <= 0) {
+      printf("[ERROR] NIC_TRAFFIC_CLASS_FIFO requires NUM_ITERATIONS > 0 (timed/infinite mode is not supported)\n");
+      exit(1);
+    }
     if (nicServiceLevel < 0 || nicServiceLevel > 15) {
       printf("[ERROR] NIC_SERVICE_LEVEL must be in range 0..15 (got %d)\n", nicServiceLevel);
       exit(1);
@@ -379,6 +389,7 @@ public:
 #if NIC_EXEC_ENABLED
     printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
     printf(" NIC_CQ_POLL_BATCH   - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
+    printf(" NIC_TRAFFIC_CLASS_FIFO - DSCP/traffic class byte for control (FIFO) QP GRH (default=0)\n");
     printf(" NIC_RELAX_ORDER     - Set to non-zero to use relaxed ordering\n");
     printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0)\n");
     printf(" NIC_TRAFFIC_CLASS   - DSCP/traffic class byte for RoCE GRH (default=0)\n");
@@ -521,6 +532,8 @@ public:
           "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
     Print("NIC_RELAX_ORDER", nicRelaxedOrder,
           "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
+    Print("NIC_TRAFFIC_CLASS_FIFO", nicFifoTrafficClass,
+          "RoCE FIFO/ctrl traffic class (DSCP) set to %d", nicFifoTrafficClass);
     Print("NIC_SERVICE_LEVEL", nicServiceLevel,
           "IB service level (sl) set to %d", nicServiceLevel);
     Print("NIC_TRAFFIC_CLASS", nicTrafficClass,
@@ -745,6 +758,7 @@ public:
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
     cfg.nic.ipAddressFamily        = ipAddressFamily;
+    cfg.nic.fifoTrafficClass       = nicFifoTrafficClass;
     cfg.nic.useRelaxedOrder        = nicRelaxedOrder;
     cfg.nic.serviceLevel           = nicServiceLevel;
     cfg.nic.trafficClass           = nicTrafficClass;
