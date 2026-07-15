@@ -10,6 +10,10 @@ TransferBench is a utility for benchmarking simultaneous memory transfers betwee
 
 The source code is hosted at `<https://github.com/ROCm/TransferBench>`_.
 
+.. note::
+
+   TransferBench is part of the `ROCmValidationSuite (RVS) <https://rocm.docs.amd.com/projects/ROCmValidationSuite/en/docs-1.5.122/index.html>`_ and is installed with it.
+
 .. grid:: 2
   :gutter: 3
 
