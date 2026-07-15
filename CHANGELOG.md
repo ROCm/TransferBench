@@ -4,8 +4,12 @@ Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
 ## v1.69.00
+### Added
+- Added -1 option for `ALWAYS_VALIDATE` to disable validation
 ### Fixed
 - Fix for non-zero byte offsets used with DMA executor
+- Explicit copy back to host for GPU subExecParam on platforms without large BAR
+- Missing device synchronization after hipMemcpy in `RunTransfers()`
 
 ## v1.68.00
 ### Fixed
