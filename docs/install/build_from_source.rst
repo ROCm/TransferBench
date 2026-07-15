@@ -8,6 +8,10 @@
 Building TransferBench from source
 ===================================
 
+.. note::
+
+   TransferBench is part of the `ROCmValidationSuite (RVS) <https://rocm.docs.amd.com/projects/ROCmValidationSuite/en/docs-1.5.122/index.html>`_ and is installed with it.
+
 To build TransferBench from source, install the following required dependencies first:
 
 Required dependencies
