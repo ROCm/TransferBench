@@ -9,7 +9,7 @@ Documentation for TransferBench is available at
 ### Fixed
 - Fix for non-zero byte offsets used with DMA executor
 - Explicit copy back to host for GPU subExecParam on platforms without large BAR
-- Missing device synchronization after hipMemcpy in `RunTransfers()`
+- Add missing device synchronization after `hipMemcpy` in `RunTransfers()`
 
 ## v1.68.00
 ### Fixed
