@@ -79,7 +79,7 @@ public:
   int useInteractive;                // Pause for user-input before starting transfer loop
 
   // Data options
-  int alwaysValidate;                // Validate after each iteration instead of once after all iterations
+  int alwaysValidate;                // <0 = disable validation, 0 = validate once after all iterations, >0 = validate after each iteration
   int blockBytes;                    // Each subexecutor, except the last, gets a multiple of this many bytes to copy
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
@@ -149,7 +149,7 @@ public:
     else if (archName == "gfx942") defaultGfxUnroll = 4;
     else if (archName == "gfx950") defaultGfxUnroll = 4;
 
-    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
+    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
@@ -352,7 +352,7 @@ public:
   {
     printf("Environment variables (client):\n");
     printf("======================\n");
-    printf(" ALWAYS_VALIDATE     - Validate after each iteration instead of once after all iterations\n");
+    printf(" ALWAYS_VALIDATE     - Data validation mode: <0=disabled, 0=validate once after all iterations (default), >0=validate after each iteration\n");
     printf(" BLOCK_BYTES         - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET         - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
     printf(" CU_MASK             - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
@@ -369,27 +369,23 @@ public:
     printf(" GFX_WORD_SIZE       - GFX kernel packed data size (4=DWORDx4, 2=DWORDx2, 1=DWORDx1)\n");
     printf(" GPU_MAX_HW_QUEUES   - Max hardware queues per GPU device (default = 4)\n");
     printf(" HIDE_ENV            - Hide environment variable value listing\n");
-#if NIC_EXEC_ENABLED
-    printf(" IB_GID_INDEX        - Required for RoCE NICs (default=-1/auto)\n");
-    printf(" IB_PORT_NUMBER      - RDMA port count for RDMA NIC (default=1)\n");
-    printf(" IP_ADDRESS_FAMILY   - IP address family (4=v4, 6=v6, default=v4)\n");
-#endif
+    if (IsIbvSymbolsReady()) {
+      printf(" IB_GID_INDEX        - Required for RoCE NICs (default=-1/auto)\n");
+      printf(" IB_PORT_NUMBER      - RDMA port count for RDMA NIC (default=1)\n");
+      printf(" IP_ADDRESS_FAMILY   - IP address family (4=v4, 6=v6, default=v4)\n");
+      printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
+      printf(" NIC_CQ_POLL_BATCH   - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
+      printf(" NIC_RELAX_ORDER     - Set to non-zero to use relaxed ordering\n");
+      printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0)\n");
+      printf(" NIC_TRAFFIC_CLASS   - DSCP/traffic class byte for RoCE GRH (default=0)\n");
+      printf(" ROCE_VERSION        - RoCE version (default=2)\n");
+    }
     printf(" MIN_VAR_SUBEXEC     - Minimum # of subexecutors to use for variable subExec Transfers\n");
     printf(" MAX_VAR_SUBEXEC     - Maximum # of subexecutors to use for variable subExec Transfers (0 for device limits)\n");
-#if NIC_EXEC_ENABLED
-    printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
-    printf(" NIC_CQ_POLL_BATCH   - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
-    printf(" NIC_RELAX_ORDER     - Set to non-zero to use relaxed ordering\n");
-    printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0)\n");
-    printf(" NIC_TRAFFIC_CLASS   - DSCP/traffic class byte for RoCE GRH (default=0)\n");
-#endif
     printf(" NUM_ITERATIONS      - # of timed iterations per test. If negative, run for this many seconds instead\n");
     printf(" NUM_SUBITERATIONS   - # of sub-iterations to run per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS         - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV       - Outputs to CSV format if set\n");
-#if NIC_EXEC_ENABLED
-    printf(" ROCE_VERSION        - RoCE version (default=2)\n");
-#endif
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
@@ -443,9 +439,9 @@ public:
   {
     int numGpuDevices = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     std::string nicSupport = "";
-#if NIC_EXEC_ENABLED
-    nicSupport = " (with NIC support)";
-#endif
+    if (IsIbvSymbolsReady()) {
+      nicSupport = " (with NIC support)";
+    }
     if (!outputToCsv) {
       if (!hideEnv) printf("[Common]                              (Suppress by setting HIDE_ENV=1)\n");
     }
@@ -454,7 +450,8 @@ public:
     if (hideEnv) return;
 
     Print("ALWAYS_VALIDATE", alwaysValidate,
-          "Validating after %s", (alwaysValidate ? "each iteration" : "all iterations"));
+          "Validation %s", (alwaysValidate < 0 ? "disabled" :
+                            alwaysValidate > 0 ? "after each iteration" : "after all iterations"));
     Print("BLOCK_BYTES", blockBytes,
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,
@@ -499,32 +496,31 @@ public:
     Print("GPU_MAX_HW_QUEUES", gpuMaxHwQueues,
           "Max %d hardware queues per GPU device", gpuMaxHwQueues);
 
-#if NIC_EXEC_ENABLED
-    Print("IP_ADDRESS_FAMILY", ipAddressFamily,
-          "IP address family is set to IPv%d", ipAddressFamily);
-
-    Print("IB_GID_INDEX", ibGidIndex,
-          "RoCE GID index is set to %s", (ibGidIndex < 0 ? "auto" : std::to_string(ibGidIndex).c_str()));
-    Print("IB_PORT_NUMBER", ibPort,
-          "IB port number is set to %d", ibPort);
-#endif
+    if (IsIbvSymbolsReady()) {
+      Print("IP_ADDRESS_FAMILY", ipAddressFamily,
+            "IP address family is set to IPv%d", ipAddressFamily);
+      Print("IB_GID_INDEX", ibGidIndex,
+            "RoCE GID index is set to %s", (ibGidIndex < 0 ? "auto" : std::to_string(ibGidIndex).c_str()));
+      Print("IB_PORT_NUMBER", ibPort,
+            "IB port number is set to %d", ibPort);
+      Print("NIC_CHUNK_BYTES", nicChunkBytes,
+            "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
+      Print("NIC_CQ_POLL_BATCH", nicCqPollBatch,
+            "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
+      Print("NIC_RELAX_ORDER", nicRelaxedOrder,
+            "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
+      Print("NIC_SERVICE_LEVEL", nicServiceLevel,
+            "IB service level (sl) set to %d", nicServiceLevel);
+      Print("NIC_TRAFFIC_CLASS", nicTrafficClass,
+            "RoCE traffic class (DSCP) set to %d", nicTrafficClass);
+      Print("ROCE_VERSION", roceVersion,
+            "RoCE version is set to %d", roceVersion);
+    }
     Print("MIN_VAR_SUBEXEC", minNumVarSubExec,
           "Using at least %d subexecutor(s) for variable subExec tranfers", minNumVarSubExec);
     Print("MAX_VAR_SUBEXEC", maxNumVarSubExec,
           "Using up to %s subexecutors for variable subExec transfers",
           maxNumVarSubExec ? std::to_string(maxNumVarSubExec).c_str() : "all available");
-#if NIC_EXEC_ENABLED
-    Print("NIC_CHUNK_BYTES", nicChunkBytes,
-          "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
-    Print("NIC_CQ_POLL_BATCH", nicCqPollBatch,
-          "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
-    Print("NIC_RELAX_ORDER", nicRelaxedOrder,
-          "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
-    Print("NIC_SERVICE_LEVEL", nicServiceLevel,
-          "IB service level (sl) set to %d", nicServiceLevel);
-    Print("NIC_TRAFFIC_CLASS", nicTrafficClass,
-          "RoCE traffic class (DSCP) set to %d", nicTrafficClass);
-#endif
     Print("NUM_ITERATIONS", numIterations,
           (numIterations == 0) ? "Running infinitely" :
           "Running %d %s", abs(numIterations), (numIterations > 0 ? " timed iteration(s)" : "seconds(s) per Test"));
@@ -532,10 +528,6 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
-#if NIC_EXEC_ENABLED
-    Print("ROCE_VERSION", roceVersion,
-          "RoCE version is set to %d", roceVersion);
-#endif
     Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");

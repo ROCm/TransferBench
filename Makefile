@@ -11,9 +11,7 @@ NVCC      ?= $(CUDA_PATH)/bin/nvcc
 DEBUG     ?= 0
 
 # Optional features (set to 0 to disable, 1 to enable)
-# DISABLE_NIC_EXEC: Disable RDMA/NIC executor support                     (default: 0)
 # DISABLE_MPI_COMM: Disable MPI communicator support                      (default: 0)
-# DISABLE_DMA_BUF:  Disable DMA-BUF support for GPU Direct RDMA           (default: 1)
 # DISABLE_AMD_SMI:  Disable AMD-SMI pod membership checking support       (default: 0)
 # DISABLE_NVML:     Disable NVML pod membership detection for CUDA builds (default: 0)
 # DISABLE_POD_COMM: Disable pod communication support                     (default: 0)
@@ -83,55 +81,13 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   else
     COMMON_FLAGS += -O0 -g -ggdb3
   endif
-  COMMON_FLAGS += -I./src/header -I./src/client -I./src/client/Presets
+  COMMON_FLAGS += -I./src/header -I./src/client -I./src/client/Presets -I./third-party/ibverbs
 
-  LDFLAGS += -lpthread
-
-  NIC_ENABLED = 0
-  # Compile RDMA executor if
-  # 1) DISABLE_NIC_EXEC is not set to 1
-  # 2) IBVerbs is found in the Dynamic Linker cache
-  # 3) infiniband/verbs.h is found in the default include path
-  DISABLE_NIC_EXEC ?= 0
-  ifneq ($(DISABLE_NIC_EXEC),1)
-    $(info Attempting to build with NIC executor support)
-    ifeq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
-      $(info - ibverbs library not found)
-    else ifeq ("$(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'infiniband/verbs.h')", "0")
-      $(info - infiniband/verbs.h not found)
-    else
-      COMMON_FLAGS += -DNIC_EXEC_ENABLED
-      LDFLAGS += -libverbs
-      NIC_ENABLED = 1
-
-      # Disable DMA-BUF support by default (set DISABLE_DMA_BUF=0 to enable)
-      DISABLE_DMA_BUF ?= 1
-      ifeq ($(DISABLE_DMA_BUF), 0)
-        # Check for both ibv_reg_dmabuf_mr and ROCm DMA-BUF export support
-        HAVE_IBV_DMABUF := $(shell echo '#include <infiniband/verbs.h>' | $(CXX) -E - 2>/dev/null | grep -c 'ibv_reg_dmabuf_mr')
-        HAVE_ROCM_DMABUF := $(shell echo '#include <hsa/hsa_ext_amd.h>' | $(CXX) -I$(ROCM_PATH)/include -E - 2>/dev/null | grep -c 'hsa_amd_portable_export_dmabuf')
-
-        ifeq ($(HAVE_IBV_DMABUF):$(HAVE_ROCM_DMABUF), 0:0)
-          $(info Building without DMA-BUF support: missing both ibv_reg_dmabuf_mr and ROCm DMA-BUF export)
-        else ifeq ($(HAVE_IBV_DMABUF), 0)
-          $(info Building without DMA-BUF support: missing ibv_reg_dmabuf_mr)
-        else ifeq ($(HAVE_ROCM_DMABUF), 0)
-          $(info Building without DMA-BUF support: missing ROCm DMA-BUF export)
-        else
-          COMMON_FLAGS += -DHAVE_DMABUF_SUPPORT
-          $(info Building with DMA-BUF support)
-        endif
-      else
-        $(info Building with DMA-BUF support disabled (DISABLE_DMA_BUF=1))
-      endif
-    endif
-    ifeq ($(NIC_ENABLED), 0)
-      $(info - Building without NIC executor support)
-      $(info - To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
-    else
-      $(info - Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable)
-    endif
-  endif
+  # libibverbs is loaded dynamically at runtime via dlopen/dlsym (see
+  # third-party/ibverbs/IbvDynLoad.hpp), so the build never links against -libverbs
+  # and does not require libibverbs-dev to be installed. We only need -ldl so
+  # the dynamic loader API is resolvable.
+  LDFLAGS += -lpthread -ldl
 
   MPI_ENABLED = 0
   # Compile with MPI communicator support if

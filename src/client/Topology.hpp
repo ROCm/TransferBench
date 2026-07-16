@@ -45,7 +45,7 @@ static int RemappedCpuIndex(int origIdx)
 
 static void PrintNicToGPUTopo(bool outputToCsv)
 {
-#ifdef NIC_EXEC_ENABLED
+  if (!IsIbvSymbolsReady()) return;
   printf(" NIC | Device Name | Active | PCIe Bus ID  | NUMA | Closest GPU(s) | GID Index | GID Descriptor\n");
   if(!outputToCsv)
     printf("-----+-------------+--------+--------------+------+----------------+-----------+-------------------\n");
@@ -73,7 +73,6 @@ static void PrintNicToGPUTopo(bool outputToCsv)
           );
   }
   printf("\n");
-#endif
 }
 
 void DisplaySingleRankTopology(bool outputToCsv)

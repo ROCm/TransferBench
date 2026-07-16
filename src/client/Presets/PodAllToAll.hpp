@@ -236,6 +236,12 @@ int PodAllToAllPreset(EnvVars&          ev,
       }
     }
 
+    if (podTransfers.size() == 0) {
+      if (Utils::RankDoesOutput())
+        Utils::Print("[WARN] No transfers requested. Try adjusting A2A_LOCAL\n");
+      continue;
+    }
+
     TransferBench::TestResults results;
     if (!TransferBench::RunTransfers(cfg, podTransfers, results)) {
       for (auto const& err : results.errResults)

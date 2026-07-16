@@ -226,9 +226,7 @@ int main(int argc, char **argv)
 void DisplayVersion()
 {
   bool nicSupport = false, mpiSupport = false, podSupport = false;
-#if NIC_EXEC_ENABLED
-  nicSupport = true;
-#endif
+  nicSupport = IsIbvSymbolsReady();
 #if MPI_COMM_ENABLED
   mpiSupport = true;
 #endif
