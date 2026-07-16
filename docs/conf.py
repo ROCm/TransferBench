@@ -28,3 +28,17 @@ external_projects_current_project = "transferbench"
 
 for sphinx_var in ROCmDocs.SPHINX_VARS:
     globals()[sphinx_var] = getattr(docs_core, sphinx_var)
+
+html_theme_options = {
+    "flavor": "generic",
+    "header_title": f"ROCm™ TransferBench 1.66.02",
+    "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/docs-1.66.02/",
+    "nav_secondary_items": {
+        "GitHub": "https://github.com/ROCm/TransferBench",
+        "Community": "https://github.com/ROCm/ROCm/discussions",
+        "Blogs": "https://rocm.blogs.amd.com/",
+        "System and Infra Docs": "https://instinct.docs.amd.com/",
+        "Support": "https://github.com/ROCm/TransferBench/issues/new/choose",
+    },
+    "link_main_doc": False,
+}
