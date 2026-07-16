@@ -10,6 +10,8 @@ Documentation for TransferBench is available at
 - Fix for non-zero byte offsets used with DMA executor
 - Explicit copy back to host for GPU subExecParam on platforms without large BAR
 - Add missing device synchronization after `hipMemcpy` in `RunTransfers()`
+- Fix for out of bound dstReference array when there are no transfers
+- Disable and warn a2a and poda2a presets when running on single GPU without `A2A_LOCAL`
 ### Modified
 - TransferBench now dynamically loads IB verbs, and its dependency and support for NIC executor is checked in runtime
   - Created a top level third-party/ folder for ibverbs related files. Will also harbor future external source which TransferBench depends

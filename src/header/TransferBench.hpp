@@ -1955,7 +1955,7 @@ namespace {
       decltype(data.fillCompress)().swap(data.fillCompress);
       System::Get().Broadcast(root, sizeof(data), &data);
 
-      // data.alwaysValidate is permitted to be different across ranks
+      if (data.alwaysValidate != cfg.data.alwaysValidate) ADD_ERROR("cfg.data.data.alwaysValidate");
       if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
       if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
 
@@ -5877,6 +5877,10 @@ namespace {
       maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
     }
+
+    // Empty transfer list leaves minNumSrcs at its sentinel (MAX_SRCS + 1);
+    // clamp so the dstReference cleanup loop below can't index out of bounds.
+    if (transfers.empty()) minNumSrcs = 0;
 
     // Loop over each executor and prepare
     // - Allocates memory for each Transfer
