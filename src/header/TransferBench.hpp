@@ -1955,7 +1955,7 @@ namespace {
       decltype(data.fillCompress)().swap(data.fillCompress);
       System::Get().Broadcast(root, sizeof(data), &data);
 
-      if (data.alwaysValidate != cfg.data.alwaysValidate) ADD_ERROR("cfg.data.data.alwaysValidate");
+      if (data.alwaysValidate != cfg.data.alwaysValidate) ADD_ERROR("cfg.data.alwaysValidate");
       if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
       if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
 
