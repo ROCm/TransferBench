@@ -84,6 +84,8 @@ public:
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
   vector<int> fillCompress;          // Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0
+  int sweepMaxPow2;                  // Maximum power of two to sweep up to when whnumber of bytes to transfer is set to 0
+  int sweepMinPow2;                  // Minimum power of two to sweep up from when number of bytes to transfer is set to 0
   int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
   int validateSource;                // Validate source GPU memory immediately after preparation
 
@@ -173,6 +175,8 @@ public:
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
     showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
+    sweepMaxPow2      = GetEnvVar("SWEEP_MAX_POW2"      , 29);
+    sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
@@ -390,6 +394,8 @@ public:
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
     printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
+    printf(" SWEEP_MAX_POW2      - When 0 is specified for data size, this is the ending power of two exponent\n");
+    printf(" SWEEP_MIN_POW2      - When 0 is specified for data size, this is the starting power of two exponent\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
