@@ -79,11 +79,13 @@ public:
   int useInteractive;                // Pause for user-input before starting transfer loop
 
   // Data options
-  int alwaysValidate;                // Validate after each iteration instead of once after all iterations
+  int alwaysValidate;                // <0 = disable validation, 0 = validate once after all iterations, >0 = validate after each iteration
   int blockBytes;                    // Each subexecutor, except the last, gets a multiple of this many bytes to copy
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
   vector<int> fillCompress;          // Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0
+  int sweepMaxPow2;                  // Maximum power of two to sweep up to when whnumber of bytes to transfer is set to 0
+  int sweepMinPow2;                  // Minimum power of two to sweep up from when number of bytes to transfer is set to 0
   int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
   int validateSource;                // Validate source GPU memory immediately after preparation
 
@@ -156,7 +158,7 @@ public:
     else if (archName == "gfx942") defaultGfxUnroll = 4;
     else if (archName == "gfx950") defaultGfxUnroll = 4;
 
-    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE"     , 0);
+    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
     fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
@@ -185,6 +187,8 @@ public:
     tdmBlockOrder     = GetEnvVar("TDM_BLOCK_ORDER"     , 0);
     tdmTemporal       = GetEnvVar("TDM_TEMPORAL"        , 0);
     tdmWordSize       = GetEnvVar("TDM_WORD_SIZE"       , 2);
+    sweepMaxPow2      = GetEnvVar("SWEEP_MAX_POW2"      , 29);
+    sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
@@ -364,7 +368,7 @@ public:
   {
     printf("Environment variables (client):\n");
     printf("======================\n");
-    printf(" ALWAYS_VALIDATE     - Validate after each iteration instead of once after all iterations\n");
+    printf(" ALWAYS_VALIDATE     - Data validation mode: <0=disabled, 0=validate once after all iterations (default), >0=validate after each iteration\n");
     printf(" BLOCK_BYTES         - Controls granularity of how work is divided across subExecutors\n");
     printf(" BYTE_OFFSET         - Initial byte-offset for memory allocations.  Must be multiple of 4\n");
     printf(" CU_MASK             - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
@@ -410,6 +414,9 @@ public:
     printf("                       NOTE: T/A (TDM / async load-store) executors do NOT honor GFX_* or\n");
     printf("                       XCC_PREF_TABLE. Their threadblock size comes from TDM_BLOCK_SIZE.\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX/DMA/TDM executor timing (0=CPU wall-clock)\n");
+    printf(" SWEEP_MAX_POW2      - When 0 is specified for data size, this is the ending power of two exponent\n");
+    printf(" SWEEP_MIN_POW2      - When 0 is specified for data size, this is the starting power of two exponent\n");
+    printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
     printf(" USE_SINGLE_STREAM   - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
@@ -469,7 +476,8 @@ public:
     if (hideEnv) return;
 
     Print("ALWAYS_VALIDATE", alwaysValidate,
-          "Validating after %s", (alwaysValidate ? "each iteration" : "all iterations"));
+          "Validation %s", (alwaysValidate < 0 ? "disabled" :
+                            alwaysValidate > 0 ? "after each iteration" : "after all iterations"));
     Print("BLOCK_BYTES", blockBytes,
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,

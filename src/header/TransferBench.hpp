@@ -93,7 +93,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.69";
+  constexpr char VERSION[] = "1.70";
 
   /**
    * Enumeration of supported Executor types
@@ -223,7 +223,7 @@ namespace TransferBench
    */
   struct DataOptions
   {
-    int           alwaysValidate   = 0;         ///< Validate after each iteration instead of once at end
+    int           alwaysValidate   = 0;         ///< <0 = disable validation, 0 = validate once at end, >0 = validate after each iteration
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
@@ -1498,6 +1498,22 @@ namespace {
     return "?";
   }
 
+  // Returns whether a memory allocation can be directly read by host code.
+  static ErrResult GetMemHostAccessibility(MemDevice const& memDevice, bool& hostAccessible)
+  {
+    hostAccessible = IsCpuMemType(memDevice.memType) || memDevice.memType == MEM_MANAGED;
+    if (hostAccessible || !IsGpuMemType(memDevice.memType)) return ERR_NONE;
+
+#if defined(__NVCC__)
+    return ERR_NONE;
+#else
+    int isLargeBar = 0;
+    ERR_CHECK(hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, memDevice.memIndex));
+    hostAccessible = (isLargeBar != 0);
+    return ERR_NONE;
+#endif
+  }
+
   // Allocate memory
   static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr,
                                   size_t* actualBytes = NULL,
@@ -1961,7 +1977,7 @@ namespace {
       decltype(data.fillCompress)().swap(data.fillCompress);
       System::Get().Broadcast(root, sizeof(data), &data);
 
-      // data.alwaysValidate is permitted to be different across ranks
+      if (data.alwaysValidate != cfg.data.alwaysValidate) ADD_ERROR("cfg.data.alwaysValidate");
       if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
       if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
 
@@ -2180,7 +2196,6 @@ namespace {
             "[tdm.maxLDSBytes] (%d) exceeds device max shared memory per block (%d); will be clamped",
             cfg.tdm.maxLDSBytes, minDeviceMax});
     }
-#endif
 
     // Check NIC options
     if (IsIbvSymbolsReady()) {
@@ -2943,6 +2958,7 @@ namespace {
 
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
     vector<hipStream_t>        streams;           ///< HIP streams to launch on
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
@@ -4476,6 +4492,7 @@ namespace {
 #endif
       ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
                                (void**)&exeInfo.subExecParamGpu));
+      ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
 
       // Create subexecutor parameter array for entire executor
       exeInfo.subExecParamCpu.clear();
@@ -5435,6 +5452,7 @@ namespace {
                                       int           const  xccDim,
                                       ConfigOptions const& cfg,
                                       int           const  gfxKernelIdx,
+                                      bool          const  subExecParamHostAccessible,
                                       TransferResources&   rss)
   {
     // Determine which kernel to launch
@@ -5491,9 +5509,17 @@ namespace {
         if (cfg.general.recordPerIteration) {
           rss.perIterMsec.push_back(deltaMsec);
           std::set<std::pair<int,int>> CUs;
+          std::vector<SubExecParam> subExecParamHost;
+          SubExecParam const* subExecParam = rss.subExecParamGpuPtr;
+          if (!subExecParamHostAccessible) {
+            subExecParamHost.resize(numSubExecs);
+            ERR_CHECK(hipMemcpy(subExecParamHost.data(), rss.subExecParamGpuPtr,
+                                numSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+            subExecParam = subExecParamHost.data();
+          }
           for (int i = 0; i < numSubExecs; i++) {
-            CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
-                                      GetId(rss.subExecParamGpuPtr[i].hwId)));
+            CUs.insert(std::make_pair(subExecParam[i].xccId,
+                                      GetId(subExecParam[i].hwId)));
           }
           rss.perIterCUs.push_back(CUs);
         }
@@ -5528,6 +5554,7 @@ namespace {
                                                xccDim,
                                                std::cref(cfg),
                                                exeInfo.gfxKernelToUse,
+                                               exeInfo.subExecParamHostAccessible,
                                                std::ref(exeInfo.resources[i])));
       }
       for (auto& asyncTransfer : asyncTransfers)
@@ -5537,7 +5564,8 @@ namespace {
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
                          cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                          cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                         xccDim, cfg, exeInfo.gfxKernelToUse, exeInfo.resources[0]);
+                         xccDim, cfg, exeInfo.gfxKernelToUse,
+                         exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
     }
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
@@ -5560,6 +5588,15 @@ namespace {
       // If Transfers were combined into a single launch, figure out per-Transfer timing
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
+        std::vector<SubExecParam> subExecParamHost;
+        SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
+        if (!exeInfo.subExecParamHostAccessible) {
+          subExecParamHost.resize(exeInfo.totalSubExecs);
+          ERR_CHECK(hipMemcpy(subExecParamHost.data(), exeInfo.subExecParamGpu,
+                              exeInfo.totalSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+          subExecParam = subExecParamHost.data();
+        }
+
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
           int64_t minStartCycle = std::numeric_limits<int64_t>::max();
@@ -5568,11 +5605,11 @@ namespace {
 
           for (auto subExecIdx : rss.subExecIdx) {
             if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
-              minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-              maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
+              minStartCycle = std::min(minStartCycle, subExecParam[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
               if (cfg.general.recordPerIteration) {
-                CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                          GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+                CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
+                                          GetId(subExecParam[subExecIdx].hwId)));
               }
             }
           }
@@ -6108,6 +6145,10 @@ namespace {
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
     }
 
+    // Empty transfer list leaves minNumSrcs at its sentinel (MAX_SRCS + 1);
+    // clamp so the dstReference cleanup loop below can't index out of bounds.
+    if (transfers.empty()) minNumSrcs = 0;
+
     // Loop over each executor and prepare
     // - Allocates memory for each Transfer
     // - Set up work for subexecutors
@@ -6133,24 +6174,30 @@ namespace {
       }
     }
 
-    // Prepare reference src/dst arrays - only once for largest size
+    // Prepare reference src/dst arrays - only once for largest size.
+    // dstReference (expected results) is only needed when validation is enabled.
+    bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
     size_t maxN = maxNumBytes / sizeof(float);
-    vector<float> outputBuffer(maxN);
-    vector<vector<float>> dstReference(maxNumSrcs + 1, vector<float>(maxN));
+    vector<float> outputBuffer(validateEnabled ? maxN : 0);
+    vector<vector<float>> dstReference;
     {
       size_t initOffset = cfg.data.byteOffset / sizeof(float);
       vector<vector<float>> srcReference(maxNumSrcs, vector<float>(maxN));
-      memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
 
+      if (validateEnabled) {
+        dstReference.assign(maxNumSrcs + 1, vector<float>(maxN));
+        memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
+      }
       for (int numSrcs = 0; numSrcs < maxNumSrcs; numSrcs++) {
         PrepareReference(cfg, srcReference[numSrcs], numSrcs);
-        for (int i = 0; i < maxN; i++) {
-          dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
-        }
+        if (validateEnabled)
+          for (int i = 0; i < maxN; i++)
+            dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
       }
       // Release un-used partial sums
-      for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
-        dstReference[numSrcs].clear();
+      if (validateEnabled)
+        for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
+          dstReference[numSrcs].clear();
 
       // Initialize all src memory buffers (if on local rank)
       bool const verbose = System::Get().IsVerbose();
@@ -6172,6 +6219,7 @@ namespace {
             }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
+            ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
         }
       }
@@ -6267,7 +6315,7 @@ namespace {
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
-      if (cfg.data.alwaysValidate) {
+      if (cfg.data.alwaysValidate > 0) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
       }
@@ -6278,11 +6326,32 @@ namespace {
       }
     }
 
-    // Pause for interactive mode - run validation and show per-transfer result before prompt
-    if (cfg.general.useInteractive) {
+    // Interactive per-transfer PASS/FAIL display (skipped when validation disabled). This does its
+    // own comparison pass to show results; authoritative error reporting still comes from
+    // ValidateAllTransfers (mode 0) or the inline per-iteration validation (mode >0).
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate >= 0) {
+      bool inputOk = true;
       if (localRank == 0) {
-        System::Get().Log("Transfers complete. Validation results:\n");
+        if (cfg.data.alwaysValidate == 0) {
+          System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
+          fflush(stdout);
+          if (getchar() == EOF) {
+            System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
+            inputOk = false;
+          } else {
+            System::Get().Log("\nValidation results:\n");
+          }
+        } else {
+          System::Get().Log("Transfers complete.\nValidation results:\n");
+        }
+      }
 
+      // Coordinate any EOF abort so no rank is left waiting at the Barrier below
+      System::Get().Broadcast(0, sizeof(inputOk), &inputOk);
+      if (!inputOk)
+        ERR_APPEND((ErrResult{ERR_FATAL, "Unexpected EOF while waiting for interactive input"}), errResults);
+
+      if (localRank == 0) {
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
         int numPass = 0, numFail = 0;
         for (auto rss : transferResources) {
@@ -6329,20 +6398,17 @@ namespace {
           if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
         }
         System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
-        System::Get().Log("Hit <Enter> to continue: ");
-        fflush(stdout);
-        if (scanf("%*c") != 0)  {
-          System::Get().Log("[ERROR] Unexpected input\n");
-          exit(1);
-        }
-        System::Get().Log("\n");
         fflush(stdout);
       }
+      System::Get().Barrier();
+    } else if (cfg.general.useInteractive) {
+      if (localRank == 0)
+        System::Get().Log("Transfers complete. Validation disabled (ALWAYS_VALIDATE < 0)\n");
       System::Get().Barrier();
     }
 
     // Validate results
-    if (!cfg.data.alwaysValidate) {
+    if (cfg.data.alwaysValidate == 0) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }
