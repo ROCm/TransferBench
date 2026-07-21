@@ -37,16 +37,15 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                SRC 1 -> Executor -> DST 1\n");
   printf("#                SRC X                DST Y\n");
   printf("\n");
-  printf("# Eight Executors are supported by TransferBench\n");
+  printf("# Six Executors are supported by TransferBench\n");
   printf("#   Executor:              SubExecutor:\n");
   printf("#   1) CPU                 CPU thread\n");
   printf("#   2) GPU                 GPU threadblock/Compute Unit (CU)\n");
   printf("#   3) DMA                 N/A.                                 (Must have single SRC, at least one DST)\n");
   printf("#   4) NIC                 Queue Pair\n");
-  printf("#   5) Nearest NIC         Queue Pair (uses closest NIC)\n");
-  printf("#   6) Batched-DMA         Batch item                           (Must have single SRC, at least one DST)\n");
-  printf("#   7) TDM                 GPU threadblock/Compute Unit (CU)\n");
-  printf("#   8) Async Load/Store    GPU threadblock/Compute Unit (CU)\n");
+  printf("#   5) Batched-DMA         Batch item                           (Must have single SRC, at least one DST)\n");
+  printf("#   6) TDM                 GPU threadblock/Compute Unit (CU)    (Requires hardware support for Tensor Data Mover\n");
+
   printf("\n");
   printf("# Each single line in the configuration file defines a set of Transfers (a Test) to run in parallel\n");
   printf("\n");
@@ -74,8 +73,7 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                 - B:    Batched-DMA-executor  (Indexed from 0 to # GPUs - 1)\n");
   printf("#                 - I#.#: NIC executor          (Indexed from 0 to # NICs - 1)\n");
   printf("#                 - N#.#: Nearest NIC executor  (Indexed from 0 to # GPUs - 1)\n");
-  printf("#                 - T:    GPU TDM kernel        (Indexed from 0 to # GPUs - 1)\n");
-  printf("#                 - A:    GPU async load/store  (Indexed from 0 to # GPUs - 1)\n");
+  printf("#                 - T:    TDM-executor          (Indexed from 0 to # GPUs - 1)\n");
   printf("#   dstMemL   :   Destination memory locations (Where the data is to be written to)\n");
   printf("#   bytesL    :   Number of bytes to copy (0 means use command-line specified size)\n");
   printf("#                 Must be a multiple of 4 and may be suffixed with ('K','M', or 'G')\n");
@@ -112,12 +110,6 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("\n");
   printf("## Single DMA executed Transfer between GPUs 0 and 1\n");
   printf("1 1 (G0->D0->G1)\n");
-  printf("\n");
-  printf("## Single GPU-executed Transfer between GPUs 0 and 1 using 1 CU for TDM path\n");
-  printf("1 1 (G0->T0->G1)\n");
-  printf("\n");
-  printf("## Single GPU-executed Transfer between GPUs 0 and 1 using 1 CU for async load/store path\n");
-  printf("1 1 (G0->A0->G1)\n");
   printf("\n");
   printf("## Copy 1Mb from GPU0 to GPU1 with 4 CUs, and 2Mb from GPU1 to GPU0 with 8 CUs\n");
   printf("-2 (G0->G0->G1 4 1M) (G1->G1->G0 8 2M)\n");
