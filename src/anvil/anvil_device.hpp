@@ -13,6 +13,24 @@
 #include "sdma-ep.h"
 #include "sdma_pkt_struct_mi4.h"
 
+// XIO_SDMA_OSS7 is a build-level switch: it gates the MI4 packet-struct and
+// host-side definitions, which are ABI-portable and compile on any arch.
+// XIO_SDMA_OSS7_ENABLED additionally gates the fused *device* code so its body
+// only codegens where the SDMA engine can consume it. HIP compiles the TU once
+// per --offload-arch; in each device pass the arch macro (__gfx1250__ etc.) is
+// defined, and in the host pass __HIP_DEVICE_COMPILE__ is not - so an all-arch
+// build defines XIO_SDMA_OSS7 everywhere but emits the fused kernels only on
+// gfx1250/gfx950. Runtime selection is still gated to gfx1250 in RunAnvilExecutor.
+#if defined(XIO_SDMA_OSS7) && XIO_SDMA_OSS7
+#  if !defined(__HIP_DEVICE_COMPILE__) || defined(__gfx1250__) || defined(__gfx950__)
+#    define XIO_SDMA_OSS7_ENABLED 1
+#  else
+#    define XIO_SDMA_OSS7_ENABLED 0
+#  endif
+#else
+#  define XIO_SDMA_OSS7_ENABLED 0
+#endif
+
 namespace anvil {
 
 constexpr uint64_t SDMA_QUEUE_SIZE = sdma_ep::SDMA_QUEUE_SIZE;
@@ -178,79 +196,9 @@ __device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
   sdma_ep::waitCounter(addr, expected);
 }
 
-template <bool PUT_EN, bool SIGNAL_EN, bool COUNTER_EN>
-__device__ __forceinline__ void put_signal_counter_impl(
-  SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
-  uint64_t* signal, uint64_t* counter, uint64_t* put_index = nullptr) {
-#if XIO_SDMA_OSS7
-  /*
-   * OSS7 fast path: when copy + signal and/or counter are requested,
-   * fuse the copy and one atomic into a single
-   * COPY_LINEAR_WAIT_SIGNAL_MI4 packet.  The HW packet has one
-   * signal slot, so when both signal and counter are active the
-   * signal is fused and the counter falls back to a separate ATOMIC.
-   * When only a counter is requested (putCounter pattern used by
-   * Mori), the counter is routed into the fused signal slot instead.
-   */
-  if constexpr (PUT_EN && (SIGNAL_EN || COUNTER_EN)) {
-    constexpr bool both = SIGNAL_EN && COUNTER_EN;
-    constexpr size_t space_required = sizeof(
-                                        SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4) +
-                                      ((both) ? sizeof(SDMA_PKT_ATOMIC) : 0);
-    uint64_t offset = 0;
-    auto base = handle.ReserveQueueSpace(space_required, offset);
-    uint64_t pendingWptr = base;
-
-    uint64_t* fused_addr = SIGNAL_EN ? signal : counter;
-    auto ws_pkt = CreateCopyWaitSignalPacketMI4(src, dst, size, fused_addr, 1,
-                                                false, nullptr, 0, 0);
-    handle.placePacket(ws_pkt, pendingWptr, offset);
-    if (put_index != nullptr) {
-      *put_index = pendingWptr;
-    }
-    offset = 0;
-
-    if constexpr (both) {
-      auto counter_packet = CreateAtomicIncPacket(
-        reinterpret_cast<HSAuint64*>(counter));
-      handle.placePacket(counter_packet, pendingWptr, offset);
-      offset = 0;
-    }
-    handle.submitPacket(base, pendingWptr);
-    return;
-  }
-#endif /* XIO_SDMA_OSS7 */
-
-  constexpr size_t space_required =
-    ((PUT_EN) ? sizeof(SDMA_PKT_COPY_LINEAR) : 0) +
-    ((SIGNAL_EN) ? sizeof(SDMA_PKT_ATOMIC) : 0) +
-    ((COUNTER_EN) ? sizeof(SDMA_PKT_ATOMIC) : 0);
-  uint64_t offset = 0;
-  auto base = handle.ReserveQueueSpace(space_required, offset);
-  uint64_t pendingWptr = base;
-
-  if constexpr (PUT_EN) {
-    auto copy_packet = CreateCopyPacket(src, dst, size);
-    handle.placePacket(copy_packet, pendingWptr, offset);
-    if (put_index != nullptr) {
-      *put_index = pendingWptr;
-    }
-    offset = 0;
-  }
-  if constexpr (SIGNAL_EN) {
-    auto signal_packet = CreateAtomicIncPacket(
-      reinterpret_cast<HSAuint64*>(signal));
-    handle.placePacket(signal_packet, pendingWptr, offset);
-    offset = 0;
-  }
-  if constexpr (COUNTER_EN) {
-    auto counter_packet = CreateAtomicIncPacket(
-      reinterpret_cast<HSAuint64*>(counter));
-    handle.placePacket(counter_packet, pendingWptr, offset);
-    offset = 0;
-  }
-  handle.submitPacket(base, pendingWptr);
-}
+// NOTE: the anvil:: duplicate of put_signal_counter_impl was removed as dead
+// code (kernels forward to sdma_ep::put_signal_counter_impl). The fused path is
+// reintroduced under ANVIL_FUSED_SIGNAL below.
 
 __device__ __forceinline__ void put(SdmaQueueDeviceHandle& handle, void* dst,
                                     void* src, size_t size) {
@@ -318,6 +266,82 @@ __device__ __forceinline__ void put_signal_chunked(SdmaQueueDeviceHandle& handle
   anvil::put_signal(handle, static_cast<uint8_t*>(dst) + off,
                     static_cast<uint8_t*>(src) + off, size - off, signal);
 }
+
+#if XIO_SDMA_OSS7_ENABLED
+// OSS7 fused put+signal: a SINGLE copy+atomic-signal packet replacing the
+// separate COPY_LINEAR + ATOMIC pair. Kept out of sdma_ep so the non-fused path
+// stays bit-for-bit unchanged; selected per-launch via ANVIL_FUSED_SIGNAL.
+//
+// IMPORTANT (hardware ABI): the fixed 19-DWORD COPY_LINEAR_WAIT_SIGNAL_MI4 with
+// wait=0 FAULTS the gfx1250 engine - the packet is variable-length and omits the
+// 7-DWORD wait block, so it reads src from a zeroed DWORD. Signal-only must use
+// the COMPACT 12-DWORD layout below (wait block removed). Validated on gfx1250,
+// 64 KiB..1 GiB. See docs/anvil/phase4.md.
+struct SDMA_PKT_COPY_LINEAR_SIGNAL_MI4_COMPACT {
+  uint32_t dw[12];
+};
+static_assert(sizeof(SDMA_PKT_COPY_LINEAR_SIGNAL_MI4_COMPACT) ==
+                12 * sizeof(uint32_t),
+              "compact fused packet must be 12 DWORDs");
+
+__device__ __forceinline__ SDMA_PKT_COPY_LINEAR_SIGNAL_MI4_COMPACT
+CreateCopySignalCompactMI4(void* srcBuf, void* dstBuf, long long int packetSize,
+                           uint64_t* signalAddr, uint64_t signalData) {
+  SDMA_PKT_COPY_LINEAR_SIGNAL_MI4_COMPACT pkt = {};
+  // DW0: header (op, subop, signal=1 at bit 31, wait=0 at bit 30).
+  pkt.dw[0] = (SDMA_OP_COPY & 0xFF) |
+              ((SDMA_SUBOP_COPY_LINEAR_WAIT_SIGNAL_MI4 & 0xFF) << 8) |
+              (1u << 31);
+  // DW1: copy_count [29:0] (bytes - 1).
+  pkt.dw[1] = (uint32_t)(packetSize - 1) & 0x3FFFFFFF;
+  // DW2: copy_param (scope/temporal hints) — 0 = default (matches CreateCopyPacket).
+  pkt.dw[2] = 0;
+  // DW3-4: src addr.
+  pkt.dw[3] = (uint32_t)(uintptr_t)srcBuf;
+  pkt.dw[4] = (uint32_t)((uintptr_t)srcBuf >> 32);
+  // DW5-6: dst addr.
+  pkt.dw[5] = (uint32_t)(uintptr_t)dstBuf;
+  pkt.dw[6] = (uint32_t)((uintptr_t)dstBuf >> 32);
+  // DW7: signal_ctrl (signal_operation [6:0]).
+  pkt.dw[7] = SDMA_SIGNAL_OP_ADD64_MI4 & 0x7F;
+  // DW8-9: signal addr (bits [31:3] hold addr>>3; low 3 bits reserved => mask).
+  pkt.dw[8] = (uint32_t)((uintptr_t)signalAddr) & 0xFFFFFFF8u;
+  pkt.dw[9] = (uint32_t)((uintptr_t)signalAddr >> 32);
+  // DW10-11: signal data.
+  pkt.dw[10] = (uint32_t)(signalData);
+  pkt.dw[11] = (uint32_t)(signalData >> 32);
+  return pkt;
+}
+
+__device__ __forceinline__ void put_signal_fused(SdmaQueueDeviceHandle& handle,
+                                                 void* dst, void* src,
+                                                 size_t size,
+                                                 uint64_t* signal) {
+  uint64_t offset = 0;
+  auto base = handle.ReserveQueueSpace(
+    sizeof(SDMA_PKT_COPY_LINEAR_SIGNAL_MI4_COMPACT), offset);
+  uint64_t pendingWptr = base;
+  auto pkt = CreateCopySignalCompactMI4(src, dst,
+                                        static_cast<long long int>(size), signal,
+                                        /*signalData=*/1);
+  handle.placePacket(pkt, pendingWptr, offset);
+  handle.submitPacket(base, pendingWptr);
+}
+
+// Chunked fused copy+signal: leading chunks are plain copies, the final chunk is
+// the fused packet, so one signal fires after all copies drain.
+__device__ __forceinline__ void put_signal_fused_chunked(
+  SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
+  uint64_t* signal, size_t chunkBytes) {
+  size_t const chunk = anvil_clamp_chunk(chunkBytes);
+  size_t off = 0;
+  for (; size - off > chunk; off += chunk)
+    anvil::put(handle, static_cast<uint8_t*>(dst) + off,
+               static_cast<uint8_t*>(src) + off, chunk);
+  anvil::put_signal_fused(handle, static_cast<uint8_t*>(dst) + off,
+                          static_cast<uint8_t*>(src) + off, size - off, signal);
+}
+#endif // XIO_SDMA_OSS7_ENABLED
 
 __device__ __forceinline__ void put_signal_counter(
   SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,

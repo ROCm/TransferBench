@@ -6189,6 +6189,45 @@ namespace {
                               signal, chunkBytes);
   }
 
+#if XIO_SDMA_OSS7
+  // OSS7 fused signal + wait: single COPY_LINEAR_WAIT_SIGNAL_MI4 packet instead
+  // of the separate COPY_LINEAR + ATOMIC pair. Selected via ANVIL_FUSED_SIGNAL.
+  // The kernel symbol is emitted for every arch (so the host launch reference
+  // resolves), but the fused body only codegens on gfx1250/gfx950 device passes
+  // (XIO_SDMA_OSS7_ENABLED); elsewhere it is an empty stub that is never launched
+  // (runtime gate forces useFused=false off gfx1250).
+  __global__ void AnvilKernelFusedSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                             void* dst, void const* src, size_t numBytes,
+                                             size_t chunkBytes,
+                                             uint64_t* signal, uint64_t expected)
+  {
+#if XIO_SDMA_OSS7_ENABLED
+    anvil::put_signal_fused_chunked(*handlePtr, dst, const_cast<void*>(src),
+                                    numBytes, signal, chunkBytes);
+    anvil::waitSignal(signal, expected);
+#else
+    (void)handlePtr; (void)dst; (void)src; (void)numBytes; (void)chunkBytes;
+    (void)signal; (void)expected;
+#endif
+  }
+
+  // OSS7 fused signal + no wait (submission-only timing).
+  __global__ void AnvilKernelFusedSignalNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                               void* dst, void const* src, size_t numBytes,
+                                               size_t chunkBytes,
+                                               uint64_t* signal, uint64_t expected)
+  {
+#if XIO_SDMA_OSS7_ENABLED
+    (void)expected;
+    anvil::put_signal_fused_chunked(*handlePtr, dst, const_cast<void*>(src),
+                                    numBytes, signal, chunkBytes);
+#else
+    (void)handlePtr; (void)dst; (void)src; (void)numBytes; (void)chunkBytes;
+    (void)signal; (void)expected;
+#endif
+  }
+#endif // XIO_SDMA_OSS7
+
   // legacy (put + quiet) + wait.
   __global__ void AnvilKernelLegacyWait(anvil::SdmaQueueDeviceHandle* handlePtr,
                                         void* dst, void const* src, size_t numBytes,
@@ -6602,6 +6641,50 @@ namespace {
       return v && atoi(v) != 0;
     }();
 
+    // ANVIL_FUSED_SIGNAL=1: use the OSS7 fused copy+signal packet instead of the
+    // separate put_signal + waitSignal path. Requires XIO_SDMA_OSS7 and a
+    // non-legacy path; falls back (with one log line) when unavailable.
+    static bool const useFused = [deviceIdx] {
+      char const* v = getenv("ANVIL_FUSED_SIGNAL");
+      bool const requested = v && atoi(v) != 0;
+      if (!requested)
+        return false;
+#if !XIO_SDMA_OSS7
+      fprintf(stderr,
+              "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: built without "
+              "XIO_SDMA_OSS7; using the separate put_signal path.\n");
+      return false;
+#else
+      if (useLegacy) {
+        fprintf(stderr,
+                "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: incompatible with "
+                "ANVIL_LEGACY=1; using the legacy path.\n");
+        return false;
+      }
+      // Fused MI4 packets are a gfx1250-only runtime feature (gfx950 builds but
+      // can't consume them). Gate on the device arch; assumes a homogeneous set,
+      // computed once from deviceIdx.
+      hipDeviceProp_t prop{};
+      if (hipGetDeviceProperties(&prop, deviceIdx) != hipSuccess) {
+        fprintf(stderr,
+                "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: could not query device %d "
+                "arch; using the separate put_signal path.\n", deviceIdx);
+        return false;
+      }
+      if (std::string(prop.gcnArchName).find("gfx1250") == std::string::npos) {
+        fprintf(stderr,
+                "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: fused SDMA packets require "
+                "a gfx1250 runtime (device %d is %s); using the separate "
+                "put_signal path.\n", deviceIdx, prop.gcnArchName);
+        return false;
+      }
+      // Compact COPY_LINEAR_WAIT_SIGNAL_MI4 layout, validated on gfx1250. Perf-
+      // neutral vs the separate path (copy dominates); kept opt-in.
+      return true;
+#endif
+    }();
+    (void)useFused;
+
     // ANVIL_CHUNK_SIZE: max bytes per COPY_LINEAR packet (raw bytes or K/M/G
     // suffix). Default and hard cap is 1 GiB (30-bit count); smaller values split
     // the transfer into more packets (tuning / exercising the chunking path).
@@ -6670,7 +6753,14 @@ namespace {
       if (useLegacy) {
         if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyWait);
         else        ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyNoWait);
-      } else {
+      }
+#if XIO_SDMA_OSS7
+      else if (useFused) {
+        if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelFusedSignalWait);
+        else        ANVIL_LAUNCH_KERNEL(AnvilKernelFusedSignalNoWait);
+      }
+#endif
+      else {
         if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelSignalWait);
         else        ANVIL_LAUNCH_KERNEL(AnvilKernelSignalNoWait);
       }
