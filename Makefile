@@ -297,6 +297,19 @@ COMMON_FLAGS  += -DTB_GIT_BRANCH='"$(TB_GIT_BRANCH)"' -DTB_GIT_COMMIT='"$(TB_GIT
       else
         ANVIL_ENABLED = 1
         COMMON_FLAGS += -DANVIL_EXEC_ENABLED -I./src/anvil
+        # XIO_SDMA_OSS7: fused COPY_LINEAR_WAIT_SIGNAL_MI4 packet ABI. Portable
+        # across archs - the MI4 structs and host code are ABI-only, and the fused
+        # *device* code is arch-gated via XIO_SDMA_OSS7_ENABLED (anvil_device.hpp)
+        # so it only codegens on gfx1250/gfx950 regardless of GPU_TARGETS. The
+        # fused path is still selected at runtime only on gfx1250. On by default;
+        # set ENABLE_XIO_SDMA_OSS7=0 to force the separate COPY_LINEAR + ATOMIC path.
+        ENABLE_XIO_SDMA_OSS7 ?= 1
+        ifeq ($(ENABLE_XIO_SDMA_OSS7), 1)
+          COMMON_FLAGS += -DXIO_SDMA_OSS7=1
+          $(info - Building with XIO_SDMA_OSS7 (fused MI4 SDMA packets; device code gated to gfx1250/gfx950))
+        else
+          $(info - Building without XIO_SDMA_OSS7 (separate COPY_LINEAR + ATOMIC path))
+        endif
         # Link hsakmt; use -Wl, to pass the static archive directly to the
         # linker — without it, -x hip causes the compiler to parse the .a
         # as source and emit "expected unqualified-id" / UTF-8 errors.
