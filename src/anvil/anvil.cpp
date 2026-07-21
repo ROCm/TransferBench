@@ -1,9 +1,14 @@
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <thread>
 
 #include "anvil.hpp"
+#include "sdma_packets.hpp"
 #include <hip/hip_runtime.h>
 #include <hip/hip_ext.h>
 
@@ -193,8 +198,8 @@ std::ostream& operator<<(std::ostream& os, const SDMA_PKT_FENCE_MI4& cmd) {
 #endif /* XIO_SDMA_OSS7 */
 
 SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
-                     hsa_agent_t& localAgent, uint32_t engineId) {
-  (void)remoteDeviceId;
+                     hsa_agent_t& localAgent, uint32_t engineId)
+    : localDeviceId_(localDeviceId), remoteDeviceId_(remoteDeviceId) {
   int originalDeviceId;
   CHECK_HIP_ERROR(hipGetDevice(&originalDeviceId));
   (void)originalDeviceId;
@@ -282,6 +287,10 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                             hipMemcpyHostToDevice));
   CHECK_HIP_ERROR(hipMemcpy(committedWptr_, &committedWptr, sizeof(uint64_t),
                             hipMemcpyHostToDevice));
+
+  // Seed host-side wptr bookkeeping so a SdmaQueueHostHandle can drive this ring.
+  hostCachedWptr_.store(cachedWptr, std::memory_order_relaxed);
+  hostCommittedWptr_.store(committedWptr, std::memory_order_relaxed);
 }
 
 SdmaQueue::~SdmaQueue() {
@@ -395,6 +404,9 @@ AnvilLib::~AnvilLib() {
   for (auto& p : sdma_channels_) {
     p.second.clear();
   }
+  for (auto& p : host_sdma_channels_) {
+    p.second.clear();
+  }
   if (s_kfd_opened) {
     CloseKFD();
     hsa_shut_down();
@@ -429,7 +441,7 @@ void AnvilLib::init() {
 
 SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
                                      uint32_t engineId, int* channelIdx) {
-  auto& vec = sdma_channels_[dstDeviceId];
+  auto& vec = sdma_channels_[ChannelKey{srcDeviceId, dstDeviceId}];
   vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
                                                gpuAgents_[srcDeviceId],
                                                engineId));
@@ -439,11 +451,22 @@ SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
 }
 
 bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels) {
-  uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
+  if (numChannels <= 0) {
+    throw std::invalid_argument("connect(): numChannels must be positive");
+  }
+
+  // Idempotent: only create the channels still missing for this {src,dst}.
+  auto& queues = sdma_channels_[ChannelKey{srcDeviceId, dstDeviceId}];
+  const int existingChannels = static_cast<int>(queues.size());
+  if (existingChannels >= numChannels) {
+    return true;
+  }
+
+  const uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
   std::cout << "Connect from " << srcDeviceId << " to " << dstDeviceId
             << " with " << numChannels << " channels using engine " << engineId
             << std::endl;
-  for (int c = 0; c < numChannels; ++c) {
+  for (int c = existingChannels; c < numChannels; ++c) {
     createSdmaQueue(srcDeviceId, dstDeviceId, engineId);
   }
   return true;
@@ -451,16 +474,297 @@ bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels) {
 
 SdmaQueue* AnvilLib::getSdmaQueue(int srcDeviceId, int dstDeviceId,
                                   int channel_idx) {
-  if (sdma_channels_.find(dstDeviceId) == sdma_channels_.end()) {
+  auto it = sdma_channels_.find(ChannelKey{srcDeviceId, dstDeviceId});
+  if (it == sdma_channels_.end()) {
     return nullptr;
   }
 
-  const auto& channels = sdma_channels_[dstDeviceId];
+  const auto& channels = it->second;
   if (channel_idx < 0 || static_cast<size_t>(channel_idx) >= channels.size()) {
     return nullptr;
   }
 
   return channels[static_cast<size_t>(channel_idx)].get();
+}
+
+// ==================== SdmaQueueHostHandle (Phase 5) ====================
+// CPU-driven SDMA submission: reserve / wrap-pad / place / doorbell over the
+// same host-accessible, uncached KFD ring the device handle uses. A queue is
+// driven by EITHER the host handle OR the device kernel, never both at once.
+
+uint64_t SdmaQueueHostHandle::wrapIntoRing(uint64_t index) const {
+  return index % SDMA_QUEUE_SIZE;
+}
+
+bool SdmaQueueHostHandle::canWriteUpto(uint64_t uptoIndex) {
+  uint64_t hw_read_index = *queue_->queue_.Queue_read_ptr_aql;
+  return (uptoIndex - hw_read_index) < SDMA_QUEUE_SIZE;
+}
+
+void SdmaQueueHostHandle::padRingToEnd(uint64_t cur_index) {
+  uint64_t padding_size = SDMA_QUEUE_SIZE - wrapIntoRing(cur_index);
+  uint64_t new_index = cur_index + padding_size;
+
+  if (!canWriteUpto(new_index)) {
+    return;
+  }
+
+  if (queue_->hostCachedWptr_.compare_exchange_weak(
+        cur_index, new_index, std::memory_order_release,
+        std::memory_order_relaxed)) {
+    uint64_t num_nops = padding_size / sizeof(uint32_t);
+    uint32_t* queueBuf = static_cast<uint32_t*>(queue_->queueBuffer_);
+    uint64_t offset_dwords = wrapIntoRing(cur_index) / sizeof(uint32_t);
+    for (uint64_t i = 0; i < num_nops; i++) {
+      queueBuf[offset_dwords + i] = SDMA_OP_NOP;
+    }
+    submitPacket(cur_index, new_index);
+  }
+}
+
+uint64_t SdmaQueueHostHandle::reserveQueueSpace(size_t size_in_bytes) {
+  uint64_t cur_index;
+  while (true) {
+    cur_index = queue_->hostCachedWptr_.load(std::memory_order_relaxed);
+    uint64_t new_index = cur_index + size_in_bytes;
+
+    // Would this packet cross the ring boundary? Pad to end and retry.
+    if (wrapIntoRing(cur_index) + size_in_bytes > SDMA_QUEUE_SIZE) {
+      padRingToEnd(cur_index);
+      continue;
+    }
+    // Wait for the hardware to free space if the ring is full.
+    if (!canWriteUpto(new_index)) {
+      std::this_thread::yield();
+      continue;
+    }
+    if (queue_->hostCachedWptr_.compare_exchange_weak(
+          cur_index, new_index, std::memory_order_release,
+          std::memory_order_relaxed)) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  return cur_index;
+}
+
+void SdmaQueueHostHandle::placePacket(const void* packet, size_t packet_size,
+                                      uint64_t index) {
+  uint64_t wrapped_index = wrapIntoRing(index);
+  char* queueBuf = static_cast<char*>(queue_->queueBuffer_) + wrapped_index;
+  std::memcpy(queueBuf, packet, packet_size);
+}
+
+void SdmaQueueHostHandle::submitPacket(uint64_t base, uint64_t pending_wptr) {
+  // Advance the wptr only after the previous submission committed, so packets
+  // reach the engine in ring order.
+  while (queue_->hostCommittedWptr_.load(std::memory_order_acquire) != base) {
+    std::this_thread::yield();
+  }
+  std::atomic_thread_fence(std::memory_order_release);
+  *queue_->queue_.Queue_write_ptr_aql = pending_wptr;
+  std::atomic_thread_fence(std::memory_order_release);
+  *queue_->queue_.Queue_DoorBell_aql = pending_wptr;
+  queue_->hostCommittedWptr_.store(pending_wptr, std::memory_order_release);
+}
+
+void SdmaQueueHostHandle::submitBatch(
+  std::initializer_list<std::pair<const void*, size_t>> packets) {
+  if (packets.size() == 0) {
+    return;
+  }
+  size_t total_size = 0;
+  for (const auto& p : packets) {
+    total_size += p.second;
+  }
+  // Wraparound reserves one NOP, so a batch above SDMA_QUEUE_SIZE - sizeof(NOP)
+  // would spin forever in reserveQueueSpace.
+  constexpr size_t kMaxSubmitBytes = SDMA_QUEUE_SIZE - sizeof(uint32_t);
+  if (total_size > kMaxSubmitBytes) {
+    throw std::invalid_argument(
+      "SdmaQueueHostHandle::submit: batch size " + std::to_string(total_size) +
+      " bytes exceeds the maximum single submission of " +
+      std::to_string(kMaxSubmitBytes) + " bytes");
+  }
+
+  uint64_t offset = reserveQueueSpace(total_size);
+  uint64_t current = offset;
+  for (const auto& p : packets) {
+    placePacket(p.first, p.second, current);
+    current += p.second;
+  }
+  submitPacket(offset, offset + total_size);
+}
+
+// Max bytes per COPY_LINEAR packet: 1 GiB HW limit, lowered via ANVIL_CHUNK_SIZE
+// (raw bytes or K/M/G suffix). Read per call so tests can vary it at runtime.
+static size_t anvilHostChunkBytes() {
+  constexpr size_t kMax = 0x40000000ull; // 1 GiB
+  char const* v = getenv("ANVIL_CHUNK_SIZE");
+  if (!v || !*v)
+    return kMax;
+  char* end = nullptr;
+  unsigned long long val = strtoull(v, &end, 10);
+  if (end && *end) {
+    switch (*end) {
+      case 'g': case 'G': val <<= 30; break;
+      case 'm': case 'M': val <<= 20; break;
+      case 'k': case 'K': val <<= 10; break;
+      default: break;
+    }
+  }
+  if (val == 0 || val > kMax)
+    return kMax;
+  return static_cast<size_t>(val);
+}
+
+void SdmaQueueHostHandle::put(void* dst, void* src, size_t size) {
+  if (!src || !dst || size == 0) {
+    throw std::invalid_argument("SdmaQueueHostHandle::put: invalid args");
+  }
+  // Split into <=chunk COPY_LINEAR packets (one doorbell each).
+  size_t const chunk = anvilHostChunkBytes();
+  auto* d = static_cast<uint8_t*>(dst);
+  auto* s = static_cast<uint8_t*>(src);
+  size_t off = 0;
+  while (size - off > chunk) {
+    packets::CopyLinearPacket copy(s + off, d + off, chunk);
+    submitBatch({{copy.data(), copy.size_bytes()}});
+    off += chunk;
+  }
+  packets::CopyLinearPacket copy(s + off, d + off, size - off);
+  submitBatch({{copy.data(), copy.size_bytes()}});
+}
+
+template <typename T>
+void SdmaQueueHostHandle::signal(T* ptr, T value) {
+  static_assert(sizeof(T) == 4 || sizeof(T) == 8,
+                "signal only supports 32-bit or 64-bit types");
+  if (!ptr) {
+    throw std::invalid_argument("SdmaQueueHostHandle::signal: nullptr");
+  }
+  packets::AtomicAddPacket<T> atom(ptr, value);
+  submitBatch({{atom.data(), atom.size_bytes()}});
+}
+
+template <typename T>
+void SdmaQueueHostHandle::put_signal(void* dst, void* src, size_t size,
+                                     T* flag_ptr, T flag_value) {
+  static_assert(sizeof(T) == 4 || sizeof(T) == 8,
+                "put_signal only supports 32-bit or 64-bit flag types");
+  if (!src || !dst || size == 0 || !flag_ptr) {
+    throw std::invalid_argument("SdmaQueueHostHandle::put_signal: invalid args");
+  }
+  // Only the final chunk carries the flag, so it fires once after all copies
+  // drain (in-order queue).
+  size_t const chunk = anvilHostChunkBytes();
+  auto* d = static_cast<uint8_t*>(dst);
+  auto* s = static_cast<uint8_t*>(src);
+  size_t off = 0;
+  while (size - off > chunk) {
+    packets::CopyLinearPacket copy(s + off, d + off, chunk);
+    submitBatch({{copy.data(), copy.size_bytes()}});
+    off += chunk;
+  }
+  packets::CopyLinearPacket copy(s + off, d + off, size - off);
+  packets::AtomicAddPacket<T> atom(flag_ptr, flag_value);
+  submitBatch({{copy.data(), copy.size_bytes()},
+               {atom.data(), atom.size_bytes()}});
+}
+
+template <typename T>
+void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected, void* dst,
+                                             void* src, size_t size,
+                                             uint32_t mask, uint32_t interval,
+                                             uint32_t retry_count) {
+  static_assert(sizeof(T) == 4,
+                "wait_flag_then_put only supports 32-bit flag types "
+                "(POLL_REGMEM compares a single DWORD)");
+  if (!src || !dst || size == 0 || !flag_ptr) {
+    throw std::invalid_argument(
+      "SdmaQueueHostHandle::wait_flag_then_put: invalid args");
+  }
+  packets::PollRegmemPacket poll(flag_ptr, static_cast<uint32_t>(expected),
+                                 mask, SDMA_POLL_FUNC_GEQ, interval,
+                                 retry_count);
+  // The poll gates the first copy chunk; remaining chunks follow once released.
+  size_t const chunk = anvilHostChunkBytes();
+  auto* d = static_cast<uint8_t*>(dst);
+  auto* s = static_cast<uint8_t*>(src);
+  size_t const first = (size > chunk) ? chunk : size;
+  packets::CopyLinearPacket copy0(s, d, first);
+  submitBatch({{poll.data(), poll.size_bytes()},
+               {copy0.data(), copy0.size_bytes()}});
+  for (size_t off = first; off < size;) {
+    size_t const n = (size - off > chunk) ? chunk : size - off;
+    packets::CopyLinearPacket copy(s + off, d + off, n);
+    submitBatch({{copy.data(), copy.size_bytes()}});
+    off += n;
+  }
+}
+
+void SdmaQueueHostHandle::timestamp(uint64_t* ts_ptr) {
+  if (!ts_ptr) {
+    throw std::invalid_argument("SdmaQueueHostHandle::timestamp: nullptr");
+  }
+  packets::TimestampPacket ts(ts_ptr);
+  submitBatch({{ts.data(), ts.size_bytes()}});
+}
+
+void SdmaQueueHostHandle::quiet() {
+  uint64_t target_wptr = queue_->hostCommittedWptr_.load(
+    std::memory_order_acquire);
+  while (*queue_->queue_.Queue_read_ptr_aql != target_wptr) {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    std::this_thread::yield();
+  }
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+// Explicit instantiations for the flag types TransferBench uses.
+template void SdmaQueueHostHandle::signal<uint32_t>(uint32_t*, uint32_t);
+template void SdmaQueueHostHandle::signal<uint64_t>(uint64_t*, uint64_t);
+template void SdmaQueueHostHandle::put_signal<uint32_t>(void*, void*, size_t,
+                                                        uint32_t*, uint32_t);
+template void SdmaQueueHostHandle::put_signal<uint64_t>(void*, void*, size_t,
+                                                        uint64_t*, uint64_t);
+template void SdmaQueueHostHandle::wait_flag_then_put<uint32_t>(
+  uint32_t*, uint32_t, void*, void*, size_t, uint32_t, uint32_t, uint32_t);
+
+bool AnvilLib::connectHost(int srcDeviceId, int dstDeviceId, int numChannels) {
+  if (numChannels <= 0) {
+    throw std::invalid_argument("connectHost(): numChannels must be positive");
+  }
+
+  auto& channels = host_sdma_channels_[ChannelKey{srcDeviceId, dstDeviceId}];
+  const int existingChannels = static_cast<int>(channels.size());
+  if (existingChannels >= numChannels) {
+    return true;
+  }
+
+  const uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
+  for (int c = existingChannels; c < numChannels; ++c) {
+    HostChannel hc;
+    hc.queue = std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                           gpuAgents_[srcDeviceId], engineId);
+    hc.handle = std::make_unique<SdmaQueueHostHandle>(hc.queue.get());
+    channels.push_back(std::move(hc));
+  }
+  return true;
+}
+
+SdmaQueueHostHandle* AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId,
+                                             int channelIdx) {
+  auto it = host_sdma_channels_.find(ChannelKey{srcDeviceId, dstDeviceId});
+  if (it == host_sdma_channels_.end()) {
+    return nullptr;
+  }
+  const auto& channels = it->second;
+  if (channelIdx < 0 ||
+      static_cast<size_t>(channelIdx) >= channels.size()) {
+    return nullptr;
+  }
+  return channels[static_cast<size_t>(channelIdx)].handle.get();
 }
 
 AnvilLib& AnvilLib::getInstance() {

@@ -27,7 +27,14 @@ const unsigned int SDMA_SUBOP_COPY_LINEAR = 0;
 const unsigned int SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW = 36;
 
 const unsigned int SDMA_SUBOP_WRITE_LINEAR = 0;
+const unsigned int SDMA_SUBOP_TIMESTAMP_GLOBAL = 2;
+
+const unsigned int SDMA_ATOMIC_ADD32 = 15;
 const unsigned int SDMA_ATOMIC_ADD64 = 47;
+
+/* POLL_REGMEM compare functions (HEADER.func, 3-bit).  Standard SDMA
+ * encoding, shared across generations: 0=always 1=< 2=<= 3=== 4=!= 5=>= 6=>. */
+const unsigned int SDMA_POLL_FUNC_GEQ = 5;
 
 /* ---- OSS7.0 (MI4) sub-opcodes and operations ------------- */
 #if XIO_SDMA_OSS7

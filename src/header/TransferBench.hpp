@@ -3163,6 +3163,7 @@ namespace {
 #ifdef ANVIL_EXEC_ENABLED
     vector<sdma_ep::SdmaQueueInfo> anvilQueues;   ///< One KFD SDMA queue per transfer
     vector<uint64_t*>              anvilSignals;  ///< Per-transfer completion signal (uncached device mem)
+    vector<anvil::SdmaQueueHostHandle*> anvilHostHandles; ///< Host-initiated mode (ANVIL_HOST_QUEUE=1): one CPU-driven handle per transfer
 #endif
   };
 
@@ -4517,6 +4518,17 @@ namespace {
       int const numResources = exeInfo.resources.size();
       exeInfo.anvilQueues.resize(numResources);
       exeInfo.anvilSignals.assign(numResources, nullptr);
+      exeInfo.anvilHostHandles.assign(numResources, nullptr);
+
+      // ANVIL_HOST_QUEUE=1: benchmark CPU-initiated (host queue) SDMA instead of
+      // the GPU-initiated (kernel) path - CPU builds packets, rings the doorbell,
+      // polls quiet(). One independent host channel per transfer.
+      static bool const useHostQueue = [] {
+        char const* v = getenv("ANVIL_HOST_QUEUE");
+        return v && atoi(v) != 0;
+      }();
+      // Per-dst host channel counter so concurrent transfers get distinct queues.
+      std::unordered_map<int, int> hostChannelCount;
 
       // ANVIL_REMOTE_DOORBELL=1: place the completion signal ("doorbell") in
       // DESTINATION memory instead of the source. The SDMA engine then rings a
@@ -4555,6 +4567,30 @@ namespace {
         if (verbose) {
           System::Get().Log("[ANVIL]   resource[%d]: transfer %d  dst GPU %d  SDMA engine %u\n",
                             i, exeInfo.resources[i].transferIdx, dstDeviceId, engineId);
+        }
+
+        // Host-initiated mode: create a CPU-driven host channel and store its
+        // handle; no device queue/kernel/signal (quiet() polls the rptr).
+        if (useHostQueue) {
+          int const ch = hostChannelCount[dstDeviceId]++;
+          if (!anvilLib.connectHost(srcDeviceId, dstDeviceId, ch + 1)) {
+            return {ERR_FATAL,
+                    "PrepareAnvilExecutor: connectHost failed for src=%d dst=%d",
+                    srcDeviceId, dstDeviceId};
+          }
+          anvil::SdmaQueueHostHandle* hh =
+            anvilLib.getHostHandle(srcDeviceId, dstDeviceId, ch);
+          if (!hh) {
+            return {ERR_FATAL,
+                    "PrepareAnvilExecutor: getHostHandle failed for src=%d dst=%d ch=%d",
+                    srcDeviceId, dstDeviceId, ch};
+          }
+          exeInfo.anvilHostHandles[i]        = hh;
+          exeInfo.anvilQueues[i].deviceHandle = nullptr;
+          exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
+          exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
+          exeInfo.anvilQueues[i].channelIdx   = ch;
+          continue;
         }
 
         anvil::SdmaQueue* queue = anvilLib.createSdmaQueue(
@@ -5066,9 +5102,10 @@ namespace {
       }
       exeInfo.anvilSignals.clear();
 
-      // SdmaQueue objects are owned by the AnvilLib singleton and are destroyed
-      // at process exit. Clear the info vector to drop our references.
+      // SdmaQueue objects (device and host) are owned by the AnvilLib singleton
+      // and are destroyed at process exit. Clear the info vectors to drop refs.
       exeInfo.anvilQueues.clear();
+      exeInfo.anvilHostHandles.clear();
     }
 #endif
 
@@ -6501,6 +6538,51 @@ namespace {
     ERR_CHECK(hipSetDevice(deviceIdx));
 
     int const numResources = (int)exeInfo.resources.size();
+
+    // ANVIL_HOST_QUEUE=1: CPU-initiated path. Submit every transfer's copy
+    // back-to-back (engines run concurrently), then drain each with quiet().
+    // Timed on the CPU wall clock - the copy is on a KFD queue, not a HIP stream,
+    // so hipEvents cannot bracket it.
+    static bool const useHostQueue = [] {
+      char const* v = getenv("ANVIL_HOST_QUEUE");
+      return v && atoi(v) != 0;
+    }();
+    if (useHostQueue) {
+      using AnvilClock = std::chrono::high_resolution_clock;
+      std::vector<std::chrono::time_point<AnvilClock>> tStart(numResources);
+      std::vector<std::chrono::time_point<AnvilClock>> tStop(numResources);
+
+      // Issue all copies first (concurrent across independent host channels).
+      for (int i = 0; i < numResources; ++i) {
+        TransferResources const& rss = exeInfo.resources[i];
+        anvil::SdmaQueueHostHandle* hh = exeInfo.anvilHostHandles[i];
+        size_t const initOffsetBytes = cfg.data.byteOffset;
+        void*  dst  = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
+        void*  src  = reinterpret_cast<uint8_t*>(
+          const_cast<void*>((void const*)rss.srcMem[0])) + initOffsetBytes;
+        size_t nbytes = rss.numBytes;
+        tStart[i] = AnvilClock::now();
+        hh->put(dst, src, nbytes);
+      }
+      // Drain each channel and stamp completion.
+      for (int i = 0; i < numResources; ++i) {
+        exeInfo.anvilHostHandles[i]->quiet();
+        tStop[i] = AnvilClock::now();
+      }
+
+      if (iteration >= 0) {
+        double maxDeltaMsec = 0.0;
+        for (int i = 0; i < numResources; ++i) {
+          double const deltaMsec =
+            std::chrono::duration<double, std::milli>(tStop[i] - tStart[i])
+              .count();
+          exeInfo.resources[i].totalDurationMsec += deltaMsec;
+          maxDeltaMsec = std::max(maxDeltaMsec, deltaMsec);
+        }
+        exeInfo.totalDurationMsec += maxDeltaMsec;
+      }
+      return ERR_NONE;
+    }
 
     // ANVIL_WAIT_SIGNAL=0: skip the in-kernel completion wait so the kernel
     // returns right after submitting the copy packet. Lets us measure the
