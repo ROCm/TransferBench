@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.66.03
+### Fixed
+- Adding a hipDeviceSynchronize after input hipMemcpy
+
 ## v1.66.02
 ### Added
 - Adding DMA-BUF support
