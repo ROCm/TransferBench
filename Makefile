@@ -78,6 +78,18 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
       HIPFLAGS += --rocm-device-lib-path=$(ROCM_DEVICE_LIB_PATH)
     endif
+
+    # gfx1250 TDM descriptor header fallback. src/header/tdmCopy.h keys TDM support
+    # on __has_include(<hip/amd_detail/amd_gfx1250_TDM.h>); some ROCm SDKs omit that
+    # descriptor header, in which case every tdm:: entry point compiles to a deleted
+    # no-op stub and IsTdmCopySupported() reports the GPU as unsupported. When the SDK
+    # lacks the header we add a vendored copy (src/tdm_fallback) to the include search
+    # path. The path is added only when the SDK is missing it, so a real SDK header is
+    # never shadowed.
+    ifeq ($(wildcard $(ROCM_PATH)/include/hip/amd_detail/amd_gfx1250_TDM.h),)
+      $(info - SDK lacks hip/amd_detail/amd_gfx1250_TDM.h; using vendored fallback in ./src/tdm_fallback)
+      CXXFLAGS += -I./src/tdm_fallback
+    endif
   endif
 
   ifeq ($(SINGLE_KERNEL), 1)

@@ -5870,13 +5870,12 @@ namespace {
     float*       __restrict__ dst = (float*)p.dst[0];
     size_t const sizeBytes        = p.N * sizeof(float);
 
-    int subIterations = 0;
-    bool useTDM = 0;
-    for(int subIterations = 0; subIterations < numSubIterations; subIterations++) {
-      if constexpr(useTDM){
-	tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
-      else{
-	async::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+    constexpr bool useTDM = false;
+    for (int subIterations = 0; subIterations < numSubIterations; subIterations++) {
+      if constexpr (useTDM) {
+        tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+      } else {
+        async::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
       }
       __syncthreads(); // Wait for all warps to finish
     }
