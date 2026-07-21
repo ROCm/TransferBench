@@ -80,6 +80,7 @@ THE SOFTWARE.
 #endif
 
 #include "tdmCopy.h"
+#include "asyncCopy.h"
 
 #endif
 /// @endcond
@@ -5870,10 +5871,14 @@ namespace {
     size_t const sizeBytes        = p.N * sizeof(float);
 
     int subIterations = 0;
-    while (1) {
-      tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+    bool useTDM = 0;
+    for(int subIterations = 0; subIterations < numSubIterations; subIterations++) {
+      if constexpr(useTDM){
+	tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+      else{
+	async::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+      }
       __syncthreads(); // Wait for all warps to finish
-      if (++subIterations == numSubIterations) break;
     }
 
     if (shouldRecordTiming) {
