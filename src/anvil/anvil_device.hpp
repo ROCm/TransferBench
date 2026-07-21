@@ -276,6 +276,49 @@ __device__ __forceinline__ void put_signal(SdmaQueueDeviceHandle& handle,
   sdma_ep::putSignal(handle, dst, src, size, signal);
 }
 
+// Max bytes per COPY_LINEAR / fused packet: 30-bit count field stores size-1,
+// so 2^30 = 1 GiB. Larger transfers must be split into multiple packets.
+constexpr size_t ANVIL_MAX_COPY_CHUNK = 0x40000000ull; // 1 GiB
+
+// Clamp a caller-requested chunk size into the valid (0, 1 GiB] range. A value
+// of 0 (or one above the HW max) means "use the hardware maximum".
+__host__ __device__ __forceinline__ size_t
+anvil_clamp_chunk(size_t chunkBytes) {
+  return (chunkBytes == 0 || chunkBytes > ANVIL_MAX_COPY_CHUNK)
+           ? ANVIL_MAX_COPY_CHUNK
+           : chunkBytes;
+}
+
+// Chunked linear copy: ceil(size/chunk) COPY_LINEAR packets (legacy put+quiet).
+__device__ __forceinline__ void put_chunked(SdmaQueueDeviceHandle& handle,
+                                            void* dst, void* src, size_t size,
+                                            size_t chunkBytes) {
+  size_t const chunk = anvil_clamp_chunk(chunkBytes);
+  size_t off = 0;
+  for (; size - off > chunk; off += chunk)
+    anvil::put(handle, static_cast<uint8_t*>(dst) + off,
+               static_cast<uint8_t*>(src) + off, chunk);
+  anvil::put(handle, static_cast<uint8_t*>(dst) + off,
+             static_cast<uint8_t*>(src) + off, size - off);
+}
+
+// Chunked copy + signal: only the final chunk carries the atomic signal, so it
+// fires once after all copies drain (in-order queue). waitSignal(signal, 1)
+// semantics are unchanged regardless of size.
+__device__ __forceinline__ void put_signal_chunked(SdmaQueueDeviceHandle& handle,
+                                                   void* dst, void* src,
+                                                   size_t size,
+                                                   uint64_t* signal,
+                                                   size_t chunkBytes) {
+  size_t const chunk = anvil_clamp_chunk(chunkBytes);
+  size_t off = 0;
+  for (; size - off > chunk; off += chunk)
+    anvil::put(handle, static_cast<uint8_t*>(dst) + off,
+               static_cast<uint8_t*>(src) + off, chunk);
+  anvil::put_signal(handle, static_cast<uint8_t*>(dst) + off,
+                    static_cast<uint8_t*>(src) + off, size - off, signal);
+}
+
 __device__ __forceinline__ void put_signal_counter(
   SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
   uint64_t* signal, uint64_t* counter) {

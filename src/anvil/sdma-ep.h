@@ -137,10 +137,10 @@ constexpr bool BREAK_ON_RETRIES = false;
  *
  * @param srcBuf Source address (GPU virtual).
  * @param dstBuf Destination address (GPU virtual).
- * @param packetSize Number of bytes to copy. Must be
- *        in the range [1, UINT32_MAX] (the HW count
- *        field is 30 bits, so max single-packet
- *        transfer is 1 GiB).
+ * @param packetSize Bytes to copy, in [1, 2^30]. The HW
+ *        count field is 30-bit (stores size-1), so 1 GiB
+ *        is the max per packet; larger transfers must be
+ *        split by the caller (see anvil::put_*_chunked).
  * @return Populated SDMA_PKT_COPY_LINEAR.
  *
  * @note Device-only. The count field stores size-1 per
@@ -149,8 +149,8 @@ constexpr bool BREAK_ON_RETRIES = false;
 __device__ __forceinline__ SDMA_PKT_COPY_LINEAR
 CreateCopyPacket(void* srcBuf, void* dstBuf, long long int packetSize) {
   assert(packetSize > 0 && "CreateCopyPacket: packetSize must be > 0");
-  assert(packetSize <= 0xFFFFFFFFLL &&
-         "CreateCopyPacket: packetSize exceeds 4 GiB");
+  assert(packetSize <= 0x40000000LL &&
+         "CreateCopyPacket: packetSize exceeds 1 GiB (30-bit count)");
   SDMA_PKT_COPY_LINEAR pkt = {};
   pkt.HEADER_UNION.op = SDMA_OP_COPY;
   pkt.HEADER_UNION.sub_op = SDMA_SUBOP_COPY_LINEAR;

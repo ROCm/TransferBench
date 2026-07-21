@@ -6133,38 +6133,44 @@ namespace {
   // signal + wait (default correctness path).
   __global__ void AnvilKernelSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
                                         void* dst, void const* src, size_t numBytes,
+                                        size_t chunkBytes,
                                         uint64_t* signal, uint64_t expected)
   {
-    anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
+    anvil::put_signal_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes,
+                              signal, chunkBytes);
     anvil::waitSignal(signal, expected);
   }
 
   // signal + no wait (submission-only timing).
   __global__ void AnvilKernelSignalNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
                                           void* dst, void const* src, size_t numBytes,
+                                          size_t chunkBytes,
                                           uint64_t* signal, uint64_t expected)
   {
     (void)expected;
-    anvil::put_signal(*handlePtr, dst, const_cast<void*>(src), numBytes, signal);
+    anvil::put_signal_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes,
+                              signal, chunkBytes);
   }
 
   // legacy (put + quiet) + wait.
   __global__ void AnvilKernelLegacyWait(anvil::SdmaQueueDeviceHandle* handlePtr,
                                         void* dst, void const* src, size_t numBytes,
+                                        size_t chunkBytes,
                                         uint64_t* signal, uint64_t expected)
   {
     (void)signal; (void)expected;
-    anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
+    anvil::put_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes, chunkBytes);
     anvil::quiet(*handlePtr);
   }
 
   // legacy (put) + no wait (submission-only timing).
   __global__ void AnvilKernelLegacyNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
                                           void* dst, void const* src, size_t numBytes,
+                                          size_t chunkBytes,
                                           uint64_t* signal, uint64_t expected)
   {
     (void)signal; (void)expected;
-    anvil::put(*handlePtr, dst, const_cast<void*>(src), numBytes);
+    anvil::put_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes, chunkBytes);
   }
 #endif // ANVIL_EXEC_ENABLED
 
@@ -6514,6 +6520,40 @@ namespace {
       return v && atoi(v) != 0;
     }();
 
+    // ANVIL_CHUNK_SIZE: max bytes per COPY_LINEAR packet (raw bytes or K/M/G
+    // suffix). Default and hard cap is 1 GiB (30-bit count); smaller values split
+    // the transfer into more packets (tuning / exercising the chunking path).
+    static size_t const chunkBytes = [] {
+      char const* v = getenv("ANVIL_CHUNK_SIZE");
+      if (!v || !*v) return anvil::ANVIL_MAX_COPY_CHUNK;
+      char* end = nullptr;
+      unsigned long long val = strtoull(v, &end, 10);
+      if (end && *end) {
+        switch (*end) {
+          case 'g': case 'G': val <<= 30; break;
+          case 'm': case 'M': val <<= 20; break;
+          case 'k': case 'K': val <<= 10; break;
+          default: break;
+        }
+      }
+      size_t const clamped = anvil::anvil_clamp_chunk(static_cast<size_t>(val));
+      if (static_cast<size_t>(val) != clamped)
+        fprintf(stderr,
+                "[anvil] ANVIL_CHUNK_SIZE=%s clamped to %zu bytes "
+                "(valid range 1..%zu)\n",
+                v, clamped, anvil::ANVIL_MAX_COPY_CHUNK);
+      return clamped;
+    }();
+
+    // ANVIL_CPU_TIMING=1: also bracket launch->synchronize with a CPU wall clock
+    // and print it next to the hipEvent time, to quantify launch+sync overhead
+    // the hipEvent time omits. Diagnostic only; reported GB/s is unchanged.
+    static bool const cpuTiming = [] {
+      char const* v = getenv("ANVIL_CPU_TIMING");
+      return v && atoi(v) != 0;
+    }();
+    auto const cpuStart = std::chrono::high_resolution_clock::now();
+
     // Launch each transfer on its own stream so they execute concurrently and
     // contend for the fabric/SDMA engines, matching how the DMA/BMA executors
     // are measured. Each transfer is timed individually via its own event pair.
@@ -6544,7 +6584,7 @@ namespace {
   hipExtLaunchKernelGGL(KERNEL, dim3(1), dim3(1), 0, exeInfo.streams[i],        \
                         exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,       \
                         handle, dst, const_cast<void*>(src), nbytes,           \
-                        signal, (uint64_t)1)
+                        chunkBytes, signal, (uint64_t)1)
       if (useLegacy) {
         if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyWait);
         else        ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyNoWait);
@@ -6560,6 +6600,8 @@ namespace {
     for (int i = 0; i < numResources; ++i)
       ERR_CHECK(hipStreamSynchronize(exeInfo.streams[i]));
 
+    auto const cpuStop = std::chrono::high_resolution_clock::now();
+
     if (iteration >= 0) {
       float maxDeltaMsec = 0.0f;
       for (int i = 0; i < numResources; ++i) {
@@ -6570,6 +6612,20 @@ namespace {
       }
       // Executor wall time is bounded by the slowest concurrent transfer
       exeInfo.totalDurationMsec += maxDeltaMsec;
+
+      if (cpuTiming) {
+        double const cpuMsec =
+          std::chrono::duration<double, std::milli>(cpuStop - cpuStart).count();
+        fprintf(stderr,
+                "[anvil-cputiming] iter=%d transfers=%d hipEvent_ms=%.6f "
+                "cpu_ms=%.6f delta_ms=%.6f ratio=%.3f\n",
+                iteration, numResources, maxDeltaMsec, cpuMsec,
+                cpuMsec - maxDeltaMsec,
+                maxDeltaMsec > 0.0 ? cpuMsec / (double)maxDeltaMsec : 0.0);
+      }
+    } else if (cpuTiming) {
+      // Silence unused-variable warning on warmup iterations (iteration < 0).
+      (void)cpuStop;
     }
 
     return ERR_NONE;
