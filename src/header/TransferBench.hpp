@@ -714,8 +714,15 @@ namespace TransferBench
 // Helper macro functions
 //==========================================================================================
 
+// TB_DISABLE_HWID_QUERY: stub the hardware-ID reads (CU/SM and XCC) to 0. Some
+// targets (e.g. functional emulators) cannot decode the s_getreg/s_sendmsg_rtn
+// instructions these macros emit; define this at build time to run the kernels
+// there. Real-hardware profiling is unaffected unless this is defined.
+
 // Macro for collecting CU/SM GFX kernel is running on
-#if defined(__GFX9__)
+#if defined(TB_DISABLE_HWID_QUERY)
+  #define GetHwId(hwId) hwId = 0
+#elif defined(__GFX9__)
   #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId))
 #elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
   #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)" : "=s" (hwId))
@@ -726,7 +733,9 @@ namespace TransferBench
 #endif
 
 // Macro for collecting XCC GFX kernel is running on
-#if defined(__gfx942__) || defined(__gfx950__)
+#if defined(TB_DISABLE_HWID_QUERY)
+#define GetXccId(val) val = 0
+#elif defined(__gfx942__) || defined(__gfx950__)
 #define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val))
 #elif defined(__GFX12__)
 #define GetXccId(val) \

@@ -103,6 +103,11 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   endif
   COMMON_FLAGS += -I./src/header -I./src/client -I./src/client/Presets -I./third-party/ibverbs
 
+  # Extra user-supplied preprocessor/compiler flags, e.g.
+  #   make EXTRA_CXXFLAGS=-DTB_DISABLE_HWID_QUERY ...
+  # to stub the hardware-ID reads for functional emulators.
+  COMMON_FLAGS += $(EXTRA_CXXFLAGS)
+
   # libibverbs is loaded dynamically at runtime via dlopen/dlsym (see
   # third-party/ibverbs/IbvDynLoad.hpp), so the build never links against -libverbs
   # and does not require libibverbs-dev to be installed. We only need -ldl so
