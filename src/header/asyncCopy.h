@@ -200,6 +200,8 @@ __device__ inline void warpAsyncCopy(const uint8_t* global, uint8_t* lds, size_t
   offset    += full128 * BYTES_PER_LANE_B128;
   remaining -= full128 * BYTES_PER_LANE_B128;  // now < 16 bytes
 
+  if (remaining == 0) return;   // common case after a 16B-multiple chunk: nothing left to drain
+
   // Phase 3b: 0..15 trailing bytes.  `offset` and `remaining` are uniform across the warp here, so the
   // descending cascade below is taken identically by every lane.  Because `offset` is 16-byte aligned, the
   // b64 (8-byte) and b32 (4-byte) accesses are naturally aligned.
