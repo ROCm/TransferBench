@@ -117,13 +117,14 @@ namespace TransferBench
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
     EXE_GPU_TDM      = 6,                       ///<  GPU TDM executor          (subExecutor = threadblock/CU)
-    EXE_GPU_INITIATED_DMA = 7,                  ///<  GPU-initiated SDMA Executor (anvil/KFD, AMD only)
+    EXE_GPU_INITIATED_DMA = 7,                  ///<  GPU-initiated SDMA Executor (GMA; anvil/KFD, AMD only)
+    EXE_HOST_INITIATED_DMA = 8,                 ///<  Host-initiated SDMA Executor (HMA; anvil/KFD, AMD only)
   };
-  char const ExeTypeStr[9] = "CGDINBTS";
+  char const ExeTypeStr[10] = "CGDINBTSH";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
   inline bool IsGpuExeType(ExeType e){
     return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM
-        || e == EXE_GPU_INITIATED_DMA;
+        || e == EXE_GPU_INITIATED_DMA || e == EXE_HOST_INITIATED_DMA;
   }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
@@ -2716,37 +2717,38 @@ namespace {
       break;
 #ifdef ANVIL_EXEC_ENABLED
       case EXE_GPU_INITIATED_DMA:
+      case EXE_HOST_INITIATED_DMA:
         if (t.srcs.size() != 1) {
           errors.push_back({ERR_FATAL,
-              "Transfer %d: EXE_GPU_INITIATED_DMA requires exactly 1 source, got %zu",
+              "Transfer %d: anvil SDMA executor (GMA/HMA) requires exactly 1 source, got %zu",
               i, t.srcs.size()});
           hasFatalError = true;
           break;
         }
         if (t.dsts.size() < 1) {
           errors.push_back({ERR_FATAL,
-              "Transfer %d: EXE_GPU_INITIATED_DMA requires at least 1 destination",
+              "Transfer %d: anvil SDMA executor (GMA/HMA) requires at least 1 destination",
               i});
           hasFatalError = true;
           break;
         }
         if (!IsGpuMemType(t.srcs[0].memType)) {
           errors.push_back({ERR_FATAL,
-              "Transfer %d: EXE_GPU_INITIATED_DMA source must be GPU memory",
+              "Transfer %d: anvil SDMA executor (GMA/HMA) source must be GPU memory",
               i});
           hasFatalError = true;
           break;
         }
         if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
           errors.push_back({ERR_FATAL,
-              "Transfer %d: EXE_GPU_INITIATED_DMA executor GPU (%d) must match source GPU (%d)",
+              "Transfer %d: anvil SDMA executor (GMA/HMA) GPU (%d) must match source GPU (%d)",
               i, t.exeDevice.exeIndex, t.srcs[0].memIndex});
           hasFatalError = true;
           break;
         }
         if (t.srcs[0].memRank != t.exeDevice.exeRank || t.dsts[0].memRank != t.exeDevice.exeRank) {
           errors.push_back({ERR_FATAL,
-              "Transfer %d: EXE_GPU_INITIATED_DMA does not support cross-rank transfers",
+              "Transfer %d: anvil SDMA executor (GMA/HMA) does not support cross-rank transfers",
               i});
           hasFatalError = true;
           break;
@@ -2754,8 +2756,9 @@ namespace {
         break;
 #else
       case EXE_GPU_INITIATED_DMA:
+      case EXE_HOST_INITIATED_DMA:
         errors.push_back({ERR_FATAL,
-            "Transfer %d: EXE_GPU_INITIATED_DMA requires -DENABLE_ANVIL_EXEC=ON at build time",
+            "Transfer %d: anvil SDMA executor (GMA/HMA) requires -DENABLE_ANVIL_EXEC=ON at build time",
             i});
         hasFatalError = true;
         break;
@@ -3159,11 +3162,11 @@ namespace {
     // iterations.  Created in PrepareExecutor (NUMA-pinned), destroyed in TeardownExecutor.
     std::unique_ptr<ThreadPool> pool;
 
-    // For EXE_GPU_INITIATED_DMA (anvil)
+    // For the anvil SDMA executors: EXE_GPU_INITIATED_DMA (GMA) and EXE_HOST_INITIATED_DMA (HMA)
 #ifdef ANVIL_EXEC_ENABLED
-    vector<sdma_ep::SdmaQueueInfo> anvilQueues;   ///< One KFD SDMA queue per transfer
-    vector<uint64_t*>              anvilSignals;  ///< Per-transfer completion signal (uncached device mem)
-    vector<anvil::SdmaQueueHostHandle*> anvilHostHandles; ///< Host-initiated mode (ANVIL_HOST_QUEUE=1): one CPU-driven handle per transfer
+    vector<sdma_ep::SdmaQueueInfo> anvilQueues;   ///< One KFD SDMA queue per transfer (GMA)
+    vector<uint64_t*>              anvilSignals;  ///< Per-transfer completion signal (uncached device mem, GMA)
+    vector<anvil::SdmaQueueHostHandle*> anvilHostHandles; ///< HMA executor: one CPU-driven host handle per transfer
 #endif
   };
 
@@ -4492,7 +4495,8 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
-  // Initialize anvil SDMA queues for EXE_GPU_INITIATED_DMA executor.
+  // Initialize anvil SDMA queues for the anvil executors: EXE_GPU_INITIATED_DMA
+  // (GMA, device/kernel-driven) and EXE_HOST_INITIATED_DMA (HMA, CPU-driven).
   // Uses AnvilLib singleton: init (idempotent), connect, createSdmaQueue.
   // Stores SdmaQueueInfo (deviceHandle, src/dst device IDs, channelIdx) per resource.
   // The SdmaQueue objects are owned by AnvilLib and live for the process lifetime.
@@ -4520,13 +4524,10 @@ namespace {
       exeInfo.anvilSignals.assign(numResources, nullptr);
       exeInfo.anvilHostHandles.assign(numResources, nullptr);
 
-      // ANVIL_HOST_QUEUE=1: benchmark CPU-initiated (host queue) SDMA instead of
-      // the GPU-initiated (kernel) path - CPU builds packets, rings the doorbell,
-      // polls quiet(). One independent host channel per transfer.
-      static bool const useHostQueue = [] {
-        char const* v = getenv("ANVIL_HOST_QUEUE");
-        return v && atoi(v) != 0;
-      }();
+      // HMA executor (EXE_HOST_INITIATED_DMA): CPU-initiated (host queue) SDMA
+      // instead of the GMA (GPU kernel) path - CPU builds packets, rings the
+      // doorbell, polls quiet(). One independent host channel per transfer.
+      bool const useHostQueue = (exeDevice.exeType == EXE_HOST_INITIATED_DMA);
       // Per-dst host channel counter so concurrent transfers get distinct queues.
       std::unordered_map<int, int> hostChannelCount;
 
@@ -4847,7 +4848,8 @@ namespace {
     }
 
 #ifdef ANVIL_EXEC_ENABLED
-    if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_INITIATED_DMA || exeDevice.exeType == EXE_HOST_INITIATED_DMA) &&
+        exeDevice.exeRank == localRank) {
       ERR_CHECK(PrepareAnvilExecutor(cfg, transfers, exeDevice, exeInfo));
     }
 #endif
@@ -5083,7 +5085,8 @@ namespace {
     }
 
 #ifdef ANVIL_EXEC_ENABLED
-    if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_INITIATED_DMA || exeDevice.exeType == EXE_HOST_INITIATED_DMA) &&
+        exeDevice.exeRank == localRank) {
       if (verbose) {
         System::Get().Log("[ANVIL] TeardownExecutor: releasing %zu queue reference(s) for src GPU %d\n",
                           exeInfo.anvilQueues.size(), exeDevice.exeIndex);
@@ -6147,7 +6150,7 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
-  // Single-thread GISDMA kernels, launched as <<<dim3(1), dim3(1)>>> on the
+  // Single-thread GMA kernels, launched as <<<dim3(1), dim3(1)>>> on the
   // source GPU. To avoid any runtime branching inside the kernel, the four
   // (completion mechanism) x (wait) combinations are separate kernels selected
   // on the host (ANVIL_LEGACY x ANVIL_WAIT_SIGNAL). All share one signature so
@@ -6569,6 +6572,55 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
+  // HMA executor (EXE_HOST_INITIATED_DMA): CPU-initiated path. Submit every
+  // transfer's copy back-to-back (engines run concurrently), then drain each
+  // with quiet(). Timed on the CPU wall clock - the copy is on a KFD queue,
+  // not a HIP stream, so hipEvents cannot bracket it.
+  static ErrResult RunAnvilHostExecutor(int           const  iteration,
+                                        ConfigOptions const& cfg,
+                                        int           const  deviceIdx,
+                                        ExeInfo&             exeInfo)
+  {
+    ERR_CHECK(hipSetDevice(deviceIdx));
+
+    int const numResources = (int)exeInfo.resources.size();
+
+    using AnvilClock = std::chrono::high_resolution_clock;
+    std::vector<std::chrono::time_point<AnvilClock>> tStart(numResources);
+    std::vector<std::chrono::time_point<AnvilClock>> tStop(numResources);
+
+    // Issue all copies first (concurrent across independent host channels).
+    for (int i = 0; i < numResources; ++i) {
+      TransferResources const& rss = exeInfo.resources[i];
+      anvil::SdmaQueueHostHandle* hh = exeInfo.anvilHostHandles[i];
+      size_t const initOffsetBytes = cfg.data.byteOffset;
+      void*  dst  = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
+      void*  src  = reinterpret_cast<uint8_t*>(
+        const_cast<void*>((void const*)rss.srcMem[0])) + initOffsetBytes;
+      size_t nbytes = rss.numBytes;
+      tStart[i] = AnvilClock::now();
+      hh->put(dst, src, nbytes);
+    }
+    // Drain each channel and stamp completion.
+    for (int i = 0; i < numResources; ++i) {
+      exeInfo.anvilHostHandles[i]->quiet();
+      tStop[i] = AnvilClock::now();
+    }
+
+    if (iteration >= 0) {
+      double maxDeltaMsec = 0.0;
+      for (int i = 0; i < numResources; ++i) {
+        double const deltaMsec =
+          std::chrono::duration<double, std::milli>(tStop[i] - tStart[i])
+            .count();
+        exeInfo.resources[i].totalDurationMsec += deltaMsec;
+        maxDeltaMsec = std::max(maxDeltaMsec, deltaMsec);
+      }
+      exeInfo.totalDurationMsec += maxDeltaMsec;
+    }
+    return ERR_NONE;
+  }
+
   static ErrResult RunAnvilExecutor(int           const  iteration,
                                     ConfigOptions const& cfg,
                                     int           const  deviceIdx,
@@ -6577,51 +6629,6 @@ namespace {
     ERR_CHECK(hipSetDevice(deviceIdx));
 
     int const numResources = (int)exeInfo.resources.size();
-
-    // ANVIL_HOST_QUEUE=1: CPU-initiated path. Submit every transfer's copy
-    // back-to-back (engines run concurrently), then drain each with quiet().
-    // Timed on the CPU wall clock - the copy is on a KFD queue, not a HIP stream,
-    // so hipEvents cannot bracket it.
-    static bool const useHostQueue = [] {
-      char const* v = getenv("ANVIL_HOST_QUEUE");
-      return v && atoi(v) != 0;
-    }();
-    if (useHostQueue) {
-      using AnvilClock = std::chrono::high_resolution_clock;
-      std::vector<std::chrono::time_point<AnvilClock>> tStart(numResources);
-      std::vector<std::chrono::time_point<AnvilClock>> tStop(numResources);
-
-      // Issue all copies first (concurrent across independent host channels).
-      for (int i = 0; i < numResources; ++i) {
-        TransferResources const& rss = exeInfo.resources[i];
-        anvil::SdmaQueueHostHandle* hh = exeInfo.anvilHostHandles[i];
-        size_t const initOffsetBytes = cfg.data.byteOffset;
-        void*  dst  = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
-        void*  src  = reinterpret_cast<uint8_t*>(
-          const_cast<void*>((void const*)rss.srcMem[0])) + initOffsetBytes;
-        size_t nbytes = rss.numBytes;
-        tStart[i] = AnvilClock::now();
-        hh->put(dst, src, nbytes);
-      }
-      // Drain each channel and stamp completion.
-      for (int i = 0; i < numResources; ++i) {
-        exeInfo.anvilHostHandles[i]->quiet();
-        tStop[i] = AnvilClock::now();
-      }
-
-      if (iteration >= 0) {
-        double maxDeltaMsec = 0.0;
-        for (int i = 0; i < numResources; ++i) {
-          double const deltaMsec =
-            std::chrono::duration<double, std::milli>(tStop[i] - tStart[i])
-              .count();
-          exeInfo.resources[i].totalDurationMsec += deltaMsec;
-          maxDeltaMsec = std::max(maxDeltaMsec, deltaMsec);
-        }
-        exeInfo.totalDurationMsec += maxDeltaMsec;
-      }
-      return ERR_NONE;
-    }
 
     // ANVIL_WAIT_SIGNAL=0: skip the in-kernel completion wait so the kernel
     // returns right after submitting the copy packet. Lets us measure the
@@ -6821,7 +6828,8 @@ namespace {
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
 #ifdef ANVIL_EXEC_ENABLED
-    case EXE_GPU_INITIATED_DMA: return RunAnvilExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_INITIATED_DMA:  return RunAnvilExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_HOST_INITIATED_DMA: return RunAnvilHostExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
     default:            return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
@@ -7549,7 +7557,8 @@ namespace {
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
         return result;
-      case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_INITIATED_DMA:
+      case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
+      case EXE_GPU_INITIATED_DMA: case EXE_HOST_INITIATED_DMA:
       {
         // Iterate over all available subindices
         ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
@@ -9010,7 +9019,7 @@ namespace {
       agent = cpuAgents[exeDevice.exeIndex];
       break;
     case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_TDM:
-    case EXE_GPU_INITIATED_DMA:
+    case EXE_GPU_INITIATED_DMA: case EXE_HOST_INITIATED_DMA:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];

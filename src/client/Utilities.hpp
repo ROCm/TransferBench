@@ -440,7 +440,8 @@ namespace TransferBench::Utils
     case EXE_NIC_NEAREST:   return "NIC";
     case EXE_GPU_BDMA:          return "BMA";
     case EXE_GPU_TDM:           return "TDM";
-    case EXE_GPU_INITIATED_DMA: return "GISDMA";
+    case EXE_GPU_INITIATED_DMA:  return "GMA";
+    case EXE_HOST_INITIATED_DMA: return "HMA";
     default:                    return "N/A";
     }
   }

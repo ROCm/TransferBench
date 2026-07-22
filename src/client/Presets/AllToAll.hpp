@@ -54,7 +54,7 @@ int AllToAllPreset(EnvVars&          ev,
   int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
-  int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);  // 0=GFX, 1=DMA, 2=BMA, 3=GISDMA(anvil)
+  int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);  // 0=GFX, 1=DMA, 2=BMA, 3=GMA(anvil), 4=HMA(anvil host)
   int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
@@ -65,11 +65,13 @@ int AllToAllPreset(EnvVars&          ev,
   }
 
   // Determine which GPU executor to use
-  ExeType exeType = (useDmaExec == 3) ? EXE_GPU_INITIATED_DMA :
+  ExeType exeType = (useDmaExec == 4) ? EXE_HOST_INITIATED_DMA :
+                    (useDmaExec == 3) ? EXE_GPU_INITIATED_DMA :
                     (useDmaExec == 2) ? EXE_GPU_BDMA :
                     (useDmaExec == 1) ? EXE_GPU_DMA :
                     (useTdmExec)      ? EXE_GPU_TDM : EXE_GPU_GFX;
-  char const* execName = (useDmaExec == 3) ? "GISDMA" :
+  char const* execName = (useDmaExec == 4) ? "HMA" :
+                         (useDmaExec == 3) ? "GMA" :
                          (useDmaExec == 2) ? "BMA" :
                          (useDmaExec == 1) ? "DMA" :
                          (useTdmExec)      ? "TDM" : "GFX";
@@ -125,7 +127,8 @@ int AllToAllPreset(EnvVars&          ev,
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor",
-               useDmaExec == 3 ? "GISDMA (GPU-initiated SDMA/anvil)" :
+               useDmaExec == 4 ? "HMA (host-initiated SDMA/anvil)" :
+               useDmaExec == 3 ? "GMA (GPU-initiated SDMA/anvil)" :
                useDmaExec == 2 ? "BMA" :
                useDmaExec == 1 ? "DMA" : "GFX");
       ev.Print("USE_TDM_EXEC"   , useTdmExec   , "Using %s executor", useTdmExec ? "TDM" : "GFX");
@@ -142,13 +145,13 @@ int AllToAllPreset(EnvVars&          ev,
     Utils::Print("[ERROR] %s execution can only be used for copies (A2A_MODE=0)\n", execName);
     return ERR_FATAL;
   }
-  if (useDmaExec < 0 || useDmaExec > 3) {
-    Utils::Print("[ERROR] USE_DMA_EXEC must be 0 (GFX), 1 (DMA), 2 (BMA), or 3 (GISDMA)\n");
+  if (useDmaExec < 0 || useDmaExec > 4) {
+    Utils::Print("[ERROR] USE_DMA_EXEC must be 0 (GFX), 1 (DMA), 2 (BMA), 3 (GMA), or 4 (HMA)\n");
     return ERR_FATAL;
   }
 #ifndef ANVIL_EXEC_ENABLED
-  if (useDmaExec == 3) {
-    Utils::Print("[ERROR] USE_DMA_EXEC=3 (GISDMA) requires building with -DENABLE_ANVIL_EXEC=ON\n");
+  if (useDmaExec == 3 || useDmaExec == 4) {
+    Utils::Print("[ERROR] USE_DMA_EXEC=3 (GMA) / 4 (HMA) requires building with -DENABLE_ANVIL_EXEC=ON\n");
     return ERR_FATAL;
   }
 #endif

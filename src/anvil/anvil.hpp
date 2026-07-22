@@ -136,8 +136,8 @@ public:
                              uint32_t engineId, int* channelIdx = nullptr);
   int getSdmaEngineId(int srcDeviceId, int dstDeviceId, int rotation = 0);
 
-  // Host-initiated queue API. Host channels are independent CPU-driven SDMA
-  // queues, separate from the device (GISDMA) channels. connectHost() is
+  // Host-initiated queue API (HMA executor). Host channels are independent
+  // CPU-driven SDMA queues, separate from the device (GMA) channels. connectHost() is
   // idempotent; getHostHandle() returns nullptr for an unknown/out-of-range
   // {src,dst,channel}.
   bool connectHost(int srcDeviceId, int dstDeviceId, int numChannels = 1);
