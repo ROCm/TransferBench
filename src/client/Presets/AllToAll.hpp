@@ -55,6 +55,7 @@ int AllToAllPreset(EnvVars&          ev,
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
+  int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
   // Check that all ranks have at least the number of GPUs requested
@@ -108,6 +109,7 @@ int AllToAllPreset(EnvVars&          ev,
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
+      ev.Print("USE_TDM_EXEC"   , useTdmExec   , "%s TDM executor", useTdmExec ? "Using" : "Not using");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
     }
@@ -121,13 +123,22 @@ int AllToAllPreset(EnvVars&          ev,
     Utils::Print("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
     return ERR_FATAL;
   }
+  if (useTdmExec && useDmaExec) {
+    Utils::Print("[ERROR] USE_TDM_EXEC and USE_DMA_EXEC are mutually exclusive\n");
+    return ERR_FATAL;
+  }
+  if (useTdmExec && (numSrcs != 1 || numDsts != 1)) {
+    Utils::Print("[ERROR] TDM execution can only be used for copies (A2A_MODE=0)\n");
+    return ERR_FATAL;
+  }
   if (numResults * 2 > numRanks) {
     Utils::Print("[ERROR] Number of extrema results requested exceeds number of ranks.  NUM_RESULTS should be at most half the number of ranks\n");
     return ERR_FATAL;
   }
 
   // Collect the number of GPU devices to use
-  ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
+  ExeType exeType = useTdmExec ? EXE_GPU_TDM : (useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX);
+  char const* exeName = useTdmExec ? "TDM" : (useDmaExec ? "DMA" : "GFX");
 
   std::vector<std::map<std::pair<int, int>, int>> reIndex(numRanks);
   std::vector<Transfer> transfers;
@@ -184,10 +195,10 @@ int AllToAllPreset(EnvVars&          ev,
     }
   }
 
-  Utils::Print("GPU-%s All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
+  Utils::Print("GPU-%s All-To-All benchmark:\n", exeName);
   Utils::Print("==============================\n");
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
-               numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts,
+               numBytesPerTransfer, exeName, numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
   if (transfers.size() == 0) {
