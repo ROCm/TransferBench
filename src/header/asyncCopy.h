@@ -124,7 +124,7 @@ constexpr size_t BYTES_PER_LANE_B128 = 16;
 // The hot loop must start on a 128-byte boundary, so the peel aligns the global pointer to this.
 constexpr size_t NATURAL_ALIGNMENT_BYTES = 128;
 // How many b128 iterations the hot loop unrolls at a time.
-constexpr int    HOT_LOOP_UNROLL     = 4;
+constexpr int    HOT_LOOP_UNROLL     = 2;
 
 // Warp-cooperative byte copy between global memory and LDS.  The whole warp must call this with identical
 // `global`, `lds`, and `sizeInBytes` arguments -- the per-lane work distribution is derived internally.
