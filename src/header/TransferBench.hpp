@@ -79,9 +79,9 @@ THE SOFTWARE.
 #include "amd_smi/amdsmi.h"
 #endif
 
-#include "tdmCopy.h"
-
 #endif
+
+#include "tdmCopy.h"
 /// @endcond
 
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
@@ -2163,8 +2163,7 @@ namespace {
       }
     }
 
-    // Check TDM options
-#if !defined(__NVCC__)
+    // Check TDM options (TDM-capable hardware: gfx1250 on AMD, sm_90+ on NVIDIA)
     if (cfg.tdm.blockSize <= 0 || cfg.tdm.blockSize % 32 || cfg.tdm.blockSize > MAX_BLOCKSIZE)
       errors.push_back({ERR_FATAL,
                         "[tdm.blockSize] must be a positive multiple of 32 less than or equal to %d",
@@ -2191,7 +2190,6 @@ namespace {
         }
       }
     }
-#endif
 
     // Check NIC options
     if (IsIbvSymbolsReady()) {
@@ -2405,18 +2403,12 @@ namespace {
           hasFatalError = true;
           break;
         }
-#if defined(__NVCC__)
-        errors.push_back({ERR_FATAL,
-                          "Transfer %d: GPU TDM kernel is not supported on NVIDIA hardware", i});
-        hasFatalError = true;
-#else
         if (!tdm::IsTdmCopySupported(t.exeDevice.exeIndex)) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: GPU TDM kernel requires gfx1250 hardware, but GPU %d is not supported",
+                            "Transfer %d: GPU TDM kernel requires TDM-capable hardware (gfx1250 or NVIDIA sm_90+), but GPU %d is not supported",
                             i, t.exeDevice.exeIndex});
           hasFatalError = true;
         }
-#endif
         break;
       case EXE_GPU_GFX:
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {

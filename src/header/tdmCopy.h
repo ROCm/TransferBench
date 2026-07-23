@@ -49,7 +49,15 @@ THE SOFTWARE.
 /// of this file under "IMPLEMENTATION NOTES"; the public API is right here.
 #pragma once
 
-#include <hip/hip_runtime.h>
+// Two backends are supported:
+// AMD's Tensor Data Mover (gfx1250) and NVIDIA's cp.async.bulk / TMA (Hopper, sm_90+). 
+// The active backend is chosen from the compiler in use (see the AVAILABILITY block below).
+#if defined(__CUDACC__) || defined(__NVCC__) || defined(__CUDA__)
+#  include <cuda_runtime.h>
+#  include <cuda/ptx>
+#else
+#  include <hip/hip_runtime.h>
+#endif
 #include <stdint.h>
 #include <stddef.h>
 
@@ -77,6 +85,17 @@ THE SOFTWARE.
 #ifndef __has_include
 #  define __has_include(x) 0
 #endif
+
+// ---- backend selection -----------------------------------------------------
+// TDM_PLATFORM_NV is a host-evaluable proxy for "this is the NVIDIA toolchain".
+// Exactly one backend is enabled: TDM_BACKEND_AMD (gfx1250 TDM) or
+// TDM_BACKEND_NV (Hopper+ cp.async.bulk). TDM_SUPPORTED is their OR.
+#if defined(__CUDACC__) || defined(__NVCC__) || defined(__CUDA__)
+#  define TDM_PLATFORM_NV 1
+#else
+#  define TDM_PLATFORM_NV 0
+#endif
+
 // Host-evaluable toolchain capability. TDM_SUPPORTED (below) keys on device arch
 // macros (e.g. __gfx1250__) that are never defined during the host pass, so it is
 // always 0 in host code and cannot gate the host-side IsTdmCopySupported() check.
@@ -85,23 +104,43 @@ THE SOFTWARE.
 // pass), and it is also a prerequisite of TDM_SUPPORTED, so it is factored out here.
 // Without this host gate, a build whose device pass fell back to the no-op TDM stub
 // would still report support on gfx1250 hardware and silently dispatch a no-op copy.
-#if __has_include(<hip/amd_detail/amd_gfx1250_TDM.h>)
-#  define TDM_TOOLCHAIN_AVAILABLE 1
+#if !TDM_PLATFORM_NV
+// AMD: TDM builds only when the arch, the builtin, AND the D# descriptor header
+// are all present, so an older toolchain degrades gracefully (see rationale above).
+#  if __has_include(<hip/amd_detail/amd_gfx1250_TDM.h>)
+#    define TDM_TOOLCHAIN_AVAILABLE 1
+#  else
+#    define TDM_TOOLCHAIN_AVAILABLE 0
+#  endif
+#  if defined(__gfx1250__) && \
+      __has_builtin(__builtin_amdgcn_tensor_load_to_lds) && \
+      TDM_TOOLCHAIN_AVAILABLE
+                                  /* extend: || (defined(__gfxNNNN__) && ...) */
+#    define TDM_BACKEND_AMD 1
+#  else
+#    define TDM_BACKEND_AMD 0
+#  endif
+#  define TDM_BACKEND_NV 0
 #else
+// NVIDIA: cp.async.bulk (TMA) is present on Hopper and newer. __CUDA_ARCH__ is
+// only defined in the device pass, so this is 0 in the host pass (as intended;
+// the host-side IsTdmCopySupported() check below uses the runtime instead).
 #  define TDM_TOOLCHAIN_AVAILABLE 0
+#  define TDM_BACKEND_AMD 0
+#  if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#    define TDM_BACKEND_NV 1
+#  else
+#    define TDM_BACKEND_NV 0
+#  endif
 #endif
 
-#if defined(__gfx1250__) && \
-    __has_builtin(__builtin_amdgcn_tensor_load_to_lds) && \
-    TDM_TOOLCHAIN_AVAILABLE
-                                  /* extend: || (defined(__gfxNNNN__) && ...) */
-#  define TDM_SUPPORTED 1
-#else
-#  define TDM_SUPPORTED 0
+#define TDM_SUPPORTED (TDM_BACKEND_AMD || TDM_BACKEND_NV)
+
+#if TDM_BACKEND_AMD
+#  include <hip/amd_detail/amd_gfx1250_TDM.h>   // D# descriptor types for the target's TDM
 #endif
 
 #if TDM_SUPPORTED
-#  include <hip/amd_detail/amd_gfx1250_TDM.h>   // D# descriptor types for the target's TDM
 #  define TDM_API      inline     // normal inline declaration (defined below)
 #  define TDM_DELETED             //   ... and not deleted
 #else
@@ -136,9 +175,14 @@ namespace tdm {
 ///   else                              launchFallbackKernel(...);
 /// \endcode
 __host__ __device__ inline bool IsTdmCopySupported(int deviceId = 0) {
-#if defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
     (void)deviceId;
     return TDM_SUPPORTED;                 // compile-time constant for this arch pass
+#elif TDM_PLATFORM_NV
+    // Host (NVIDIA): cp.async.bulk (TMA) requires compute capability 9.0+ (Hopper).
+    cudaDeviceProp prop;
+    if (cudaGetDeviceProperties(&prop, deviceId) != cudaSuccess) return false;
+    return prop.major >= 9;
 #else
     hipDeviceProp_t prop;
     if (hipGetDeviceProperties(&prop, deviceId) != hipSuccess) return false;
@@ -296,6 +340,8 @@ __device__ TDM_API void tdmWait() TDM_DELETED;
 namespace tdm {
 
 #if TDM_SUPPORTED            // ===== real TDM implementation ================
+
+#if TDM_BACKEND_AMD          // ----- AMD Tensor Data Mover (gfx1250) --------
 
 namespace detail {
 
@@ -476,6 +522,169 @@ __device__ inline void issue(void* dst, const void* src, size_t sizeBytes,
 }
 
 } // namespace detail
+
+#elif TDM_BACKEND_NV         // ----- NVIDIA cp.async.bulk / TMA (sm_90+) -----
+
+// The AMD backend expresses the aligned bulk as a 2D tensor tile (256B rows).
+// cp.async.bulk is a FLAT 1-D byte copy, so the 2D descriptor machinery is gone:
+// we copy contiguous 16B-aligned byte ranges through the same single-buffered LDS
+// staging window. The load/store completion model also differs from AMD's single
+// TENSORcnt: the global->shared load is tracked by an mbarrier (transaction bytes)
+// and the shared->global store by a bulk async-group (commit + wait). The
+// partition/team logic mirrors the AMD path so the public API is identical.
+namespace detail {
+
+namespace ptx = cuda::ptx;
+
+constexpr uint32_t ALIGN = 16;           // cp.async.bulk addr/size granularity
+
+// ---- cooperative vector copy of a small byte range, by one warp (== AMD) ----
+__device__ inline void warpVecCopy(const uint8_t* s, uint8_t* d, size_t n,
+                                   uint32_t warpThread, uint32_t warpThreads) {
+    size_t nd = n >> 2;
+    const uint32_t* s32 = reinterpret_cast<const uint32_t*>(s);
+    uint32_t*       d32 = reinterpret_cast<uint32_t*>(d);
+    for (size_t i = warpThread; i < nd; i += warpThreads) d32[i] = s32[i];
+    uint32_t rem = static_cast<uint32_t>(n & 3u);
+    if (rem && warpThread == 0)
+        for (uint32_t b = 0; b < rem; ++b) d[nd * 4 + b] = s[nd * 4 + b];
+}
+
+// Drain the CALLING THREAD's outstanding bulk-store groups (the WAR/async edge).
+// Named waitTensor0() so the shared public-API wrappers below are backend-agnostic.
+__device__ inline void waitTensor0() {
+    ptx::cp_async_bulk_wait_group_read(ptx::n32_t<0>{});
+}
+
+// ---- issue one contiguous chunk (nbytes, a 16B multiple) through ONE window --
+// Single-buffered, so the same RAW/WAR edges as the AMD path apply, just with the
+// cp.async.bulk completion mechanisms:
+//   * G2S load  -> mbarrier wait      (RAW: store must see the filled LDS window)
+//   * S2G store -> bulk-group wait     (WAR: next load must not clobber a window
+//                                       whose store is still draining)
+// Issued by the warp's leader thread only (bulk copies are single-thread ops).
+__device__ inline void issueChunk(const uint8_t* src, void* lds, uint8_t* dst,
+                                  uint32_t nbytes, uint64_t* bar, uint32_t& phase) {
+    // G2S: arrive + expect nbytes, launch the async copy, then wait for the
+    // mbarrier phase to flip (the copy deposits its tx-bytes on completion).
+    ptx::mbarrier_arrive_expect_tx(ptx::sem_release, ptx::scope_cta,
+                                   ptx::space_shared, bar, nbytes);
+    ptx::cp_async_bulk(ptx::space_cluster, ptx::space_global, lds, src, nbytes, bar);
+    while (!ptx::mbarrier_try_wait_parity(bar, phase)) {}
+    phase ^= 1u;
+
+    // Order the async-proxy LDS writes before the async-proxy store reads them.
+    ptx::fence_proxy_async(ptx::space_shared);
+
+    // S2G: launch the store, commit the bulk group, and drain before window reuse.
+    ptx::cp_async_bulk(ptx::space_global, ptx::space_shared, dst, lds, nbytes);
+    ptx::cp_async_bulk_commit_group();
+    ptx::cp_async_bulk_wait_group_read(ptx::n32_t<0>{});
+}
+
+// ---- core: partition + issue the whole copy for the team [start, stop). ------
+// Same partitioning contract as the AMD issue(): NO final wait beyond the
+// per-chunk drains, work + LDS split by rank within the team.
+__device__ inline void issue(void* dst, const void* src, size_t sizeBytes,
+                             void* ldsBuffer, size_t ldsBufferBytes,
+                             uint32_t startWarpId, uint32_t stopWarpId) {
+    const uint8_t* s = reinterpret_cast<const uint8_t*>(src);
+    uint8_t*       d = reinterpret_cast<uint8_t*>(dst);
+    const uint32_t ldsBytes = static_cast<uint32_t>(ldsBufferBytes);  // LDS is small
+
+    const uint32_t W          = warpSize;
+    const uint32_t nThreads   = blockDim.x * blockDim.y * blockDim.z;
+    const uint32_t tid        = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x
+                                + threadIdx.x;
+    const uint32_t warpThread = tid % W;
+    const uint32_t warpId     = tid / W;
+    const uint32_t nWarps     = (nThreads + W - 1) / W;
+
+    // --- team membership: this warp participates iff in [start, stop) --------
+    const uint32_t teamStop = (stopWarpId > nWarps) ? nWarps : stopWarpId;
+    if (startWarpId >= teamStop || warpId < startWarpId || warpId >= teamStop)
+        return;
+    const uint32_t rank      = warpId - startWarpId;
+    const uint32_t teamWarps = teamStop - startWarpId;
+    const uint32_t warpThreads = (nThreads - warpId * W < W) ? (nThreads - warpId * W) : W;
+    const bool     leader    = (warpThread == 0);
+
+    // Carve per-team mbarriers (one per warp in the team, indexed by rank) from the
+    // FRONT of this team's ldsBuffer; the staging windows use the remainder. Keeping
+    // the barriers in the passed-in dynamic LDS avoids any static __shared__, which
+    // would otherwise push a full-size dynamic allocation past the per-block cap and
+    // make the launch fail with "invalid argument".
+    uint8_t*  ldsBase   = reinterpret_cast<uint8_t*>(ldsBuffer);
+    uint32_t  barRegion = ((teamWarps * static_cast<uint32_t>(sizeof(uint64_t)))
+                           + (ALIGN - 1)) & ~(ALIGN - 1);
+    uint64_t* bars      = reinterpret_cast<uint64_t*>(ldsBase);
+    uint8_t*  winBase   = ldsBase + barRegion;
+    uint32_t  winBytes  = (ldsBytes > barRegion) ? (ldsBytes - barRegion) : 0u;
+
+    // --- split the range: [head][ 16B-aligned bulk ][tail] -------------------
+    // cp.async.bulk requires BOTH src and dst 16B-aligned. A single head can only
+    // align both if they share the same 16B phase; if they don't, there is no
+    // valid bulk split, so fall back to a pure cooperative vector copy.
+    uint64_t sAddr = reinterpret_cast<uint64_t>(s);
+    uint64_t dAddr = reinterpret_cast<uint64_t>(d);
+    if (((sAddr ^ dAddr) & (ALIGN - 1)) != 0) {
+        if (rank == 0) warpVecCopy(s, d, sizeBytes, warpThread, warpThreads);
+        return;
+    }
+    uint32_t head = static_cast<uint32_t>((ALIGN - (sAddr & (ALIGN - 1))) & (ALIGN - 1));
+    if (head > sizeBytes) head = static_cast<uint32_t>(sizeBytes);
+    size_t   rest    = sizeBytes - head;
+    size_t   bulk    = rest & ~static_cast<size_t>(ALIGN - 1);   // whole 16B units
+    uint32_t tail    = static_cast<uint32_t>(rest - bulk);       // < 16B remainder
+    size_t   tailOff = head + bulk;
+
+    // --- edges (team's FIRST warp = rank 0): vector head and tail ------------
+    if (rank == 0 && head) warpVecCopy(s, d, head, warpThread, warpThreads);
+    if (rank == 0 && tail) warpVecCopy(s + tailOff, d + tailOff, tail,
+                                       warpThread, warpThreads);
+
+    // --- aligned bulk via cp.async.bulk --------------------------------------
+    if (bulk == 0) return;
+    uint32_t maxByLds = winBytes / ALIGN;              // #warps we can give a window
+    if (maxByLds == 0) {                               // no window room: vector fallback
+        if (rank == 0)
+            warpVecCopy(s + head, d + head, bulk, warpThread, warpThreads);
+        return;
+    }
+    uint32_t issuers = teamWarps < maxByLds ? teamWarps : maxByLds;
+    uint32_t window  = (winBytes / issuers) & ~(ALIGN - 1);   // per-warp 16B-multiple
+    if (rank >= issuers) return;                       // this warp doesn't issue
+
+    // distribute the bulk across issuers by team rank (contiguous 16B units)
+    size_t units   = bulk / ALIGN;
+    size_t base    = units / issuers;
+    size_t extra   = units % issuers;
+    size_t myUnits = base + (rank < extra ? 1u : 0u);
+    size_t myStart = rank * base + (rank < extra ? rank : extra);
+    if (myUnits == 0) return;
+
+    size_t         myBytes = myUnits * ALIGN;
+    uint8_t*       myLds   = winBase + (size_t)rank * window;
+    const uint8_t* sBase   = s + head + myStart * ALIGN;
+    uint8_t*       dBase   = d + head + myStart * ALIGN;
+
+    uint64_t* bar   = &bars[rank];
+    uint32_t  phase = 0;
+    if (leader) ptx::mbarrier_init(bar, 1);            // one arrival (the leader)
+    __syncwarp();
+
+    if (leader) {
+        for (size_t off = 0; off < myBytes; off += window) {
+            uint32_t chunk = (myBytes - off < window)
+                             ? static_cast<uint32_t>(myBytes - off) : window;
+            issueChunk(sBase + off, myLds, dBase + off, chunk, bar, phase);
+        }
+    }
+}
+
+} // namespace detail
+
+#endif // backend selection
 
 // ---- public API definitions (declared at the top of this file) -------------
 
