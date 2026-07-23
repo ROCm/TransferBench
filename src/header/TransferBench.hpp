@@ -5860,6 +5860,14 @@ namespace {
 
 // TDM Executor-related functions
 //========================================================================================
+// Compile-time selection of the LDS-staged copy backend used by GpuTdmKernel:
+//   TB_USE_ASYNC_COPY=1 (default) -> async-to/from-LDS path (async::tdmCopy, asyncCopy.h)
+//   TB_USE_ASYNC_COPY=0           -> tensor-data-mover path  (tdm::tdmCopy,  tdmCopy.h)
+// Override without touching source, e.g.: make ... EXTRA_CXXFLAGS=-DTB_USE_ASYNC_COPY=0
+#ifndef TB_USE_ASYNC_COPY
+#define TB_USE_ASYNC_COPY 1
+#endif
+
 #if TDM_SUPPORTED
   __global__ void  GpuTdmKernel(SubExecParam* params,
                                 uint32_t      ldsBytes,
@@ -5879,7 +5887,7 @@ namespace {
     float*       __restrict__ dst = (float*)p.dst[0];
     size_t const sizeBytes        = p.N * sizeof(float);
 
-    constexpr bool useTDM = false;
+    constexpr bool useTDM = (TB_USE_ASYNC_COPY == 0);
     for (int subIterations = 0; subIterations < numSubIterations; subIterations++) {
       if constexpr (useTDM) {
         tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
