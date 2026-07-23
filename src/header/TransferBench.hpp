@@ -7007,6 +7007,9 @@ namespace {
 
     // Collect topology and distribute across all ranks
     CollectTopology();
+    if (verbose) {
+      Log("[INFO] Finished topology exchange\n");
+    }
   }
 
   System::~System()
@@ -7255,6 +7258,7 @@ namespace {
         }
         sockets[clientRank] = clientSocket;
       }
+      Log("[INFO] %d other rank(s) have connected\n", numRanks);
     } else {
       // All other ranks connect to rank 0
       int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
