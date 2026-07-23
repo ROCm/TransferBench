@@ -3,6 +3,12 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.70.00
+## Added
+- Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
+- Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware.  This provides
+  an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
+
 ## v1.69.00
 ### Added
 - Added support for `ALWAYS_VALIDATE=-1` to disable validation
@@ -17,7 +23,7 @@ Documentation for TransferBench is available at
   - Created a top level third-party/ folder for ibverbs related files. Will also harbor future external source which TransferBench depends
   - Created a separate minimal header IbvHeader.hpp for ib verbs structs and IbvDynLoad.hpp for dynamic loading and status report for ib verbs functionality.
   - Dynamic loading is a singleton and done once per process, and TransferBench header will probe in runtime if basic ibverbs function as well as dmabuf export is supported.
-  - Also got rid HAVE_DMABUF_SUPPORT macro. Got rid of redundant dependency check on hsa header and rocr binaries (they are mandatory for AMD platform) in build process. Similar to ibv, it now dynamically checks for hsa_amd_portable_export_dmabuf symbol as part of check kernel support, and returns dmabuf support in runtime.
+  - Also got rid of HAVE_DMABUF_SUPPORT macro. Got rid of redundant dependency check on hsa header and rocr binaries (they are mandatory for AMD platform) in build process. Similar to ibv, it now dynamically checks for hsa_amd_portable_export_dmabuf symbol as part of check kernel support, and returns dmabuf support in runtime.
 
 ## v1.68.00
 ### Fixed

@@ -171,7 +171,7 @@ int main(int argc, char **argv)
     }
 
     // Run the specified numbers of bytes otherwise generate a range of values
-    for (size_t bytes = (1<<10); bytes <= (1<<29); bytes *= 2) {
+    for (size_t bytes = (1ULL<<ev.sweepMinPow2); bytes <= (1ULL<<ev.sweepMaxPow2); bytes *= 2) {
       size_t deltaBytes = std::max(1UL, bytes / ev.samplingFactor);
       size_t currBytes = (numBytesPerTransfer == 0) ? bytes : numBytesPerTransfer;
       do {

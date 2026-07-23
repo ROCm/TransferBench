@@ -6,7 +6,15 @@
 ROCM_PATH ?= /opt/rocm
 CUDA_PATH ?= /usr/local/cuda
 MPI_PATH  ?= /usr/local/openmpi
+# pip ROCm wheels ship bin/amdclang++ but often omit bin/amdllvm (which that stub execs).
+# Default to llvm/bin when bin/amdllvm is absent so HIP builds work without extra flags.
+ifeq ("$(shell test -e $(ROCM_PATH)/bin/amdllvm && echo found)", "found")
 HIPCC     ?= $(ROCM_PATH)/bin/amdclang++
+else ifeq ("$(shell test -e $(ROCM_PATH)/llvm/bin/amdclang++ && echo found)", "found")
+HIPCC     ?= $(ROCM_PATH)/llvm/bin/amdclang++
+else
+HIPCC     ?= $(ROCM_PATH)/bin/amdclang++
+endif
 NVCC      ?= $(CUDA_PATH)/bin/nvcc
 DEBUG     ?= 0
 
@@ -70,6 +78,18 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
       HIPFLAGS += --rocm-device-lib-path=$(ROCM_DEVICE_LIB_PATH)
     endif
+
+    # gfx1250 TDM descriptor header fallback. src/header/tdmCopy.h keys TDM support
+    # on __has_include(<hip/amd_detail/amd_gfx1250_TDM.h>); some ROCm SDKs omit that
+    # descriptor header, in which case every tdm:: entry point compiles to a deleted
+    # no-op stub and IsTdmCopySupported() reports the GPU as unsupported. When the SDK
+    # lacks the header we add a vendored copy (src/tdm_fallback) to the include search
+    # path. The path is added only when the SDK is missing it, so a real SDK header is
+    # never shadowed.
+    ifeq ($(wildcard $(ROCM_PATH)/include/hip/amd_detail/amd_gfx1250_TDM.h),)
+      $(info - SDK lacks hip/amd_detail/amd_gfx1250_TDM.h; using vendored fallback in ./src/tdm_fallback)
+      CXXFLAGS += -I./src/tdm_fallback
+    endif
   endif
 
   ifeq ($(SINGLE_KERNEL), 1)
@@ -82,6 +102,11 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     COMMON_FLAGS += -O0 -g -ggdb3
   endif
   COMMON_FLAGS += -I./src/header -I./src/client -I./src/client/Presets -I./third-party/ibverbs
+
+  # Extra user-supplied preprocessor/compiler flags, e.g.
+  #   make EXTRA_CXXFLAGS=-DTB_DISABLE_HWID_QUERY ...
+  # to stub the hardware-ID reads for functional emulators.
+  COMMON_FLAGS += $(EXTRA_CXXFLAGS)
 
   # libibverbs is loaded dynamically at runtime via dlopen/dlsym (see
   # third-party/ibverbs/IbvDynLoad.hpp), so the build never links against -libverbs

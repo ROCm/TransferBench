@@ -56,11 +56,20 @@ int AllToAllSweepPreset(EnvVars&          ev,
   int showMinOnly   = EnvVars::GetEnvVar("SHOW_MIN_ONLY",   1);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int useSpray      = EnvVars::GetEnvVar("USE_SPRAY",       0);
+  int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC",    0);
   int verbose       = EnvVars::GetEnvVar("VERBOSE",         0);
 
   std::vector<int> blockList  = EnvVars::GetEnvVarArray("BLOCKSIZES", {256,512,768,1024});
   std::vector<int> unrollList = EnvVars::GetEnvVarArray("UNROLLS", {1,2,3,4,6,8});
   std::vector<int> numSesList = EnvVars::GetEnvVarArray("NUM_SUB_EXECS", {4,8,12,16,24,32});
+  std::vector<int> ldsList    = EnvVars::GetEnvVarArray("LDSBYTES", {0});
+
+  // GFX and TDM expose different "middle" sweep dimensions shown in the second column:
+  //   GFX -> UNROLLS  (cfg.gfx.unrollFactor)
+  //   TDM -> LDSBYTES (cfg.tdm.ldsBytes, per-block LDS staging bytes; 0 = device max)
+  // Each executor lacks the other's knob, so only the relevant list is swept.
+  std::vector<int>& midList  = useTdmExec ? ldsList : unrollList;
+  char const*       midLabel = useTdmExec ? "LDS" : "UnR";
 
   // A2A_MODE may be 0,1,2 or else custom numSrcs:numDsts
   int numSrcs, numDsts;
@@ -94,9 +103,13 @@ int AllToAllSweepPreset(EnvVars&          ev,
     ev.Print("NUM_GPU_DEVICES", numGpus          , "Using %d GPUs", numGpus);
     ev.Print("NUM_SUB_EXECS"  , numSesList.size(), EnvVars::ToStr(numSesList).c_str());
     ev.Print("SHOW_MIN_ONLY"  , showMinOnly      , showMinOnly ? "Showing only slowest GPU results" : "Showing slowest and fastest GPU results");
-    ev.Print("UNROLLS"        , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
+    if (useTdmExec)
+      ev.Print("LDSBYTES"     , ldsList.size()   , "%s (0 = device max)", EnvVars::ToStr(ldsList).c_str());
+    else
+      ev.Print("UNROLLS"      , unrollList.size(), EnvVars::ToStr(unrollList).c_str());
     ev.Print("USE_REMOTE_READ", useRemoteRead    , "Using %s as executor", useRemoteRead ? "DST" : "SRC");
     ev.Print("USE_SPRAY"      , useSpray         , "%s per SubExecutor", useSpray ? "All targets" : "One target");
+    ev.Print("USE_TDM_EXEC"   , useTdmExec       , "Using %s executor", useTdmExec ? "TDM" : "GFX");
     ev.Print("VERBOSE"        , verbose          , verbose ? "Display test results" : "Display summary only");
     printf("\n");
   }
@@ -112,8 +125,18 @@ int AllToAllSweepPreset(EnvVars&          ev,
     exit(1);
   }
 
+  if (useTdmExec && (numSrcs != 1 || numDsts != 1)) {
+    printf("[ERROR] TDM execution can only be used for copies (A2A_MODE=0)\n");
+    exit(1);
+  }
+  if (useTdmExec && useSpray) {
+    printf("[ERROR] Cannot use USE_TDM_EXEC with USE_SPRAY (TDM copies one src/dst pair)\n");
+    exit(1);
+  }
+
   // Collect the number of GPU devices to use
-  ExeType exeType = EXE_GPU_GFX;
+  ExeType exeType = useTdmExec ? EXE_GPU_TDM : EXE_GPU_GFX;
+  char const* exeName = useTdmExec ? "TDM" : "GFX";
 
   std::vector<Transfer> transfers;
 
@@ -180,7 +203,8 @@ int AllToAllSweepPreset(EnvVars&          ev,
     }
   }
 
-  Utils::Print("GPU-GFX All-To-All Sweep benchmark (%lu bytes, local=%s). All values are %s GB/s\n",
+  Utils::Print("GPU-%s All-To-All Sweep benchmark (%lu bytes, local=%s). All values are %s GB/s\n",
+               exeName,
                numBytesPerTransfer,
                a2aLocal         ? "yes"                            : "no",
                ev.useHipEvents  ? "GPU-Event-Timed (min over GPUs)": "CPU-Timed");
@@ -196,10 +220,10 @@ int AllToAllSweepPreset(EnvVars&          ev,
   char sep = ev.outputToCsv ? ',' : ' ';
 
   double bestMinBw = 0.0;
-  int bestBlock = -1, bestUnroll = -1, bestNumSes = -1;
+  int bestBlock = -1, bestMid = -1, bestNumSes = -1;
 
   // Print header once
-  Utils::Print(" BlkS %c UnR ", sep);
+  Utils::Print(" BlkS %c %3s ", sep, midLabel);
   for (int c : numSesList) {
     Utils::Print("%c  SE %03d", sep, c);
     if (ev.useHipEvents && !showMinOnly) {
@@ -208,15 +232,17 @@ int AllToAllSweepPreset(EnvVars&          ev,
   }
   Utils::Print("\n");
 
-  // Results keyed by (blockSize, numSes, unroll) for verbose output
+  // Results keyed by (blockSize, numSes, midValue) for verbose output
   std::map<std::tuple<int,int,int>, TransferBench::TestResults> results;
 
   for (int blockSize : blockList) {
-    cfg.gfx.blockSize = blockSize;
+    if (useTdmExec) cfg.tdm.blockSize = blockSize;
+    else            cfg.gfx.blockSize = blockSize;
 
-    for (int u : unrollList) {
-      cfg.gfx.unrollFactor = u;
-      Utils::Print("%5d %c %3d ", blockSize, sep, u);
+    for (int mid : midList) {
+      if (useTdmExec) cfg.tdm.ldsBytes    = mid;   // per-block LDS staging bytes
+      else            cfg.gfx.unrollFactor = mid;   // GFX-kernel unroll factor
+      Utils::Print("%5d %c %3d ", blockSize, sep, mid);
       fflush(stdout);
 
       for (int c : numSesList) {
@@ -247,11 +273,11 @@ int AllToAllSweepPreset(EnvVars&          ev,
           if (minBw > bestMinBw) {
             bestMinBw  = minBw;
             bestBlock  = blockSize;
-            bestUnroll = u;
+            bestMid    = mid;
             bestNumSes = c;
           }
           if (verbose) {
-            results[std::make_tuple(blockSize, c, u)] = result;
+            results[std::make_tuple(blockSize, c, mid)] = result;
           }
         }
         Utils::Print("%c%8.2f", sep, minBw);
@@ -270,13 +296,13 @@ int AllToAllSweepPreset(EnvVars&          ev,
     int testNum = 0;
     for (int blockSize : blockList) {
       for (int c : numSesList) {
-        for (int u : unrollList) {
+        for (int mid : midList) {
           auto verboseTransfers = transfers;
           for (auto& t : verboseTransfers) {
             t.numSubExecs = useSpray ? (c * targetCount) : c;
           }
-          Utils::Print("BlockSize: %d SubExecs: %d Unroll: %d\n", blockSize, c, u);
-          Utils::PrintResults(ev, ++testNum, verboseTransfers, results[std::make_tuple(blockSize, c, u)]);
+          Utils::Print("BlockSize: %d SubExecs: %d %s: %d\n", blockSize, c, midLabel, mid);
+          Utils::PrintResults(ev, ++testNum, verboseTransfers, results[std::make_tuple(blockSize, c, mid)]);
         }
       }
     }
@@ -287,7 +313,7 @@ int AllToAllSweepPreset(EnvVars&          ev,
     Utils::Print("Highest %s bandwidth found: %7.2f GB/s\n",
                  ev.useHipEvents ? "GPU-event-timed (min)" : "CPU-timed", bestMinBw);
     Utils::Print("          BlockSize  : %7d\n", bestBlock);
-    Utils::Print("          Unroll     : %7d\n", bestUnroll);
+    Utils::Print("          %-10s : %7d\n", midLabel, bestMid);
     Utils::Print("          NumSubExec : %7d\n", bestNumSes);
   }
 
