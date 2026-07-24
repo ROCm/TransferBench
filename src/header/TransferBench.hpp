@@ -908,7 +908,7 @@ namespace {
     /**
      * Barrier that all ranks must arrive at before proceeding
      */
-    void Barrier();
+    void Barrier() const;
 
     /**
      * Send data to a single destination rank
@@ -7377,7 +7377,7 @@ namespace {
     fprintf(dumpCfgFile, "\n");
   }
 
-  void System::Barrier()
+  void System::Barrier() const
   {
 #ifdef MPI_COMM_ENABLED
     if (commMode == COMM_MPI) {
@@ -7494,6 +7494,8 @@ namespace {
         RecvData(0, numBytes, data);
       }
     }
+
+    Barrier(); // temporary workaround
   }
 
   bool System::Any(bool const flag) const
