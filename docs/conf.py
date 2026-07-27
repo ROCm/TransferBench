@@ -27,8 +27,7 @@ html_theme_options = {
     "flavor": "rocm-extras",
     "header_title": f"TransferBench {version_number}",
     "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/latest/",
-    "version_list_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/latest/versions.html",
-    "link_main_doc": True,
+"link_main_doc": True,
 }
 
 external_projects_current_project = "transferbench"
