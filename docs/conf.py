@@ -4,12 +4,7 @@
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
-import re
-
-from rocm_docs import ROCmDocs
-
 version_number = "1.66.02"
-left_nav_title = f"TransferBench {version_number} Documentation"
 
 # for PDF output on Read the Docs
 project = "TransferBench Documentation"
@@ -20,25 +15,13 @@ release = version_number
 
 external_toc_path = "./sphinx/_toc.yml"
 
-docs_core = ROCmDocs(left_nav_title)
-docs_core.run_doxygen(doxygen_root="doxygen", doxygen_path="doxygen/xml")
-docs_core.setup()
+extensions = ["rocm_docs"]
+html_theme = "rocm_docs_theme"
+html_theme_options = {
+    "flavor": "rocm-extras",
+    "header_title": f"ROCm™ TransferBench {version_number}",
+    "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/docs-1.66.02/",
+    "link_main_doc": True,
+}
 
 external_projects_current_project = "transferbench"
-
-for sphinx_var in ROCmDocs.SPHINX_VARS:
-    globals()[sphinx_var] = getattr(docs_core, sphinx_var)
-
-html_theme_options = {
-    "flavor": "generic",
-    "header_title": f"ROCm™ TransferBench 1.66.02",
-    "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/docs-1.66.02/",
-    "nav_secondary_items": {
-        "GitHub": "https://github.com/ROCm/TransferBench",
-        "Community": "https://github.com/ROCm/ROCm/discussions",
-        "Blogs": "https://rocm.blogs.amd.com/",
-        "System and Infra Docs": "https://instinct.docs.amd.com/",
-        "Support": "https://github.com/ROCm/TransferBench/issues/new/choose",
-    },
-    "link_main_doc": False,
-}
