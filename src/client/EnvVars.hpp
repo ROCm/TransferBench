@@ -129,6 +129,7 @@ public:
   // TDM options
   int tdmBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
   int tdmBlockSize;                  // Size of each threadblock for TDM kernels (must be multiple of 32)
+  int tdmKernel;                     // TDM Kernel to use (-1=auto, 0=copy-only, 1=reduce)
   int tdmLdsBytes;                   // Size of LDS (shared memory) bytes per threadblock for TDM kernels (0 = use device max)
 
   // Developer features
@@ -184,6 +185,7 @@ public:
     sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
     tdmBlockOrder     = GetEnvVar("TDM_BLOCK_ORDER"     , 0);
     tdmBlockSize      = GetEnvVar("TDM_BLOCK_SIZE"      , 256);
+    tdmKernel         = GetEnvVar("TDM_KERNEL"          , 0);
     tdmLdsBytes       = GetEnvVar("TDM_LDS_BYTES"       , 0);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
@@ -406,6 +408,7 @@ public:
     printf(" SWEEP_MIN_POW2      - When 0 is specified for data size, this is the starting power of two exponent\n");
     printf(" TDM_BLOCK_ORDER     - How blocks for TDM transfers are ordered. 0=sequential, 1=interleaved\n");
     printf(" TDM_BLOCK_SIZE      - # of threads per threadblock for TDM (async tensor) kernels (Must be multiple of 32)\n");
+    printf(" TDM_KERNEL          - -1=auto, 0=force TdmCopyKernel, 1=force TdmReduceKernel (may error if ineligible)\n");
     printf(" TDM_LDS_BYTES       - Amount of LDS bytes to allocate per workgroup for TDM kernels (0 = device max; K/M/G suffixes accepted)\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX/DMA/TDM executor timing (0=CPU wall-clock)\n");
@@ -554,6 +557,10 @@ public:
     Print("TDM_BLOCK_ORDER", tdmBlockOrder,
           "TDM Thread block ordering: %s", tdmBlockOrder == 0 ? "Sequential" : "Interleaved");
     Print("TDM_BLOCK_SIZE", tdmBlockSize, "TDM threadblock size of %d", tdmBlockSize);
+    Print("TDM_KERNEL", tdmKernel,
+          "%s", tdmKernel == -1 ? "auto" :
+                tdmKernel ==  0 ? "force TdmCopyKernel" :
+                tdmKernel ==  1 ? "force TdmReduceKernel" : "unknown");
     Print("TDM_LDS_BYTES", tdmLdsBytes, "%s",
           tdmLdsBytes == 0 ? "Using device max LDS bytes per workgroup"
           : (std::string("Setting LDS to ") + std::to_string(tdmLdsBytes) + " bytes per workgroup").c_str());
@@ -766,6 +773,7 @@ public:
 
     cfg.tdm.blockOrder             = tdmBlockOrder;
     cfg.tdm.blockSize              = tdmBlockSize;
+    cfg.tdm.tdmKernel              = tdmKernel;
     cfg.tdm.ldsBytes               = tdmLdsBytes;
 
     return cfg;

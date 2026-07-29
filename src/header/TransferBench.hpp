@@ -171,6 +171,17 @@ namespace TransferBench
   };
 
   /**
+   * Enumeration of supported TDM kernels
+   */
+  enum TdmKernelType
+  {
+    TDM_KERNEL_AUTO   = -1,                     ///< Automatically choose a kernel
+    TDM_KERNEL_COPY   =  0,                     ///< Default kernel that copies a single input to a single output
+    TDM_KERNEL_REDUCE =  1,                     ///< Kernel that supports multiple input/output buffers (sum-reduce)
+    NUM_TDM_KERNELS   =  2                      ///< Number of TDM kernels currently supported
+  };
+
+  /**
    * A MemDevice indicates a memory type on a specific device
    */
   struct MemDevice
@@ -284,6 +295,7 @@ namespace TransferBench
     int blockOrder = 0;                         ///< Determines how threadblocks are ordered (0=sequential, 1=interleaved, 2=random)
     int blockSize  = 256;                       ///< Size of each threadblock
     int ldsBytes   = 0;                         ///< Amount of __shared__ memory per threadblock to use as bounce buffer (0 = device max)
+    int tdmKernel  = 0;                         ///< Kernel selector: -1=auto, 0=copy-only, 1=reduce
   };
 
   /**
@@ -2062,6 +2074,7 @@ namespace {
       System::Get().Broadcast(root, sizeof(tdm), &tdm);
       if (tdm.blockOrder     != cfg.tdm.blockOrder)     ADD_ERROR("cfg.tdm.blockOrder");
       if (tdm.blockSize      != cfg.tdm.blockSize)      ADD_ERROR("cfg.tdm.blockSize");
+      if (tdm.tdmKernel      != cfg.tdm.tdmKernel)      ADD_ERROR("cfg.tdm.tdmKernel");
       if (tdm.ldsBytes       != cfg.tdm.ldsBytes)       ADD_ERROR("cfg.tdm.ldsBytes");
     }
     #undef ADD_ERROR
@@ -2168,6 +2181,10 @@ namespace {
       errors.push_back({ERR_FATAL,
                         "[tdm.blockSize] must be a positive multiple of 32 less than or equal to %d",
                         MAX_BLOCKSIZE});
+
+    if (cfg.tdm.tdmKernel < -1 || cfg.tdm.tdmKernel >= NUM_TDM_KERNELS)
+      errors.push_back(
+        {ERR_FATAL, "[tdm.tdmKernel] must be -1 for auto, or less than %d", NUM_TDM_KERNELS});
 
     if (cfg.tdm.ldsBytes < 0)
       errors.push_back({ERR_FATAL, "[tdm.ldsBytes] must be positive or 0"});
@@ -2384,9 +2401,22 @@ namespace {
         }
         break;
       case EXE_GPU_TDM:
-        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+        // The copy TDM kernel only supports a single SRC/DST; the reduce kernel supports
+        // any number of inputs/outputs. When auto-selecting, allow the reduce cardinalities.
+        if (cfg.tdm.tdmKernel == TDM_KERNEL_COPY && (t.srcs.size() != 1 || t.dsts.size() != 1)) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: GPU TDM kernel currently requires exactly 1 SRC and 1 DST", i});
+                            "Transfer %d: GPU TDM copy kernel currently requires exactly 1 SRC and 1 DST", i});
+          hasFatalError = true;
+          break;
+        }
+        // The multi-SRC/DST sum-reduce kernel is only implemented on the AMD TDM
+        // backend; disable it on the NVIDIA platform. This covers both explicitly
+        // requesting the reduce kernel and auto-selecting it via reduce cardinalities.
+        if (TDM_PLATFORM_NV &&
+            (cfg.tdm.tdmKernel == TDM_KERNEL_REDUCE ||
+             (cfg.tdm.tdmKernel == TDM_KERNEL_AUTO && (t.srcs.size() != 1 || t.dsts.size() != 1)))) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM reduce kernel (multi-SRC/DST) is not supported on the NVIDIA platform", i});
           hasFatalError = true;
           break;
         }
@@ -2951,6 +2981,7 @@ namespace {
 
     // For TDM-Executors
     uint32_t                   ldsBytesActual;    ///< Actual number of LDS bytes to use as buffer
+    int                        tdmKernelToUse;    ///< (TDM-only) Which TDM kernel to use
   };
 
   // Structure to track PCIe topology
@@ -4110,6 +4141,46 @@ namespace {
     if (cfg.gfx.gfxKernel == GFX_KERNEL_COPY && !CanUseGfxKernel(GFX_KERNEL_COPY, cfg, transfers, exeInfo)) {
       return {ERR_WARN,
         "GFX copy kernel forced even though deemed incompatible for current set of Transfers / config"};
+    }
+    return ERR_NONE;
+  }
+
+  static bool CanUseTdmKernel(int const                tdmKernelIdx,
+                              ConfigOptions const&     cfg,
+                              vector<Transfer> const&  transfers,
+                              ExeInfo const&           exeInfo)
+  {
+    // Reduce kernel supports any number of inputs/outputs
+    if (tdmKernelIdx == TDM_KERNEL_REDUCE) return true;
+
+    // Copy kernel works if all Transfers have exactly one SRC / one DST
+    if (tdmKernelIdx == TDM_KERNEL_COPY) {
+      if (exeInfo.resources.empty()) return false;
+      for (auto const& rss : exeInfo.resources) {
+        Transfer const& t = transfers[rss.transferIdx];
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  static ErrResult SelectTdmKernel(ConfigOptions const& cfg, vector<Transfer> const& transfers, ExeInfo& exeInfo)
+  {
+    // Decide on which TDM kernel to use
+    // Auto-select - prefer copy kernel if eligible, otherwise fall back to reduce
+    if (cfg.tdm.tdmKernel == TDM_KERNEL_AUTO) {
+      exeInfo.tdmKernelToUse = CanUseTdmKernel(TDM_KERNEL_COPY, cfg, transfers, exeInfo)
+                             ? TDM_KERNEL_COPY : TDM_KERNEL_REDUCE;
+    } else {
+      exeInfo.tdmKernelToUse = cfg.tdm.tdmKernel;
+    }
+
+    // Warn if forcing copy kernel even though incompatible, but allow kernel to continue
+    if (cfg.tdm.tdmKernel == TDM_KERNEL_COPY && !CanUseTdmKernel(TDM_KERNEL_COPY, cfg, transfers, exeInfo)) {
+      return {ERR_WARN,
+        "TDM copy kernel forced even though deemed incompatible for current set of Transfers / config"};
     }
     return ERR_NONE;
   }
@@ -5843,7 +5914,8 @@ namespace {
 // TDM Executor-related functions
 //========================================================================================
 #if TDM_SUPPORTED
-  __global__ void  GpuTdmKernel(SubExecParam* params,
+  // Copy kernel: single SRC -> single DST via tensor-DMA staged through shared memory
+  __global__ void  TdmCopyKernel(SubExecParam* params,
                                 uint32_t      ldsBytes,
                                 int           numSubIterations)
   {
@@ -5876,12 +5948,59 @@ namespace {
       GetXccId(p.xccId);
     }
   }
+
+  // Reduce kernel: sum-reduce any number of SRCs into any number of DSTs
+  __global__ void  TdmReduceKernel(SubExecParam* params,
+                                   uint32_t      ldsBytes,
+                                   int           numSubIterations)
+  {
+    int64_t startCycle;
+    bool const shouldRecordTiming = (threadIdx.x == 0);
+    if (shouldRecordTiming) startCycle = GetTimestamp();
+
+    extern __shared__ __align__(128) float shmem[];
+
+    // Each threadblock is a subexecutor (mirrors GpuCopyKernel).
+    SubExecParam& p = params[blockIdx.x];
+    if (p.N == 0) return;
+
+    // TODO: TDM-accelerated sum-reduce (mirror GpuReduceKernel using tensor loads/stores staged
+    //       through shared memory). This naive per-thread implementation is a placeholder so the
+    //       reduce path is wired end-to-end and compiles; replace with the tensor-DMA reduce.
+    int32_t const numSrcs = p.numSrcs;
+    int32_t const numDsts = p.numDsts;
+    size_t const sizeBytes        = p.N * sizeof(float);
+
+    int subIterations = 0;
+    while (1) {
+      //tdm::tdmReduce(p.dst, p.src, numSrcs, numDsts, sizeBytes, shmem, ldsBytes);
+      __syncthreads(); // Wait for all warps to finish this subiteration
+      if (++subIterations == numSubIterations) break;
+    }
+
+    if (shouldRecordTiming) {
+      __threadfence_system();
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+      GetHwId(p.hwId);
+      GetXccId(p.xccId);
+    }
+  }
 #else
   // gfx1250 tensor TDM builtins unavailable for this translation: emit empty kernel stubs with
   // the exact launch signatures so the host-side launch path still links. They are never
   // dispatched on non-gfx1250 or nvidia hardware (see TransfersHaveErrors).
-  __global__ void GpuTdmKernel(SubExecParam*, uint32_t, int) {}
+  __global__ void TdmCopyKernel(SubExecParam*, uint32_t, int) {}
+  __global__ void TdmReduceKernel(SubExecParam*, uint32_t, int) {}
 #endif // TDM_SUPPORTED
+
+  // Table of all TDM kernel functions - must match ordering in TdmKernelType
+  typedef void (*TdmKernelFuncPtr)(SubExecParam*, uint32_t, int);
+  TdmKernelFuncPtr TdmKernelsTable[NUM_TDM_KERNELS] =
+  {
+    TdmCopyKernel,    // TDM_KERNEL_COPY
+    TdmReduceKernel,  // TDM_KERNEL_REDUCE
+  };
 
   static ErrResult ExecuteTdmTransfer(int           const  iteration,
                                       int           const  exeTotalSubExecs,
@@ -5892,6 +6011,7 @@ namespace {
                                       ConfigOptions const& cfg,
                                       bool          const  subExecParamHostAccessible,
                                       uint32_t      const  ldsBytes,
+                                      int           const  tdmKernelIdx,
                                       TransferResources&   rss)
   {
     // Compute kernel launch parameters
@@ -5900,18 +6020,21 @@ namespace {
     dim3 const blockSize(cfg.tdm.blockSize);
     SubExecParam* params = cfg.general.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
 
+    // Select which TDM kernel to launch (must match ordering in TdmKernelType)
+    auto tdmKernel = TdmKernelsTable[tdmKernelIdx];
+
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
 #if defined(__NVCC__)
     if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
-    GpuTdmKernel<<<gridSize, blockSize, ldsBytes, stream>>>(params,
-                                                            ldsBytes,
-                                                            cfg.general.numSubIterations);
+    tdmKernel<<<gridSize, blockSize, ldsBytes, stream>>>(params,
+                                                         ldsBytes,
+                                                         cfg.general.numSubIterations);
     if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(GpuTdmKernel, gridSize, blockSize, (int)ldsBytes, stream,
+    hipExtLaunchKernelGGL(tdmKernel, gridSize, blockSize, (int)ldsBytes, stream,
                           startEvent, stopEvent, 0,
                           params, ldsBytes, cfg.general.numSubIterations);
 #endif
@@ -5976,6 +6099,7 @@ namespace {
                                                std::cref(cfg),
                                                exeInfo.subExecParamHostAccessible,
                                                exeInfo.ldsBytesActual,
+                                               exeInfo.tdmKernelToUse,
                                                std::ref(exeInfo.resources[i])));
       }
       for (auto& asyncTransfer : asyncTransfers)
@@ -5985,7 +6109,8 @@ namespace {
       ExecuteTdmTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
                          cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
                          cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                         cfg, exeInfo.subExecParamHostAccessible, exeInfo.ldsBytesActual, exeInfo.resources[0]);
+                         cfg, exeInfo.subExecParamHostAccessible, exeInfo.ldsBytesActual,
+                         exeInfo.tdmKernelToUse, exeInfo.resources[0]);
     }
 
     if (iteration >= 0) {
@@ -6221,6 +6346,31 @@ namespace {
       // Select which GFX kernel to use for this executor
       if (exeDevice.exeType == EXE_GPU_GFX) {
         ERR_APPEND(SelectGfxKernel(cfg, transfers, exeInfo), errResults);
+      }
+
+      // Select which TDM kernel to use for this executor
+      if (exeDevice.exeType == EXE_GPU_TDM) {
+        ERR_APPEND(SelectTdmKernel(cfg, transfers, exeInfo), errResults);
+
+        // For the TDM reduce kernel, warn about any SRC/DST buffer that is not
+        // 128B aligned (the tensor data mover reaches peak bandwidth on
+        // 128B-aligned addresses; misaligned buffers still work but slower).
+        if (exeInfo.tdmKernelToUse == TDM_KERNEL_REDUCE) {
+          for (auto const& rss : exeInfo.resources) {
+            for (int iSrc = 0; iSrc < (int)rss.srcMem.size(); ++iSrc) {
+              if (reinterpret_cast<uintptr_t>(rss.srcMem[iSrc]) & 127u)
+                errResults.push_back({ERR_WARN,
+                  "Transfer %d: TDM reduce SRC[%d] (%p) is not 128B aligned; performance may be reduced",
+                  rss.transferIdx, iSrc, (void*)rss.srcMem[iSrc]});
+            }
+            for (int iDst = 0; iDst < (int)rss.dstMem.size(); ++iDst) {
+              if (reinterpret_cast<uintptr_t>(rss.dstMem[iDst]) & 127u)
+                errResults.push_back({ERR_WARN,
+                  "Transfer %d: TDM reduce DST[%d] (%p) is not 128B aligned; performance may be reduced",
+                  rss.transferIdx, iDst, (void*)rss.dstMem[iDst]});
+            }
+          }
+        }
       }
     }
 
