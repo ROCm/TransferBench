@@ -5964,16 +5964,13 @@ namespace {
     SubExecParam& p = params[blockIdx.x];
     if (p.N == 0) return;
 
-    // TODO: TDM-accelerated sum-reduce (mirror GpuReduceKernel using tensor loads/stores staged
-    //       through shared memory). This naive per-thread implementation is a placeholder so the
-    //       reduce path is wired end-to-end and compiles; replace with the tensor-DMA reduce.
     int32_t const numSrcs = p.numSrcs;
     int32_t const numDsts = p.numDsts;
     size_t const sizeBytes        = p.N * sizeof(float);
 
     int subIterations = 0;
     while (1) {
-      //tdm::tdmReduce(p.dst, p.src, numSrcs, numDsts, sizeBytes, shmem, ldsBytes);
+      tdm::tdmReduce(p.dst, p.src, numSrcs, numDsts, sizeBytes, shmem, ldsBytes);
       __syncthreads(); // Wait for all warps to finish this subiteration
       if (++subIterations == numSubIterations) break;
     }
