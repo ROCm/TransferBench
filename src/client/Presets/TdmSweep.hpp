@@ -57,6 +57,7 @@ int TdmSweepPreset(EnvVars&          ev,
   // Collect environment variables for this preset
   vector<int> blockList     = EnvVars::GetEnvVarArray("BLOCKSIZES",   {64,128,256,512,1024});
   vector<int> blockOrders   = EnvVars::GetEnvVarArray("BLOCK_ORDERS",                    {0});
+  vector<int> byteOffsets   = EnvVars::GetEnvVarArray("BYTE_OFFSETS",                    {0});
   vector<int> ldsList       = EnvVars::GetEnvVarArray("LDS_BYTES",  {8192,16384,32768,65536,0});
   vector<int> numSesList    = EnvVars::GetEnvVarArray("NUM_SUB_EXECS",       {2,4,8,16,32,64});
   int         numTransfers  = EnvVars::GetEnvVar(     "NUM_TRANSFERS",                     1);
@@ -71,6 +72,7 @@ int TdmSweepPreset(EnvVars&          ev,
         Utils::Print("[TDM Sweep Related]\n");
       ev.Print("BLOCKSIZES",    blockList.size(),   EnvVars::ToStr(blockList).c_str());
       ev.Print("BLOCK_ORDERS",  blockOrders.size(), "%s (0=sequential 1=interleaved 2=random)", EnvVars::ToStr(blockOrders).c_str());
+      ev.Print("BYTE_OFFSETS",  byteOffsets.size(), "%s (src/dst alloc offset; drives the TDM vector head/tail path)", EnvVars::ToStr(byteOffsets).c_str());
       ev.Print("LDS_BYTES",     ldsList.size(),     "%s (0 = device max LDS per block)", EnvVars::ToStr(ldsList).c_str());
       ev.Print("NUM_SUB_EXECS", numSesList.size(),  EnvVars::ToStr(numSesList).c_str());
       ev.Print("NUM_TRANSFERS", numTransfers,       "Number of Transfers specified in TDM_TRANSFER");
@@ -106,6 +108,13 @@ int TdmSweepPreset(EnvVars&          ev,
   for (int bo : blockOrders) {
     if (bo < 0 || bo > 2) {
       Utils::Print("[ERROR] BLOCK_ORDERS value %d is invalid (must be 0, 1, or 2)\n", bo);
+      return ERR_FATAL;
+    }
+  }
+  for (int off : byteOffsets) {
+    if (off < 0 || off % (int)sizeof(float)) {
+      Utils::Print("[ERROR] BYTE_OFFSETS value %d is invalid (must be a non-negative multiple of %lu)\n",
+                   off, sizeof(float));
       return ERR_FATAL;
     }
   }
@@ -173,7 +182,7 @@ int TdmSweepPreset(EnvVars&          ev,
 
   // Print header
   char sep = ev.outputToCsv ? ',' : ' ';
-  Utils::Print(" BlkO %c  BlkS  %c  LDSBytes ", sep, sep);
+  Utils::Print(" BlkO %c  BlkS  %c  LDSBytes %c ByteOff ", sep, sep, sep);
   for  (int numSubExec : numSesList)
     Utils::Print("%c  SE %03d", sep, numSubExec);
   Utils::Print("\n");
@@ -181,60 +190,63 @@ int TdmSweepPreset(EnvVars&          ev,
   int bestSe = -1;
   double overallBestBw = 0;
   vector<double> bestBw(numSesList.size(), 0.0);
-  // best[s] = {blockOrder, blockSize, ldsBytes, numSubExec}
-  vector<vector<int>> best(numSesList.size(), vector<int>(4));
+  // best[s] = {blockOrder, blockSize, ldsBytes, byteOffset, numSubExec}
+  vector<vector<int>> best(numSesList.size(), vector<int>(5));
 
   // Loop over all combinations
   for (int blockOrder : blockOrders) {          cfg.tdm.blockOrder = blockOrder;
     for (int blockSize : blockList) {           cfg.tdm.blockSize  = blockSize;
       for (int ldsBytes : ldsList) {            cfg.tdm.ldsBytes   = ldsBytes;
-        Utils::Print("  %1d   %c  %4d  %c  %8d ", blockOrder, sep, blockSize, sep, ldsBytes);
-        fflush(stdout);
-        for (auto s = 0; s < numSesList.size(); s++) {
-          int numSubExec = numSesList[s];
-          for (Transfer& t : transfers) t.numSubExecs = numSubExec;
+        for (int byteOffset : byteOffsets) {    cfg.data.byteOffset = byteOffset;
+          Utils::Print("  %1d   %c  %4d  %c  %8d %c %7d ",
+                       blockOrder, sep, blockSize, sep, ldsBytes, sep, byteOffset);
+          fflush(stdout);
+          for (auto s = 0; s < numSesList.size(); s++) {
+            int numSubExec = numSesList[s];
+            for (Transfer& t : transfers) t.numSubExecs = numSubExec;
 
-          TestResults result;
-          // A given combination may be rejected by the library (e.g. LDS window
-          // larger than the device max). Treat that as a skipped cell (N/A) and
-          // keep sweeping instead of aborting the whole matrix.
-          if (RunTransfers(cfg, transfers, result)) {
-            double bw = 0.0;
-            switch (timingMode) {
-            case 0: bw = result.avgTotalBandwidthGbPerSec; break;
-            case 1:
-              for (auto const& e : result.exeResults) {
-                bw = std::max(bw, e.second.avgBandwidthGbPerSec);
+            TestResults result;
+            // A given combination may be rejected by the library (e.g. LDS window
+            // larger than the device max). Treat that as a skipped cell (N/A) and
+            // keep sweeping instead of aborting the whole matrix.
+            if (RunTransfers(cfg, transfers, result)) {
+              double bw = 0.0;
+              switch (timingMode) {
+              case 0: bw = result.avgTotalBandwidthGbPerSec; break;
+              case 1:
+                for (auto const& e : result.exeResults) {
+                  bw = std::max(bw, e.second.avgBandwidthGbPerSec);
+                }
+                break;
+              case 2: default:
+                for (auto const& t : result.tfrResults) {
+                  bw = std::max(bw, t.avgBandwidthGbPerSec);
+                }
+                break;
               }
-              break;
-            case 2: default:
-              for (auto const& t : result.tfrResults) {
-                bw = std::max(bw, t.avgBandwidthGbPerSec);
-              }
-              break;
-            }
 
-            if (bw > bestBw[s]) {
-              bestBw[s] = bw;
-              best[s] = {blockOrder, blockSize, ldsBytes, numSubExec};
-              if (bw > overallBestBw) {
-                overallBestBw = bw;
-                bestSe = s;
+              if (bw > bestBw[s]) {
+                bestBw[s] = bw;
+                best[s] = {blockOrder, blockSize, ldsBytes, byteOffset, numSubExec};
+                if (bw > overallBestBw) {
+                  overallBestBw = bw;
+                  bestSe = s;
+                }
               }
+              Utils::Print("%c%8.2f", sep, bw);
+            } else {
+              Utils::Print("%c%8s", sep, "N/A");
             }
-            Utils::Print("%c%8.2f", sep, bw);
-          } else {
-            Utils::Print("%c%8s", sep, "N/A");
+            fflush(stdout);
           }
+          Utils::Print("\n");
           fflush(stdout);
         }
-        Utils::Print("\n");
-        fflush(stdout);
       }
     }
   }
 
-  Utils::Print(" BlkO %c  BlkS  %c  LDSBytes ", sep, sep);
+  Utils::Print(" BlkO %c  BlkS  %c  LDSBytes %c ByteOff ", sep, sep, sep);
   for (auto s = 0; s < numSesList.size(); s++) {
     Utils::Print("%c%8.2f", sep, bestBw[s]);
   }
@@ -254,10 +266,11 @@ int TdmSweepPreset(EnvVars&          ev,
   Utils::Print("          BlockOrder   : %7d  [TDM_BLOCK_ORDER=%d]\n", best[bestSe][0], best[bestSe][0]);
   Utils::Print("          BlockSize    : %7d  [TDM_BLOCK_SIZE=%d]\n",  best[bestSe][1], best[bestSe][1]);
   Utils::Print("          LDS Bytes    : %7d  [TDM_LDS_BYTES=%d]\n",   best[bestSe][2], best[bestSe][2]);
-  Utils::Print("          NumSubExec   : %7d\n", best[bestSe][3]);
+  Utils::Print("          Byte Offset  : %7d  [BYTE_OFFSET=%d]\n",     best[bestSe][3], best[bestSe][3]);
+  Utils::Print("          NumSubExec   : %7d\n", best[bestSe][4]);
   Utils::Print("Command to run best result:\n");
-  Utils::Print("TDM_BLOCK_ORDER=%d TDM_BLOCK_SIZE=%d TDM_LDS_BYTES=%d ./TransferBench cmdline %lu \"%d %d %s\"\n",
-               best[bestSe][0], best[bestSe][1], best[bestSe][2],
-               numBytesPerTransfer, numTransfers, best[bestSe][3], transferStr.c_str());
+  Utils::Print("TDM_BLOCK_ORDER=%d TDM_BLOCK_SIZE=%d TDM_LDS_BYTES=%d BYTE_OFFSET=%d ./TransferBench cmdline %lu \"%d %d %s\"\n",
+               best[bestSe][0], best[bestSe][1], best[bestSe][2], best[bestSe][3],
+               numBytesPerTransfer, numTransfers, best[bestSe][4], transferStr.c_str());
   return ERR_NONE;
 }
