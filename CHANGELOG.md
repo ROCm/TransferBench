@@ -3,6 +3,10 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.69.01
+### Added
+- Added support for ABI change introduced in amd-smi 27.0.0 (ROCm 10.0)
+
 ## v1.69.00
 ### Added
 - Added support for `ALWAYS_VALIDATE=-1` to disable validation

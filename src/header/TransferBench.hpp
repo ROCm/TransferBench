@@ -52,7 +52,9 @@ THE SOFTWARE.
 #include <sys/socket.h>
 #include <sys/utsname.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "IbvDynLoad.hpp"
@@ -793,6 +795,26 @@ namespace TransferBench
 // Helper functions ('hidden' in anonymous namespace)
 //========================================================================================
 namespace {
+
+#ifdef AMD_SMI_ENABLED
+template <typename T, typename = void>
+struct AmdSmiFabricInfoIsFlat : std::false_type {};
+
+template <typename T>
+struct AmdSmiFabricInfoIsFlat<T, std::void_t<decltype(std::declval<const T&>().fabric_info.v1)>>
+    : std::true_type {};
+
+template <typename T>
+const auto& AmdSmiFabricInfoV1(const T& info)
+{
+  if constexpr (AmdSmiFabricInfoIsFlat<T>::value) {
+    return info.fabric_info.v1;      // New layout (amd-smi 27+): fabric_info.v1
+  } else {
+    return info.fabric_info.fabric_version.v1;  // Old layout (pre-27): fabric_info.fabric_version.v1
+  }
+}
+
+#endif
 
 // Constants
 //========================================================================================
@@ -7287,9 +7309,9 @@ namespace {
         if (err == AMDSMI_STATUS_SUCCESS) {
           // NOTE: vpod_id is a uint32_t but System holds it as an int64_t to allow for
           //       vpodId == -1 to represent no pod present
-          memcpy(ppodId, &fabricInfo.fabric_info.fabric_version.v1.ppod_id,
-                 sizeof(fabricInfo.fabric_info.fabric_version.v1.ppod_id));
-          vpodId = fabricInfo.fabric_info.fabric_version.v1.vpod_id;
+          const auto& fabricV1 = AmdSmiFabricInfoV1(fabricInfo);
+          memcpy(ppodId, fabricV1.ppod_id, sizeof(fabricV1.ppod_id));
+          vpodId = fabricV1.vpod_id;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
