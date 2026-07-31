@@ -64,7 +64,7 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
     endif
     GPU_TARGETS_FLAGS = $(foreach target,$(GPU_TARGETS),"--offload-arch=$(target)")
     $(info Compiling for $(GPU_TARGETS) architecture(s). Can modify this by setting GPU_TARGETS)
-    CXXFLAGS = -I. -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
+    CXXFLAGS = -std=c++17 -I. -I$(ROCM_PATH)/include -I$(ROCM_PATH)/include/hip -I$(ROCM_PATH)/include/hsa
     HIPLDFLAGS= -lnuma -L$(ROCM_PATH)/lib -lhsa-runtime64 -lamdhip64
     HIPFLAGS = -Wall -x hip -D__HIP_PLATFORM_AMD__ -D__HIPCC__ $(GPU_TARGETS_FLAGS)
     ifneq ($(strip $(ROCM_DEVICE_LIB_PATH)),)
@@ -224,8 +224,6 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
                   '  amdsmi_get_processor_handle_from_bdf(bdf, &h);' \
                   '  amdsmi_fabric_info_t fi;' \
                   '  amdsmi_get_gpu_fabric_info(h, &fi);' \
-                  '  (void)fi.fabric_info.fabric_version.v1.ppod_id;' \
-                  '  (void)fi.fabric_info.fabric_version.v1.vpod_id;' \
                   '  return 0;' \
                   '}' | \
                 $(CXX) -I$(ROCM_PATH)/include -x c++ - \

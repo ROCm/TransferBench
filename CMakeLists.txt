@@ -103,8 +103,8 @@ set(ENV{ROCM_PATH} "${ROCM_PATH}")
 # TransferBench project definitions
 #==================================================================================================
 set(TRANSFERBENCH_VERSION_MAJOR 1)
-set(TRANSFERBENCH_VERSION_MINOR 67)
-set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "00")
+set(TRANSFERBENCH_VERSION_MINOR 69)
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "01")
 
 # Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
 # Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,
@@ -411,8 +411,6 @@ else()
             amdsmi_get_processor_handle_from_bdf(bdf, &h);
             amdsmi_fabric_info_t fi;
             amdsmi_get_gpu_fabric_info(h, &fi);
-            (void)fi.fabric_info.fabric_version.v1.ppod_id;
-            (void)fi.fabric_info.fabric_version.v1.vpod_id;
             return 0;
           }" AMDSMI_HAS_FABRIC)
         cmake_pop_check_state()
