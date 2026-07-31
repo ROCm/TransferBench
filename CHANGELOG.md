@@ -14,6 +14,10 @@ Documentation for TransferBench is available at
 - CPU NUMA nodes with 0 cores will now be hidden.  To re-enable, set TB_SHOW_ALL_NUMA=1
 - Switching to use of persistent threadpools to cut-down on thread creation overheads
 
+## v1.69.01
+### Added
+- Added support for ABI change introduced in amd-smi 27.0.0 (ROCm 10.0)
+
 ## v1.69.00
 ### Added
 - Added support for `ALWAYS_VALIDATE=-1` to disable validation
