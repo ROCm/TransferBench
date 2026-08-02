@@ -194,8 +194,33 @@ cleanup() {
 # Set up signal handlers for Ctrl-C and termination
 trap cleanup INT TERM
 
+# SSH aliases defined in ssh_config are only understood by the SSH client, so workers
+# calling getaddrinfo() on one would fail. Expand to the underlying host and prefer a
+# literal IPv4, since the master address is resolved remotely and only over AF_INET.
+resolve_master_addr() {
+    local host="$1" addr ipv4
+    addr=$(ssh -G "$host" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+    [[ -z "$addr" ]] && addr="$host"
+
+    if [[ ! "$addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        ipv4=$(getent ahostsv4 "$addr" 2>/dev/null | awk 'NR==1{print $1}')
+        if [[ -n "$ipv4" ]]; then
+            addr="$ipv4"
+        else
+            echo "WARNING: Could not resolve '$host' to an IPv4 address" >&2
+            echo "         Workers must be able to resolve '$addr' themselves" >&2
+        fi
+    fi
+    printf '%s' "$addr"
+}
+
 # Start worker ranks in the background
 master_host="${hosts[0]}"
+master_addr=$(resolve_master_addr "$master_host")
+if [[ "$master_addr" != "$master_host" ]]; then
+    echo "Master    : $master_host ($master_addr)"
+    echo
+fi
 worker_pids=()
 worker_hosts=()
 
@@ -207,14 +232,14 @@ done
 
 for ((rank=1; rank<num_ranks; rank++)); do
     worker_host="${hosts[$rank]}"
-    worker_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=$rank TB_SINGLE_LOG=1 TB_MASTER_ADDR=$master_host $env_string '$transferbench_path'$tb_args_escaped"
+    worker_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=$rank TB_SINGLE_LOG=1 TB_MASTER_ADDR=$master_addr $env_string '$transferbench_path'$tb_args_escaped"
     ssh -q -o LogLevel=ERROR "$worker_host" "$worker_cmd" >/dev/null 2>&1 &
     worker_pids+=($!)
     worker_hosts+=("$worker_host")
 done
 
 # Start master rank (TransferBench will wait for all workers to connect)
-master_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=0 TB_SINGLE_LOG=1 $env_string '$transferbench_path'$tb_args_escaped"
+master_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=0 TB_SINGLE_LOG=1 TB_MASTER_ADDR=$master_addr $env_string '$transferbench_path'$tb_args_escaped"
 if ! ssh -q -o LogLevel=ERROR "$master_host" "$master_cmd"; then
     echo "ERROR: Master rank failed on $master_host" >&2
     # Clean up worker processes before exiting
