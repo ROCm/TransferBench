@@ -199,7 +199,7 @@ trap cleanup INT TERM
 # literal IPv4, since the master address is resolved remotely and only over AF_INET.
 resolve_master_addr() {
     local host="$1" addr ipv4
-    addr=$(ssh -G "$host" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+    addr=$(ssh -G -- "$host" 2>/dev/null | awk '/^hostname /{print $2; exit}')
     [[ -z "$addr" ]] && addr="$host"
 
     if [[ ! "$addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
