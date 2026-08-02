@@ -239,7 +239,7 @@ for ((rank=1; rank<num_ranks; rank++)); do
 done
 
 # Start master rank (TransferBench will wait for all workers to connect)
-master_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=0 TB_SINGLE_LOG=1 TB_MASTER_ADDR=$master_addr $env_string '$transferbench_path'$tb_args_escaped"
+master_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=0 TB_SINGLE_LOG=1 TB_MASTER_ADDR='$master_addr' $env_string '$transferbench_path'$tb_args_escaped"
 if ! ssh -q -o LogLevel=ERROR "$master_host" "$master_cmd"; then
     echo "ERROR: Master rank failed on $master_host" >&2
     # Clean up worker processes before exiting
