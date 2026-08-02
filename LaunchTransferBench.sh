@@ -232,7 +232,7 @@ done
 
 for ((rank=1; rank<num_ranks; rank++)); do
     worker_host="${hosts[$rank]}"
-    worker_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=$rank TB_SINGLE_LOG=1 TB_MASTER_ADDR=$master_addr $env_string '$transferbench_path'$tb_args_escaped"
+    worker_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=$rank TB_SINGLE_LOG=1 TB_MASTER_ADDR='$master_addr' $env_string '$transferbench_path'$tb_args_escaped"
     ssh -q -o LogLevel=ERROR "$worker_host" "$worker_cmd" >/dev/null 2>&1 &
     worker_pids+=($!)
     worker_hosts+=("$worker_host")
