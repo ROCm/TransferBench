@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <initializer_list>
+#include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <unordered_map>

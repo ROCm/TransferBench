@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -36,8 +37,9 @@ static bool AnvilVerbose() {
 
 #define CHECK_HSAKMT_SUCCESS(call, msg)                                        \
   do {                                                                         \
-    if ((call) != HSAKMT_STATUS_SUCCESS) {                                     \
-      std::cout << "ERROR code: " << std::dec << call << " " << msg            \
+    HSAKMT_STATUS _hsakmt_status = (call);                                     \
+    if (_hsakmt_status != HSAKMT_STATUS_SUCCESS) {                             \
+      std::cout << "ERROR code: " << std::dec << _hsakmt_status << " " << msg  \
                 << " (File: " << __FILE__ << ", Line: " << __LINE__ << ")"     \
                 << std::endl;                                                  \
       exit(EXIT_FAILURE);                                                      \
@@ -130,7 +132,8 @@ static const std::string getBusId(int deviceId) {
   CHECK_HIP_ERROR(hipDeviceGetPCIBusId(busIdChar, sizeof(busIdChar), deviceId));
   // we need the hex in lower case format
   for (size_t i = 0; i < sizeof(busIdChar); i++) {
-    busIdChar[i] = std::tolower(busIdChar[i]);
+    busIdChar[i] = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(busIdChar[i])));
   }
   return std::string(busIdChar);
 }
@@ -841,6 +844,6 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId, int rotation) {
   return mi300xOamMap[srcOamId][dstOamId] * 2;
 }
 
-AnvilLib& anvil = anvil.getInstance();
+AnvilLib& anvil = AnvilLib::getInstance();
 
 } // namespace anvil
