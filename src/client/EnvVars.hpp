@@ -417,19 +417,20 @@ public:
     printf("\n");
     printf("Environment variables (back-end):\n");
     printf("====================================\n");
-    printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
-    printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
+    printf(" TB_DUMP_CFG_FILE    - Writes executed transfers to a config file\n");
+    printf(" TB_DUMP_LINES       - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
+    printf(" TB_FORCE_SINGLE_POD - Forces all ranks into one pod (skips pod query)\n");
     printf(" TB_MASTER_ADDR      - Rank 0 hostname or IPv4 for workers; optional on rank 0 (auto-detected if unset)\n");
     printf(" TB_MASTER_IFACE     - When TB_MASTER_ADDR unset on rank 0, optional interface for IPv4 detection (e.g. eth0)\n");
     printf(" TB_MASTER_PORT      - Used to set Rank 0 port for socket communicator (default: 29500)\n");
+    printf(" TB_NIC_FILTER       - Regex filter to limit NIC visibility for NIC executors\n");
+    printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
+    printf(" TB_PAUSE            - Pauses startup for debugger attachment\n");
+    printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
+    printf(" TB_SHOW_ALL_NUMA    - Shows all CPU NUMA nodes incl. those with no cores (default: skip core-less)\n");
     printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
     printf(" TB_VERBOSE          - Enables additional internal logging\n");
-    printf(" TB_DUMP_CFG_FILE    - Writes executed transfers to a config file\n");
-    printf(" TB_DUMP_LINES       - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
-    printf(" TB_NIC_FILTER       - Regex filter to limit NIC visibility for NIC executors\n");
-    printf(" TB_FORCE_SINGLE_POD - Forces all ranks into one pod (skips pod query)\n");
     printf(" TB_WALLCLOCK_RATE   - Overrides queried GPU wallclock rate if needed\n");
-    printf(" TB_PAUSE            - Pauses startup for debugger attachment\n");
   }
 
   void Print(std::string const& name, int32_t const value, const char* format, ...) const
