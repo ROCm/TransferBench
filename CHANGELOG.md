@@ -4,10 +4,12 @@ Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
 ## v1.70.00
-## Added
+### Added
 - Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
 - Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware.  This provides
   an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
+### Modified
+- CPU NUMA nodes with 0 cores will now be hidden.  To re-enable, set TB_SHOW_ALL_NUMA=1
 
 ## v1.69.00
 ### Added

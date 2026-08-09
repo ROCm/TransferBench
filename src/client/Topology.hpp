@@ -27,20 +27,9 @@ THE SOFTWARE.
 
 static int RemappedCpuIndex(int origIdx)
 {
-  static std::vector<int> remappingCpu;
-
-  // Build CPU remapping on first use
-  // Skip numa nodes that are not configured
-  if (remappingCpu.empty()) {
-    for (int node = 0; node <= numa_max_node(); node++) {
-      if (numa_bitmask_isbitset(numa_get_mems_allowed(), node))
-        remappingCpu.push_back(node);
-      else {
-        remappingCpu.push_back(-1);
-      }
-    }
-  }
-  return remappingCpu[origIdx];
+  // Map a logical CPU NUMA index to its physical NUMA node using the same mapping
+  // the core library uses (honors TB_SHOW_ALL_NUMA and core-less node skipping).
+  return TransferBench::GetCpuNumaPhysicalNode(origIdx);
 }
 
 static void PrintNicToGPUTopo(bool outputToCsv)
@@ -89,7 +78,13 @@ void DisplaySingleRankTopology(bool outputToCsv)
   } else {
     printf("\nDetected Topology:\n");
     printf("==================\n");
-    printf("  %d configured CPU NUMA node(s) [%d total]\n", numCpus, numa_max_node() + 1);
+    int hiddenNuma = numa_num_configured_nodes() - numCpus;
+    if (hiddenNuma > 0) {
+      printf("  %d configured CPU NUMA node(s) [%d total] (%d core-less node(s) hidden; set TB_SHOW_ALL_NUMA=1 to show)\n",
+             numCpus, numa_max_node() + 1, hiddenNuma);
+    } else {
+      printf("  %d configured CPU NUMA node(s) [%d total]\n", numCpus, numa_max_node() + 1);
+    }
     printf("  %d GPU device(s)\n", numGpus);
     printf("  %d Supported NIC device(s)\n", numNics);
   }
@@ -121,8 +116,9 @@ void DisplaySingleRankTopology(bool outputToCsv)
       if (numa_node_of_cpu(j) == nodeI) numCpuCores++;
     printf(" %5d %c", numCpuCores, sep);
 
+    // GetClosestCpuNumaToGpu returns a logical CPU index, so compare against i (logical)
     for (int j = 0; j < numGpus; j++) {
-      if (TransferBench::GetClosestCpuNumaToGpu(j) == nodeI) {
+      if (TransferBench::GetClosestCpuNumaToGpu(j) == i) {
         printf(" %d", j);
       }
     }

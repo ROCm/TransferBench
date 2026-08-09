@@ -486,6 +486,14 @@ namespace TransferBench
   int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank = -1);
 
   /**
+   * Returns the physical NUMA node id backing a logical CPU NUMA index
+   *
+   * @param[in] cpuIndex        Logical CPU NUMA index (as exposed by GetNumExecutors(EXE_CPU))
+   * @returns Physical NUMA node id, or cpuIndex unchanged if out of range
+   */
+  int GetCpuNumaPhysicalNode(int cpuIndex);
+
+  /**
    * Returns the index of the NUMA node closest to the given NIC
    *
    * @param[in] nicIndex        Index of the NIC to query
@@ -1032,6 +1040,13 @@ namespace {
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
 
+    // Translate a logical CPU NUMA index (as exposed to users) into the physical
+    // NUMA node id used by libnuma / HSA.  Returns the index unchanged if out of range.
+    int GetCpuPhysicalNode(int logicalIdx) const;
+    // Translate a physical NUMA node id into its logical CPU index, or -1 if the node
+    // is not exposed (e.g. a core-less node skipped by default).
+    int GetCpuLogicalNode(int physicalNode) const;
+
 #if !defined(__NVCC__)
     ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
     ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
@@ -1062,6 +1077,12 @@ namespace {
     std::vector<hsa_agent_t> cpuAgents;
     std::vector<hsa_agent_t> gpuAgents;
 #endif
+
+    // CPU NUMA remapping (logical index <-> physical NUMA node)
+    // By default core-less NUMA nodes are skipped; TB_SHOW_ALL_NUMA=1 exposes every node.
+    bool                showAllNuma = false;  ///< Expose all configured NUMA nodes (legacy behavior)
+    std::vector<int>    cpuNumaMap;           ///< logical index -> physical NUMA node
+    std::map<int, int>  cpuNumaRevMap;        ///< physical NUMA node -> logical index
 
     int commMode;                             ///< Communication mode
 
@@ -1099,6 +1120,10 @@ namespace {
     void SetupSocketCommunicator();
     void SetupMpiCommunicator();
     void CollectPodMembership(char* ppodId, int64_t& vpodId);
+    void BuildCpuNumaMap();
+    // Return the logical index of the exposed CPU NUMA node nearest (by numa_distance) to a
+    // physical node; used when the physical node itself is not exposed (e.g. core-less).
+    int  GetClosestLogicalCpu(int physicalNode) const;
     void GetRankTopology(RankTopology& topo);
     void CollectTopology();
     std::string GetCpuName() const;
@@ -1523,9 +1548,13 @@ namespace {
       deviceIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
     }
 
+    // For CPU memory, deviceIdx is a logical CPU NUMA index; translate to the physical
+    // NUMA node for all libnuma operations (policy, allocation, page verification).
+    int cpuPhysNode = IsCpuMemType(memType) ? System::Get().GetCpuPhysicalNode(deviceIdx) : deviceIdx;
+
     if (IsCpuMemType(memType)) {
       // Set NUMA policy prior to call to hipHostMalloc
-      numa_set_preferred(deviceIdx);
+      numa_set_preferred(cpuPhysNode);
     } else if (IsGpuMemType(memType)) {
       // Switch to the appropriate GPU
       // IMP: if the remapping above changes, remember to modify this!
@@ -1567,7 +1596,7 @@ namespace {
       if (IsCpuMemType(memType)) {
         memset(*memPtr, 0, roundedUpBytes);
         // Check that the allocated pages are actually on the correct NUMA node
-        ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
+        ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, cpuPhysNode));
         numa_set_preferred(-1);
       } else if (IsGpuMemType(memType)) {
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
@@ -1614,12 +1643,12 @@ namespace {
 #endif
 #endif
       } else if (memType == MEM_CPU_UNPINNED) {
-        *memPtr = numa_alloc_onnode(numBytes, deviceIdx);
+        *memPtr = numa_alloc_onnode(numBytes, cpuPhysNode);
       }
 
       // Check that the allocated pages are actually on the correct NUMA node
       memset(*memPtr, 0, numBytes);
-      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, deviceIdx));
+      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, cpuPhysNode));
 
       // Reset to default numa mem policy
       numa_set_preferred(-1);
@@ -1910,7 +1939,9 @@ namespace {
         return {ERR_FATAL,
                 "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
 
-      if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), memDevice.memIndex)) {
+      if (GetRank() == memDevice.memRank &&
+          !numa_bitmask_isbitset(numa_get_mems_allowed(),
+                                 System::Get().GetCpuPhysicalNode(memDevice.memIndex))) {
         return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
           memDevice.memIndex, memDevice.memRank};
       }
@@ -1927,7 +1958,9 @@ namespace {
         if (actualNumaIdx == -1) {
           return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
-        if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), actualNumaIdx))
+        if (GetRank() == memDevice.memRank &&
+            !numa_bitmask_isbitset(numa_get_mems_allowed(),
+                                   System::Get().GetCpuPhysicalNode(actualNumaIdx)))
           return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
             memDevice.memIndex, memDevice.memRank};
       }
@@ -4775,7 +4808,8 @@ namespace {
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    numa_run_on_node(exeIndex);
+    // exeIndex is a logical CPU NUMA index; pin the executor to the physical node.
+    numa_run_on_node(System::Get().GetCpuPhysicalNode(exeIndex));
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     vector<std::thread> asyncTransfers;
@@ -6954,9 +6988,11 @@ namespace {
     // TB_SINGLE_LOG    = Only rank 0 will produce output (useful if spawning multi-node socket)
     // TB_DUMP_CFG_FILE = Config file to dump executed Transfers
     // TB_PAUSE         = Insert a pause for debug attachment
+    // TB_SHOW_ALL_NUMA = Expose all CPU NUMA nodes (default skips nodes with no cores)
 
     verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
     bool singleLog = getenv("TB_SINGLE_LOG") ? atoi(getenv("TB_SINGLE_LOG")) : 0;
+    showAllNuma = getenv("TB_SHOW_ALL_NUMA") ? atoi(getenv("TB_SHOW_ALL_NUMA")) : 0;
 
     char* dumpCfgFilename = getenv("TB_DUMP_CFG_FILE");
     if (dumpCfgFilename) {
@@ -6996,6 +7032,10 @@ namespace {
     if (verbose && commMode == COMM_NONE) {
       Log("[INFO] Running in single node mode\n");
     }
+
+    // Build the CPU NUMA remapping before collecting topology so that all
+    // subsequent CPU indexing (agents, executors, memory) is consistent.
+    BuildCpuNumaMap();
 
     // Collect topology and distribute across all ranks
     CollectTopology();
@@ -7625,6 +7665,83 @@ namespace {
 #endif
   }
 
+  // Build the logical<->physical CPU NUMA node mapping.
+  // Default: skip NUMA nodes that have no CPU cores.
+  // TB_SHOW_ALL_NUMA=1: reproduce legacy behavior (logical index == physical node).
+  void System::BuildCpuNumaMap()
+  {
+    cpuNumaMap.clear();
+    cpuNumaRevMap.clear();
+
+    if (showAllNuma) {
+      // Legacy behavior: expose every configured node with identity mapping
+      int numConfigured = numa_num_configured_nodes();
+      for (int node = 0; node < numConfigured; node++)
+        cpuNumaMap.push_back(node);
+    } else {
+      // Skip NUMA nodes that have no CPU cores
+      int numConfiguredCpus = numa_num_configured_cpus();
+      for (int node = 0; node <= numa_max_node(); node++) {
+        int coreCount = 0;
+        for (int cpu = 0; cpu < numConfiguredCpus; cpu++)
+          if (numa_node_of_cpu(cpu) == node) coreCount++;
+        if (coreCount > 0)
+          cpuNumaMap.push_back(node);
+      }
+      // Safety fallback: if no node reported cores, fall back to legacy enumeration
+      if (cpuNumaMap.empty()) {
+        int numConfigured = numa_num_configured_nodes();
+        for (int node = 0; node < numConfigured; node++)
+          cpuNumaMap.push_back(node);
+      }
+    }
+
+    for (int logical = 0; logical < (int)cpuNumaMap.size(); logical++)
+      cpuNumaRevMap[cpuNumaMap[logical]] = logical;
+
+    if (verbose) {
+      std::string mapStr;
+      for (int logical = 0; logical < (int)cpuNumaMap.size(); logical++)
+        mapStr += " " + std::to_string(logical) + "->" + std::to_string(cpuNumaMap[logical]);
+      Log("[INFO] Rank %03d: CPU NUMA map (logical->physical)%s%s\n", rank, mapStr.c_str(),
+          showAllNuma ? " [TB_SHOW_ALL_NUMA]" : "");
+    }
+  }
+
+  int System::GetCpuPhysicalNode(int logicalIdx) const
+  {
+    if (logicalIdx < 0 || logicalIdx >= (int)cpuNumaMap.size())
+      return logicalIdx;
+    return cpuNumaMap[logicalIdx];
+  }
+
+  int System::GetCpuLogicalNode(int physicalNode) const
+  {
+    auto it = cpuNumaRevMap.find(physicalNode);
+    return (it == cpuNumaRevMap.end()) ? -1 : it->second;
+  }
+
+  int System::GetClosestLogicalCpu(int physicalNode) const
+  {
+    if (physicalNode < 0 || cpuNumaMap.empty()) return -1;
+
+    // Exact match: the physical node is itself exposed
+    int logical = GetCpuLogicalNode(physicalNode);
+    if (logical >= 0) return logical;
+
+    // Otherwise pick the exposed node with the smallest NUMA distance
+    int bestLogical = -1;
+    int bestDist    = std::numeric_limits<int>::max();
+    for (int i = 0; i < (int)cpuNumaMap.size(); i++) {
+      int dist = numa_distance(physicalNode, cpuNumaMap[i]);
+      if (dist < bestDist) {
+        bestDist    = dist;
+        bestLogical = i;
+      }
+    }
+    return bestLogical;
+  }
+
   void System::GetRankTopology(RankTopology& topo)
   {
     // Clear topology structure first
@@ -7644,19 +7761,22 @@ namespace {
     // Collect Pod membership
     CollectPodMembership(topo.ppodId, topo.vpodId);
 
-    // CPU Executor
-    int numCpus = numa_num_configured_nodes();
+    // CPU Executor (indexed by logical CPU NUMA index; core-less nodes may be skipped)
+    int numCpus = static_cast<int>(cpuNumaMap.size());
     topo.numExecutors[EXE_CPU] = numCpus;
 
     std::string cpuName = GetCpuName();
 
     for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
       topo.numExecutorSubIndices[{EXE_CPU, exeIndex}] = 0;
+      topo.numSubExecutors[{EXE_CPU, exeIndex}] = 0;
       topo.executorName[{EXE_CPU, exeIndex}] = cpuName;
     }
 
     for (int cpuCore = 0; cpuCore < numa_num_configured_cpus(); cpuCore++) {
-      topo.numSubExecutors[{EXE_CPU, numa_node_of_cpu(cpuCore)}]++;
+      int logical = GetCpuLogicalNode(numa_node_of_cpu(cpuCore));
+      if (logical >= 0)
+        topo.numSubExecutors[{EXE_CPU, logical}]++;
     }
 
     if (verbose) {
@@ -7745,7 +7865,11 @@ namespace {
     {
       numNics = GetIbvDeviceList().size();
       for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
-        topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+        // Report the closest CPU NUMA as a logical index (matching CPU executor indices).
+        // If the NIC's physical node is not exposed (e.g. core-less), fall back to the
+        // nearest exposed node by NUMA distance so the value stays a valid CPU index.
+        int nicPhysNode = GetIbvDeviceList()[exeIndex].numaNode;
+        topo.closestCpuNumaToNic[exeIndex] = GetClosestLogicalCpu(nicPhysNode);
         topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
         topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
         if (verbose) {
@@ -8224,12 +8348,14 @@ namespace {
       std::map<int, hsa_agent_t> cpuAgentMap;
       hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
 
+      // Index CPU agents by logical CPU index (physical node = cpuNumaMap[logical])
       cpuAgents.clear();
-      int numCpus = numa_num_configured_nodes();
+      int numCpus = static_cast<int>(cpuNumaMap.size());
       cpuAgents.resize(numCpus);
       for (int i = 0; i < numCpus; i++) {
-        if (cpuAgentMap.count(i)) {
-          cpuAgents[i] = cpuAgentMap[i];
+        int physNode = cpuNumaMap[i];
+        if (cpuAgentMap.count(physNode)) {
+          cpuAgents[i] = cpuAgentMap[physNode];
         }
       }
     }
@@ -8425,6 +8551,11 @@ namespace {
   int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank)
   {
     return System::Get().GetClosestCpuNumaToGpu(gpuIndex, targetRank);
+  }
+
+  int GetCpuNumaPhysicalNode(int cpuIndex)
+  {
+    return System::Get().GetCpuPhysicalNode(cpuIndex);
   }
 
   int GetClosestCpuNumaToNic(int nicIndex, int targetRank)
