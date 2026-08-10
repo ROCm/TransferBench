@@ -7662,8 +7662,6 @@ namespace {
         RecvData(0, numBytes, data);
       }
     }
-
-    Barrier(); // temporary workaround
   }
 
   bool System::Any(bool const flag) const

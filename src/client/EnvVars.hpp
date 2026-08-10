@@ -151,10 +151,11 @@ public:
     // Different hardware pick different GPU kernels
     // This performance difference is generally only noticable when executing fewer CUs
     int defaultGfxUnroll = 4;
-    if      (archName == "gfx906") defaultGfxUnroll = 8;
-    else if (archName == "gfx90a") defaultGfxUnroll = 8;
-    else if (archName == "gfx942") defaultGfxUnroll = 4;
-    else if (archName == "gfx950") defaultGfxUnroll = 4;
+    if      (archName == "gfx906")  defaultGfxUnroll = 8;
+    else if (archName == "gfx90a")  defaultGfxUnroll = 8;
+    else if (archName == "gfx942")  defaultGfxUnroll = 4;
+    else if (archName == "gfx950")  defaultGfxUnroll = 4;
+    else if (archName == "gfx1250") defaultGfxUnroll = 32;
 
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
