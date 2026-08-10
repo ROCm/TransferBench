@@ -5970,7 +5970,9 @@ namespace {
 
     int subIterations = 0;
     while (1) {
-      tdm::tdmReduce(p.dst, p.src, numSrcs, numDsts, sizeBytes, shmem, ldsBytes);
+      tdm::tdmReduce(reinterpret_cast<void**>(p.dst),
+                     const_cast<const void**>(reinterpret_cast<void**>(p.src)),
+                     numSrcs, numDsts, sizeBytes, shmem, ldsBytes);
       __syncthreads(); // Wait for all warps to finish this subiteration
       if (++subIterations == numSubIterations) break;
     }

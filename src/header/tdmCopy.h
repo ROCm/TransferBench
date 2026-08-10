@@ -586,6 +586,22 @@ __device__ inline void warpVecCopy(uint64_t* srcs, uint64_t* dsts,
     }
 }
 
+// ---- LDS (address space 3) pointer helper --------------------------------
+// `val`/`tmp` are 32-bit LDS byte offsets (exactly what the TDM load/store
+// builtins consume). To touch that staging memory with ordinary scalar
+// loads/stores we must build a pointer TAGGED as LDS (address space 3). A plain
+// reinterpret_cast<T*> yields a generic/flat pointer whose numeric value lands
+// in the GLOBAL aperture (an LDS offset like 0x19000 is a valid global VA), so
+// dereferencing it faults. Casting to an address_space(3) pointer makes the
+// compiler emit ds_* (LDS) accesses against the offset instead.
+template <typename T>
+using LdsPtr = T __attribute__((address_space(3)))*;
+
+template <typename T>
+__device__ inline LdsPtr<T> ldsCast(uint32_t off) {
+    return reinterpret_cast<LdsPtr<T>>(off);
+}
+
 // ---- issue one chunk of whole 256B rows (2D tile) through ONE LDS window. ---
 // Same single-buffered LDS window / RAW+WAR waits as the single-copy issueRows().
 // The first source lands in `val`; each subsequent source lands in `tmp` and is
@@ -604,8 +620,8 @@ __device__ inline void issueRows(uint64_t* srcs, uint64_t* dsts,
     if (numSrcs) {
       gfx1250_TDM_GROUP0 g0l(val, srcs[0] + off);
       load(g0l, g1);   waitTensor0();
-      PACKED_FLOAT*       vp = reinterpret_cast<PACKED_FLOAT*>(static_cast<uintptr_t>(val));
-      const PACKED_FLOAT* tp = reinterpret_cast<const PACKED_FLOAT*>(static_cast<uintptr_t>(tmp));
+      LdsPtr<PACKED_FLOAT>       vp = ldsCast<PACKED_FLOAT>(val);
+      LdsPtr<const PACKED_FLOAT> tp = ldsCast<const PACKED_FLOAT>(tmp);
       uint32_t nElems = (rows * WIDTH) / sizeof(PACKED_FLOAT);
       for (size_t s = 1; s < numSrcs; s++) {
         gfx1250_TDM_GROUP0 g0l(tmp, srcs[s] + off);
@@ -618,7 +634,7 @@ __device__ inline void issueRows(uint64_t* srcs, uint64_t* dsts,
       // Empty source: fill this warp's reduce window with the MEMSET_CHAR byte
       // pattern so the TDM store below writes a memset() result to each dst
       // (mirrors GpuReduceKernel's numSrcs==0 path). No load is issued.
-      uint32_t* vp     = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(val));
+      LdsPtr<uint32_t> vp = ldsCast<uint32_t>(val);
       uint32_t  nWords = (rows * WIDTH) / sizeof(uint32_t);
       for (uint32_t u = warpThread; u < nWords; u += warpSize) vp[u] = MEMSET_WORD;
     }
@@ -646,13 +662,13 @@ __device__ inline void issueRow1d(uint64_t* srcs, uint64_t* dsts,
       gfx1250_TDM_GROUP0 g0l(val, srcs[0] + off); // unused higher dims -> zero (see load())
       load(g0l, g1);   waitTensor0();        // RAW: fill LDS before store/reduce reads it
       // LDS byte-offsets -> typed shared pointers for the reduce accumulation
-      PACKED_FLOAT*       vp = reinterpret_cast<PACKED_FLOAT*>(static_cast<uintptr_t>(val));
-      const PACKED_FLOAT* tp = reinterpret_cast<const PACKED_FLOAT*>(static_cast<uintptr_t>(tmp));
+      LdsPtr<PACKED_FLOAT>       vp = ldsCast<PACKED_FLOAT>(val);
+      LdsPtr<const PACKED_FLOAT> tp = ldsCast<const PACKED_FLOAT>(tmp);
       uint32_t nP = nbytes / sizeof(PACKED_FLOAT);         // whole PACKED_FLOAT elements
       // Remaining whole floats (nbytes not a PACKED_FLOAT multiple); float data is
       // 4-byte aligned so the DS1 tail is always a whole number of floats.
-      float*       vpf = reinterpret_cast<float*>(static_cast<uintptr_t>(val));
-      const float* tpf = reinterpret_cast<const float*>(static_cast<uintptr_t>(tmp));
+      LdsPtr<float>       vpf = ldsCast<float>(val);
+      LdsPtr<const float> tpf = ldsCast<const float>(tmp);
       uint32_t nF     = nbytes >> 2;
       uint32_t fStart = nP * (sizeof(PACKED_FLOAT) >> 2);
       for (size_t s = 1; s < numSrcs; s++) {
@@ -665,12 +681,12 @@ __device__ inline void issueRow1d(uint64_t* srcs, uint64_t* dsts,
       // Empty source: fill this warp's tail window with the MEMSET_CHAR byte
       // pattern (memset semantics), then the store below broadcasts it to each
       // dst. No load is issued.
-      uint32_t* vp     = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(val));
+      LdsPtr<uint32_t> vp = ldsCast<uint32_t>(val);
       uint32_t  nWords = nbytes / sizeof(uint32_t);
       for (uint32_t u = warpThread; u < nWords; u += warpSize) vp[u] = MEMSET_WORD;
       uint32_t rem = nbytes & 3u;                // sub-word remainder (rare for float data)
       if (rem && warpThread == 0) {
-        uint8_t* vb = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(val));
+        LdsPtr<uint8_t> vb = ldsCast<uint8_t>(val);
         for (uint32_t b = 0; b < rem; ++b) vb[nWords * 4 + b] = MEMSET_CHAR;
       }
     }
@@ -757,9 +773,12 @@ __device__ inline void issue(void** dsts, const void** srcs, uint32_t numSrcs, u
     size_t myStart = rank * base + (rank < extra ? rank : extra);
     if (myRows == 0) return;
 
-    // shift this warp's reduce buffers into its own window
-    val += rank * window;
-    tmp += rank * window;
+    // Give this warp its own window and split it evenly into two halves:
+    //   val = running sum (first half), tmp = staging for extra srcs (second half).
+    // window is a multiple of RWIDTH (= 2*WIDTH), so window/2 is a WIDTH-multiple
+    // large enough to hold rowsPerChunk (= window/RWIDTH) rows in each half.
+    val = ldsBase + rank * window;
+    tmp = val + window / 2;
 
     for (size_t r = 0; r < myRows; r += rowsPerChunk) {
         uint32_t chunkRows = (myRows - r < rowsPerChunk)
