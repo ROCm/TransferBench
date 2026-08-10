@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include <atomic>
 #include <cassert>
 #include <climits>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -36,6 +37,7 @@ THE SOFTWARE.
 #include <functional>
 #include <future>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <net/if.h>
 #include <netdb.h>
@@ -2962,36 +2964,139 @@ namespace {
     vector<set<pair<int,int>>> perIterCUs;        ///< GFX-Executor only. XCC:CU used per iteration
   };
 
+  // Persistent pool of worker threads, created once and reused across all iterations to
+  // avoid the per-iteration thread creation overhead of std::async/std::thread.
+  // Each worker runs an optional init hook once at startup (used to bind NUMA affinity and
+  // set the HIP device for the executor the pool serves).
+  class ThreadPool
+  {
+  public:
+    // numThreads worker threads are spawned immediately.  perThreadInit (if provided) runs
+    // once on each worker before it starts servicing tasks.
+    ThreadPool(int numThreads, std::function<void()> perThreadInit = {})
+    {
+      numThreads = std::max(1, numThreads);
+      workers.reserve(numThreads);
+      for (int i = 0; i < numThreads; ++i)
+        workers.emplace_back(&ThreadPool::WorkerLoop, this, perThreadInit);
+    }
+
+    ~ThreadPool()
+    {
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        stop = true;
+      }
+      cv.notify_all();
+      for (auto& worker : workers)
+        if (worker.joinable()) worker.join();
+    }
+
+    ThreadPool(ThreadPool const&)            = delete;
+    ThreadPool& operator=(ThreadPool const&) = delete;
+
+    // Run fn(i) for i in [0, count), spreading the calls across the worker threads, and block
+    // until every call has completed.  Safe to call repeatedly; no allocation per call.
+    void ParallelFor(int count, std::function<void(int)> const& fn)
+    {
+      if (count <= 0) return;
+      {
+        // Publish the new batch.  Every worker is woken and runs until the shared index is
+        // exhausted; completion is signalled once all workers have parked again (not when the
+        // last task finishes) so a lagging worker can never observe the next batch's reset.
+        std::unique_lock<std::mutex> lock(mutex);
+        task        = &fn;
+        nextIndex.store(0);
+        totalTasks  = count;
+        doneWorkers = 0;
+        ++generation;
+      }
+      cv.notify_all();
+
+      // All work runs on the (NUMA-pinned) worker threads; the caller only waits so that a
+      // subexecutor's memory traffic is never issued from an unpinned dispatch thread.
+      std::unique_lock<std::mutex> lock(mutex);
+      doneCv.wait(lock, [this] { return doneWorkers == (int)workers.size(); });
+    }
+
+  private:
+    void WorkerLoop(std::function<void()> perThreadInit)
+    {
+      if (perThreadInit) perThreadInit();
+
+      uint64_t lastGeneration = 0;
+      while (true) {
+        std::function<void(int)> const* localTask = nullptr;
+        int localCount = 0;
+        {
+          std::unique_lock<std::mutex> lock(mutex);
+          cv.wait(lock, [this, &lastGeneration] { return stop || generation != lastGeneration; });
+          if (stop) return;
+          lastGeneration = generation;
+          localTask  = task;
+          localCount = totalTasks;
+        }
+
+        // Claim task indices off the shared counter until exhausted
+        while (true) {
+          int idx = nextIndex.fetch_add(1);
+          if (idx >= localCount) break;
+          (*localTask)(idx);
+        }
+
+        // Mark this worker parked; the last one to park wakes the waiting caller
+        std::unique_lock<std::mutex> lock(mutex);
+        if (++doneWorkers == (int)workers.size())
+          doneCv.notify_one();
+      }
+    }
+
+    std::vector<std::thread>        workers;
+    std::mutex                      mutex;           ///< Guards dispatch, generation, completion
+    std::condition_variable         cv;              ///< Wakes workers for a new batch
+    std::condition_variable         doneCv;          ///< Wakes ParallelFor when batch completes
+    std::function<void(int)> const* task = nullptr;  ///< Current batch task (owned by caller)
+    std::atomic<int>                nextIndex{0};    ///< Next task index to claim
+    int                             totalTasks = 0;  ///< Size of current batch
+    int                             doneWorkers = 0; ///< Workers parked for the current batch
+    uint64_t                        generation = 0;  ///< Incremented per batch to wake workers
+    bool                            stop = false;    ///< Set at destruction
+  };
+
   // Internal resources allocated per Executor
   struct ExeInfo
   {
-    size_t                     totalBytes;        ///< Total bytes this executor transfers
-    double                     totalDurationMsec; ///< Total duration for all iterations for this Executor
-    int                        totalSubExecs;     ///< Total number of subExecutors to use
-    bool                       useSubIndices;     ///< Use subexecutor indicies
-    int                        numSubIndices;     ///< Number of subindices this ExeDevice has
-    vector<SubExecParam>       subExecParamCpu;   ///< Subexecutor parameters for this executor
-    vector<TransferResources>  resources;         ///< Per-Transfer resources
+    size_t                     totalBytes;           ///< Total bytes this executor transfers
+    double                     totalDurationMsec;    ///< Total duration for all iterations for this Executor
+    int                        totalSubExecs;        ///< Total number of subExecutors to use
+    bool                       useSubIndices;        ///< Use subexecutor indicies
+    int                        numSubIndices;        ///< Number of subindices this ExeDevice has
+    vector<SubExecParam>       subExecParamCpu;      ///< Subexecutor parameters for this executor
+    vector<TransferResources>  resources;            ///< Per-Transfer resources
 
     // For GPU-Executors
-    SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    SubExecParam*              subExecParamGpu;      ///< GPU copy of subExecutor parameters
     bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
-    vector<hipStream_t>        streams;           ///< HIP streams to launch on
-    vector<hipEvent_t>         startEvents;       ///< HIP start timing event
-    vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
-    int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
-    int                        gfxKernelToUse;    ///< (GFX-only) Which GFX kernel to use
+    vector<hipStream_t>        streams;              ///< HIP streams to launch on
+    vector<hipEvent_t>         startEvents;          ///< HIP start timing event
+    vector<hipEvent_t>         stopEvents;           ///< HIP stop timing event
+    int                        wallClockRate;        ///< (GFX-only) Device wall clock rate
+    int                        gfxKernelToUse;       ///< (GFX-only) Which GFX kernel to use
 
     // For TDM-Executors
-    uint32_t                   ldsBytesActual;    ///< Actual number of LDS bytes to use as buffer
+    uint32_t                   ldsBytesActual;       ///< Actual number of LDS bytes to use as buffer
+
+    // Persistent worker pool servicing this executor's Transfers/subexecutors across all
+    // iterations.  Created in PrepareExecutor (NUMA-pinned), destroyed in TeardownExecutor.
+    std::unique_ptr<ThreadPool> pool;
   };
 
   // Structure to track PCIe topology
   struct PCIeNode
   {
-    std::string        address;                   ///< PCIe address for this PCIe node
-    std::string        description;               ///< Description for this PCIe node
-    std::set<PCIeNode> children;                  ///< Children PCIe nodes
+    std::string        address;                      ///< PCIe address for this PCIe node
+    std::string        description;                  ///< Description for this PCIe node
+    std::set<PCIeNode> children;                     ///< Children PCIe nodes
 
     // Default constructor
     PCIeNode() : address(""), description("") {}
@@ -4625,6 +4730,25 @@ namespace {
       }
     }
 
+    // Create the persistent, NUMA-pinned worker pool that services this executor across all
+    // iterations.  Sized to the executor's peak intra-executor concurrency.  NIC executors
+    // post work single-threaded and need no pool.
+    if (exeDevice.exeRank == localRank) {
+      if (exeDevice.exeType == EXE_CPU) {
+        int const physNode = System::Get().GetCpuPhysicalNode(exeDevice.exeIndex);
+        exeInfo.pool.reset(new ThreadPool(std::max(1, exeInfo.totalSubExecs),
+                                          [physNode] { numa_run_on_node(physNode); }));
+      } else if (IsGpuExeType(exeDevice.exeType)) {
+        int const numThreads = std::max({1, (int)exeInfo.resources.size(), (int)exeInfo.streams.size()});
+        int const exeIndex   = exeDevice.exeIndex;
+        int const physNode   = (exeNuma >= 0) ? System::Get().GetCpuPhysicalNode(exeNuma) : -1;
+        exeInfo.pool.reset(new ThreadPool(numThreads, [physNode, exeIndex] {
+          if (physNode >= 0) numa_run_on_node(physNode);
+          (void)hipSetDevice(exeIndex);
+        }));
+      }
+    }
+
     return ERR_NONE;
   }
 
@@ -4639,6 +4763,9 @@ namespace {
   {
     int const localRank = GetRank();
     bool const verbose  = System::Get().IsVerbose();
+
+    // Tear down the persistent worker pool (joins all workers) now that all iterations are done.
+    exeInfo.pool.reset();
 
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
@@ -4776,58 +4903,62 @@ namespace {
     } while (++subIteration != numSubIterations);
   }
 
-  // Execution of a single CPU Transfers
-  static void ExecuteCpuTransfer(int           const  iteration,
-                                 ConfigOptions const& cfg,
-                                 int           const  exeIndex,
-                                 TransferResources&   rss)
-  {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-    vector<std::thread> childThreads;
-
-    for (auto const& subExecParam : rss.subExecParamCpu)
-      childThreads.emplace_back(std::thread(CpuReduceKernel, std::cref(subExecParam), cfg.general.numSubIterations));
-
-    for (auto& subExecThread : childThreads)
-      subExecThread.join();
-    childThreads.clear();
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0) / cfg.general.numSubIterations;
-
-    if (iteration >= 0) {
-      rss.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration)
-        rss.perIterMsec.push_back(deltaMsec);
-    }
-  }
-
   // Execution of a single CPU executor
   static ErrResult RunCpuExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    // exeIndex is a logical CPU NUMA index; pin the executor to the physical node.
-    numa_run_on_node(System::Get().GetCpuPhysicalNode(exeIndex));
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    using Clock = std::chrono::high_resolution_clock;
 
-    vector<std::thread> asyncTransfers;
-    for (auto& rss : exeInfo.resources) {
-      asyncTransfers.emplace_back(std::thread(ExecuteCpuTransfer,
-                                              iteration,
-                                              std::cref(cfg),
-                                              exeIndex,
-                                              std::ref(rss)));
+    // Flatten every subexecutor across all of this executor's Transfers into a single task
+    // list serviced by the persistent, NUMA-pinned worker pool.  This collapses the former
+    // per-transfer + per-subexecutor thread creation into zero per-iteration thread spawns.
+    struct CpuTask { SubExecParam const* param; int rssIdx; };
+    std::vector<CpuTask> tasks;
+    tasks.reserve(exeInfo.totalSubExecs);
+    for (int r = 0; r < (int)exeInfo.resources.size(); ++r)
+      for (auto const& p : exeInfo.resources[r].subExecParamCpu)
+        tasks.push_back({&p, r});
+
+    int const numTasks = (int)tasks.size();
+    std::vector<Clock::time_point> starts(numTasks), stops(numTasks);
+
+    auto cpuStart = Clock::now();
+    exeInfo.pool->ParallelFor(numTasks, [&](int i) {
+      starts[i] = Clock::now();
+      CpuReduceKernel(*tasks[i].param, cfg.general.numSubIterations);
+      stops[i]  = Clock::now();
+    });
+    auto cpuDelta = Clock::now() - cpuStart;
+
+    if (iteration >= 0) {
+      // Executor duration: wall-clock span of the whole batch
+      exeInfo.totalDurationMsec += std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count()
+                                   * 1000.0 / cfg.general.numSubIterations;
+
+      // Per-transfer duration: span from the earliest subexecutor start to the latest stop
+      // among that Transfer's subexecutors (they run concurrently in the pool).
+      for (int r = 0; r < (int)exeInfo.resources.size(); ++r) {
+        TransferResources& rss = exeInfo.resources[r];
+        auto minStart = Clock::time_point::max();
+        auto maxStop  = Clock::time_point::min();
+        bool any = false;
+        for (int i = 0; i < numTasks; ++i) {
+          if (tasks[i].rssIdx != r) continue;
+          any = true;
+          minStart = std::min(minStart, starts[i]);
+          maxStop  = std::max(maxStop,  stops[i]);
+        }
+        double deltaMsec = any
+          ? std::chrono::duration_cast<std::chrono::duration<double>>(maxStop - minStart).count()
+              * 1000.0 / cfg.general.numSubIterations
+          : 0.0;
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration)
+          rss.perIterMsec.push_back(deltaMsec);
+      }
     }
-    for (auto& asyncTransfer : asyncTransfers)
-      asyncTransfer.join();
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
-
-    if (iteration >= 0)
-      exeInfo.totalDurationMsec += deltaMsec;
     return ERR_NONE;
   }
 
@@ -5573,25 +5704,23 @@ namespace {
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
     if (cfg.general.useMultiStream) {
-      // Launch one thread per Transfer in separate streams
-      vector<std::future<ErrResult>> asyncTransfers;
-      for (int i = 0; i < exeInfo.streams.size(); i++) {
-        asyncTransfers.emplace_back(std::async(std::launch::async,
-                                               ExecuteGpuTransfer,
-                                               iteration,
-                                               exeInfo.totalSubExecs,
-                                               exeInfo.subExecParamGpu,
-                                               exeInfo.streams[i],
-                                               cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                               cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
-                                               xccDim,
-                                               std::cref(cfg),
-                                               exeInfo.gfxKernelToUse,
-                                               exeInfo.subExecParamHostAccessible,
-                                               std::ref(exeInfo.resources[i])));
-      }
-      for (auto& asyncTransfer : asyncTransfers)
-        ERR_CHECK(asyncTransfer.get());
+      // Launch one task per Transfer in separate streams on the persistent worker pool
+      int const numStreams = (int)exeInfo.streams.size();
+      std::vector<ErrResult> tfrErr(numStreams);
+      exeInfo.pool->ParallelFor(numStreams, [&](int i) {
+        tfrErr[i] = ExecuteGpuTransfer(iteration,
+                                       exeInfo.totalSubExecs,
+                                       exeInfo.subExecParamGpu,
+                                       exeInfo.streams[i],
+                                       cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                       cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                       xccDim,
+                                       cfg,
+                                       exeInfo.gfxKernelToUse,
+                                       exeInfo.subExecParamHostAccessible,
+                                       exeInfo.resources[i]);
+      });
+      for (auto& e : tfrErr) ERR_CHECK(e);
     } else {
       // Launch all Transfers in one kernel launch (avoid extra thread creation)
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
@@ -5763,22 +5892,19 @@ namespace {
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteDmaTransfer,
-                                             iteration,
-                                             exeInfo.useSubIndices,
-                                             exeIndex,
-                                             exeInfo.streams[i],
-                                             cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
-
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+    int const numTransfers = (int)exeInfo.resources.size();
+    std::vector<ErrResult> tfrErr(numTransfers);
+    exeInfo.pool->ParallelFor(numTransfers, [&](int i) {
+      tfrErr[i] = ExecuteDmaTransfer(iteration,
+                                     exeInfo.useSubIndices,
+                                     exeIndex,
+                                     exeInfo.streams[i],
+                                     cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                     cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                     cfg,
+                                     exeInfo.resources[i]);
+    });
+    for (auto& e : tfrErr) ERR_CHECK(e);
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5850,21 +5976,18 @@ namespace {
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteBatchDmaTransfer,
-                                             iteration,
-                                             exeIndex,
-                                             exeInfo.streams[i],
-                                             cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
-
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+    int const numTransfers = (int)exeInfo.resources.size();
+    std::vector<ErrResult> tfrErr(numTransfers);
+    exeInfo.pool->ParallelFor(numTransfers, [&](int i) {
+      tfrErr[i] = ExecuteBatchDmaTransfer(iteration,
+                                          exeIndex,
+                                          exeInfo.streams[i],
+                                          cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                          cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                          cfg,
+                                          exeInfo.resources[i]);
+    });
+    for (auto& e : tfrErr) ERR_CHECK(e);
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5996,24 +6119,22 @@ namespace {
     ERR_CHECK(hipSetDevice(exeIndex));
 
     if (cfg.general.useMultiStream && exeInfo.streams.size() > 1 ) {
-      // Launch one thread per Transfer in separate streams
-      vector<std::future<ErrResult>> asyncTransfers;
-      for (int i = 0; i < exeInfo.streams.size(); i++) {
-        asyncTransfers.emplace_back(std::async(std::launch::async,
-                                               ExecuteTdmTransfer,
-                                               iteration,
-                                               exeInfo.totalSubExecs,
-                                               exeInfo.subExecParamGpu,
-                                               exeInfo.streams[i],
-                                               cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                               cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
-                                               std::cref(cfg),
-                                               exeInfo.subExecParamHostAccessible,
-                                               exeInfo.ldsBytesActual,
-                                               std::ref(exeInfo.resources[i])));
-      }
-      for (auto& asyncTransfer : asyncTransfers)
-        ERR_CHECK(asyncTransfer.get());
+      // Launch one task per Transfer in separate streams on the persistent worker pool
+      int const numStreams = (int)exeInfo.streams.size();
+      std::vector<ErrResult> tfrErr(numStreams);
+      exeInfo.pool->ParallelFor(numStreams, [&](int i) {
+        tfrErr[i] = ExecuteTdmTransfer(iteration,
+                                       exeInfo.totalSubExecs,
+                                       exeInfo.subExecParamGpu,
+                                       exeInfo.streams[i],
+                                       cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                       cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                       cfg,
+                                       exeInfo.subExecParamHostAccessible,
+                                       exeInfo.ldsBytesActual,
+                                       exeInfo.resources[i]);
+      });
+      for (auto& e : tfrErr) ERR_CHECK(e);
     } else {
       // Launch all Transfers in one kernel launch (avoid extra thread creation)
       ExecuteTdmTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
@@ -6360,6 +6481,18 @@ namespace {
     }
 
     // Perform iterations
+    // Persistent pool that dispatches the local executors concurrently each iteration,
+    // replacing per-iteration std::async.  Each RunExecutor still sets its own device/NUMA.
+    // ExeInfo pointers are resolved up-front so the parallel lambda never touches the map
+    // (std::map::operator[] is non-const and not safe to call concurrently).
+    std::vector<ExeInfo*> localExeInfos;
+    localExeInfos.reserve(localExecutors.size());
+    for (auto const& exeDevice : localExecutors)
+      localExeInfos.push_back(&executorMap[exeDevice]);
+
+    ThreadPool executorPool((int)localExecutors.size());
+    std::vector<ErrResult> exeErrors(localExecutors.size());
+
     size_t numTimedIterations = 0;
     double totalCpuTimeSec = 0.0;
     for (int iteration = -cfg.general.numWarmups; ; iteration++) {
@@ -6377,19 +6510,14 @@ namespace {
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
-      // Execute all Transfers in parallel
-      std::vector<std::future<ErrResult>> asyncExecutors;
-      for (auto const& exeDevice : localExecutors) {
-        asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
-                                               iteration,
-                                               std::cref(cfg),
-                                               std::cref(exeDevice),
-                                               std::ref(executorMap[exeDevice])));
-      }
+      // Execute all local executors in parallel on the persistent executor pool
+      executorPool.ParallelFor((int)localExecutors.size(), [&](int i) {
+        exeErrors[i] = RunExecutor(iteration, cfg, localExecutors[i], *localExeInfos[i]);
+      });
 
-      // Wait for all threads to finish
-      for (auto& asyncExecutor : asyncExecutors) {
-        ERR_APPEND(asyncExecutor.get(), errResults);
+      // Collect any errors reported by the executors
+      for (auto& exeErr : exeErrors) {
+        ERR_APPEND(exeErr, errResults);
       }
 
       // Wait for all ranks to finish

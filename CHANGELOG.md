@@ -10,6 +10,7 @@ Documentation for TransferBench is available at
   an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
 ### Modified
 - CPU NUMA nodes with 0 cores will now be hidden.  To re-enable, set TB_SHOW_ALL_NUMA=1
+- Switching to use of persistent threadpools to cut-down on thread creation overheads
 
 ## v1.69.00
 ### Added
