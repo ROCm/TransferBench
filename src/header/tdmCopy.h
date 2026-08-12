@@ -594,12 +594,29 @@ __device__ inline void warpVecCopy(uint64_t* srcs, uint64_t* dsts,
 // in the GLOBAL aperture (an LDS offset like 0x19000 is a valid global VA), so
 // dereferencing it faults. Casting to an address_space(3) pointer makes the
 // compiler emit ds_* (LDS) accesses against the offset instead.
+// ---- LDS pointer from the real base pointer + absolute byte offset --------
+// `val`/`tmp` are ABSOLUTE LDS byte offsets (ldsBase + per-warp shift), exactly
+// what the TDM load/store builtins consume. To touch that staging memory with
+// ordinary scalar loads/stores we must use a pointer that carries the correct
+// LDS aperture. Building one from a bare integer offset does NOT (it resolves to
+// the GLOBAL aperture and reads/writes don't alias the tensor-written LDS);
+// instead we offset from `ldsMem`, the real generic pointer to this block's LDS.
 template <typename T>
-using LdsPtr = T __attribute__((address_space(3)))*;
+__device__ inline T* ldsPtr(void* ldsMem, uint32_t absOff) {
+    uint32_t base = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ldsMem));
+    return reinterpret_cast<T*>(static_cast<char*>(ldsMem) + (absOff - base));
+}
 
-template <typename T>
-__device__ inline LdsPtr<T> ldsCast(uint32_t off) {
-    return reinterpret_cast<LdsPtr<T>>(off);
+// ---- LDS visibility fence between the tensor and vector memory pipes -------
+// s_wait_tensorcnt only orders tensor-op vs tensor-op, so it makes the pure copy
+// path (load->wait->store) correct but does NOT make the tensor engine's LDS
+// writes visible to this wave's vector (ds) reads, nor the ds writes visible to a
+// following tensor store. The reduce path interleaves ds reads/writes between the
+// tensor load and store, so it needs an explicit workgroup-scope fence at those
+// boundaries. (A __syncthreads() barrier is unusable here: warps with
+// rank >= issuers or myRows == 0 return early and would deadlock it.)
+__device__ __forceinline__ void ldsFence() {
+    __builtin_amdgcn_fence(__ATOMIC_ACQ_REL, "workgroup");
 }
 
 // ---- issue one chunk of whole 256B rows (2D tile) through ONE LDS window. ---
@@ -609,7 +626,7 @@ __device__ inline LdsPtr<T> ldsCast(uint32_t off) {
 template <typename PACKED_FLOAT>
 __device__ inline void issueRows(uint64_t* srcs, uint64_t* dsts,
                                  uint32_t numSrcs, uint32_t numDsts,
-                                 uint32_t val, uint32_t tmp, uint32_t rows,
+                                 uint32_t val, uint32_t tmp, void* ldsMem, uint32_t rows,
                                  uint32_t warpThread, uint32_t off = 0) {
     gfx1250_TDM_GROUP1 g1;
     g1.dataSize(DS4);
@@ -619,13 +636,13 @@ __device__ inline void issueRows(uint64_t* srcs, uint64_t* dsts,
 
     if (numSrcs) {
       gfx1250_TDM_GROUP0 g0l(val, srcs[0] + off);
-      load(g0l, g1);   waitTensor0();
-      LdsPtr<PACKED_FLOAT>       vp = ldsCast<PACKED_FLOAT>(val);
-      LdsPtr<const PACKED_FLOAT> tp = ldsCast<const PACKED_FLOAT>(tmp);
+      load(g0l, g1);   waitTensor0();   ldsFence();  // src0 LDS write visible to ds reads
+      PACKED_FLOAT*       vp = ldsPtr<PACKED_FLOAT>(ldsMem, val);
+      const PACKED_FLOAT* tp = ldsPtr<const PACKED_FLOAT>(ldsMem, tmp);
       uint32_t nElems = (rows * WIDTH) / sizeof(PACKED_FLOAT);
       for (size_t s = 1; s < numSrcs; s++) {
         gfx1250_TDM_GROUP0 g0l(tmp, srcs[s] + off);
-        load(g0l, g1);   waitTensor0();
+        load(g0l, g1);   waitTensor0();   ldsFence();  // srcS LDS write visible to ds reads
         for (uint32_t u = warpThread; u < nElems; u += warpSize) {
           vp[u] += tp[u];
         }
@@ -634,11 +651,12 @@ __device__ inline void issueRows(uint64_t* srcs, uint64_t* dsts,
       // Empty source: fill this warp's reduce window with the MEMSET_CHAR byte
       // pattern so the TDM store below writes a memset() result to each dst
       // (mirrors GpuReduceKernel's numSrcs==0 path). No load is issued.
-      LdsPtr<uint32_t> vp = ldsCast<uint32_t>(val);
+      uint32_t* vp = ldsPtr<uint32_t>(ldsMem, val);
       uint32_t  nWords = (rows * WIDTH) / sizeof(uint32_t);
       for (uint32_t u = warpThread; u < nWords; u += warpSize) vp[u] = MEMSET_WORD;
     }
 
+    ldsFence();  // ds writes (reduced/memset result) visible to the tensor store
     for (size_t d = 0; d < numDsts; d++) {
       gfx1250_TDM_GROUP0 g0s(val, dsts[d] + off);  // broadcast reduced result to each dst
       store(g0s, g1);  waitTensor0();
@@ -650,7 +668,7 @@ __device__ inline void issueRows(uint64_t* srcs, uint64_t* dsts,
 template <typename PACKED_FLOAT = float>
 __device__ inline void issueRow1d(uint64_t* srcs, uint64_t* dsts,
                                   uint32_t numSrcs, uint32_t numDsts,
-                                  uint32_t val, uint32_t tmp, uint32_t nbytes,
+                                  uint32_t val, uint32_t tmp, void* ldsMem, uint32_t nbytes,
                                   uint32_t warpThread, uint64_t off = 0) {
     gfx1250_TDM_GROUP1 g1;
     g1.dataSize(DS1);                        // 1-byte elements: exact length
@@ -660,20 +678,20 @@ __device__ inline void issueRow1d(uint64_t* srcs, uint64_t* dsts,
 
     if (numSrcs) {
       gfx1250_TDM_GROUP0 g0l(val, srcs[0] + off); // unused higher dims -> zero (see load())
-      load(g0l, g1);   waitTensor0();        // RAW: fill LDS before store/reduce reads it
+      load(g0l, g1);   waitTensor0();   ldsFence();  // src0 LDS write visible to ds reads
       // LDS byte-offsets -> typed shared pointers for the reduce accumulation
-      LdsPtr<PACKED_FLOAT>       vp = ldsCast<PACKED_FLOAT>(val);
-      LdsPtr<const PACKED_FLOAT> tp = ldsCast<const PACKED_FLOAT>(tmp);
+      PACKED_FLOAT*       vp = ldsPtr<PACKED_FLOAT>(ldsMem, val);
+      const PACKED_FLOAT* tp = ldsPtr<const PACKED_FLOAT>(ldsMem, tmp);
       uint32_t nP = nbytes / sizeof(PACKED_FLOAT);         // whole PACKED_FLOAT elements
       // Remaining whole floats (nbytes not a PACKED_FLOAT multiple); float data is
       // 4-byte aligned so the DS1 tail is always a whole number of floats.
-      LdsPtr<float>       vpf = ldsCast<float>(val);
-      LdsPtr<const float> tpf = ldsCast<const float>(tmp);
+      float*       vpf = ldsPtr<float>(ldsMem, val);
+      const float* tpf = ldsPtr<const float>(ldsMem, tmp);
       uint32_t nF     = nbytes >> 2;
       uint32_t fStart = nP * (sizeof(PACKED_FLOAT) >> 2);
       for (size_t s = 1; s < numSrcs; s++) {
         gfx1250_TDM_GROUP0 g0l(tmp, srcs[s] + off);
-        load(g0l, g1);   waitTensor0();
+        load(g0l, g1);   waitTensor0();   ldsFence();  // srcS LDS write visible to ds reads
         for (uint32_t u = warpThread; u < nP; u += warpSize)          vp[u]  += tp[u];   // PACKED_FLOAT bulk
         for (uint32_t u = fStart + warpThread; u < nF; u += warpSize) vpf[u] += tpf[u];  // float remainder
       }
@@ -681,16 +699,17 @@ __device__ inline void issueRow1d(uint64_t* srcs, uint64_t* dsts,
       // Empty source: fill this warp's tail window with the MEMSET_CHAR byte
       // pattern (memset semantics), then the store below broadcasts it to each
       // dst. No load is issued.
-      LdsPtr<uint32_t> vp = ldsCast<uint32_t>(val);
+      uint32_t* vp = ldsPtr<uint32_t>(ldsMem, val);
       uint32_t  nWords = nbytes / sizeof(uint32_t);
       for (uint32_t u = warpThread; u < nWords; u += warpSize) vp[u] = MEMSET_WORD;
       uint32_t rem = nbytes & 3u;                // sub-word remainder (rare for float data)
       if (rem && warpThread == 0) {
-        LdsPtr<uint8_t> vb = ldsCast<uint8_t>(val);
+        uint8_t* vb = ldsPtr<uint8_t>(ldsMem, val);
         for (uint32_t b = 0; b < rem; ++b) vb[nWords * 4 + b] = MEMSET_CHAR;
       }
     }
 
+    ldsFence();  // ds writes (reduced/memset result) visible to the tensor store
     for (size_t d = 0; d < numDsts; d++) {
       gfx1250_TDM_GROUP0 g0s(val, dsts[d] + off);  // broadcast reduced result to each dst
       store(g0s, g1);  waitTensor0();        // WAR: drain store before window reuse
@@ -744,7 +763,7 @@ __device__ inline void issue(void** dsts, const void** srcs, uint32_t numSrcs, u
         // LDS needed: val (+ tmp when reducing multiple srcs), each holding `tail` bytes
         uint32_t need = (numSrcs > 1 ? (tmp - ldsBase) : (val - ldsBase)) + tail;
         if (ldsBytes >= need) {                        // stage tail in rank 0's window
-            issueRow1d<PACKED_FLOAT>(mySrcs, myDsts, numSrcs, numDsts, val, tmp, tail, warpThread, tdmBytes);
+            issueRow1d<PACKED_FLOAT>(mySrcs, myDsts, numSrcs, numDsts, val, tmp, ldsBuffer, tail, warpThread, tdmBytes);
         } else {
             warpVecCopy<PACKED_FLOAT>(mySrcs, myDsts, numSrcs, numDsts, tail, tdmBytes,
                         warpThread, warpThreads);
@@ -784,7 +803,7 @@ __device__ inline void issue(void** dsts, const void** srcs, uint32_t numSrcs, u
         uint32_t chunkRows = (myRows - r < rowsPerChunk)
                              ? static_cast<uint32_t>(myRows - r) : rowsPerChunk;
         uint64_t off = (uint64_t)(myStart + r) * WIDTH;   // this warp's row block
-        issueRows<PACKED_FLOAT>(mySrcs, myDsts, numSrcs, numDsts, val, tmp, chunkRows, warpThread, off);
+        issueRows<PACKED_FLOAT>(mySrcs, myDsts, numSrcs, numDsts, val, tmp, ldsBuffer, chunkRows, warpThread, off);
     }
 }
 
