@@ -6955,7 +6955,10 @@ namespace {
       resource.transferIdx = i;
 
       ExeInfo& exeInfo = executorMap[exeDevice];
-      exeInfo.totalBytes    += t.numBytes;
+      // Count every destination write: a multi-destination Transfer (e.g. a
+      // merged BMA batch) moves numBytes to each of its destinations, so the
+      // executor's byte total (and hence CPU-timed bandwidth) must scale with it.
+      exeInfo.totalBytes    += t.numBytes * (t.dsts.empty() ? 1 : t.dsts.size());
       exeInfo.totalSubExecs += t.numSubExecs;
       exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
       exeInfo.resources.push_back(resource);
