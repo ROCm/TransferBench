@@ -76,6 +76,18 @@ int AllToAllPreset(EnvVars&          ev,
                          (useDmaExec == 1) ? "DMA" :
                          (useTdmExec)      ? "TDM" : "GFX";
 
+  // BMA batches all of a source GPU's copies into a single hipMemcpyBatchAsync
+  // launch (one multi-destination Transfer per source GPU) - the intended use of
+  // the batched API. Because the batch is one launch, only the per-source
+  // aggregate egress is observable; per-(src,dst) bandwidth is not.  The single
+  // executor must be the source device, so USE_REMOTE_READ (destination as
+  // executor) is incompatible with BMA.
+  bool const bmaMerged = (useDmaExec == 2);
+  if (bmaMerged && useRemoteRead) {
+    Utils::Print("[WARN] USE_REMOTE_READ is ignored for BMA; the source GPU is always the executor\n");
+    useRemoteRead = 0;
+  }
+
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
   int numNics  = TransferBench::GetNumExecutors(EXE_NIC, 0);
@@ -155,6 +167,12 @@ int AllToAllPreset(EnvVars&          ev,
     return ERR_FATAL;
   }
 #endif
+  // Anvil (GMA/HMA) builds raw SDMA packets with process-local virtual addresses,
+  // so it cannot target another rank's memory. Restrict those to single-rank runs.
+  if ((useDmaExec == 3 || useDmaExec == 4) && numRanks > 1) {
+    Utils::Print("[ERROR] GMA/HMA do not support cross-rank transfers; all-to-all with GMA/HMA requires a single rank\n");
+    return ERR_FATAL;
+  }
   if (numResults * 2 > numRanks) {
     Utils::Print("[ERROR] Number of extrema results requested exceeds number of ranks.  NUM_RESULTS should be at most half the number of ranks\n");
     return ERR_FATAL;
@@ -164,6 +182,18 @@ int AllToAllPreset(EnvVars&          ev,
   std::vector<Transfer> transfers;
   for (int r = 0; r < numRanks; r++) {
     for (int i = 0; i < numGpus; i++) {
+
+      // For BMA, accumulate every destination of source GPU i into one Transfer
+      TransferBench::Transfer merged;
+      std::vector<int> mergedDstGpus;
+      if (bmaMerged) {
+        merged.numBytes    = numBytesPerTransfer;
+        merged.srcs.push_back({memType, i, r});
+        merged.exeDevice   = {exeType, i, r};
+        merged.exeSubIndex = -1;
+        merged.numSubExecs = numSubExecs;
+      }
+
       for (int j = 0; j < numGpus; j++) {
 
         // Check whether or not to execute this pair
@@ -177,6 +207,13 @@ int AllToAllPreset(EnvVars&          ev,
           HIP_CALL(hipExtGetLinkTypeAndHopCount(i, j, &linkType, &hopCount));
           if (hopCount != 1) continue;
 #endif
+        }
+
+        if (bmaMerged) {
+          // Every batched copy reads source GPU i and writes destination GPU j
+          merged.dsts.push_back({memType, j, r});
+          mergedDstGpus.push_back(j);
+          continue;
         }
 
         // Build Transfer and add it to list
@@ -193,6 +230,17 @@ int AllToAllPreset(EnvVars&          ev,
 
         reIndex[r][std::make_pair(i,j)] = transfers.size();
         transfers.push_back(transfer);
+      }
+
+      if (bmaMerged && !merged.dsts.empty()) {
+        // All of this source's copies share one batched launch and cannot be
+        // resolved individually. Point every (src,dst) cell at that one Transfer;
+        // each cell then reports the per-copy bandwidth (its equal share of the
+        // measured per-source aggregate), and row/column totals still add up.
+        int const idx = transfers.size();
+        for (int j : mergedDstGpus)
+          reIndex[r][std::make_pair(i, j)] = idx;
+        transfers.push_back(merged);
       }
     }
   }
@@ -220,6 +268,8 @@ int AllToAllPreset(EnvVars&          ev,
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
                numBytesPerTransfer, execName, numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
+  if (bmaMerged)
+    Utils::Print("[BMA merges each source GPU's copies into one batched launch; per-(src,dst) links can't be resolved, so each cell shows its equal share of the measured per-source aggregate]\n");
 
   if (transfers.size() == 0) {
     if (Utils::RankDoesOutput())
