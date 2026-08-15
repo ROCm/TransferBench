@@ -203,6 +203,7 @@ option(ENABLE_MPI_COMM             "Enable MPI Communicator support"            
 option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"        OFF)
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
 option(BUILD_RELOCATABLE_PACKAGE   "Build with RVS-style relocatable RPATH and amdrocm<MAJOR>-transferbench package naming" OFF)
+option(ENABLE_ANVIL_EXEC           "Enable GPU-initiated SDMA executor via anvil (AMD MI300X only)" OFF)
 
 include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets, rocm_check_target_ids
 
@@ -440,6 +441,46 @@ else()
   endif()
 endif()
 
+## Check for anvil SDMA executor support
+if(NOT ENABLE_ANVIL_EXEC)
+  message(STATUS "For CMake builds, anvil GPU-initiated SDMA executor requires -DENABLE_ANVIL_EXEC=ON")
+  message(STATUS "- Disabling anvil executor support")
+else()
+  message(STATUS "Attempting to build with anvil GPU-initiated SDMA executor")
+
+  find_library(HSAKMT_LIBRARY hsakmt PATHS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64 NO_DEFAULT_PATH)
+  find_path(HSAKMT_INCLUDE_DIR hsakmt/hsakmt.h PATHS ${ROCM_PATH}/include NO_DEFAULT_PATH)
+
+  if(HSAKMT_LIBRARY AND HSAKMT_INCLUDE_DIR)
+    # hsakmt is typically a static archive; drm_amdgpu/drm are transitive deps
+    if(HSAKMT_LIBRARY MATCHES "\\.a$")
+      add_library(hsakmt STATIC IMPORTED)
+    else()
+      add_library(hsakmt SHARED IMPORTED)
+    endif()
+    find_library(DRM_AMDGPU_LIBRARY drm_amdgpu)
+    find_library(DRM_LIBRARY drm)
+    set_target_properties(hsakmt PROPERTIES
+      IMPORTED_LOCATION "${HSAKMT_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}"
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${HSAKMT_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${DRM_AMDGPU_LIBRARY};${DRM_LIBRARY}")
+    set(ANVIL_EXEC_FOUND 1)
+    message(STATUS "- Building with anvil GPU-initiated SDMA executor support")
+    message(STATUS "  - hsakmt: ${HSAKMT_LIBRARY}")
+    message(STATUS "  - drm_amdgpu: ${DRM_AMDGPU_LIBRARY}")
+    message(STATUS "  - drm: ${DRM_LIBRARY}")
+  else()
+    if(NOT HSAKMT_LIBRARY)
+      message(WARNING "- libhsakmt not found under ${ROCM_PATH}/lib or ${ROCM_PATH}/lib64")
+    endif()
+    if(NOT HSAKMT_INCLUDE_DIR)
+      message(WARNING "- hsakmt/hsakmt.h not found under ${ROCM_PATH}/include")
+    endif()
+    message(WARNING "- Building without anvil executor support")
+  endif()
+endif()
+
 set(PACKAGE_NAME TB)
 set(LIBRARY_NAME TransferBench)
 
@@ -471,6 +512,23 @@ if(AMD_SMI_FOUND)
 endif()
 if(POD_COMM_FOUND)
   target_compile_definitions(TransferBench PRIVATE POD_COMM_ENABLED)
+endif()
+if(ANVIL_EXEC_FOUND)
+  target_sources(TransferBench PRIVATE src/anvil/anvil.cpp)
+  target_include_directories(TransferBench PRIVATE src/anvil)
+  target_compile_definitions(TransferBench PRIVATE ANVIL_EXEC_ENABLED)
+  target_link_libraries(TransferBench PRIVATE hsakmt)
+  # XIO_SDMA_OSS7: fused COPY_LINEAR_WAIT_SIGNAL_MI4 packet. ABI-portable (structs
+  # + host code build on any arch; device code is arch-gated to gfx1250/gfx950 via
+  # XIO_SDMA_OSS7_ENABLED and selected at runtime only on gfx1250), so it is safe
+  # for all-arch builds. Set -DENABLE_XIO_SDMA_OSS7=OFF to force the separate path.
+  option(ENABLE_XIO_SDMA_OSS7 "Enable fused MI4 SDMA packets (gfx1250 runtime)" ON)
+  if(ENABLE_XIO_SDMA_OSS7)
+    target_compile_definitions(TransferBench PRIVATE XIO_SDMA_OSS7=1)
+    message(STATUS "- Building with XIO_SDMA_OSS7 (fused MI4 SDMA packets; device code gated to gfx1250/gfx950)")
+  else()
+    message(STATUS "- Building without XIO_SDMA_OSS7 (separate COPY_LINEAR + ATOMIC path)")
+  endif()
 endif()
 
 target_compile_definitions(TransferBench PRIVATE

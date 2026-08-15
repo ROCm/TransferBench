@@ -54,7 +54,7 @@ int AllToAllPreset(EnvVars&          ev,
   int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
-  int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
+  int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);  // 0=GFX, 1=DMA, 2=BMA, 3=GMA(anvil), 4=HMA(anvil host)
   int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
@@ -65,8 +65,25 @@ int AllToAllPreset(EnvVars&          ev,
   }
 
   // Determine which GPU executor to use
-  ExeType     exeType    = useDmaExec ? EXE_GPU_DMA : (useTdmExec ? EXE_GPU_TDM : EXE_GPU_GFX);
-  char const* execName   = useDmaExec ? "DMA" : (useTdmExec ? "TDM" : "GFX");
+  ExeType exeType = (useDmaExec == 4) ? EXE_HOST_INITIATED_DMA :
+                    (useDmaExec == 3) ? EXE_GPU_INITIATED_DMA :
+                    (useDmaExec == 2) ? EXE_GPU_BDMA :
+                    (useDmaExec == 1) ? EXE_GPU_DMA :
+                    (useTdmExec)      ? EXE_GPU_TDM : EXE_GPU_GFX;
+  char const* execName = (useDmaExec == 4) ? "HMA" :
+                         (useDmaExec == 3) ? "GMA" :
+                         (useDmaExec == 2) ? "BMA" :
+                         (useDmaExec == 1) ? "DMA" :
+                         (useTdmExec)      ? "TDM" : "GFX";
+
+  // BMA merges each source GPU's copies into one hipMemcpyBatchAsync launch (one
+  // multi-destination Transfer per source). Only the per-source aggregate is
+  // observable, and the executor must be the source, so USE_REMOTE_READ is ignored.
+  bool const bmaMerged = (useDmaExec == 2);
+  if (bmaMerged && useRemoteRead) {
+    Utils::Print("[WARN] USE_REMOTE_READ is ignored for BMA; the source GPU is always the executor\n");
+    useRemoteRead = 0;
+  }
 
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
@@ -118,7 +135,11 @@ int AllToAllPreset(EnvVars&          ev,
         ev.Print("NUM_RESULTS"  , numResults   , "Showing top/bottom %d results", numResults);
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
-      ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
+      ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor",
+               useDmaExec == 4 ? "HMA (host-initiated SDMA/anvil)" :
+               useDmaExec == 3 ? "GMA (GPU-initiated SDMA/anvil)" :
+               useDmaExec == 2 ? "BMA" :
+               useDmaExec == 1 ? "DMA" : "GFX");
       ev.Print("USE_TDM_EXEC"   , useTdmExec   , "Using %s executor", useTdmExec ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
@@ -133,6 +154,22 @@ int AllToAllPreset(EnvVars&          ev,
     Utils::Print("[ERROR] %s execution can only be used for copies (A2A_MODE=0)\n", execName);
     return ERR_FATAL;
   }
+  if (useDmaExec < 0 || useDmaExec > 4) {
+    Utils::Print("[ERROR] USE_DMA_EXEC must be 0 (GFX), 1 (DMA), 2 (BMA), 3 (GMA), or 4 (HMA)\n");
+    return ERR_FATAL;
+  }
+#ifndef ANVIL_EXEC_ENABLED
+  if (useDmaExec == 3 || useDmaExec == 4) {
+    Utils::Print("[ERROR] USE_DMA_EXEC=3 (GMA) / 4 (HMA) requires building with -DENABLE_ANVIL_EXEC=ON\n");
+    return ERR_FATAL;
+  }
+#endif
+  // Anvil (GMA/HMA) builds raw SDMA packets with process-local virtual addresses,
+  // so it cannot target another rank's memory. Restrict those to single-rank runs.
+  if ((useDmaExec == 3 || useDmaExec == 4) && numRanks > 1) {
+    Utils::Print("[ERROR] GMA/HMA do not support cross-rank transfers; all-to-all with GMA/HMA requires a single rank\n");
+    return ERR_FATAL;
+  }
   if (numResults * 2 > numRanks) {
     Utils::Print("[ERROR] Number of extrema results requested exceeds number of ranks.  NUM_RESULTS should be at most half the number of ranks\n");
     return ERR_FATAL;
@@ -142,6 +179,18 @@ int AllToAllPreset(EnvVars&          ev,
   std::vector<Transfer> transfers;
   for (int r = 0; r < numRanks; r++) {
     for (int i = 0; i < numGpus; i++) {
+
+      // For BMA, accumulate every destination of source GPU i into one Transfer
+      TransferBench::Transfer merged;
+      std::vector<int> mergedDstGpus;
+      if (bmaMerged) {
+        merged.numBytes    = numBytesPerTransfer;
+        merged.srcs.push_back({memType, i, r});
+        merged.exeDevice   = {exeType, i, r};
+        merged.exeSubIndex = -1;
+        merged.numSubExecs = numSubExecs;
+      }
+
       for (int j = 0; j < numGpus; j++) {
 
         // Check whether or not to execute this pair
@@ -155,6 +204,13 @@ int AllToAllPreset(EnvVars&          ev,
           HIP_CALL(hipExtGetLinkTypeAndHopCount(i, j, &linkType, &hopCount));
           if (hopCount != 1) continue;
 #endif
+        }
+
+        if (bmaMerged) {
+          // Every batched copy reads source GPU i and writes destination GPU j
+          merged.dsts.push_back({memType, j, r});
+          mergedDstGpus.push_back(j);
+          continue;
         }
 
         // Build Transfer and add it to list
@@ -171,6 +227,16 @@ int AllToAllPreset(EnvVars&          ev,
 
         reIndex[r][std::make_pair(i,j)] = transfers.size();
         transfers.push_back(transfer);
+      }
+
+      if (bmaMerged && !merged.dsts.empty()) {
+        // All of this source's copies share one launch; point every (src,dst) cell
+        // at that Transfer so each reports its share of the per-source aggregate
+        // and row/column totals still add up.
+        int const idx = transfers.size();
+        for (int j : mergedDstGpus)
+          reIndex[r][std::make_pair(i, j)] = idx;
+        transfers.push_back(merged);
       }
     }
   }
@@ -198,6 +264,8 @@ int AllToAllPreset(EnvVars&          ev,
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
                numBytesPerTransfer, execName, numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
+  if (bmaMerged)
+    Utils::Print("[BMA merges each source GPU's copies into one batched launch; per-(src,dst) links can't be resolved, so each cell shows its equal share of the measured per-source aggregate]\n");
 
   if (transfers.size() == 0) {
     if (Utils::RankDoesOutput())

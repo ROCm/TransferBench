@@ -19,11 +19,12 @@ NVCC      ?= $(CUDA_PATH)/bin/nvcc
 DEBUG     ?= 0
 
 # Optional features (set to 0 to disable, 1 to enable)
-# DISABLE_MPI_COMM: Disable MPI communicator support                      (default: 0)
-# DISABLE_AMD_SMI:  Disable AMD-SMI pod membership checking support       (default: 0)
-# DISABLE_NVML:     Disable NVML pod membership detection for CUDA builds (default: 0)
-# DISABLE_POD_COMM: Disable pod communication support                     (default: 0)
-# DISABLE_CUMEM:    Disable CUDA driver API (also disables pod on CUDA)   (default: 0)
+# DISABLE_MPI_COMM:  Disable MPI communicator support                      (default: 0)
+# DISABLE_AMD_SMI:   Disable AMD-SMI pod membership checking support       (default: 0)
+# DISABLE_NVML:      Disable NVML pod membership detection for CUDA builds (default: 0)
+# DISABLE_POD_COMM:  Disable pod communication support                     (default: 0)
+# DISABLE_CUMEM:     Disable CUDA driver API (also disables pod on CUDA)   (default: 0)
+# ENABLE_ANVIL_EXEC: Enable GPU-initiated SDMA executor (AMD KFD, ROCm only) (default: 0)
 
 # ROCm device libraries can live in different locations depending on packaging.
 # hipcc/clang needs to find the amdgcn bitcode directory at link time.
@@ -266,14 +267,75 @@ _TB_DIR       := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
 TB_GIT_BRANCH := $(shell git -C "$(_TB_DIR)" rev-parse --abbrev-ref HEAD 2>/dev/null || sed -n '1p' "$(_TB_DIR)GIT_VERSION" 2>/dev/null || echo unknown)
 TB_GIT_COMMIT := $(shell git -C "$(_TB_DIR)" rev-parse --short HEAD 2>/dev/null || sed -n '2p' "$(_TB_DIR)GIT_VERSION" 2>/dev/null || echo unknown)
 COMMON_FLAGS  += -DTB_GIT_BRANCH='"$(TB_GIT_BRANCH)"' -DTB_GIT_COMMIT='"$(TB_GIT_COMMIT)"'
+
+  ANVIL_ENABLED = 0
+  # Compile with GPU-initiated SDMA executor (anvil/KFD) if
+  # 1) ENABLE_ANVIL_EXEC is set to 1
+  # 2) hsakmt/hsakmt.h is found (KFD user-space library header)
+  # 3) libhsakmt is found (static or shared)
+  # Note: disabled by default; requires AMD ROCm KFD and is AMD-only
+  ENABLE_ANVIL_EXEC ?= 0
+  ifeq ($(ENABLE_ANVIL_EXEC), 1)
+    ifeq ($(MAKECMDGOALS),TransferBenchCuda)
+      $(info - Anvil executor not supported for CUDA builds; ignoring ENABLE_ANVIL_EXEC=1)
+    else
+      $(info Attempting to build with Anvil GPU-initiated SDMA executor support)
+      HSAKMT_INC := $(firstword $(wildcard \
+        $(ROCM_PATH)/include/hsakmt/hsakmt.h \
+        /usr/include/hsakmt/hsakmt.h))
+      HSAKMT_LIB := $(firstword $(wildcard \
+        $(ROCM_PATH)/lib/libhsakmt.a \
+        $(ROCM_PATH)/lib64/libhsakmt.a \
+        $(ROCM_PATH)/lib/libhsakmt.so \
+        /usr/lib/x86_64-linux-gnu/libhsakmt.so))
+      ifeq ($(HSAKMT_INC),)
+        $(info - hsakmt/hsakmt.h not found; cannot build Anvil executor)
+        $(info - Install libhsakmt-dev or ensure ROCM_PATH is set correctly)
+      else ifeq ($(HSAKMT_LIB),)
+        $(info - libhsakmt not found; cannot build Anvil executor)
+        $(info - Install libhsakmt or ensure ROCM_PATH is set correctly)
+      else
+        ANVIL_ENABLED = 1
+        COMMON_FLAGS += -DANVIL_EXEC_ENABLED -I./src/anvil
+        # XIO_SDMA_OSS7: fused COPY_LINEAR_WAIT_SIGNAL_MI4 packet. ABI-portable
+        # (device code is arch-gated to gfx1250/gfx950 via XIO_SDMA_OSS7_ENABLED and
+        # selected at runtime only on gfx1250). Set ENABLE_XIO_SDMA_OSS7=0 to force
+        # the separate COPY_LINEAR + ATOMIC path.
+        ENABLE_XIO_SDMA_OSS7 ?= 1
+        ifeq ($(ENABLE_XIO_SDMA_OSS7), 1)
+          COMMON_FLAGS += -DXIO_SDMA_OSS7=1
+          $(info - Building with XIO_SDMA_OSS7 (fused MI4 SDMA packets; device code gated to gfx1250/gfx950))
+        else
+          $(info - Building without XIO_SDMA_OSS7 (separate COPY_LINEAR + ATOMIC path))
+        endif
+        # Link hsakmt; use -Wl, to pass the static archive directly to the
+        # linker — without it, -x hip causes the compiler to parse the .a
+        # as source and emit "expected unqualified-id" / UTF-8 errors.
+        ifeq ($(suffix $(HSAKMT_LIB)),.a)
+          LDFLAGS += -Wl,$(HSAKMT_LIB) -ldrm_amdgpu -ldrm
+        else
+          LDFLAGS += -lhsakmt
+        endif
+        $(info - Building with Anvil GPU-initiated SDMA executor. Can set ENABLE_ANVIL_EXEC=0 to disable)
+      endif
+    endif
+    ifeq ($(ANVIL_ENABLED), 0)
+      $(info - Building without Anvil GPU-initiated SDMA executor support)
+    endif
+  endif
 endif
 
 .PHONY : all clean
 
 all: TransferBench
 
-TransferBench: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
-	$(CXX) $(CXXFLAGS) $(HIPFLAGS) $(COMMON_FLAGS) $< -o $@ $(HIPLDFLAGS) $(LDFLAGS)
+ANVIL_SRCS =
+ifeq ($(ANVIL_ENABLED), 1)
+  ANVIL_SRCS = ./src/anvil/anvil.cpp
+endif
+
+TransferBench: ./src/client/Client.cpp $(ANVIL_SRCS) $(shell find -regex ".*\.\hpp")
+	$(CXX) $(CXXFLAGS) $(HIPFLAGS) $(COMMON_FLAGS) ./src/client/Client.cpp $(ANVIL_SRCS) -o $@ $(HIPLDFLAGS) $(LDFLAGS)
 
 TransferBenchCuda: ./src/client/Client.cpp $(shell find -regex ".*\.\hpp")
 	$(NVCC) $(NVFLAGS) $(COMMON_FLAGS) $< -o $@ $(LDFLAGS)

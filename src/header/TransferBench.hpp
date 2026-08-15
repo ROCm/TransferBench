@@ -80,7 +80,10 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
-
+#ifdef ANVIL_EXEC_ENABLED
+#include "anvil.hpp"
+#include "sdma-ep.h"
+#endif
 #endif
 
 #include "tdmCopy.h"
@@ -114,10 +117,15 @@ namespace TransferBench
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
     EXE_GPU_TDM      = 6,                       ///<  GPU TDM executor          (subExecutor = threadblock/CU)
+    EXE_GPU_INITIATED_DMA = 7,                  ///<  GPU-initiated SDMA Executor (GMA; anvil/KFD, AMD only)
+    EXE_HOST_INITIATED_DMA = 8,                 ///<  Host-initiated SDMA Executor (HMA; anvil/KFD, AMD only)
   };
-  char const ExeTypeStr[8] = "CGDINBT";
+  char const ExeTypeStr[10] = "CGDINBTSH";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM; }
+  inline bool IsGpuExeType(ExeType e){
+    return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM
+        || e == EXE_GPU_INITIATED_DMA || e == EXE_HOST_INITIATED_DMA;
+  }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
@@ -557,6 +565,22 @@ namespace TransferBench
    * @returns GPU indices closest to NIC nicIndex, or empty if unable to detect
    */
   void GetClosestGpusToNic(std::vector<int>& gpuIndices, int nicIndex, int targetRank = -1);
+
+#if !defined(__NVCC__)
+  /**
+   * Returns the SDMA engine availability and preference bitmasks for a GPU pair.
+   *
+   * @param[in]  srcGpu          Source GPU index
+   * @param[in]  dstGpu          Destination GPU index
+   * @param[out] availMask       Bitmask of all SDMA engines that can service this pair
+   *                             (from hsa_amd_memory_copy_engine_status)
+   * @param[out] preferredMask   Bitmask of SDMA engines recommended for max bandwidth
+   *                             (from hsa_amd_memory_get_preferred_copy_engine); 0 = no preference
+   * @returns true on success, false if HSA query failed
+   */
+  bool GetSdmaAffinityMask(int srcGpu, int dstGpu,
+                           uint32_t& availMask, uint32_t& preferredMask);
+#endif
 
   /**
    * @returns 0-indexed rank for this process
@@ -2691,6 +2715,54 @@ namespace {
         hasFatalError = true;
       }
       break;
+#ifdef ANVIL_EXEC_ENABLED
+      case EXE_GPU_INITIATED_DMA:
+      case EXE_HOST_INITIATED_DMA:
+        if (t.srcs.size() != 1) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: anvil SDMA executor (GMA/HMA) requires exactly 1 source, got %zu",
+              i, t.srcs.size()});
+          hasFatalError = true;
+          break;
+        }
+        if (t.dsts.size() < 1) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: anvil SDMA executor (GMA/HMA) requires at least 1 destination",
+              i});
+          hasFatalError = true;
+          break;
+        }
+        if (!IsGpuMemType(t.srcs[0].memType)) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: anvil SDMA executor (GMA/HMA) source must be GPU memory",
+              i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: anvil SDMA executor (GMA/HMA) GPU (%d) must match source GPU (%d)",
+              i, t.exeDevice.exeIndex, t.srcs[0].memIndex});
+          hasFatalError = true;
+          break;
+        }
+        if (t.srcs[0].memRank != t.exeDevice.exeRank || t.dsts[0].memRank != t.exeDevice.exeRank) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: anvil SDMA executor (GMA/HMA) does not support cross-rank transfers",
+              i});
+          hasFatalError = true;
+          break;
+        }
+        break;
+#else
+      case EXE_GPU_INITIATED_DMA:
+      case EXE_HOST_INITIATED_DMA:
+        errors.push_back({ERR_FATAL,
+            "Transfer %d: anvil SDMA executor (GMA/HMA) requires -DENABLE_ANVIL_EXEC=ON at build time",
+            i});
+        hasFatalError = true;
+        break;
+#endif
       }
 
       // Skip further tests if fatal error detected
@@ -3089,6 +3161,13 @@ namespace {
     // Persistent worker pool servicing this executor's Transfers/subexecutors across all
     // iterations.  Created in PrepareExecutor (NUMA-pinned), destroyed in TeardownExecutor.
     std::unique_ptr<ThreadPool> pool;
+
+    // For the anvil SDMA executors: EXE_GPU_INITIATED_DMA (GMA) and EXE_HOST_INITIATED_DMA (HMA)
+#ifdef ANVIL_EXEC_ENABLED
+    vector<sdma_ep::SdmaQueueInfo> anvilQueues;   ///< One KFD SDMA queue per transfer (GMA)
+    vector<uint64_t*>              anvilSignals;  ///< Per-transfer completion signal (uncached device mem, GMA)
+    vector<anvil::SdmaQueueHostHandle*> anvilHostHandles; ///< HMA executor: one CPU-driven host handle per transfer
+#endif
   };
 
   // Structure to track PCIe topology
@@ -4415,6 +4494,149 @@ namespace {
     return ERR_NONE;
   }
 
+#ifdef ANVIL_EXEC_ENABLED
+  // Set up anvil SDMA queues for GMA (device-driven) and HMA (host-driven).
+  // Queues are owned by the AnvilLib singleton (process lifetime); this stores one
+  // SdmaQueueInfo (+ completion signal for GMA) per resource in exeInfo.
+  static ErrResult PrepareAnvilExecutor(ConfigOptions    const& cfg,
+                                        vector<Transfer> const& transfers,
+                                        ExeDevice        const& exeDevice,
+                                        ExeInfo&                exeInfo)
+  {
+    int const srcDeviceId = exeDevice.exeIndex;
+    ERR_CHECK(hipSetDevice(srcDeviceId));
+
+    bool const verbose = System::Get().IsVerbose();
+    if (verbose) {
+      System::Get().Log("[ANVIL] PrepareAnvilExecutor: src GPU %d  %zu resource(s)\n",
+                        srcDeviceId, exeInfo.resources.size());
+    }
+
+    try {
+      // Initialize the AnvilLib singleton (idempotent via std::call_once)
+      anvil::AnvilLib& anvilLib = anvil::AnvilLib::getInstance();
+      anvilLib.init();
+
+      int const numResources = exeInfo.resources.size();
+      exeInfo.anvilQueues.resize(numResources);
+      exeInfo.anvilSignals.assign(numResources, nullptr);
+      exeInfo.anvilHostHandles.assign(numResources, nullptr);
+
+      // HMA (EXE_HOST_INITIATED_DMA): CPU-driven host queue (builds packets, rings
+      // the doorbell, polls quiet()) instead of the GMA kernel path.
+      bool const useHostQueue = (exeDevice.exeType == EXE_HOST_INITIATED_DMA);
+      // Per-dst channel counters so concurrent transfers to the same dst get
+      // distinct queues, while re-prepares (e.g. a size sweep) reuse the same
+      // channels instead of allocating fresh KFD SDMA queues each time.
+      std::unordered_map<int, int> hostChannelCount;
+      std::unordered_map<int, int> deviceChannelCount;
+
+      // ANVIL_REMOTE_DOORBELL=1: place the completion signal in DESTINATION memory
+      // so the source kernel remote-polls a signal that lands at the same endpoint
+      // as the data. Default (0): local (source) signal, cheaper to poll and sound
+      // on this coherent, in-order path (a non-coherent path would need a fence
+      // packet between copy and atomic).
+      static bool const remoteDoorbell = [] {
+        char const* v = getenv("ANVIL_REMOTE_DOORBELL");
+        return v && atoi(v) != 0;
+      }();
+      if (verbose) {
+        System::Get().Log("[ANVIL] PrepareAnvilExecutor: doorbell mode = %s\n",
+                          remoteDoorbell ? "REMOTE (dst)" : "LOCAL (src)");
+      }
+
+      for (int i = 0; i < numResources; ++i) {
+        Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
+        int const dstDeviceId = t.dsts[0].memIndex;
+
+        // Enable peer access and resolve the XGMI-optimal SDMA engine. The
+        // resource index is the round-robin rotation so concurrent transfers
+        // spread across the preferred engine set.
+        int channelIdx = -1;
+        anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
+        uint32_t const engineId = static_cast<uint32_t>(
+          anvilLib.getSdmaEngineId(srcDeviceId, dstDeviceId, i));
+
+        if (verbose) {
+          System::Get().Log("[ANVIL]   resource[%d]: transfer %d  dst GPU %d  SDMA engine %u\n",
+                            i, exeInfo.resources[i].transferIdx, dstDeviceId, engineId);
+        }
+
+        // Host-initiated mode: one CPU-driven host channel per transfer; no
+        // device queue/kernel/signal (quiet() polls the rptr).
+        if (useHostQueue) {
+          int const ch = hostChannelCount[dstDeviceId]++;
+          if (!anvilLib.connectHost(srcDeviceId, dstDeviceId, ch + 1)) {
+            return {ERR_FATAL,
+                    "PrepareAnvilExecutor: connectHost failed for src=%d dst=%d",
+                    srcDeviceId, dstDeviceId};
+          }
+          anvil::SdmaQueueHostHandle* hh =
+            anvilLib.getHostHandle(srcDeviceId, dstDeviceId, ch);
+          if (!hh) {
+            return {ERR_FATAL,
+                    "PrepareAnvilExecutor: getHostHandle failed for src=%d dst=%d ch=%d",
+                    srcDeviceId, dstDeviceId, ch};
+          }
+          exeInfo.anvilHostHandles[i]        = hh;
+          exeInfo.anvilQueues[i].deviceHandle = nullptr;
+          exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
+          exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
+          exeInfo.anvilQueues[i].channelIdx   = ch;
+          continue;
+        }
+
+        // Reuse the channel for this {src,dst} across re-prepares; only allocate a
+        // new queue when a concurrent transfer to the same dst needs one.
+        channelIdx = deviceChannelCount[dstDeviceId]++;
+        anvil::SdmaQueue* queue = anvilLib.getOrCreateSdmaQueue(
+          srcDeviceId, dstDeviceId, engineId, channelIdx);
+        if (!queue) {
+          return {ERR_FATAL,
+                  "PrepareAnvilExecutor: getOrCreateSdmaQueue failed for src=%d dst=%d",
+                  srcDeviceId, dstDeviceId};
+        }
+
+        // Populate SdmaQueueInfo from the created SdmaQueue
+        exeInfo.anvilQueues[i].deviceHandle = queue->deviceHandle();
+        exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
+        exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
+        exeInfo.anvilQueues[i].channelIdx   = channelIdx;
+
+        // Per-transfer completion signal: uncached device memory the engine
+        // atomically increments after the copy and the kernel polls via
+        // waitSignal. Placed on src (local) or dst (remote) per remoteDoorbell.
+        {
+          int const signalDevice = remoteDoorbell ? dstDeviceId : srcDeviceId;
+          if (remoteDoorbell) ERR_CHECK(hipSetDevice(signalDevice));
+
+          uint64_t* signal = nullptr;
+          hipError_t const allocErr = hipExtMallocWithFlags(
+            (void**)&signal, sizeof(uint64_t), hipDeviceMallocUncached);
+
+          if (remoteDoorbell) ERR_CHECK(hipSetDevice(srcDeviceId));
+
+          if (allocErr != hipSuccess || !signal) {
+            return {ERR_FATAL,
+                    "PrepareAnvilExecutor: signal alloc failed for src=%d dst=%d (device=%d)",
+                    srcDeviceId, dstDeviceId, signalDevice};
+          }
+          ERR_CHECK(hipMemset(signal, 0, sizeof(uint64_t)));
+          exeInfo.anvilSignals[i] = signal;
+        }
+
+        if (verbose) {
+          System::Get().Log("[ANVIL]   resource[%d]: channelIdx %d  deviceHandle %p\n",
+                            i, channelIdx, (void*)queue->deviceHandle());
+        }
+      }
+    } catch (std::exception const& ex) {
+      return {ERR_FATAL, "PrepareAnvilExecutor: exception: %s", ex.what()};
+    }
+    return ERR_NONE;
+  }
+#endif
+
   // Prepare each executor
   // Allocates memory for src/dst, prepares subexecutors, executor-specific data structures
   static ErrResult PrepareExecutor(ConfigOptions    const& cfg,
@@ -4575,6 +4797,7 @@ namespace {
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
+                                   exeDevice.exeType == EXE_GPU_INITIATED_DMA ||
                                    (cfg.general.useMultiStream && (exeDevice.exeType == EXE_GPU_GFX ||
                                                                    exeDevice.exeType == EXE_GPU_TDM)))
                                   ? exeInfo.resources.size() : 1;
@@ -4594,7 +4817,7 @@ namespace {
         }
       }
 
-      if (cfg.general.useHipEvents) {
+      if (cfg.general.useHipEvents || exeDevice.exeType == EXE_GPU_INITIATED_DMA) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4615,6 +4838,13 @@ namespace {
         }
       }
     }
+
+#ifdef ANVIL_EXEC_ENABLED
+    if ((exeDevice.exeType == EXE_GPU_INITIATED_DMA || exeDevice.exeType == EXE_HOST_INITIATED_DMA) &&
+        exeDevice.exeRank == localRank) {
+      ERR_CHECK(PrepareAnvilExecutor(cfg, transfers, exeDevice, exeInfo));
+    }
+#endif
 
     // Prepare for GPU GFX / TDM executor (both consume SubExecParam from GPU memory)
     if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
@@ -4845,6 +5075,34 @@ namespace {
       for (auto event : exeInfo.stopEvents)
         ERR_CHECK(hipEventDestroy(event));
     }
+
+#ifdef ANVIL_EXEC_ENABLED
+    if ((exeDevice.exeType == EXE_GPU_INITIATED_DMA || exeDevice.exeType == EXE_HOST_INITIATED_DMA) &&
+        exeDevice.exeRank == localRank) {
+      if (verbose) {
+        System::Get().Log("[ANVIL] TeardownExecutor: releasing %zu queue reference(s) for src GPU %d\n",
+                          exeInfo.anvilQueues.size(), exeDevice.exeIndex);
+        for (size_t i = 0; i < exeInfo.anvilQueues.size(); ++i) {
+          System::Get().Log("[ANVIL]   anvilQueues[%zu]: src GPU %d  dst GPU %d  channel %d  handle %p\n",
+                            i,
+                            exeInfo.anvilQueues[i].srcDeviceId,
+                            exeInfo.anvilQueues[i].dstDeviceId,
+                            exeInfo.anvilQueues[i].channelIdx,
+                            (void*)exeInfo.anvilQueues[i].deviceHandle);
+        }
+      }
+      // Free per-transfer completion signals.
+      for (uint64_t* signal : exeInfo.anvilSignals) {
+        if (signal) ERR_CHECK(hipFree(signal));
+      }
+      exeInfo.anvilSignals.clear();
+
+      // SdmaQueue objects (device and host) are owned by the AnvilLib singleton
+      // and are destroyed at process exit. Clear the info vectors to drop refs.
+      exeInfo.anvilQueues.clear();
+      exeInfo.anvilHostHandles.clear();
+    }
+#endif
 
     if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
         exeDevice.exeRank == localRank) {
@@ -5805,10 +6063,10 @@ namespace {
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int numDsts = (int)resources.dstMem.size();
+    size_t const initOffsetBytes = cfg.data.byteOffset;
+    uint8_t* const srcBase = reinterpret_cast<uint8_t*>(resources.srcMem[0]);
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
-    size_t const initOffset = cfg.data.byteOffset / sizeof(float);
-    float* const src = resources.srcMem[0] + initOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
@@ -5822,13 +6080,13 @@ namespace {
       do {
         // Queue for each output location
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-          float* const dst = resources.dstMem[dstIdx] + initOffset;
+          uint8_t* dstBase = reinterpret_cast<uint8_t*>(resources.dstMem[dstIdx]);
 #if defined(CUMEM_ENABLED)
-          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)dst,
-                                  (CUdeviceptr)src,
+          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)(dstBase + initOffsetBytes),
+                                  (CUdeviceptr)(srcBase + initOffsetBytes),
                                   resources.numBytes, stream));
 #else
-          ERR_CHECK(hipMemcpyAsync(dst, src, resources.numBytes,
+          ERR_CHECK(hipMemcpyAsync(dstBase + initOffsetBytes, srcBase + initOffsetBytes, resources.numBytes,
                                    memcpyKind, stream));
 #endif
         }
@@ -5845,15 +6103,15 @@ namespace {
       do {
         hsa_signal_store_screlease(resources.signal, numDsts);
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-          float* const dst = resources.dstMem[dstIdx] + initOffset;
+          uint8_t* dstBase = reinterpret_cast<uint8_t*>(resources.dstMem[dstIdx]);
           if (!useSubIndices) {
-            ERR_CHECK(hsa_amd_memory_async_copy(dst, resources.dstAgent[dstIdx],
-                                                src, resources.srcAgent,
+            ERR_CHECK(hsa_amd_memory_async_copy(dstBase + initOffsetBytes, resources.dstAgent[dstIdx],
+                                                srcBase + initOffsetBytes, resources.srcAgent,
                                                 resources.numBytes, 0, NULL,
                                                 resources.signal));
           } else {
-            HSA_CALL(hsa_amd_memory_async_copy_on_engine(dst, resources.dstAgent[dstIdx],
-                                                         src, resources.srcAgent,
+            HSA_CALL(hsa_amd_memory_async_copy_on_engine(dstBase + initOffsetBytes, resources.dstAgent[dstIdx],
+                                                         srcBase + initOffsetBytes, resources.srcAgent,
                                                          resources.numBytes, 0, NULL,
                                                          resources.signal,
                                                          resources.sdmaEngineId, true));
@@ -5882,6 +6140,99 @@ namespace {
     }
     return ERR_NONE;
   }
+
+#ifdef ANVIL_EXEC_ENABLED
+  // Single-thread GMA kernels (<<<1,1>>> on the source GPU). The four
+  // (completion) x (wait) combinations are separate kernels selected on the host
+  // (ANVIL_LEGACY x ANVIL_WAIT_SIGNAL) to avoid in-kernel branching; all share one
+  // signature.
+  //   signal (default): put_signal + waitSignal; the engine orders the atomic
+  //     after the copy, so it is a correct completion barrier.
+  //   legacy:           put + quiet (polls ring rptr); can report early, comparison
+  //     only.
+  //   Wait blocks until completion (stop event covers the copy); NoWait returns
+  //     after submit (timing-only, not validation-safe).
+
+  // signal + wait (default correctness path).
+  __global__ void AnvilKernelSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                        void* dst, void const* src, size_t numBytes,
+                                        size_t chunkBytes,
+                                        uint64_t* signal, uint64_t expected)
+  {
+    anvil::put_signal_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes,
+                              signal, chunkBytes);
+    anvil::waitSignal(signal, expected);
+  }
+
+  // signal + no wait (submission-only timing).
+  __global__ void AnvilKernelSignalNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                          void* dst, void const* src, size_t numBytes,
+                                          size_t chunkBytes,
+                                          uint64_t* signal, uint64_t expected)
+  {
+    (void)expected;
+    anvil::put_signal_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes,
+                              signal, chunkBytes);
+  }
+
+#if XIO_SDMA_OSS7
+  // OSS7 fused signal+wait: one COPY_LINEAR_WAIT_SIGNAL_MI4 packet instead of the
+  // COPY_LINEAR + ATOMIC pair (ANVIL_FUSED_SIGNAL). Symbol emitted on all archs so
+  // the host launch resolves; body only codegens on gfx1250/gfx950
+  // (XIO_SDMA_OSS7_ENABLED) and is never launched elsewhere (runtime gate).
+  __global__ void AnvilKernelFusedSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                             void* dst, void const* src, size_t numBytes,
+                                             size_t chunkBytes,
+                                             uint64_t* signal, uint64_t expected)
+  {
+#if XIO_SDMA_OSS7_ENABLED
+    anvil::put_signal_fused_chunked(*handlePtr, dst, const_cast<void*>(src),
+                                    numBytes, signal, chunkBytes);
+    anvil::waitSignal(signal, expected);
+#else
+    (void)handlePtr; (void)dst; (void)src; (void)numBytes; (void)chunkBytes;
+    (void)signal; (void)expected;
+#endif
+  }
+
+  // OSS7 fused signal + no wait (submission-only timing).
+  __global__ void AnvilKernelFusedSignalNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                               void* dst, void const* src, size_t numBytes,
+                                               size_t chunkBytes,
+                                               uint64_t* signal, uint64_t expected)
+  {
+#if XIO_SDMA_OSS7_ENABLED
+    (void)expected;
+    anvil::put_signal_fused_chunked(*handlePtr, dst, const_cast<void*>(src),
+                                    numBytes, signal, chunkBytes);
+#else
+    (void)handlePtr; (void)dst; (void)src; (void)numBytes; (void)chunkBytes;
+    (void)signal; (void)expected;
+#endif
+  }
+#endif // XIO_SDMA_OSS7
+
+  // legacy (put + quiet) + wait.
+  __global__ void AnvilKernelLegacyWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                        void* dst, void const* src, size_t numBytes,
+                                        size_t chunkBytes,
+                                        uint64_t* signal, uint64_t expected)
+  {
+    (void)signal; (void)expected;
+    anvil::put_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes, chunkBytes);
+    anvil::quiet(*handlePtr);
+  }
+
+  // legacy (put) + no wait (submission-only timing).
+  __global__ void AnvilKernelLegacyNoWait(anvil::SdmaQueueDeviceHandle* handlePtr,
+                                          void* dst, void const* src, size_t numBytes,
+                                          size_t chunkBytes,
+                                          uint64_t* signal, uint64_t expected)
+  {
+    (void)signal; (void)expected;
+    anvil::put_chunked(*handlePtr, dst, const_cast<void*>(src), numBytes, chunkBytes);
+  }
+#endif // ANVIL_EXEC_ENABLED
 
   // Execute a single DMA executor
   static ErrResult RunDmaExecutor(int           const  iteration,
@@ -6201,6 +6552,235 @@ namespace {
     return ERR_NONE;
   }
 
+#ifdef ANVIL_EXEC_ENABLED
+  // HMA executor (EXE_HOST_INITIATED_DMA): CPU-initiated path. Submit every
+  // transfer's copy back-to-back (engines run concurrently), then drain each
+  // with quiet(). Timed on the CPU wall clock - the copy is on a KFD queue,
+  // not a HIP stream, so hipEvents cannot bracket it.
+  static ErrResult RunAnvilHostExecutor(int           const  iteration,
+                                        ConfigOptions const& cfg,
+                                        int           const  deviceIdx,
+                                        ExeInfo&             exeInfo)
+  {
+    ERR_CHECK(hipSetDevice(deviceIdx));
+
+    int const numResources = (int)exeInfo.resources.size();
+
+    using AnvilClock = std::chrono::high_resolution_clock;
+    std::vector<std::chrono::time_point<AnvilClock>> tStart(numResources);
+    std::vector<std::chrono::time_point<AnvilClock>> tStop(numResources);
+
+    // Issue all copies first (concurrent across independent host channels).
+    for (int i = 0; i < numResources; ++i) {
+      TransferResources const& rss = exeInfo.resources[i];
+      anvil::SdmaQueueHostHandle* hh = exeInfo.anvilHostHandles[i];
+      size_t const initOffsetBytes = cfg.data.byteOffset;
+      void*  dst  = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
+      void*  src  = reinterpret_cast<uint8_t*>(
+        const_cast<void*>((void const*)rss.srcMem[0])) + initOffsetBytes;
+      size_t nbytes = rss.numBytes;
+      tStart[i] = AnvilClock::now();
+      hh->put(dst, src, nbytes);
+    }
+    // Drain each channel and stamp completion.
+    for (int i = 0; i < numResources; ++i) {
+      exeInfo.anvilHostHandles[i]->quiet();
+      tStop[i] = AnvilClock::now();
+    }
+
+    if (iteration >= 0) {
+      double maxDeltaMsec = 0.0;
+      for (int i = 0; i < numResources; ++i) {
+        double const deltaMsec =
+          std::chrono::duration<double, std::milli>(tStop[i] - tStart[i])
+            .count();
+        exeInfo.resources[i].totalDurationMsec += deltaMsec;
+        maxDeltaMsec = std::max(maxDeltaMsec, deltaMsec);
+      }
+      exeInfo.totalDurationMsec += maxDeltaMsec;
+    }
+    return ERR_NONE;
+  }
+
+  static ErrResult RunAnvilExecutor(int           const  iteration,
+                                    ConfigOptions const& cfg,
+                                    int           const  deviceIdx,
+                                    ExeInfo&             exeInfo)
+  {
+    ERR_CHECK(hipSetDevice(deviceIdx));
+
+    int const numResources = (int)exeInfo.resources.size();
+
+    // ANVIL_WAIT_SIGNAL=0: skip the in-kernel wait so the kernel returns right
+    // after submitting; isolates the waitSignal cost. Copy still in flight -
+    // timing-only, not correctness-safe.
+    static bool const doWait = [] {
+      char const* v = getenv("ANVIL_WAIT_SIGNAL");
+      return !v || atoi(v) != 0;
+    }();
+
+    // ANVIL_LEGACY=1: legacy put + quiet (rptr poll) instead of put_signal +
+    // waitSignal. Comparison only; quiet can report completion early.
+    static bool const useLegacy = [] {
+      char const* v = getenv("ANVIL_LEGACY");
+      return v && atoi(v) != 0;
+    }();
+
+    // ANVIL_FUSED_SIGNAL=1: OSS7 fused copy+signal packet instead of the separate
+    // put_signal path. Requires XIO_SDMA_OSS7 + non-legacy; falls back (one log
+    // line) when unavailable.
+    static bool const useFused = [deviceIdx] {
+      char const* v = getenv("ANVIL_FUSED_SIGNAL");
+      bool const requested = v && atoi(v) != 0;
+      if (!requested)
+        return false;
+#if !XIO_SDMA_OSS7
+      fprintf(stderr,
+              "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: built without "
+              "XIO_SDMA_OSS7; using the separate put_signal path.\n");
+      return false;
+#else
+      if (useLegacy) {
+        fprintf(stderr,
+                "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: incompatible with "
+                "ANVIL_LEGACY=1; using the legacy path.\n");
+        return false;
+      }
+      // Fused MI4 packets are gfx1250-only at runtime; gate on device arch
+      // (assumes a homogeneous set), computed once.
+      hipDeviceProp_t prop{};
+      if (hipGetDeviceProperties(&prop, deviceIdx) != hipSuccess) {
+        fprintf(stderr,
+                "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: could not query device %d "
+                "arch; using the separate put_signal path.\n", deviceIdx);
+        return false;
+      }
+      if (std::string(prop.gcnArchName).find("gfx1250") == std::string::npos) {
+        fprintf(stderr,
+                "[anvil] ANVIL_FUSED_SIGNAL=1 ignored: fused SDMA packets require "
+                "a gfx1250 runtime (device %d is %s); using the separate "
+                "put_signal path.\n", deviceIdx, prop.gcnArchName);
+        return false;
+      }
+      // Validated on gfx1250; perf-neutral vs the separate path, kept opt-in.
+      return true;
+#endif
+    }();
+    (void)useFused;
+
+    // ANVIL_CHUNK_SIZE: max bytes per COPY_LINEAR packet (raw or K/M/G suffix),
+    // clamped to (0, 1 GiB] (30-bit count). Smaller values force more packets.
+    static size_t const chunkBytes = [] {
+      char const* v = getenv("ANVIL_CHUNK_SIZE");
+      if (!v || !*v) return anvil::ANVIL_MAX_COPY_CHUNK;
+      char* end = nullptr;
+      unsigned long long val = strtoull(v, &end, 10);
+      if (end && *end) {
+        switch (*end) {
+          case 'g': case 'G': val <<= 30; break;
+          case 'm': case 'M': val <<= 20; break;
+          case 'k': case 'K': val <<= 10; break;
+          default: break;
+        }
+      }
+      size_t const clamped = anvil::anvil_clamp_chunk(static_cast<size_t>(val));
+      if (static_cast<size_t>(val) != clamped)
+        fprintf(stderr,
+                "[anvil] ANVIL_CHUNK_SIZE=%s clamped to %zu bytes "
+                "(valid range 1..%zu)\n",
+                v, clamped, anvil::ANVIL_MAX_COPY_CHUNK);
+      return clamped;
+    }();
+
+    // ANVIL_CPU_TIMING=1: also print CPU wall time next to the hipEvent time to
+    // quantify launch+sync overhead. Diagnostic only; reported GB/s unchanged.
+    static bool const cpuTiming = [] {
+      char const* v = getenv("ANVIL_CPU_TIMING");
+      return v && atoi(v) != 0;
+    }();
+    auto const cpuStart = std::chrono::high_resolution_clock::now();
+
+    // One stream per transfer so they run concurrently and contend, matching the
+    // DMA/BMA executors; each is timed with its own event pair.
+    for (int i = 0; i < numResources; ++i) {
+      TransferResources const& rss = exeInfo.resources[i];
+      sdma_ep::SdmaQueueInfo const& qi = exeInfo.anvilQueues[i];
+
+      anvil::SdmaQueueDeviceHandle* handle =
+        reinterpret_cast<anvil::SdmaQueueDeviceHandle*>(qi.deviceHandle);
+
+      size_t const initOffsetBytes = cfg.data.byteOffset;
+      void*       dst    = reinterpret_cast<uint8_t*>(rss.dstMem[0]) + initOffsetBytes;
+      void const* src    = reinterpret_cast<uint8_t const*>(rss.srcMem[0]) + initOffsetBytes;
+      size_t      nbytes = rss.numBytes;
+      uint64_t*   signal = exeInfo.anvilSignals[i];
+
+      // Reset the signal to 0 on this stream before the kernel (ordered ahead of
+      // the launch, outside the timing window); put_signal increments it once.
+      ERR_CHECK(hipMemsetAsync(signal, 0, sizeof(uint64_t), exeInfo.streams[i]));
+
+      // Anvil is AMD-only, so bracket the kernel with start/stop events via
+      // hipExtLaunchKernelGGL (matching the GFX timing path). One of the four
+      // specialized kernels is selected on the host; all share one arg list.
+#define ANVIL_LAUNCH_KERNEL(KERNEL)                                             \
+  hipExtLaunchKernelGGL(KERNEL, dim3(1), dim3(1), 0, exeInfo.streams[i],        \
+                        exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,       \
+                        handle, dst, const_cast<void*>(src), nbytes,           \
+                        chunkBytes, signal, (uint64_t)1)
+      if (useLegacy) {
+        if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyWait);
+        else        ANVIL_LAUNCH_KERNEL(AnvilKernelLegacyNoWait);
+      }
+#if XIO_SDMA_OSS7
+      else if (useFused) {
+        if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelFusedSignalWait);
+        else        ANVIL_LAUNCH_KERNEL(AnvilKernelFusedSignalNoWait);
+      }
+#endif
+      else {
+        if (doWait) ANVIL_LAUNCH_KERNEL(AnvilKernelSignalWait);
+        else        ANVIL_LAUNCH_KERNEL(AnvilKernelSignalNoWait);
+      }
+#undef ANVIL_LAUNCH_KERNEL
+      ERR_CHECK(hipGetLastError());
+    }
+
+    // Wait for all concurrent transfers to complete, then record per-transfer times
+    for (int i = 0; i < numResources; ++i)
+      ERR_CHECK(hipStreamSynchronize(exeInfo.streams[i]));
+
+    auto const cpuStop = std::chrono::high_resolution_clock::now();
+
+    if (iteration >= 0) {
+      float maxDeltaMsec = 0.0f;
+      for (int i = 0; i < numResources; ++i) {
+        float deltaMsec = 0.0f;
+        ERR_CHECK(hipEventElapsedTime(&deltaMsec, exeInfo.startEvents[i], exeInfo.stopEvents[i]));
+        exeInfo.resources[i].totalDurationMsec += deltaMsec;
+        maxDeltaMsec = std::max(maxDeltaMsec, deltaMsec);
+      }
+      // Executor wall time is bounded by the slowest concurrent transfer
+      exeInfo.totalDurationMsec += maxDeltaMsec;
+
+      if (cpuTiming) {
+        double const cpuMsec =
+          std::chrono::duration<double, std::milli>(cpuStop - cpuStart).count();
+        fprintf(stderr,
+                "[anvil-cputiming] iter=%d transfers=%d hipEvent_ms=%.6f "
+                "cpu_ms=%.6f delta_ms=%.6f ratio=%.3f\n",
+                iteration, numResources, maxDeltaMsec, cpuMsec,
+                cpuMsec - maxDeltaMsec,
+                maxDeltaMsec > 0.0 ? cpuMsec / (double)maxDeltaMsec : 0.0);
+      }
+    } else if (cpuTiming) {
+      // Silence unused-variable warning on warmup iterations (iteration < 0).
+      (void)cpuStop;
+    }
+
+    return ERR_NONE;
+  }
+#endif
+
 // Executor-related functions
 //========================================================================================
   static ErrResult RunExecutor(int           const  iteration,
@@ -6216,6 +6796,10 @@ namespace {
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+#endif
+#ifdef ANVIL_EXEC_ENABLED
+    case EXE_GPU_INITIATED_DMA:  return RunAnvilExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_HOST_INITIATED_DMA: return RunAnvilHostExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
     default:            return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
@@ -6341,7 +6925,10 @@ namespace {
       resource.transferIdx = i;
 
       ExeInfo& exeInfo = executorMap[exeDevice];
-      exeInfo.totalBytes    += t.numBytes;
+      // Count every destination write: a multi-destination Transfer (e.g. a
+      // merged BMA batch) moves numBytes to each of its destinations, so the
+      // executor's byte total (and hence CPU-timed bandwidth) must scale with it.
+      exeInfo.totalBytes    += t.numBytes * (t.dsts.empty() ? 1 : t.dsts.size());
       exeInfo.totalSubExecs += t.numSubExecs;
       exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
       exeInfo.resources.push_back(resource);
@@ -6944,6 +7531,7 @@ namespace {
         wc.exe.exeSubIndices[0] = -2;
         return result;
       case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
+      case EXE_GPU_INITIATED_DMA: case EXE_HOST_INITIATED_DMA:
       {
         // Iterate over all available subindices
         ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
@@ -8404,6 +8992,7 @@ namespace {
       agent = cpuAgents[exeDevice.exeIndex];
       break;
     case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_TDM:
+    case EXE_GPU_INITIATED_DMA: case EXE_HOST_INITIATED_DMA:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
@@ -8725,6 +9314,21 @@ namespace {
       }
     }
   }
+
+#if !defined(__NVCC__)
+  bool GetSdmaAffinityMask(int srcGpu, int dstGpu,
+                           uint32_t& availMask, uint32_t& preferredMask)
+  {
+    hsa_agent_t srcAgent, dstAgent;
+    if (System::Get().GetHsaAgent({EXE_GPU_GFX, srcGpu}, srcAgent).errType != ERR_NONE) return false;
+    if (System::Get().GetHsaAgent({EXE_GPU_GFX, dstGpu}, dstAgent).errType != ERR_NONE) return false;
+    if (hsa_amd_memory_copy_engine_status(dstAgent, srcAgent, &availMask)
+        != HSA_STATUS_SUCCESS) return false;
+    if (hsa_amd_memory_get_preferred_copy_engine(dstAgent, srcAgent, &preferredMask)
+        != HSA_STATUS_SUCCESS) preferredMask = 0;
+    return true;
+  }
+#endif
 
   int GetRank()
   {

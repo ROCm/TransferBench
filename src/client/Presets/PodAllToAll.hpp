@@ -76,8 +76,25 @@ int PodAllToAllPreset(EnvVars&          ev,
   }
 
   // Determine which GPU executor to use
-  ExeType     exeType    = useDmaExec ? EXE_GPU_DMA : (useTdmExec ? EXE_GPU_TDM : EXE_GPU_GFX);
-  char const* execName   = useDmaExec ? "DMA" : (useTdmExec ? "TDM" : "GFX");
+  ExeType exeType = (useDmaExec == 4) ? EXE_HOST_INITIATED_DMA :
+                    (useDmaExec == 3) ? EXE_GPU_INITIATED_DMA :
+                    (useDmaExec == 2) ? EXE_GPU_BDMA :
+                    (useDmaExec == 1) ? EXE_GPU_DMA :
+                    (useTdmExec)      ? EXE_GPU_TDM : EXE_GPU_GFX;
+  char const* execName = (useDmaExec == 4) ? "HMA" :
+                         (useDmaExec == 3) ? "GMA" :
+                         (useDmaExec == 2) ? "BMA" :
+                         (useDmaExec == 1) ? "DMA" :
+                         (useTdmExec)      ? "TDM" : "GFX";
+
+  // BMA merges each source GPU's copies into one hipMemcpyBatchAsync launch (one
+  // multi-destination Transfer per source); the executor must be the source, so
+  // USE_REMOTE_READ is ignored.
+  bool const bmaMerged = (useDmaExec == 2);
+  if (bmaMerged && useRemoteRead) {
+    Utils::Print("[WARN] USE_REMOTE_READ is ignored for BMA; the source GPU is always the executor\n");
+    useRemoteRead = 0;
+  }
 
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
@@ -125,7 +142,11 @@ int PodAllToAllPreset(EnvVars&          ev,
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
-      ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
+      ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor",
+               useDmaExec == 4 ? "HMA (host-initiated SDMA/anvil)" :
+               useDmaExec == 3 ? "GMA (GPU-initiated SDMA/anvil)" :
+               useDmaExec == 2 ? "BMA" :
+               useDmaExec == 1 ? "DMA" : "GFX");
       ev.Print("USE_TDM_EXEC"   , useTdmExec   , "Using %s executor", useTdmExec ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("GROUP_STRIDE"   , groupStride  , "Stride permutation on device list before splitting into groups");
@@ -142,6 +163,22 @@ int PodAllToAllPreset(EnvVars&          ev,
     Utils::Print("[ERROR] %s execution can only be used for copies (A2A_MODE=0)\n", execName);
     return ERR_FATAL;
   }
+  if (useDmaExec < 0 || useDmaExec > 4) {
+    Utils::Print("[ERROR] USE_DMA_EXEC must be 0 (GFX), 1 (DMA), 2 (BMA), 3 (GMA), or 4 (HMA)\n");
+    return ERR_FATAL;
+  }
+#ifndef ANVIL_EXEC_ENABLED
+  if (useDmaExec == 3 || useDmaExec == 4) {
+    Utils::Print("[ERROR] USE_DMA_EXEC=3 (GMA) / 4 (HMA) requires building with -DENABLE_ANVIL_EXEC=ON\n");
+    return ERR_FATAL;
+  }
+#endif
+  // Anvil (GMA/HMA) builds raw SDMA packets with process-local virtual addresses,
+  // so it cannot target another rank's memory. Restrict those to single-rank pods.
+  if ((useDmaExec == 3 || useDmaExec == 4) && numRanks > 1) {
+    Utils::Print("[ERROR] GMA/HMA do not support cross-rank transfers; PodAllToAll with GMA/HMA requires a single rank\n");
+    return ERR_FATAL;
+  }
 
   if (numGroups < 1) {
     Utils::Print("[ERROR] NUM_GROUPS must be >= 1 (got %d)\n", numGroups);
@@ -153,6 +190,8 @@ int PodAllToAllPreset(EnvVars&          ev,
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
                numBytesPerTransfer, execName, numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
+  if (bmaMerged)
+    Utils::Print("[BMA merges each source GPU's copies into one batched launch; per-(src,dst) links can't be resolved, so each cell shows its equal share of the measured per-source aggregate]\n");
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
 
@@ -189,10 +228,31 @@ int PodAllToAllPreset(EnvVars&          ev,
       std::vector<std::vector<int>>& groupReIndex = groupReIndexes[group];
 
       for (int i = group * groupSize; i < (group + 1) * groupSize; i++) {
+        int const localI = i - group * groupSize;
+
+        // For BMA, accumulate every destination of source device i into one Transfer
+        TransferBench::Transfer merged;
+        std::vector<int> mergedLocalJ;
+        if (bmaMerged) {
+          merged.numBytes    = numBytesPerTransfer;
+          merged.srcs.push_back(devices[i]);
+          merged.exeDevice   = {exeType, (int32_t)devices[i].memIndex, (int32_t)devices[i].memRank};
+          merged.exeSubIndex = -1;
+          merged.numSubExecs = numSubExecs;
+        }
+
         for (int j = group * groupSize; j < (group + 1) * groupSize; j++) {
           if (i == j) {
             if (!a2aLocal) continue;
           }
+
+          if (bmaMerged) {
+            // Every batched copy reads source device i and writes destination device j
+            merged.dsts.push_back(devices[j]);
+            mergedLocalJ.push_back(j - group * groupSize);
+            continue;
+          }
+
           TransferBench::Transfer transfer;
           transfer.numBytes = numBytesPerTransfer;
           for (int x = 0; x < numSrcs; x++) transfer.srcs.push_back(devices[i]);
@@ -204,11 +264,20 @@ int PodAllToAllPreset(EnvVars&          ev,
                                (int32_t)(useRemoteRead ? devices[j].memRank : devices[i].memRank)};
           transfer.exeSubIndex = -1;
           transfer.numSubExecs = numSubExecs;
-          int const localI = i - group * groupSize;
           int const localJ = j - group * groupSize;
           groupReIndex[localI][localJ] =
               (int)(podTransfers.size() - groupTransferBase[group]);
           podTransfers.push_back(transfer);
+        }
+
+        if (bmaMerged && !merged.dsts.empty()) {
+          // All of this source's copies share one launch; point every (src,dst)
+          // cell at that Transfer so each reports its share of the per-source
+          // aggregate and row/column totals still add up.
+          int const localIdx = (int)(podTransfers.size() - groupTransferBase[group]);
+          for (int lj : mergedLocalJ)
+            groupReIndex[localI][lj] = localIdx;
+          podTransfers.push_back(merged);
         }
 
         // NIC transfers are supplementary bandwidth; excluded from groupReIndex and bandwidth table

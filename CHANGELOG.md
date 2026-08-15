@@ -8,6 +8,11 @@ Documentation for TransferBench is available at
 - Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
 - Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware.  This provides
   an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
+- Adding new GPU-initiated SDMA executor "GMA" [S] (AMD only, opt-in via `-DENABLE_ANVIL_EXEC=ON`), which
+  drives KFD SDMA queues directly from a GPU kernel using the bundled `anvil` KFD/SDMA queue library
+- Adding new host-initiated SDMA executor "HMA" [H] (AMD only), a CPU-driven variant of the anvil SDMA
+  path where the host builds packets, rings the doorbell, and polls for completion
+- Extended the AllToAll preset `USE_DMA_EXEC` to select the executor: 0=GFX, 1=DMA, 2=BMA, 3=GMA, 4=HMA
 ### Modified
 - CPU NUMA nodes with 0 cores will now be hidden.  To re-enable, set TB_SHOW_ALL_NUMA=1
 - Switching to use of persistent threadpools to cut-down on thread creation overheads
