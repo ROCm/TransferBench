@@ -4528,8 +4528,11 @@ namespace {
       // instead of the GMA (GPU kernel) path - CPU builds packets, rings the
       // doorbell, polls quiet(). One independent host channel per transfer.
       bool const useHostQueue = (exeDevice.exeType == EXE_HOST_INITIATED_DMA);
-      // Per-dst host channel counter so concurrent transfers get distinct queues.
+      // Per-dst channel counters so concurrent transfers to the same dst get
+      // distinct queues, while re-prepares (e.g. a size sweep) reuse the same
+      // channels instead of allocating fresh KFD SDMA queues each time.
       std::unordered_map<int, int> hostChannelCount;
+      std::unordered_map<int, int> deviceChannelCount;
 
       // ANVIL_REMOTE_DOORBELL=1: place the completion signal ("doorbell") in
       // DESTINATION memory instead of the source. The SDMA engine then rings a
@@ -4594,11 +4597,15 @@ namespace {
           continue;
         }
 
-        anvil::SdmaQueue* queue = anvilLib.createSdmaQueue(
-          srcDeviceId, dstDeviceId, engineId, &channelIdx);
+        // Reuse an existing channel for this {src,dst} when re-preparing (idempotent
+        // across size sweeps); only allocate a new KFD SDMA queue when a concurrent
+        // transfer to the same dst needs a distinct channel this prepare pass.
+        channelIdx = deviceChannelCount[dstDeviceId]++;
+        anvil::SdmaQueue* queue = anvilLib.getOrCreateSdmaQueue(
+          srcDeviceId, dstDeviceId, engineId, channelIdx);
         if (!queue) {
           return {ERR_FATAL,
-                  "PrepareAnvilExecutor: createSdmaQueue failed for src=%d dst=%d",
+                  "PrepareAnvilExecutor: getOrCreateSdmaQueue failed for src=%d dst=%d",
                   srcDeviceId, dstDeviceId};
         }
 

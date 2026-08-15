@@ -135,6 +135,12 @@ public:
   SdmaQueue* getSdmaQueue(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
                              uint32_t engineId, int* channelIdx = nullptr);
+  // Idempotent get-or-create: returns channel `channel` for {src,dst}, creating
+  // any missing channels up to that index. Unlike createSdmaQueue (which always
+  // appends), repeated calls with the same {src,dst,channel} reuse the same KFD
+  // SDMA queue, so callers that re-prepare (e.g. a size sweep) do not leak queues.
+  SdmaQueue* getOrCreateSdmaQueue(int srcDeviceId, int dstDeviceId,
+                                  uint32_t engineId, int channel);
   int getSdmaEngineId(int srcDeviceId, int dstDeviceId, int rotation = 0);
 
   // Host-initiated queue API (HMA executor). Host channels are independent

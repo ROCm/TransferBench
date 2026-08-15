@@ -453,6 +453,17 @@ SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
   return vec.back().get();
 }
 
+SdmaQueue* AnvilLib::getOrCreateSdmaQueue(int srcDeviceId, int dstDeviceId,
+                                          uint32_t engineId, int channel) {
+  auto& vec = sdma_channels_[ChannelKey{srcDeviceId, dstDeviceId}];
+  while (static_cast<int>(vec.size()) <= channel) {
+    vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                                 gpuAgents_[srcDeviceId],
+                                                 engineId));
+  }
+  return vec[static_cast<size_t>(channel)].get();
+}
+
 bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels) {
   if (numChannels <= 0) {
     throw std::invalid_argument("connect(): numChannels must be positive");
