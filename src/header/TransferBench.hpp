@@ -4495,11 +4495,9 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
-  // Initialize anvil SDMA queues for the anvil executors: EXE_GPU_INITIATED_DMA
-  // (GMA, device/kernel-driven) and EXE_HOST_INITIATED_DMA (HMA, CPU-driven).
-  // Uses AnvilLib singleton: init (idempotent), connect, createSdmaQueue.
-  // Stores SdmaQueueInfo (deviceHandle, src/dst device IDs, channelIdx) per resource.
-  // The SdmaQueue objects are owned by AnvilLib and live for the process lifetime.
+  // Set up anvil SDMA queues for GMA (device-driven) and HMA (host-driven).
+  // Queues are owned by the AnvilLib singleton (process lifetime); this stores one
+  // SdmaQueueInfo (+ completion signal for GMA) per resource in exeInfo.
   static ErrResult PrepareAnvilExecutor(ConfigOptions    const& cfg,
                                         vector<Transfer> const& transfers,
                                         ExeDevice        const& exeDevice,
@@ -4524,9 +4522,8 @@ namespace {
       exeInfo.anvilSignals.assign(numResources, nullptr);
       exeInfo.anvilHostHandles.assign(numResources, nullptr);
 
-      // HMA executor (EXE_HOST_INITIATED_DMA): CPU-initiated (host queue) SDMA
-      // instead of the GMA (GPU kernel) path - CPU builds packets, rings the
-      // doorbell, polls quiet(). One independent host channel per transfer.
+      // HMA (EXE_HOST_INITIATED_DMA): CPU-driven host queue (builds packets, rings
+      // the doorbell, polls quiet()) instead of the GMA kernel path.
       bool const useHostQueue = (exeDevice.exeType == EXE_HOST_INITIATED_DMA);
       // Per-dst channel counters so concurrent transfers to the same dst get
       // distinct queues, while re-prepares (e.g. a size sweep) reuse the same
@@ -4534,18 +4531,11 @@ namespace {
       std::unordered_map<int, int> hostChannelCount;
       std::unordered_map<int, int> deviceChannelCount;
 
-      // ANVIL_REMOTE_DOORBELL=1: place the completion signal ("doorbell") in
-      // DESTINATION memory instead of the source. The SDMA engine then rings a
-      // doorbell that travels the same fabric path to the same endpoint as the
-      // copied data, and the source kernel remote-polls it via waitSignal - a
-      // more direct proof that the data actually landed at the destination.
-      // Default (0): local (source) doorbell, cheaper to poll; sound on a
-      // coherent link where engine-retire implies remote visibility.
-      // NOTE: the remote doorbell's correctness relies on the copy's writes
-      // becoming visible at the destination before the atomic signal write. On
-      // this coherent, in-order single-queue path that holds; if a future
-      // non-coherent path reorders them, a fence packet between copy and atomic
-      // would be required (see plan: hdp-gcr-conditional / completion modes).
+      // ANVIL_REMOTE_DOORBELL=1: place the completion signal in DESTINATION memory
+      // so the source kernel remote-polls a signal that lands at the same endpoint
+      // as the data. Default (0): local (source) signal, cheaper to poll and sound
+      // on this coherent, in-order path (a non-coherent path would need a fence
+      // packet between copy and atomic).
       static bool const remoteDoorbell = [] {
         char const* v = getenv("ANVIL_REMOTE_DOORBELL");
         return v && atoi(v) != 0;
@@ -4559,10 +4549,9 @@ namespace {
         Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
         int const dstDeviceId = t.dsts[0].memIndex;
 
-        // Enable peer access and resolve XGMI-optimal SDMA engine; create queue.
-        // Pass the resource index as the round-robin rotation so concurrent
-        // transfers on this source GPU spread across the preferred engine set
-        // instead of all funneling onto the lowest-index engine.
+        // Enable peer access and resolve the XGMI-optimal SDMA engine. The
+        // resource index is the round-robin rotation so concurrent transfers
+        // spread across the preferred engine set.
         int channelIdx = -1;
         anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
         uint32_t const engineId = static_cast<uint32_t>(
@@ -4573,8 +4562,8 @@ namespace {
                             i, exeInfo.resources[i].transferIdx, dstDeviceId, engineId);
         }
 
-        // Host-initiated mode: create a CPU-driven host channel and store its
-        // handle; no device queue/kernel/signal (quiet() polls the rptr).
+        // Host-initiated mode: one CPU-driven host channel per transfer; no
+        // device queue/kernel/signal (quiet() polls the rptr).
         if (useHostQueue) {
           int const ch = hostChannelCount[dstDeviceId]++;
           if (!anvilLib.connectHost(srcDeviceId, dstDeviceId, ch + 1)) {
@@ -4597,9 +4586,8 @@ namespace {
           continue;
         }
 
-        // Reuse an existing channel for this {src,dst} when re-preparing (idempotent
-        // across size sweeps); only allocate a new KFD SDMA queue when a concurrent
-        // transfer to the same dst needs a distinct channel this prepare pass.
+        // Reuse the channel for this {src,dst} across re-prepares; only allocate a
+        // new queue when a concurrent transfer to the same dst needs one.
         channelIdx = deviceChannelCount[dstDeviceId]++;
         anvil::SdmaQueue* queue = anvilLib.getOrCreateSdmaQueue(
           srcDeviceId, dstDeviceId, engineId, channelIdx);
@@ -4615,12 +4603,9 @@ namespace {
         exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
         exeInfo.anvilQueues[i].channelIdx   = channelIdx;
 
-        // Per-transfer completion signal: uncached device memory the SDMA
-        // engine atomically increments after the copy, and the kernel polls
-        // via waitSignal. Uncached so the poller observes the engine's write
-        // without stale cache lines. Placed on src (local) or dst (remote)
-        // per remoteDoorbell; remote requires peer access (enabled above) so
-        // the source kernel can poll it.
+        // Per-transfer completion signal: uncached device memory the engine
+        // atomically increments after the copy and the kernel polls via
+        // waitSignal. Placed on src (local) or dst (remote) per remoteDoorbell.
         {
           int const signalDevice = remoteDoorbell ? dstDeviceId : srcDeviceId;
           if (remoteDoorbell) ERR_CHECK(hipSetDevice(signalDevice));
@@ -6157,25 +6142,16 @@ namespace {
   }
 
 #ifdef ANVIL_EXEC_ENABLED
-  // Single-thread GMA kernels, launched as <<<dim3(1), dim3(1)>>> on the
-  // source GPU. To avoid any runtime branching inside the kernel, the four
-  // (completion mechanism) x (wait) combinations are separate kernels selected
-  // on the host (ANVIL_LEGACY x ANVIL_WAIT_SIGNAL). All share one signature so
-  // the launch site is uniform; the legacy kernels ignore signal/expected.
-  //
-  // Completion mechanism:
-  //   signal (default): put_signal + waitSignal. Completion is detected via the
-  //     signal atomic, which the engine orders AFTER the copy. rptr only
-  //     reflects ring-space reclamation and can advance before the copy's
-  //     writes retire, so it is not a correct completion barrier.
-  //   legacy:           put + quiet (polls the ring rptr). Kept for comparison;
-  //     can report completion early, so the signal path is the default.
-  // (Neither path issues HDP flush / GCR ops; those are only needed for
-  // non-coherent host-data-path/aperture consumers - see plan hdp-gcr-conditional.)
-  //
-  // Wait variants: the "Wait" kernels block until completion so the stop event
-  // captures the full transfer; the "NoWait" kernels return right after
-  // submitting (submission-only timing; copy still in flight, NOT validation-safe).
+  // Single-thread GMA kernels (<<<1,1>>> on the source GPU). The four
+  // (completion) x (wait) combinations are separate kernels selected on the host
+  // (ANVIL_LEGACY x ANVIL_WAIT_SIGNAL) to avoid in-kernel branching; all share one
+  // signature.
+  //   signal (default): put_signal + waitSignal; the engine orders the atomic
+  //     after the copy, so it is a correct completion barrier.
+  //   legacy:           put + quiet (polls ring rptr); can report early, comparison
+  //     only.
+  //   Wait blocks until completion (stop event covers the copy); NoWait returns
+  //     after submit (timing-only, not validation-safe).
 
   // signal + wait (default correctness path).
   __global__ void AnvilKernelSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
@@ -6200,12 +6176,10 @@ namespace {
   }
 
 #if XIO_SDMA_OSS7
-  // OSS7 fused signal + wait: single COPY_LINEAR_WAIT_SIGNAL_MI4 packet instead
-  // of the separate COPY_LINEAR + ATOMIC pair. Selected via ANVIL_FUSED_SIGNAL.
-  // The kernel symbol is emitted for every arch (so the host launch reference
-  // resolves), but the fused body only codegens on gfx1250/gfx950 device passes
-  // (XIO_SDMA_OSS7_ENABLED); elsewhere it is an empty stub that is never launched
-  // (runtime gate forces useFused=false off gfx1250).
+  // OSS7 fused signal+wait: one COPY_LINEAR_WAIT_SIGNAL_MI4 packet instead of the
+  // COPY_LINEAR + ATOMIC pair (ANVIL_FUSED_SIGNAL). Symbol emitted on all archs so
+  // the host launch resolves; body only codegens on gfx1250/gfx950
+  // (XIO_SDMA_OSS7_ENABLED) and is never launched elsewhere (runtime gate).
   __global__ void AnvilKernelFusedSignalWait(anvil::SdmaQueueDeviceHandle* handlePtr,
                                              void* dst, void const* src, size_t numBytes,
                                              size_t chunkBytes,
@@ -6637,27 +6611,24 @@ namespace {
 
     int const numResources = (int)exeInfo.resources.size();
 
-    // ANVIL_WAIT_SIGNAL=0: skip the in-kernel completion wait so the kernel
-    // returns right after submitting the copy packet. Lets us measure the
-    // waitSignal cost by comparing kernel time with it on (default) vs off.
-    // WARNING: with the wait off the copy is still in flight when the kernel
-    // returns - timing-only, not correctness-safe.
+    // ANVIL_WAIT_SIGNAL=0: skip the in-kernel wait so the kernel returns right
+    // after submitting; isolates the waitSignal cost. Copy still in flight -
+    // timing-only, not correctness-safe.
     static bool const doWait = [] {
       char const* v = getenv("ANVIL_WAIT_SIGNAL");
       return !v || atoi(v) != 0;
     }();
 
-    // ANVIL_LEGACY=1: use the legacy put + quiet (rptr-poll) completion instead
-    // of put_signal + waitSignal. For comparison only; quiet can report
-    // completion before the copy's writes retire, so the signal path is default.
+    // ANVIL_LEGACY=1: legacy put + quiet (rptr poll) instead of put_signal +
+    // waitSignal. Comparison only; quiet can report completion early.
     static bool const useLegacy = [] {
       char const* v = getenv("ANVIL_LEGACY");
       return v && atoi(v) != 0;
     }();
 
-    // ANVIL_FUSED_SIGNAL=1: use the OSS7 fused copy+signal packet instead of the
-    // separate put_signal + waitSignal path. Requires XIO_SDMA_OSS7 and a
-    // non-legacy path; falls back (with one log line) when unavailable.
+    // ANVIL_FUSED_SIGNAL=1: OSS7 fused copy+signal packet instead of the separate
+    // put_signal path. Requires XIO_SDMA_OSS7 + non-legacy; falls back (one log
+    // line) when unavailable.
     static bool const useFused = [deviceIdx] {
       char const* v = getenv("ANVIL_FUSED_SIGNAL");
       bool const requested = v && atoi(v) != 0;
@@ -6675,9 +6646,8 @@ namespace {
                 "ANVIL_LEGACY=1; using the legacy path.\n");
         return false;
       }
-      // Fused MI4 packets are a gfx1250-only runtime feature (gfx950 builds but
-      // can't consume them). Gate on the device arch; assumes a homogeneous set,
-      // computed once from deviceIdx.
+      // Fused MI4 packets are gfx1250-only at runtime; gate on device arch
+      // (assumes a homogeneous set), computed once.
       hipDeviceProp_t prop{};
       if (hipGetDeviceProperties(&prop, deviceIdx) != hipSuccess) {
         fprintf(stderr,
@@ -6692,16 +6662,14 @@ namespace {
                 "put_signal path.\n", deviceIdx, prop.gcnArchName);
         return false;
       }
-      // Compact COPY_LINEAR_WAIT_SIGNAL_MI4 layout, validated on gfx1250. Perf-
-      // neutral vs the separate path (copy dominates); kept opt-in.
+      // Validated on gfx1250; perf-neutral vs the separate path, kept opt-in.
       return true;
 #endif
     }();
     (void)useFused;
 
-    // ANVIL_CHUNK_SIZE: max bytes per COPY_LINEAR packet (raw bytes or K/M/G
-    // suffix). Default and hard cap is 1 GiB (30-bit count); smaller values split
-    // the transfer into more packets (tuning / exercising the chunking path).
+    // ANVIL_CHUNK_SIZE: max bytes per COPY_LINEAR packet (raw or K/M/G suffix),
+    // clamped to (0, 1 GiB] (30-bit count). Smaller values force more packets.
     static size_t const chunkBytes = [] {
       char const* v = getenv("ANVIL_CHUNK_SIZE");
       if (!v || !*v) return anvil::ANVIL_MAX_COPY_CHUNK;
@@ -6724,18 +6692,16 @@ namespace {
       return clamped;
     }();
 
-    // ANVIL_CPU_TIMING=1: also bracket launch->synchronize with a CPU wall clock
-    // and print it next to the hipEvent time, to quantify launch+sync overhead
-    // the hipEvent time omits. Diagnostic only; reported GB/s is unchanged.
+    // ANVIL_CPU_TIMING=1: also print CPU wall time next to the hipEvent time to
+    // quantify launch+sync overhead. Diagnostic only; reported GB/s unchanged.
     static bool const cpuTiming = [] {
       char const* v = getenv("ANVIL_CPU_TIMING");
       return v && atoi(v) != 0;
     }();
     auto const cpuStart = std::chrono::high_resolution_clock::now();
 
-    // Launch each transfer on its own stream so they execute concurrently and
-    // contend for the fabric/SDMA engines, matching how the DMA/BMA executors
-    // are measured. Each transfer is timed individually via its own event pair.
+    // One stream per transfer so they run concurrently and contend, matching the
+    // DMA/BMA executors; each is timed with its own event pair.
     for (int i = 0; i < numResources; ++i) {
       TransferResources const& rss = exeInfo.resources[i];
       sdma_ep::SdmaQueueInfo const& qi = exeInfo.anvilQueues[i];
@@ -6749,16 +6715,13 @@ namespace {
       size_t      nbytes = rss.numBytes;
       uint64_t*   signal = exeInfo.anvilSignals[i];
 
-      // Reset the completion signal to 0 on this stream before the kernel so it
-      // is ordered ahead of the launch but outside the start/stop timing window.
-      // The kernel's put_signal increments it once, so we wait for exactly 1.
+      // Reset the signal to 0 on this stream before the kernel (ordered ahead of
+      // the launch, outside the timing window); put_signal increments it once.
       ERR_CHECK(hipMemsetAsync(signal, 0, sizeof(uint64_t), exeInfo.streams[i]));
 
-      // Anvil is AMD-only (no NVCC path), so use hipExtLaunchKernelGGL to bracket
-      // the kernel with start/stop events as part of the launch, matching the GFX
-      // executor's timing path instead of separate hipEventRecord calls. Select
-      // one of the four specialized kernels on the host so the kernel itself does
-      // no runtime branching; all share the same argument list.
+      // Anvil is AMD-only, so bracket the kernel with start/stop events via
+      // hipExtLaunchKernelGGL (matching the GFX timing path). One of the four
+      // specialized kernels is selected on the host; all share one arg list.
 #define ANVIL_LAUNCH_KERNEL(KERNEL)                                             \
   hipExtLaunchKernelGGL(KERNEL, dim3(1), dim3(1), 0, exeInfo.streams[i],        \
                         exeInfo.startEvents[i], exeInfo.stopEvents[i], 0,       \

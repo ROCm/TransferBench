@@ -13,14 +13,10 @@
 #include "sdma-ep.h"
 #include "sdma_pkt_struct_mi4.h"
 
-// XIO_SDMA_OSS7 is a build-level switch: it gates the MI4 packet-struct and
-// host-side definitions, which are ABI-portable and compile on any arch.
-// XIO_SDMA_OSS7_ENABLED additionally gates the fused *device* code so its body
-// only codegens where the SDMA engine can consume it. HIP compiles the TU once
-// per --offload-arch; in each device pass the arch macro (__gfx1250__ etc.) is
-// defined, and in the host pass __HIP_DEVICE_COMPILE__ is not - so an all-arch
-// build defines XIO_SDMA_OSS7 everywhere but emits the fused kernels only on
-// gfx1250/gfx950. Runtime selection is still gated to gfx1250 in RunAnvilExecutor.
+// XIO_SDMA_OSS7 gates the ABI-portable MI4 packet structs/host code (compiles on
+// any arch). XIO_SDMA_OSS7_ENABLED additionally gates the fused *device* code so
+// its body only codegens on the host pass or on gfx1250/gfx950 device passes;
+// runtime selection is still gated to gfx1250 in RunAnvilExecutor.
 #if defined(XIO_SDMA_OSS7) && XIO_SDMA_OSS7
 #  if !defined(__HIP_DEVICE_COMPILE__) || defined(__gfx1250__) || defined(__gfx950__)
 #    define XIO_SDMA_OSS7_ENABLED 1
@@ -196,10 +192,6 @@ __device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
   sdma_ep::waitCounter(addr, expected);
 }
 
-// NOTE: the anvil:: duplicate of put_signal_counter_impl was removed as dead
-// code (kernels forward to sdma_ep::put_signal_counter_impl). The fused path is
-// reintroduced under ANVIL_FUSED_SIGNAL below.
-
 __device__ __forceinline__ void put(SdmaQueueDeviceHandle& handle, void* dst,
                                     void* src, size_t size) {
   sdma_ep::put(handle, dst, src, size);
@@ -269,14 +261,11 @@ __device__ __forceinline__ void put_signal_chunked(SdmaQueueDeviceHandle& handle
 
 #if XIO_SDMA_OSS7_ENABLED
 // OSS7 fused put+signal: a SINGLE copy+atomic-signal packet replacing the
-// separate COPY_LINEAR + ATOMIC pair. Kept out of sdma_ep so the non-fused path
-// stays bit-for-bit unchanged; selected per-launch via ANVIL_FUSED_SIGNAL.
-//
-// IMPORTANT (hardware ABI): the fixed 19-DWORD COPY_LINEAR_WAIT_SIGNAL_MI4 with
-// wait=0 FAULTS the gfx1250 engine - the packet is variable-length and omits the
-// 7-DWORD wait block, so it reads src from a zeroed DWORD. Signal-only must use
-// the COMPACT 12-DWORD layout below (wait block removed). Validated on gfx1250,
-// 64 KiB..1 GiB. See docs/anvil/phase4.md.
+// COPY_LINEAR + ATOMIC pair (selected per-launch via ANVIL_FUSED_SIGNAL).
+// HW ABI: the fixed 19-DWORD COPY_LINEAR_WAIT_SIGNAL_MI4 with wait=0 faults
+// gfx1250 (it omits the wait block and reads src from a zeroed DWORD), so
+// signal-only must use the COMPACT 12-DWORD layout below. Validated on gfx1250,
+// 64 KiB..1 GiB.
 struct SDMA_PKT_COPY_LINEAR_SIGNAL_MI4_COMPACT {
   uint32_t dw[12];
 };

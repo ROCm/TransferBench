@@ -518,12 +518,10 @@ if(ANVIL_EXEC_FOUND)
   target_include_directories(TransferBench PRIVATE src/anvil)
   target_compile_definitions(TransferBench PRIVATE ANVIL_EXEC_ENABLED)
   target_link_libraries(TransferBench PRIVATE hsakmt)
-  # XIO_SDMA_OSS7: fused COPY_LINEAR_WAIT_SIGNAL_MI4 packet ABI. Portable across
-  # archs - the MI4 structs and host code are ABI-only, and the fused *device*
-  # code is arch-gated via XIO_SDMA_OSS7_ENABLED (src/anvil/anvil_device.hpp) so
-  # it only codegens on gfx1250/gfx950. Safe to enable for an all-arch package
-  # build; the fused path is still selected at runtime only on gfx1250. On by
-  # default; set -DENABLE_XIO_SDMA_OSS7=OFF to force the separate path.
+  # XIO_SDMA_OSS7: fused COPY_LINEAR_WAIT_SIGNAL_MI4 packet. ABI-portable (structs
+  # + host code build on any arch; device code is arch-gated to gfx1250/gfx950 via
+  # XIO_SDMA_OSS7_ENABLED and selected at runtime only on gfx1250), so it is safe
+  # for all-arch builds. Set -DENABLE_XIO_SDMA_OSS7=OFF to force the separate path.
   option(ENABLE_XIO_SDMA_OSS7 "Enable fused MI4 SDMA packets (gfx1250 runtime)" ON)
   if(ENABLE_XIO_SDMA_OSS7)
     target_compile_definitions(TransferBench PRIVATE XIO_SDMA_OSS7=1)

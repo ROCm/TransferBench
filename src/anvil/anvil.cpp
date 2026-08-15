@@ -815,18 +815,15 @@ static int NthSetBit(uint32_t mask, int n) {
 }
 
 int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId, int rotation) {
-  // ANVIL_USE_HSA_ENGINE=1 (default): query hsa_amd_memory_get_preferred_copy_engine
-  // for the src->dst pair and return an engine index from the preferred mask.
-  // ANVIL_USE_HSA_ENGINE=0: use the hardcoded MI300X OAM lookup table.
+  // ANVIL_USE_HSA_ENGINE=1 (default): pick an engine from the HSA preferred-copy
+  // mask for src->dst. =0: use the hardcoded MI300X OAM lookup table.
   static bool useHsaEngine = [] {
     char const* v = getenv("ANVIL_USE_HSA_ENGINE");
     return !v || atoi(v) != 0;
   }();
 
-  // ANVIL_ENGINE_ROUND_ROBIN=1: distribute successive transfers across the set
-  // bits of the preferred-engine mask (rotation selects the k-th engine).
-  // Default (0): always use the lowest-set-bit engine (legacy deterministic).
-  // Neutral on gfx1250 (bandwidth/latency-bound); opt-in for other topologies.
+  // ANVIL_ENGINE_ROUND_ROBIN=1: spread transfers across the mask's set bits
+  // (rotation selects the k-th engine). Default (0): lowest-set-bit engine.
   static bool roundRobin = [] {
     char const* v = getenv("ANVIL_ENGINE_ROUND_ROBIN");
     return v && atoi(v) != 0;

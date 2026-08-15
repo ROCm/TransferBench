@@ -76,12 +76,9 @@ int AllToAllPreset(EnvVars&          ev,
                          (useDmaExec == 1) ? "DMA" :
                          (useTdmExec)      ? "TDM" : "GFX";
 
-  // BMA batches all of a source GPU's copies into a single hipMemcpyBatchAsync
-  // launch (one multi-destination Transfer per source GPU) - the intended use of
-  // the batched API. Because the batch is one launch, only the per-source
-  // aggregate egress is observable; per-(src,dst) bandwidth is not.  The single
-  // executor must be the source device, so USE_REMOTE_READ (destination as
-  // executor) is incompatible with BMA.
+  // BMA merges each source GPU's copies into one hipMemcpyBatchAsync launch (one
+  // multi-destination Transfer per source). Only the per-source aggregate is
+  // observable, and the executor must be the source, so USE_REMOTE_READ is ignored.
   bool const bmaMerged = (useDmaExec == 2);
   if (bmaMerged && useRemoteRead) {
     Utils::Print("[WARN] USE_REMOTE_READ is ignored for BMA; the source GPU is always the executor\n");
@@ -233,10 +230,9 @@ int AllToAllPreset(EnvVars&          ev,
       }
 
       if (bmaMerged && !merged.dsts.empty()) {
-        // All of this source's copies share one batched launch and cannot be
-        // resolved individually. Point every (src,dst) cell at that one Transfer;
-        // each cell then reports the per-copy bandwidth (its equal share of the
-        // measured per-source aggregate), and row/column totals still add up.
+        // All of this source's copies share one launch; point every (src,dst) cell
+        // at that Transfer so each reports its share of the per-source aggregate
+        // and row/column totals still add up.
         int const idx = transfers.size();
         for (int j : mergedDstGpus)
           reIndex[r][std::make_pair(i, j)] = idx;
