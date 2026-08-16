@@ -42,6 +42,7 @@ THE SOFTWARE.
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
 #include <random>
@@ -1096,8 +1097,10 @@ namespace {
     // Socket related
     std::string      masterAddr;              ///< Rank 0 master address
     int              masterPort;              ///< Rank 0 master port
-    std::vector<int> sockets;                 ///< Master list of sockets
-    int              listenSocket;            ///< Master listener socket
+    std::vector<int>         sockets;          ///< Master list of sockets
+    mutable std::vector<int> socketEpoch;     ///< Per-socket send/recv epoch counter
+    int                      listenSocket;    ///< Master listener socket
+    int                      sendUsleep = 0;  ///< Microseconds to sleep after each SendData (TB_SEND_USLEEP)
 
     // Topology related
     struct RankTopology
@@ -7117,8 +7120,10 @@ namespace {
     // TB_DUMP_CFG_FILE = Config file to dump executed Transfers
     // TB_PAUSE         = Insert a pause for debug attachment
     // TB_SHOW_ALL_NUMA = Expose all CPU NUMA nodes (default skips nodes with no cores)
+    // TB_SEND_USLEEP   = microseconds to sleep after each socket SendData (default 0)
 
-    verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
+    verbose    = getenv("TB_VERBOSE")    ? atoi(getenv("TB_VERBOSE"))    : 0;
+    sendUsleep = getenv("TB_SEND_USLEEP") ? atoi(getenv("TB_SEND_USLEEP")) : 0;
     bool singleLog = getenv("TB_SINGLE_LOG") ? atoi(getenv("TB_SINGLE_LOG")) : 0;
     showAllNuma = getenv("TB_SHOW_ALL_NUMA") ? atoi(getenv("TB_SHOW_ALL_NUMA")) : 0;
 
@@ -7341,6 +7346,7 @@ namespace {
     }
 
     sockets.resize(numRanks, -1);
+    socketEpoch.resize(numRanks, 0);
 
     // Rank 0 acts as server for others to connect to
     int opt = 1;
@@ -7404,9 +7410,20 @@ namespace {
           exit(1);
         }
 
+        // Disable Nagle's algorithm to prevent small-message coalescing delays
+        setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
         // Receive rank ID from client
-        int clientRank;
-        recv(clientSocket, (char*)&clientRank, sizeof(clientRank), 0);
+        int clientRank = -1;
+        size_t totalRecv = 0;
+        while (totalRecv < sizeof(clientRank)) {
+          auto r = recv(clientSocket, (char*)&clientRank + totalRecv, sizeof(clientRank) - totalRecv, 0);
+          if (r <= 0) {
+            Log("[ERROR] Failed to receive rank ID from connecting client\n");
+            exit(1);
+          }
+          totalRecv += r;
+        }
 
         if (clientRank < 0 || clientRank >= numRanks) {
           close(clientSocket);
@@ -7459,8 +7476,19 @@ namespace {
         exit(1);
       }
 
+      // Disable Nagle's algorithm to prevent small-message coalescing delays
+      setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
       // Send local rank to the server
-      send(sock, (char*)&rank, sizeof(rank), 0);
+      size_t totalSent = 0;
+      while (totalSent < sizeof(rank)) {
+        auto s = send(sock, (char*)&rank + totalSent, sizeof(rank) - totalSent, MSG_NOSIGNAL);
+        if (s <= 0) {
+          Log("[ERROR] Failed to send rank ID to master\n");
+          exit(1);
+        }
+        totalSent += s;
+      }
       sockets[0] = sock;
     }
 
@@ -7590,16 +7618,22 @@ namespace {
       }
       auto sock = sockets[dstRank];
 
-      // Send data
+      if (verbose)
+        Log("[SOCK] SendData #%d: rank %d -> rank %d, %zu bytes (usleep=%dus)\n",
+            socketEpoch[dstRank], rank, dstRank, numBytes, sendUsleep);
+      socketEpoch[dstRank]++;
+
       size_t totalSent = 0;
       while (totalSent < numBytes) {
-        auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, 0);
+        auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, MSG_NOSIGNAL);
         if (sent == -1) {
           Log("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
           exit(1);
         }
         totalSent += sent;
       }
+
+      if (sendUsleep > 0) usleep(sendUsleep);
     }
   }
 
@@ -7619,6 +7653,12 @@ namespace {
       }
 
       auto sock = sockets[srcRank];
+
+      if (verbose)
+        Log("[SOCK] RecvData #%d: rank %d <- rank %d, %zu bytes\n",
+            socketEpoch[srcRank], rank, srcRank, numBytes);
+      socketEpoch[srcRank]++;
+
       size_t totalRecv = 0;
       while (totalRecv < numBytes) {
         auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);

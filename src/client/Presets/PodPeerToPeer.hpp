@@ -25,9 +25,8 @@ int PodPeerToPeerPreset(EnvVars&          ev,
                         std::string const presetName,
                         bool        const bytesSpecified)
 {
-  if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] Pod p2p preset can only be run across ranks that are homogenous\n");
-    Utils::Print("[ERROR] All ranks currently have to be under the same physical and virtual pod\n");
+  if (!Utils::AllRanksHaveSameGpuCount()) {
+    Utils::Print("[ERROR] Pod p2p preset requires all ranks to have the same number of GPUs\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     return ERR_FATAL;
   }
