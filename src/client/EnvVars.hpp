@@ -428,6 +428,7 @@ public:
     printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
     printf(" TB_PAUSE            - Pauses startup for debugger attachment\n");
     printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
+    printf(" TB_SEND_USLEEP      - Microseconds to sleep after each socket SendData call (default: 0)\n");
     printf(" TB_SHOW_ALL_NUMA    - Shows all CPU NUMA nodes incl. those with no cores (default: skip core-less)\n");
     printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
     printf(" TB_VERBOSE          - Enables additional internal logging\n");

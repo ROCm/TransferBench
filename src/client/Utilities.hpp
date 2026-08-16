@@ -128,6 +128,9 @@ namespace TransferBench::Utils
   // Return the number of homogenous groups of ranks
   int GetNumRankGroups();
 
+  // Return true if all ranks have the same number of GPUs
+  bool AllRanksHaveSameGpuCount();
+
   // Helper function for pod membership
   RankPerPodMap& GetRankPerPodMap();
 
@@ -412,6 +415,16 @@ namespace TransferBench::Utils
   int GetNumRankGroups()
   {
     return GetRankGroupMap().size();
+  }
+
+  bool AllRanksHaveSameGpuCount()
+  {
+    int const numRanks = TransferBench::GetNumRanks();
+    if (numRanks <= 1) return true;
+    int const gpuCount = TransferBench::GetNumExecutors(EXE_GPU_GFX, 0);
+    for (int rank = 1; rank < numRanks; rank++)
+      if (TransferBench::GetNumExecutors(EXE_GPU_GFX, rank) != gpuCount) return false;
+    return true;
   }
 
   RankPerPodMap& GetRankPerPodMap()

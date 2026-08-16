@@ -8,6 +8,8 @@ Documentation for TransferBench is available at
 - Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
 - Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware.  This provides
   an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
+### Added
+- Added TB_SEND_USLEEP to insert a configurable microsecond delay after each socket SendData call (default: 0); useful for diagnosing small-message timing issues on sensitive clusters
 ### Modified
 - CPU NUMA nodes with 0 cores will now be hidden.  To re-enable, set TB_SHOW_ALL_NUMA=1
 - Switching to use of persistent threadpools to cut-down on thread creation overheads
