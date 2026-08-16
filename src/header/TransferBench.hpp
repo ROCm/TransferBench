@@ -7949,6 +7949,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Collect Pod membership
     CollectPodMembership(topo.ppodId, topo.vpodId);
 
+    if (verbose) {
+      if (topo.vpodId == -1) {
+        Log("[INFO] Rank %03d: No pod membership detected\n", rank);
+      } else {
+        auto* p = (unsigned char*)topo.ppodId;
+        char ppodUuid[37];
+        snprintf(ppodUuid, sizeof(ppodUuid),
+                 "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                 p[0],p[1],p[2],p[3], p[4],p[5], p[6],p[7],
+                 p[8],p[9], p[10],p[11],p[12],p[13],p[14],p[15]);
+        Log("[INFO] Rank %03d: ppod_id=%s vpod_id=%lld\n", rank, ppodUuid, (long long)topo.vpodId);
+      }
+    }
+
     // CPU Executor (indexed by logical CPU NUMA index; core-less nodes may be skipped)
     int numCpus = static_cast<int>(cpuNumaMap.size());
     topo.numExecutors[EXE_CPU] = numCpus;
