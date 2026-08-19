@@ -5097,7 +5097,24 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #if defined(__NVCC_)
     return hwId;
 #else
-    // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
+    // Detect gfx1250 (CDNA5/MI400) at runtime: bit 29 is always set on gfx1250
+    if (hwId & (1u << 29)) {
+      // gfx1250 HW_ID1 layout per amd-instinct-cdna5-instruction-set-architecture.pdf:
+      //   WAVE_ID[4:0], SIMD_ID[9:8], WGP_ID[13:10], SA_ID[16]
+      // Returns CU index matching hipExtStreamCreateWithCUMask bit position.
+      // Mask layout (32 CUs per XCC):
+      //   WGPs 0-6: both SAs, 4 bits each (bits 0-27)
+      //   WGPs 7-8: SA0 only, 2 bits each (bits 28-31)
+      uint32_t simd_id = (hwId >> 8) & 0x3;   // bits 9:8: [0]=CU in WGP, [1]=SIMD in CU
+      uint32_t wgp_id  = (hwId >> 10) & 0xF;  // bits 13:10
+      uint32_t sa_id   = (hwId >> 16) & 0x1;  // bit 16: Shader Array ID
+      uint32_t cu_in_wgp = simd_id & 0x1;     // which CU within the WGP
+      if (wgp_id < 7)
+        return (wgp_id * 4) + (sa_id * 2) + cu_in_wgp;
+      else
+        return 28 + (wgp_id - 7) * 2 + cu_in_wgp;
+    }
+    // CDNA2/MI200: Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
     int const shId = (hwId >> 12) &  1;
     int const cuId = (hwId >>  8) & 15;
     int const seId = (hwId >> 13) &  3;
