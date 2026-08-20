@@ -320,8 +320,8 @@ __device__ TDM_API void tdmWait() TDM_DELETED;
 //   * This copy is single-buffered (one LDS window per warp), so each tile is a
 //     load->store dependency chain on that window: the store reads what the load
 //     wrote (RAW), and the next tile's load overwrites the window the store is
-//     still draining (WAR). Both edges need an s_wait_tensorcnt, so issueRows()/
-//     issueRow1d() wait after the load and after the store. Consequence: with a
+//     still draining (WAR). Both edges need an s_wait_tensorcnt, so issueRow()/
+//     issueBytes() wait after the load and after the store. Consequence: with a
 //     single window the copy is effectively serialized; tdmCopyAsync() therefore
 //     overlaps very little today. Regaining overlap needs DOUBLE-BUFFERING (>=2
 //     LDS windows per warp) so a load into window B runs while window A stores.
@@ -398,24 +398,21 @@ __device__ inline void warpVecCopy(const uint8_t* s, uint8_t* d, size_t n,
         for (uint32_t b = 0; b < rem; ++b) d[nd * 4 + b] = s[nd * 4 + b];
 }
 
-// ---- issue one chunk of whole 256B rows (2D tile) through ONE LDS window. ---
-// This staging window is single-buffered, so the two TDM ops form a dependency
-// chain that MUST be enforced with TENSORcnt waits -- up to 3 TDM ops are
-// outstanding per wave (they overlap), so "same-wave in-order issue" does NOT
-// serialize their memory effects:
-//   * load -> wait: the store reads the LDS the load just wrote (RAW hazard).
-//   * store -> wait: the caller reuses this same window next iteration; the next
-//     load must not overwrite LDS the store is still draining (WAR hazard).
-__device__ inline void issueRows(uint64_t src, uint32_t lds, uint64_t dst,
-                                 uint32_t rows) {
+// ---- issue aligned bulk as a single 1-D tile through ONE LDS window. --------
+// The chunk is expressed as one flat 1-D tile of `rows * TD0` dwords (dataSize
+// DS4), moving exactly `rows * WIDTH` contiguous bytes through the same
+// single-buffered LDS window with the same RAW/WAR waits as the tail path.
+// tileDim0 is a 16-bit field, so `rows*TD0` must be <= 65535 (rows <= 1023);
+// the per-warp LDS window bounds chunkRows well below that.
+__device__ inline void issueRow(uint64_t src, uint32_t lds, uint64_t dst,
+                                uint32_t rows) {
+    uint32_t dwords = rows * TD0;            // whole chunk as one flat dword run
     gfx1250_TDM_GROUP1 g1;
     g1.dataSize(DS4);
-    g1.tileDim0(TD0);   g1.tileDim1(rows);
-    g1.tensorDim0(TD0); g1.tensorDim1(rows);
-    g1.tensorDim0Stride(TD0);                // rows back-to-back (contiguous)
+    g1.tileDim0(dwords);   g1.tileDim1(1);
+    g1.tensorDim0(dwords); g1.tensorDim1(1);
+    g1.tensorDim0Stride(dwords);
 
-    // Higher dims (D2/D3/D4) are unused for this 2D tile -> passed as zero inside
-    // load()/store(), matching known-good example usage.
     gfx1250_TDM_GROUP0 g0l(lds, src);
     load(g0l, g1);   waitTensor0();          // RAW: fill LDS before store reads it
     gfx1250_TDM_GROUP0 g0s(lds, dst);
@@ -424,7 +421,7 @@ __device__ inline void issueRows(uint64_t src, uint32_t lds, uint64_t dst,
 
 // ---- issue a sub-row tail (<256B) as a 1-D tile at BYTE granularity. ---------
 // Same single-buffered LDS window and the same required RAW/WAR waits as above.
-__device__ inline void issueRow1d(uint64_t src, uint32_t lds, uint64_t dst,
+__device__ inline void issueBytes(uint64_t src, uint32_t lds, uint64_t dst,
                                   uint32_t nbytes) {
     gfx1250_TDM_GROUP1 g1;
     g1.dataSize(DS1);                        // 1-byte elements: exact length
@@ -482,7 +479,7 @@ __device__ inline void issue(void* dst, const void* src, size_t sizeBytes,
     if (rank == 0 && head) warpVecCopy(s, d, head, warpThread, warpThreads);
     if (rank == 0 && tail) {
         if (ldsBytes >= tail)                          // stage tail in rank 0's window
-            issueRow1d(reinterpret_cast<uint64_t>(s + tailOff), ldsBase,
+            issueBytes(reinterpret_cast<uint64_t>(s + tailOff), ldsBase,
                        reinterpret_cast<uint64_t>(d + tailOff), tail);
         else
             warpVecCopy(s + tailOff, d + tailOff, tail, warpThread, warpThreads);
@@ -517,7 +514,7 @@ __device__ inline void issue(void* dst, const void* src, size_t sizeBytes,
         uint32_t chunkRows = (myRows - r < rowsPerChunk)
                              ? static_cast<uint32_t>(myRows - r) : rowsPerChunk;
         uint64_t off = (uint64_t)r * WIDTH;
-        issueRows(sBase + off, myLds, dBase + off, chunkRows);
+        issueRow(sBase + off, myLds, dBase + off, chunkRows);
     }
 }
 
