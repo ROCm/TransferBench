@@ -3348,7 +3348,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ibvDeviceList.push_back(ibvDevice);
         }
       }
-      ibv_free_device_list(deviceList);
+      if (deviceList) ibv_free_device_list(deviceList);
       isInitialized = true;
     }
     return ibvDeviceList;
