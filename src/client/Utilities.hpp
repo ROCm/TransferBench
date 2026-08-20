@@ -561,7 +561,10 @@ namespace TransferBench::Utils
     size_t numTimedIterations = results.numTimedIterations;
     for (auto const& exeInfoPair : results.exeResults) {
       ExeResult const& exeResult = exeInfoPair.second;
-      numRows += 1 + exeResult.transferIdx.size();
+      int displayCount = 0;
+      for (int idx : exeResult.transferIdx)
+        if (transfers[idx].laps >= 0) displayCount++;
+      numRows += 1 + displayCount;
       if (!ev.showPercentiles.empty()) {
         numRows += static_cast<int>(ev.showPercentiles.size()) * static_cast<int>(exeResult.transferIdx.size());
       }
@@ -570,6 +573,7 @@ namespace TransferBench::Utils
       }
       if (ev.showIterations || !ev.showPercentiles.empty()) {
         for (int idx : exeResult.transferIdx) {
+          if (transfers[idx].laps < 0) continue;
           TransferResult const& r = results.tfrResults[idx];
           if (r.perIterMsec.size() != numTimedIterations) {
             Print("[ERROR] Per iteration timing data unavailable: Expected %lu data points, but have %lu\n",
@@ -615,87 +619,141 @@ namespace TransferBench::Utils
         Transfer const& t = transfers[idx];
         TransferResult const& r = results.tfrResults[idx];
 
-        table.Set(rowIdx, 0, "Transfer %-4d ", idx);
-        table.Set(rowIdx, 1, "%8.3f GB/s "   , r.avgBandwidthGbPerSec);
-        table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
-        table.Set(rowIdx, 3, "%12lu bytes "  , r.numBytes);
+        if (t.laps < 0) continue;
 
-        char exeSubIndexStr[32] = "";
-        if (t.exeSubIndex != -1)
-          sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
+        if (t.laps > 0) {
+          // Pingpong row: show latency using ping's round-trip delta
+          double latencyUs = r.avgDurationMsec * 1000.0;
+          table.Set(rowIdx, 0, "PingPong %-4d ", idx);
+          table.Set(rowIdx, 1, "%8.3f us "     , latencyUs);
+          table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
+          table.Set(rowIdx, 3, "%8d laps "     , t.laps);
 
-        if (isMultiRank) {
-          table.Set(rowIdx, 4, " %s -> R%d%c%d%s:%d -> %s",
-                    MemDevicesToStr(t.srcs).c_str(),
-                    exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-                    exeSubIndexStr, t.numSubExecs,
-                    MemDevicesToStr(t.dsts).c_str());
-        } else {
-          table.Set(rowIdx, 4, " %s -> %c%d%s:%d -> %s",
-                    MemDevicesToStr(t.srcs).c_str(),
-                    ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-                    exeSubIndexStr, t.numSubExecs,
-                    MemDevicesToStr(t.dsts).c_str());
-        }
-        table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
-        rowIdx++;
-
-        // Show per-iteration timing information
-        if (ev.showIterations) {
-
-          // Compute standard deviation and track iterations by speed
-          std::set<std::pair<double, int>> times;
-          double stdDevTime = 0;
-          double stdDevBw = 0;
-          for (int i = 0; i < numTimedIterations; i++) {
-            times.insert(std::make_pair(r.perIterMsec[i], i+1));
-            double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
-            stdDevTime += varTime * varTime;
-
-            double iterBandwidthGbs = (t.numBytes / 1.0E9) / r.perIterMsec[i] * 1000.0f;
-            double const varBw = fabs(iterBandwidthGbs - r.avgBandwidthGbPerSec);
-            stdDevBw += varBw * varBw;
+          Transfer const& pong = transfers[idx + 1];
+          if (isMultiRank) {
+            table.Set(rowIdx, 4, " %s->R%d%c%d->%s <+> %s->R%d%c%d->%s",
+                      MemDevicesToStr(t.srcs).c_str(),
+                      exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      MemDevicesToStr(t.dsts).c_str(),
+                      MemDevicesToStr(pong.srcs).c_str(),
+                      pong.exeDevice.exeRank, ExeTypeStr[pong.exeDevice.exeType], pong.exeDevice.exeIndex,
+                      MemDevicesToStr(pong.dsts).c_str());
+          } else {
+            table.Set(rowIdx, 4, " %s->%c%d->%s <+> %s->%c%d->%s",
+                      MemDevicesToStr(t.srcs).c_str(),
+                      ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      MemDevicesToStr(t.dsts).c_str(),
+                      MemDevicesToStr(pong.srcs).c_str(),
+                      ExeTypeStr[pong.exeDevice.exeType], pong.exeDevice.exeIndex,
+                      MemDevicesToStr(pong.dsts).c_str());
           }
-          stdDevTime = sqrt(stdDevTime / numTimedIterations);
-          stdDevBw = sqrt(stdDevBw / numTimedIterations);
+          table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
+          rowIdx++;
 
-          // Loop over iterations (fastest to slowest)
-          for (auto& time : times) {
-            double iterDurationMsec = time.first;
-            double iterBandwidthGbs = (t.numBytes / 1.0E9) / iterDurationMsec * 1000.0f;
+          if (ev.showIterations) {
+            std::set<std::pair<double, int>> times;
+            double stdDevTime = 0;
+            for (size_t i = 0; i < numTimedIterations; i++) {
+              times.insert(std::make_pair(r.perIterMsec[i], i+1));
+              double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
+              stdDevTime += varTime * varTime;
+            }
+            stdDevTime = sqrt(stdDevTime / numTimedIterations);
 
-            std::set<int> usedXccs;
-            std::stringstream ss1;
-            if (exeDevice.exeType == EXE_GPU_GFX) {
-              if (time.second - 1 < r.perIterCUs.size()) {
-                ss1 << " CUs: ";
-                for (auto x : r.perIterCUs[time.second - 1]) {
-                  ss1 << x.first << ":" << std::setfill('0') << std::setw(2) << x.second << " ";
-                  usedXccs.insert(x.first);
+            for (auto& time : times) {
+              double iterUs = time.first * 1000.0;
+              table.Set(rowIdx, 0, "Iter %03d    ", time.second);
+              table.Set(rowIdx, 1, "%8.3f us ", iterUs);
+              table.Set(rowIdx, 2, "%8.3f ms ", time.first);
+              rowIdx++;
+            }
+
+            table.Set(rowIdx, 0, "StandardDev ");
+            table.Set(rowIdx, 1, "%8.3f us ", stdDevTime * 1000.0);
+            table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
+            rowIdx++;
+            table.DrawRowBorder(rowIdx);
+          }
+        } else {
+          // Regular transfer row (laps == 0)
+          table.Set(rowIdx, 0, "Transfer %-4d ", idx);
+          table.Set(rowIdx, 1, "%8.3f GB/s "   , r.avgBandwidthGbPerSec);
+          table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
+          table.Set(rowIdx, 3, "%12lu bytes "  , r.numBytes);
+
+          char exeSubIndexStr[32] = "";
+          if (t.exeSubIndex != -1)
+            sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
+
+          if (isMultiRank) {
+            table.Set(rowIdx, 4, " %s -> R%d%c%d%s:%d -> %s",
+                      MemDevicesToStr(t.srcs).c_str(),
+                      exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      exeSubIndexStr, t.numSubExecs,
+                      MemDevicesToStr(t.dsts).c_str());
+          } else {
+            table.Set(rowIdx, 4, " %s -> %c%d%s:%d -> %s",
+                      MemDevicesToStr(t.srcs).c_str(),
+                      ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      exeSubIndexStr, t.numSubExecs,
+                      MemDevicesToStr(t.dsts).c_str());
+          }
+          table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
+          rowIdx++;
+
+          if (ev.showIterations) {
+            std::set<std::pair<double, int>> times;
+            double stdDevTime = 0;
+            double stdDevBw = 0;
+            for (size_t i = 0; i < numTimedIterations; i++) {
+              times.insert(std::make_pair(r.perIterMsec[i], i+1));
+              double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
+              stdDevTime += varTime * varTime;
+
+              double iterBandwidthGbs = (t.numBytes / 1.0E9) / r.perIterMsec[i] * 1000.0f;
+              double const varBw = fabs(iterBandwidthGbs - r.avgBandwidthGbPerSec);
+              stdDevBw += varBw * varBw;
+            }
+            stdDevTime = sqrt(stdDevTime / numTimedIterations);
+            stdDevBw = sqrt(stdDevBw / numTimedIterations);
+
+            for (auto& time : times) {
+              double iterDurationMsec = time.first;
+              double iterBandwidthGbs = (t.numBytes / 1.0E9) / iterDurationMsec * 1000.0f;
+
+              std::set<int> usedXccs;
+              std::stringstream ss1;
+              if (exeDevice.exeType == EXE_GPU_GFX) {
+                if (time.second - 1 < r.perIterCUs.size()) {
+                  ss1 << " CUs: ";
+                  for (auto x : r.perIterCUs[time.second - 1]) {
+                    ss1 << x.first << ":" << std::setfill('0') << std::setw(2) << x.second << " ";
+                    usedXccs.insert(x.first);
+                  }
                 }
               }
+
+              std::stringstream ss2;
+              if (!usedXccs.empty()) {
+                ss2 << " XCCs:";
+                for (auto x : usedXccs)
+                  ss2 << " "  << x;
+              }
+
+              table.Set(rowIdx, 0, "Iter %03d    ", time.second);
+              table.Set(rowIdx, 1, "%8.3f GB/s ", iterBandwidthGbs);
+              table.Set(rowIdx, 2, "%8.3f ms ", iterDurationMsec);
+              table.Set(rowIdx, 3, ss1.str());
+              table.Set(rowIdx, 4, ss2.str());
+              rowIdx++;
             }
 
-            std::stringstream ss2;
-            if (!usedXccs.empty()) {
-              ss2 << " XCCs:";
-              for (auto x : usedXccs)
-                ss2 << " "  << x;
-            }
-
-            table.Set(rowIdx, 0, "Iter %03d    ", time.second);
-            table.Set(rowIdx, 1, "%8.3f GB/s ", iterBandwidthGbs);
-            table.Set(rowIdx, 2, "%8.3f ms ", iterDurationMsec);
-            table.Set(rowIdx, 3, ss1.str());
-            table.Set(rowIdx, 4, ss2.str());
+            table.Set(rowIdx, 0, "StandardDev ");
+            table.Set(rowIdx, 1, "%8.3f GB/s ", stdDevBw);
+            table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
             rowIdx++;
+            table.DrawRowBorder(rowIdx);
           }
-
-          table.Set(rowIdx, 0, "StandardDev ");
-          table.Set(rowIdx, 1, "%8.3f GB/s ", stdDevBw);
-          table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
-          rowIdx++;
-          table.DrawRowBorder(rowIdx);
         }
 
         // Show percentiles

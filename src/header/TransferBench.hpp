@@ -196,6 +196,9 @@ namespace TransferBench
     int32_t           exeSubIndex = -1;         ///< Executor subindex
     int32_t           exeSubSlot  = 0;          ///< Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
+    int               laps        = 0;          ///< 0 = one-way transfer, >0 = ping (forward), <0 = pong (backward). abs(laps) = lap count
+    MemDevice         flag        = {};         ///< Memory device for pingpong signal flag (only used when laps != 0)
+                                                ///< TODO: pingpong forbid multi-src/dst ?
   };
 
   /**
@@ -208,6 +211,7 @@ namespace TransferBench
     int numWarmups         = 3;                 ///< Number of un-timed warmup iterations to perform
     int recordPerIteration = 0;                 ///< Record per-iteration timing information
     int useInteractive     = 0;                 ///< Pause for user-input before starting transfer loop
+    int pingpongStride     = 8;                 ///< Stride in bytes between flag slots for pingpong laps (must be multiple of 8)
   };
 
   /**
@@ -1941,6 +1945,7 @@ namespace {
       if (general.numIterations      != cfg.general.numIterations)      ADD_ERROR("cfg.general.numIterations");
       if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
+      if (general.pingpongStride     != cfg.general.pingpongStride)     ADD_ERROR("cfg.general.pingpongStride");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
     }
@@ -2308,6 +2313,22 @@ namespace {
           errors.push_back({ERR_FATAL, "Transfer %d: DST %d: %s", i, j, err.errMsg.c_str()});
           hasFatalError = true;
           break;
+        }
+      }
+      if (hasFatalError) break;
+
+      // Pingpong flag checks
+      if (t.laps != 0) {
+        if (t.flag.memType == MEM_NULL) {
+          errors.push_back({ERR_FATAL, "Transfer %d: Pingpong transfer requires a valid flag memory device", i});
+          hasFatalError = true;
+        } else if (t.flag.memRank != t.exeDevice.exeRank) {
+          // forbid remote flag
+          // TODO: elaborate more on this and add UALoE support
+          errors.push_back({ERR_FATAL,
+            "Transfer %d: Pingpong flag must be on the same node as the executor (flag rank %d != executor rank %d)",
+            i, t.flag.memRank, t.exeDevice.exeRank});
+          hasFatalError = true;
         }
       }
       if (hasFatalError) break;
@@ -2758,6 +2779,10 @@ namespace {
     float*                     src[MAX_SRCS];     ///< Source array pointers
     float*                     dst[MAX_DSTS];     ///< Destination array pointers
     int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
+    volatile int64_t*          flagMem;           ///< Pingpong flag base pointer (nullptr for normal transfers)
+    int                        laps;              ///< 0 = normal, >0 = ping, <0 = pong
+    int                        flagStride;        ///< Stride in bytes between flag slots per lap
+    int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
 
     // Prepared
     int                        teamSize;          ///< Index of this sub executor amongst team
@@ -2829,6 +2854,12 @@ namespace {
     vector<void*>              batchSrcs;         ///< Source pointers (per batch item)
     vector<size_t>             batchBytes;        ///< Bytes to copy (per batch item)
 #endif
+
+    // Pingpong
+    int                        laps = 0;           ///< 0 = normal, >0 = ping, <0 = pong
+    void*                      flagMem = nullptr;  ///< Pointer to paired transfer's dstMem[0] (the flag to wait on)
+    int                        flagStride = 8;     ///< Stride in bytes between flag slots per lap
+    int                        flagAllocBytes = 8; ///< Total flag allocation in bytes (for wrap-around)
 
     // Counters
     double                     totalDurationMsec; ///< Total duration for all iterations for this Transfer
@@ -4049,6 +4080,10 @@ namespace {
       SubExecParam& p  = subExecParam[i];
       p.numSrcs        = rss.srcMem.size();
       p.numDsts        = rss.dstMem.size();
+      p.flagMem        = nullptr;
+      p.laps           = transfer.laps;
+      p.flagStride     = 0;
+      p.flagAllocBytes = 0;
       p.startCycle     = 0;
       p.stopCycle      = 0;
       p.hwId           = 0;
@@ -4284,6 +4319,10 @@ namespace {
         }
 
         // Allocate destination memory (on the correct rank)
+        // For pingpong transfers, allocate a larger buffer to hold multiple flag slots
+        size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
+        if (t.laps != 0)
+          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * abs(t.laps)));
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           if (verbose) {
@@ -4295,7 +4334,7 @@ namespace {
                               dstMemDevice.memRank, t.numBytes + cfg.data.byteOffset,
                               requiresFabricHandle ? " [fabric-exportable]" : "");
           }
-          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
+          ERR_CHECK(AllocateMemory(dstMemDevice, dstAllocBytes, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
           if (verbose) {
             System::Get().Log("[INFO]   DST[%d]: allocated at %p\n", iDst, rss.dstMem[iDst]);
@@ -4589,6 +4628,54 @@ namespace {
     return ERR_NONE;
   }
 
+// PingPong Wait primitives
+//========================================================================================
+
+  // Dispatcher: selects the appropriate wait implementation based on executor type and flag memory type.
+  void PingpongWait(void* flagMem, MemType flagMemType, ExeType exeType)
+  {
+    //TODO
+  }
+
+  // CPU-side spin wait: polls a flag until it becomes non-zero.
+  // Used by CPU executors and NIC pingpong lambdas.
+  template <typename T>
+  static void CpuWait(volatile T* flag)
+  {
+    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) == T(0))
+      ;
+  }
+
+  // GPU-side spin wait: polls a flag until it becomes non-zero.
+  // Used by GPU-GFX executors (called inline from the transfer kernel).
+  template <typename T>
+  __device__ void GpuWait(volatile T* flag)
+  {
+#if defined(__NVCC__)
+    while (atomicAdd(const_cast<T*>(flag), T(0)) == T(0))
+      ;
+#else
+    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) == T(0))
+      ;
+#endif
+  }
+
+  // Standalone GPU wait kernel: enqueued on a HIP stream for GPU-DMA executors.
+  // Launched with grid(1,1,1) block(1,1,1) on the same stream as the DMA transfer.
+  template <typename T>
+  __global__ void GpuDmaWaitKernel(volatile T* flag)
+  {
+    GpuWait(flag);
+  }
+
+  // Returns a pointer to the flag slot for the given lap, using strided wrap-around.
+  __host__ __device__
+  static volatile int64_t* FlagSlot(volatile int64_t* base, int lap, int stride, int allocBytes)
+  {
+    int offset = (lap * stride) % allocBytes;
+    return (volatile int64_t*)((volatile char*)base + offset);
+  }
+
 // CPU Executor-related functions
 //========================================================================================
 
@@ -4597,15 +4684,23 @@ namespace {
   {
     if (p.N == 0) return;
 
+    int const iterations = (p.laps == 0) ? numSubIterations : abs(p.laps);
     int subIteration = 0;
     do {
+      // Pong: wait for ping's signal before each lap
+      if (p.laps < 0 && p.flagMem)
+        CpuWait(FlagSlot(p.flagMem, subIteration, p.flagStride, p.flagAllocBytes));
+
+      // For pingpong, offset dst per lap so the 8-byte write lands on the correct flag slot
+      int const dstByteOff = (p.laps != 0) ? (subIteration * p.flagStride) % p.flagAllocBytes : 0;
+      int const dstFloatOff = dstByteOff / (int)sizeof(float);
+
       int const& numSrcs = p.numSrcs;
       int const& numDsts = p.numDsts;
 
       if (numSrcs == 0) {
         for (int i = 0; i < numDsts; ++i) {
-          memset(p.dst[i], MEMSET_CHAR, p.N * sizeof(float));
-          //for (int j = 0; j < p.N; j++) p.dst[i][j] = MEMSET_VAL;
+          memset(p.dst[i] + dstFloatOff, MEMSET_CHAR, p.N * sizeof(float));
         }
       } else if (numSrcs == 1) {
         float const* __restrict__ src = p.src[0];
@@ -4614,23 +4709,27 @@ namespace {
           for (int j = 0; j < p.N; j++)
             sum += p.src[0][j];
 
-          // Add a dummy check to ensure the read is not optimized out
           if (sum != sum) {
             System::Get().Log("[ERROR] Nan detected\n");
           }
         } else {
           for (int i = 0; i < numDsts; ++i)
-            memcpy(p.dst[i], src, p.N * sizeof(float));
+            memcpy(p.dst[i] + dstFloatOff, src, p.N * sizeof(float));
         }
       } else {
         float sum = 0.0f;
         for (int j = 0; j < p.N; j++) {
           sum = p.src[0][j];
           for (int i = 1; i < numSrcs; i++) sum += p.src[i][j];
-          for (int i = 0; i < numDsts; i++) p.dst[i][j] = sum;
+          for (int i = 0; i < numDsts; i++) p.dst[i][j + dstFloatOff] = sum;
         }
       }
-    } while (++subIteration != numSubIterations);
+
+      // Ping: wait for pong's signal before next lap
+      if (p.laps > 0 && p.flagMem)
+        CpuWait(FlagSlot(p.flagMem, subIteration, p.flagStride, p.flagAllocBytes));
+
+    } while (++subIteration != iterations);
   }
 
   // Execution of a single CPU Transfers
@@ -4639,6 +4738,9 @@ namespace {
                                  int           const  exeIndex,
                                  TransferResources&   rss)
   {
+    if (rss.laps >= 0 && rss.flagMem)
+      usleep(1);
+
     auto cpuStart = std::chrono::high_resolution_clock::now();
     vector<std::thread> childThreads;
 
@@ -4650,7 +4752,8 @@ namespace {
     childThreads.clear();
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0) / cfg.general.numSubIterations;
+    int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+    double deltaMsec = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0) / divisor;
 
     if (iteration >= 0) {
       rss.totalDurationMsec += deltaMsec;
@@ -4724,53 +4827,113 @@ namespace {
     auto transferCount = exeInfo.resources.size();
     std::vector<double> totalTimeMsec(transferCount, 0.0);
 
+    // Launch pingpong transfers in dedicated threads
+    vector<std::future<ErrResult>> ppAsyncTransfers;
+    for (int i = 0; i < transferCount; i++) {
+      auto& rss = exeInfo.resources[i];
+      if (rss.laps == 0) continue;
+      ppAsyncTransfers.emplace_back(std::async(std::launch::async,
+        [&rss, &totalTimeMsec_i = totalTimeMsec[i], iteration, &cfg, exeIndex]() -> ErrResult {
+          if (rss.laps >= 0 && rss.flagMem)
+            usleep(1);
+          int const laps = abs(rss.laps);
+          for (int lap = 0; lap < laps; ++lap) {
+            if (rss.laps < 0)
+              CpuWait(FlagSlot(static_cast<volatile int64_t*>(rss.flagMem), lap, rss.flagStride, rss.flagAllocBytes));
+
+            int dstByteOff = (lap * rss.flagStride) % rss.flagAllocBytes;
+            for (auto& wrVec : rss.sendWorkRequests)
+              for (auto& wr : wrVec)
+                wr.wr.rdma.remote_addr += dstByteOff;
+
+            auto lapStart = std::chrono::high_resolution_clock::now();
+            ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, rss));
+
+            for (auto& wrVec : rss.sendWorkRequests)
+              for (auto& wr : wrVec)
+                wr.wr.rdma.remote_addr -= dstByteOff;
+
+            ibv_cq* cq = rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue;
+            struct ibv_wc wc;
+            int completed = 0;
+            while (completed < rss.qpCount) {
+              int nc = ibv_poll_cq(cq, 1, &wc);
+              if (nc > 0) {
+                if (wc.status != IBV_WC_SUCCESS)
+                  return {ERR_FATAL, "Transfer %d: pingpong NIC completion error [status %d]", rss.transferIdx, wc.status};
+                completed++;
+              } else if (nc < 0) {
+                return {ERR_FATAL, "Transfer %d: pingpong NIC poll error", rss.transferIdx};
+              }
+            }
+
+            if (rss.laps > 0)
+              CpuWait(FlagSlot(static_cast<volatile int64_t*>(rss.flagMem), lap, rss.flagStride, rss.flagAllocBytes));
+
+            auto lapDelta = std::chrono::high_resolution_clock::now() - lapStart;
+            if (iteration >= 0)
+              totalTimeMsec_i += std::chrono::duration_cast<std::chrono::duration<double>>(lapDelta).count() * 1000.0;
+          }
+          return ERR_NONE;
+        }));
+    }
+
+    // Normal transfers: existing batch loop (skip pingpong)
+    size_t normalCount = 0;
+    for (int i = 0; i < transferCount; i++)
+      if (exeInfo.resources[i].laps == 0) normalCount++;
+
     int subIterations = 0;
     auto cpuStart = std::chrono::high_resolution_clock::now();
     std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
-    do {
-      std::vector<uint32_t> receivedQPs(transferCount, 0);
-      // post the sends
-      for (auto i = 0; i < transferCount; i++) {
-        transferTimers[i] = std::chrono::high_resolution_clock::now();
-        ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
-      }
-      // poll for completions
-      size_t completedTransfers = 0;
-      int pollBatch = std::max(1, cfg.nic.cqPollBatch);
-      std::vector<ibv_wc> wc((size_t)pollBatch);
-      ibv_wc* wc_array = wc.data();
-      while (completedTransfers < transferCount) {
+    if (normalCount > 0) {
+      do {
+        std::vector<uint32_t> receivedQPs(transferCount, 0);
+        // post the sends
         for (auto i = 0; i < transferCount; i++) {
-          if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
-            auto& rss = exeInfo.resources[i];
-            // Poll the completion queue until all queue pairs are complete
-            // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
-            // Use batch polling to drain multiple completions at once for better efficiency
-            int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, pollBatch, wc_array);
-            if (nc > 0) {
-              // Process all completions in the batch
-              for (int j = 0; j < nc; j++) {
-                if (wc_array[j].status != IBV_WC_SUCCESS) {
-                  return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
+          if (exeInfo.resources[i].laps != 0) continue;
+          transferTimers[i] = std::chrono::high_resolution_clock::now();
+          ERR_CHECK(ExecuteNicTransfer(iteration, cfg, exeIndex, exeInfo.resources[i]));
+        }
+        // poll for completions
+        size_t completedTransfers = 0;
+        int pollBatch = std::max(1, cfg.nic.cqPollBatch);
+        std::vector<ibv_wc> wc((size_t)pollBatch);
+        ibv_wc* wc_array = wc.data();
+        while (completedTransfers < normalCount) {
+          for (auto i = 0; i < transferCount; i++) {
+            if (exeInfo.resources[i].laps != 0) continue;
+            if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
+              auto& rss = exeInfo.resources[i];
+              int nc = ibv_poll_cq(rss.srcIsExeNic ? rss.srcCompQueue : rss.dstCompQueue, pollBatch, wc_array);
+              if (nc > 0) {
+                for (int j = 0; j < nc; j++) {
+                  if (wc_array[j].status != IBV_WC_SUCCESS) {
+                    return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
+                  }
+                  receivedQPs[i]++;
                 }
-                receivedQPs[i]++;
+              } else if (nc < 0) {
+                return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
               }
-            } else if (nc < 0) {
-              return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
-            }
-            if(receivedQPs[i] == rss.qpCount) {
-              auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
-              double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
-              if (iteration >= 0) {
-                totalTimeMsec[i] += deltaMsec;
+              if(receivedQPs[i] == rss.qpCount) {
+                auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
+                double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+                if (iteration >= 0) {
+                  totalTimeMsec[i] += deltaMsec;
+                }
+                completedTransfers++;
               }
-              completedTransfers++;
             }
           }
         }
-      }
-    } while(++subIterations < cfg.general.numSubIterations);
+      } while(++subIterations < cfg.general.numSubIterations);
+    }
+
+    // Wait for pingpong threads to finish
+    for (auto& f : ppAsyncTransfers)
+      ERR_CHECK(f.get());
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -4779,7 +4942,8 @@ namespace {
       exeInfo.totalDurationMsec += deltaMsec;
       for (int i = 0; i < transferCount; i++) {
         auto& rss = exeInfo.resources[i];
-        double transferTimeMsec = totalTimeMsec[i] / cfg.general.numSubIterations;
+        int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+        double transferTimeMsec = totalTimeMsec[i] / divisor;
         rss.totalDurationMsec += transferTimeMsec;
         if (cfg.general.recordPerIteration)
           rss.perIterMsec.push_back(transferTimeMsec);
@@ -5077,11 +5241,6 @@ namespace {
   __global__ void __launch_bounds__(LAUNCH_BOUND)
     GpuReduceKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
   {
-    int64_t startCycle;
-    // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
-    bool shouldRecordTiming = (seType == 1) ? (threadIdx.x % warpSize == 0) : (threadIdx.x == 0);
-    if (shouldRecordTiming) startCycle = GetTimestamp();
-
     // seType: 0=threadblock, 1=warp
     int subExecIdx;
     if (seType == 0) {
@@ -5095,6 +5254,17 @@ namespace {
     }
 
     SubExecParam& p = params[subExecIdx];
+
+    // Delay non-pong transfers so pong can start waiting on the flag first
+    if (p.laps >= 0 && p.flagMem) {
+      int64_t t0 = GetTimestamp();
+      while (GetTimestamp() - t0 < 1000) {}
+    }
+
+    int64_t startCycle;
+    // For warp-level, each warp's first thread records timing; for threadblock-level, only first thread of block
+    bool shouldRecordTiming = (seType == 1) ? (threadIdx.x % warpSize == 0) : (threadIdx.x == 0);
+    if (shouldRecordTiming) startCycle = GetTimestamp();
 
     // For warp-level dispatch, inactive warps should return early
     if (seType == 1 && p.N == 0) return;
@@ -5141,8 +5311,21 @@ namespace {
     case 5: /* C,W,U */ teamStride = 1; waveStride = nTeams; unrlStride = nTeams * nWaves;  teamStride2 = 1;      waveStride2 = nTeams; break;
     }
 
+    int const iterations = (p.laps == 0) ? numSubIterations : abs(p.laps);
     int subIterations = 0;
     while (1) {
+      // Pong: wait for ping's signal before each lap
+      if (p.laps < 0 && p.flagMem) {
+        if (threadIdx.x == 0)
+          GpuWait(FlagSlot(p.flagMem, subIterations, p.flagStride, p.flagAllocBytes));
+        if (seType == 0) __syncthreads(); else __syncwarp();
+      }
+
+      // For pingpong, offset dst per lap so the 8-byte write lands on the correct flag slot
+      size_t const dstFloatOff = (p.laps != 0)
+        ? ((subIterations * p.flagStride) % p.flagAllocBytes) / sizeof(float)
+        : 0;
+
       // First loop: Each wavefront in the team works on UNROLL PACKED_FLOAT per thread
       size_t const loop1Stride = nTeams * nWaves * UNROLL * warpSize;
       size_t const loop1Limit  = numPackedFloat / loop1Stride * loop1Stride;
@@ -5220,7 +5403,7 @@ namespace {
             }
 
             for (int d = 0; d < numDsts; d++)
-              Store<TEMPORAL_MODE>(val, &p.dst[d][idx]);
+              Store<TEMPORAL_MODE>(val, &p.dst[d][idx + dstFloatOff]);
           }
         }
       }
@@ -5238,8 +5421,16 @@ namespace {
         __syncthreads();
       }
 
+      // TODO: Should this be before or after sync
+      // Ping: wait for pong's signal before next lap
+      if (p.laps > 0 && p.flagMem) {
+        if (threadIdx.x == 0)
+          GpuWait(FlagSlot(p.flagMem, subIterations, p.flagStride, p.flagAllocBytes));
+        if (seType == 0) __syncthreads(); else __syncwarp();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
-      if (++subIterations == numSubIterations) break;
+      if (++subIterations == iterations) break;
     }
 
     if (shouldRecordTiming) {
@@ -5350,6 +5541,11 @@ namespace {
     [[maybe_unused]] int const wordSizeIdx  = GetGpuKernelWordsizeIdx(cfg.gfx.wordSize);
     [[maybe_unused]] int const temporalIdx  = GetGpuKernelTemporalIdx(cfg.gfx.temporalMode);
 
+    if (rss.laps >= 0 && rss.flagMem)
+      usleep(1);
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
 #ifdef SINGLE_KERNEL
     auto gpuKernel = GpuReduceKernel<float4, 1024, 1, 0>;
 #else
@@ -5361,8 +5557,6 @@ namespace {
     int  const gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
     dim3 const gridSize(xccDim, gridY, 1);
     dim3 const blockSize(cfg.gfx.blockSize);
-
-    auto cpuStart = std::chrono::high_resolution_clock::now();
 
     SubExecParam* params = cfg.gfx.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
 
@@ -5381,6 +5575,7 @@ namespace {
 
     ERR_CHECK(hipStreamSynchronize(stream));
 
+//<<<<<<< HEAD
     // Record this timing if this Transfer is being run in multistream mode
     if (cfg.gfx.useMultiStream) {
       if (iteration >= 0) {
@@ -5411,6 +5606,26 @@ namespace {
                                       GetId(subExecParam[i].hwId)));
           }
           rss.perIterCUs.push_back(CUs);
+/*=======
+    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / divisor;
+
+    if (iteration >= 0) {
+      double deltaMsec = cpuDeltaMsec;
+      if (startEvent != NULL) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+        deltaMsec = gpuDeltaMsec / divisor;
+      }
+      rss.totalDurationMsec += deltaMsec;
+      if (cfg.general.recordPerIteration) {
+        rss.perIterMsec.push_back(deltaMsec);
+        std::set<std::pair<int,int>> CUs;
+        for (int i = 0; i < numSubExecs; i++) {
+          CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
+                                    GetId(rss.subExecParamGpuPtr[i].hwId)));
+>>>>>>> origin/pingpong*/
         }
       }
     }
@@ -5504,7 +5719,8 @@ namespace {
           }
 
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
-          deltaMsec /= cfg.general.numSubIterations;
+          int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+          deltaMsec /= divisor;
           rss.totalDurationMsec += deltaMsec;
           if (cfg.general.recordPerIteration) {
             rss.perIterMsec.push_back(deltaMsec);
@@ -5529,10 +5745,14 @@ namespace {
                                       ConfigOptions const& cfg,
                                       TransferResources&   resources)
   {
+    if (resources.laps >= 0 && resources.flagMem)
+      usleep(1);
+
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int numDsts = (int)resources.dstMem.size();
     ERR_CHECK(hipSetDevice(exeIndex));
+    int const iterations = (resources.laps != 0) ? abs(resources.laps) : cfg.general.numSubIterations;
     int subIterations = 0;
     size_t const initOffset = cfg.data.byteOffset / sizeof(float);
     float* const src = resources.srcMem[0] + initOffset;
@@ -5547,19 +5767,42 @@ namespace {
 
       // Use DMA copy engine
       do {
-        // Queue for each output location
-        for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
-          float* const dst = resources.dstMem[dstIdx] + initOffset;
-#if defined(CUMEM_ENABLED)
-          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)dst,
+        if (resources.laps != 0) { // pingpong
+          // Pong: enqueue wait kernel before DMA copy
+          if (resources.laps < 0 && resources.flagMem)
+            GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
+
+          // For pingpong, offset dst per lap
+          int dstByteOff = (resources.laps != 0) ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
+          void* lapDst = (char*)resources.dstMem[0] + dstByteOff;
+
+          #if defined(__NVCC__)
+          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)lapDst,
                                   (CUdeviceptr)src,
                                   resources.numBytes, stream));
 #else
-          ERR_CHECK(hipMemcpyAsync(dst, src, resources.numBytes,
-                                   memcpyKind, stream));
+          ERR_CHECK(hipMemcpyAsync(lapDst, src, resources.numBytes,
+                                   hipMemcpyDefault, stream));
 #endif
+
+          // Ping: enqueue wait kernel after DMA copy (wait for pong before next lap)
+          if (resources.laps > 0 && resources.flagMem)
+            GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
+        } else { // original multi-dst DMA
+          // Queue for each output location
+          for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+            float* const dst = resources.dstMem[dstIdx] + initOffset;
+#if defined(CUMEM_ENABLED)
+            ERR_CHECK(cuMemcpyAsync((CUdeviceptr)dst,
+                                    (CUdeviceptr)src,
+                                    resources.numBytes, stream));
+#else
+            ERR_CHECK(hipMemcpyAsync(dst, src, resources.numBytes,
+                                     memcpyKind, stream));
+#endif
+          }
         }
-      } while (++subIterations != cfg.general.numSubIterations);
+      } while (++subIterations != iterations);
 
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(stopEvent, stream));
@@ -5570,6 +5813,17 @@ namespace {
 #else
       // Use HSA async copy
       do {
+        // Pong: enqueue wait kernel before HSA copy
+        if (resources.laps < 0 && resources.flagMem) {
+          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
+          ERR_CHECK(hipStreamSynchronize(stream));
+        }
+
+        //TODO: double check hsaLapDst, as well as behavior for multi src
+        // For pingpong, offset dst per lap
+        int hsaDstByteOff = (resources.laps != 0) ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
+        void* hsaLapDst = (char*)resources.dstMem[0] + hsaDstByteOff;
+
         hsa_signal_store_screlease(resources.signal, numDsts);
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
           float* const dst = resources.dstMem[dstIdx] + initOffset;
@@ -5590,18 +5844,25 @@ namespace {
         while(hsa_signal_wait_scacquire(resources.signal,
                                         HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
                                         HSA_WAIT_STATE_ACTIVE) >= 1);
-      } while (++subIterations != cfg.general.numSubIterations);
+
+        // Ping: enqueue wait kernel after HSA copy (wait for pong before next lap)
+        if (resources.laps > 0 && resources.flagMem) {
+          GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
+          ERR_CHECK(hipStreamSynchronize(stream));
+        }
+
+      } while (++subIterations != iterations);
 #endif
     }
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / iterations;
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
       if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
+        deltaMsec = gpuDeltaMsec / iterations;
       }
       resources.totalDurationMsec += deltaMsec;
       if (cfg.general.recordPerIteration)
@@ -5621,6 +5882,7 @@ namespace {
 
     vector<std::future<ErrResult>> asyncTransfers;
     for (int i = 0; i < exeInfo.resources.size(); i++) {
+      auto& rss = exeInfo.resources[i];
       asyncTransfers.emplace_back(std::async(std::launch::async,
                                              ExecuteDmaTransfer,
                                              iteration,
@@ -5867,6 +6129,7 @@ namespace {
 
       TransferResources resource = {};
       resource.transferIdx = i;
+      resource.laps = t.laps;
 
       ExeInfo& exeInfo = executorMap[exeDevice];
       exeInfo.totalBytes    += t.numBytes;
@@ -5910,6 +6173,55 @@ namespace {
     // Prepare reference src/dst arrays - only once for largest size.
     // dstReference (expected results) is only needed when validation is enabled.
     bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
+    // Cross-link flagMem for pingpong pairs (ping and pong are consecutive in transfers)
+    for (size_t i = 0; i + 1 < transfers.size(); i++) {
+      if (transfers[i].laps > 0 && transfers[i+1].laps < 0) {
+        auto pingRss = transferResources[i];
+        auto pongRss = transferResources[i + 1];
+        pingRss->flagMem        = pongRss->dstMem[0];
+        pongRss->flagMem        = pingRss->dstMem[0];
+        int stride              = cfg.general.pingpongStride;
+        int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * abs(transfers[i].laps));
+        pingRss->flagStride     = stride;
+        pongRss->flagStride     = stride;
+        pingRss->flagAllocBytes = allocBytes;
+        pongRss->flagAllocBytes = allocBytes;
+        i++;
+      }
+    }
+
+    // Propagate flagMem into SubExecParam for pingpong transfers
+    for (auto& exeInfoPair : executorMap) {
+      ExeDevice const& exeDevice = exeInfoPair.first;
+      ExeInfo&         exeInfo   = exeInfoPair.second;
+      if (exeDevice.exeRank != localRank) continue;
+
+      for (auto& rss : exeInfo.resources) {
+        if (rss.laps == 0) continue;
+        volatile int64_t* flag = static_cast<volatile int64_t*>(rss.flagMem);
+
+        // Update per-transfer CPU-side SubExecParam (used by CPU executor)
+        for (auto& p : rss.subExecParamCpu) {
+          p.flagMem        = flag;
+          p.flagStride     = rss.flagStride;
+          p.flagAllocBytes = rss.flagAllocBytes;
+        }
+
+        // For GFX executors, also update the packed GPU-side buffer
+        if (exeDevice.exeType == EXE_GPU_GFX) {
+          int subIdx = rss.subExecIdx[0];
+          exeInfo.subExecParamCpu[subIdx].flagMem        = flag;
+          exeInfo.subExecParamCpu[subIdx].flagStride     = rss.flagStride;
+          exeInfo.subExecParamCpu[subIdx].flagAllocBytes = rss.flagAllocBytes;
+          ERR_APPEND(hipMemcpy(exeInfo.subExecParamGpu + subIdx,
+                               &exeInfo.subExecParamCpu[subIdx],
+                               sizeof(SubExecParam),
+                               hipMemcpyHostToDevice), errResults);
+        }
+      }
+    }
+
+    // Prepare reference src/dst arrays - only once for largest size
     size_t maxN = maxNumBytes / sizeof(float);
     vector<float> outputBuffer(validateEnabled ? maxN : 0);
     vector<vector<float>> dstReference;
@@ -6022,6 +6334,23 @@ namespace {
 
       // Wait for all ranks before starting any timing
       System::Get().Barrier();
+
+      // Zero flag memory for pingpong transfers so each lap's slot starts at 0
+      for (size_t i = 0; i + 1 < transfers.size(); i++) {
+        if (transfers[i].laps > 0 && transfers[i+1].laps < 0) {
+          size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(transfers[i].laps));
+          for (int k = 0; k < 2; k++) {
+            void* dst = transferResources[i + k]->dstMem[0];
+            if (!dst) continue;
+            MemType mt = transfers[i + k].dsts[0].memType;
+            if (mt == MEM_CPU || mt == MEM_NULL)
+              memset(dst, 0, allocBytes);
+            else
+              hipMemset(dst, 0, allocBytes);
+          }
+          i++;
+        }
+      }
 
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -6553,7 +6882,7 @@ namespace {
   ErrResult ParseTransfers(std::string            line,
                            std::vector<Transfer>& transfers)
   {
-    // Replace any round brackets or '->' with spaces,
+    // Replace round brackets, '->', and ':' with spaces, but preserve '+'
     for (int i = 1; line[i]; i++)
       if (line[i] == '(' || line[i] == ')' || line[i] == '-'  || line[i] == ':' || line[i] == '>' ) line[i] = ' ';
 
@@ -6615,11 +6944,82 @@ namespace {
       ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
       ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
-      // Perform wildcard expansion
-      int numRanks = GetNumRanks();
-      for (int localRankIndex = 0; localRankIndex < numRanks; localRankIndex++) {
-        bool localRankModified = RecursiveWildcardTransferExpansion(wct, localRankIndex, numBytes, numSubExecs, transfers);
-        if (!localRankModified) break;
+      // Check for '+' to detect pingpong pair
+      std::string nextToken;
+      auto pos = iss.tellg();
+      bool isPingpong = (iss >> nextToken && nextToken == "+");
+      if (!isPingpong) {
+        iss.clear();
+        iss.seekg(pos);
+      }
+
+      if (isPingpong) {
+        // Parse the pong (backward) triplet
+        std::string pongSrcStr, pongExeStr, pongDstStr;
+        iss >> pongSrcStr >> pongExeStr >> pongDstStr;
+        if (iss.fail())
+          return {ERR_FATAL,
+            "Parsing error: Incomplete pong triplet for Pingpong %d", i+1};
+
+        WildcardTransfer pongWct;
+        ERR_CHECK(ParseMemType(pongSrcStr, pongWct.mem[0]));
+        ERR_CHECK(ParseMemType(pongDstStr, pongWct.mem[1]));
+        ERR_CHECK(ParseExeType(pongExeStr, pongWct.exe));
+
+        // Check for optional trailing 'x<laps>' (e.g. x50)
+        int numLaps = 1;
+        auto lapsPos = iss.tellg();
+        std::string lapsToken;
+        if (iss >> lapsToken && lapsToken.size() > 1 &&
+            (lapsToken[0] == 'x' || lapsToken[0] == 'X')) {
+          numLaps = atoi(lapsToken.c_str() + 1);
+          if (numLaps < 1)
+            return {ERR_FATAL, "Parsing error: Pingpong %d lap count must be positive (got %d)", i+1, numLaps};
+        } else {
+          iss.clear();
+          iss.seekg(lapsPos);
+        }
+
+        // Expand ping half
+        std::vector<Transfer> pingTransfers;
+        int numRanks = GetNumRanks();
+        for (int r = 0; r < numRanks; r++) {
+          if (!RecursiveWildcardTransferExpansion(wct, r, numBytes, numSubExecs, pingTransfers))
+            break;
+        }
+
+        // Expand pong half
+        std::vector<Transfer> pongTransfers;
+        for (int r = 0; r < numRanks; r++) {
+          if (!RecursiveWildcardTransferExpansion(pongWct, r, numBytes, numSubExecs, pongTransfers))
+            break;
+        }
+
+        // Cartesian product: pair every ping with every pong
+        for (size_t p = 0; p < pingTransfers.size(); p++) {
+          for (size_t q = 0; q < pongTransfers.size(); q++) {
+            Transfer ping = pingTransfers[p];
+            Transfer pong = pongTransfers[q];
+            ping.laps     =  numLaps;
+            pong.laps     = -numLaps;
+            ping.numBytes    = 8;
+            pong.numBytes    = 8;
+            ping.numSubExecs = 1;
+            pong.numSubExecs = 1;
+            ping.flag        = ping.dsts[0];
+            pong.flag        = pong.dsts[0];
+            transfers.push_back(ping);
+            transfers.push_back(pong);
+          }
+        }
+
+      } else {
+        // Normal transfer -- expand into transfers (existing behavior)
+        int numRanks = GetNumRanks();
+        for (int localRankIndex = 0; localRankIndex < numRanks; localRankIndex++) {
+          bool localRankModified = RecursiveWildcardTransferExpansion(wct, localRankIndex, numBytes, numSubExecs, transfers);
+          if (!localRankModified) break;
+        }
       }
     }
 

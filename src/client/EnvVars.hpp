@@ -74,6 +74,7 @@ public:
   int numIterations;                 // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numSubIterations;              // Number of subiterations to perform
   int numWarmups;                    // Number of un-timed warmup iterations to perform
+  int pingpongStride;                // Stride in bytes between flag slots for pingpong laps
   int showBorders;                   // Show ASCII box-drawing characaters in tables
   int showIterations;                // Show per-iteration timing info
   int useInteractive;                // Pause for user-input before starting transfer loop
@@ -170,6 +171,7 @@ public:
     numIterations     = GetEnvVar("NUM_ITERATIONS"      , 10);
     numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
     numWarmups        = GetEnvVar("NUM_WARMUPS"         , 3);
+    pingpongStride    = GetEnvVar("PINGPONG_STRIDE"     , 8);
     outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
@@ -390,6 +392,7 @@ public:
     printf(" NUM_SUBITERATIONS   - # of sub-iterations to run per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS         - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV       - Outputs to CSV format if set\n");
+    printf(" PINGPONG_STRIDE   - Stride in bytes between flag slots for pingpong laps (default 8, must be multiple of 8)\n");
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
@@ -534,6 +537,8 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
+    Print("PINGPONG_STRIDE", pingpongStride,
+          "Pingpong flag stride %d bytes per lap", pingpongStride);
     Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
     Print("SHOW_ITERATIONS", showIterations,
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
@@ -709,6 +714,7 @@ public:
     cfg.general.numIterations      = numIterations;
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
+    cfg.general.pingpongStride     = pingpongStride;
     cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
     cfg.general.useInteractive     = useInteractive;
 
