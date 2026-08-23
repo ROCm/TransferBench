@@ -186,19 +186,36 @@ namespace TransferBench
 
   /**
    * A Transfer adds together data from zero or more sources then writes the sum to zero or more desintations
+   *
+   * Normal transfer (laps == 0):
+   *   srcs/dsts are variable-length lists as today.
+   *
+   * Pingpong transfer (laps > 0):
+   *   srcs and dsts are each exactly 2 entries:
+   *     [0] = ping half, [1] = pong half
+   *   dsts[0] and dsts[1] are required (non-NULL); srcs[0] and srcs[1] are optional (MEM_NULL if absent)
+   *   Ping/pong MemDevices are not restricted — any supported MemType is allowed per slot.
+   *   exeDevice / exeSubIndex / exeSubSlot             = ping executor (any ExeType)
+   *   exeDevicePong / exeSubIndexPong / exeSubSlotPong = pong executor (any ExeType)
+   *   laps = number of pingpong laps (must be > 0)
+   *
+   * Ping/pong executors may differ in type (e.g. ping on GFX, pong on DMA). The struct is
+   * executor-agnostic; additional executor types are enabled by implementing their dispatch
+   * paths. As of now, pingpong execution is implemented for EXE_GPU_GFX only.
    */
   struct Transfer
   {
     size_t            numBytes    = 0;          ///< Number of bytes to Transfer
-    vector<MemDevice> srcs        = {};         ///< List of source memory devices
-    vector<MemDevice> dsts        = {};         ///< List of destination memory devices
-    ExeDevice         exeDevice   = {};         ///< Executor to use
-    int32_t           exeSubIndex = -1;         ///< Executor subindex
-    int32_t           exeSubSlot  = 0;          ///< Executor subslot
+    vector<MemDevice> srcs        = {};         ///< Source memory (pingpong: [ping, pong])
+    vector<MemDevice> dsts        = {};         ///< Destination memory (pingpong: [ping, pong])
+    ExeDevice         exeDevice   = {};         ///< (Transfer or Ping) Executor to use
+    int32_t           exeSubIndex = -1;         ///< (Transfer or Ping) Executor subindex
+    int32_t           exeSubSlot  = 0;          ///< (Transfer or Ping) Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
-    int               laps        = 0;          ///< 0 = one-way transfer, >0 = ping (forward), <0 = pong (backward). abs(laps) = lap count
-    MemDevice         flag        = {};         ///< Memory device for pingpong signal flag (only used when laps != 0)
-                                                ///< TODO: pingpong forbid multi-src/dst ?
+    int               laps        = 0;          ///< 0 = normal transfer; >0 = pingpong lap count
+    ExeDevice         exeDevicePong   = {};     ///< Pong executor (pingpong only)
+    int32_t           exeSubIndexPong = -1;     ///< Pong executor subindex (pingpong only)
+    int32_t           exeSubSlotPong  = 0;      ///< Pong executor subslot (pingpong only)
   };
 
   /**
@@ -2218,6 +2235,10 @@ namespace {
       System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
       System::Get().Broadcast(root, sizeof(t.exeSubSlot),  &t.exeSubSlot);
       System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
+      System::Get().Broadcast(root, sizeof(t.laps), &t.laps);
+      System::Get().Broadcast(root, sizeof(t.exeDevicePong),   &t.exeDevicePong);
+      System::Get().Broadcast(root, sizeof(t.exeSubIndexPong), &t.exeSubIndexPong);
+      System::Get().Broadcast(root, sizeof(t.exeSubSlotPong),  &t.exeSubSlotPong);
 
       if (t.numBytes    != transfers[i].numBytes)    ADD_ERROR("numBytes");
       if (t.srcs        != transfers[i].srcs)        ADD_ERROR("Source memory locations");
@@ -2227,6 +2248,11 @@ namespace {
       if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
       if (t.exeSubSlot  != transfers[i].exeSubSlot)  ADD_ERROR("Executor dst slot");
       if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
+      if (t.laps        != transfers[i].laps)        ADD_ERROR("laps");
+      if (t.exeDevicePong < transfers[i].exeDevicePong ||
+          transfers[i].exeDevicePong < t.exeDevicePong) ADD_ERROR("Pong executor device");
+      if (t.exeSubIndexPong != transfers[i].exeSubIndexPong) ADD_ERROR("Pong executor subindex");
+      if (t.exeSubSlotPong  != transfers[i].exeSubSlotPong)  ADD_ERROR("Pong executor subslot");
     }
 
     if (isInconsistent && !System::Get().IsVerbose()) {
@@ -2239,6 +2265,15 @@ namespace {
   // Returns true if the given Transfer requires pod communication
   static bool IsPodTransfer(Transfer const& t)
   {
+    if (t.laps > 0) {
+      for (int half = 0; half < 2; half++) {
+        ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+        if (t.srcs[half].memType != MEM_NULL && t.srcs[half].memRank != exe.exeRank) return true;
+        if (t.dsts[half].memType != MEM_NULL && t.dsts[half].memRank != exe.exeRank) return true;
+      }
+      return false;
+    }
+
     if (IsCpuExeType(t.exeDevice.exeType) || IsGpuExeType(t.exeDevice.exeType)) {
       for (auto const& src : t.srcs)
         if (src.memRank != t.exeDevice.exeRank) return true;
@@ -2291,8 +2326,29 @@ namespace {
                             i, maxSubExecToUse, t.numSubExecs, cfg.data.blockBytes});
       }
 
+      bool const isPingpong = t.laps > 0;
+      if (t.laps < 0) {
+        errors.push_back({ERR_FATAL,
+          "Transfer %zu: Signed laps values are not supported; use laps > 0 with ping/pong halves", i});
+        hasFatalError = true;
+        break;
+      }
+
       // Check sources and destinations
-      if (t.srcs.empty() && t.dsts.empty()) {
+      if (isPingpong) {
+        if (t.srcs.size() != 2 || t.dsts.size() != 2) {
+          errors.push_back({ERR_FATAL,
+            "Transfer %zu: Pingpong transfer requires srcs and dsts each have exactly 2 entries ([ping, pong])", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.dsts[0].memType == MEM_NULL || t.dsts[1].memType == MEM_NULL) {
+          errors.push_back({ERR_FATAL,
+            "Transfer %zu: Pingpong transfer requires a non-NULL dst for both ping and pong halves", i});
+          hasFatalError = true;
+          break;
+        }
+      } else if (t.srcs.empty() && t.dsts.empty()) {
         errors.push_back({ERR_FATAL, "Transfer %d: Must have at least one source or destination", i});
         break;
       }
@@ -2317,22 +2373,56 @@ namespace {
       }
       if (hasFatalError) break;
 
-      // Pingpong flag checks
-      if (t.laps != 0) {
-        if (t.flag.memType == MEM_NULL) {
-          errors.push_back({ERR_FATAL, "Transfer %d: Pingpong transfer requires a valid flag memory device", i});
-          hasFatalError = true;
-        } else if (t.flag.memRank != t.exeDevice.exeRank) {
-          // forbid remote flag
-          // TODO: elaborate more on this and add UALoE support
+      if (isPingpong) {
+        if (t.exeDevice.exeType != EXE_GPU_GFX || t.exeDevicePong.exeType != EXE_GPU_GFX) {
           errors.push_back({ERR_FATAL,
-            "Transfer %d: Pingpong flag must be on the same node as the executor (flag rank %d != executor rank %d)",
-            i, t.flag.memRank, t.exeDevice.exeRank});
+            "Transfer %zu: Pingpong is currently supported on GFX executors only (ping type %c, pong type %c)",
+            i, ExeTypeStr[t.exeDevice.exeType], ExeTypeStr[t.exeDevicePong.exeType]});
           hasFatalError = true;
+          break;
         }
-      }
-      if (hasFatalError) break;
 
+        auto validateGfxExecutor = [&](ExeDevice const& exe, int32_t subIndex, char const* role) {
+          if (exe.exeRank < 0 || exe.exeRank >= GetNumRanks()) {
+            errors.push_back({ERR_FATAL,
+              "Transfer %zu: %s executor rank must be between 0 and %d (instead of %d)",
+              i, role, GetNumRanks() - 1, exe.exeRank});
+            return true;
+          }
+          executors.insert(exe);
+          transferCount[exe]++;
+          int numExecutors = GetNumExecutors(EXE_GPU_GFX, exe.exeRank);
+          if (exe.exeIndex < 0 || exe.exeIndex >= numExecutors) {
+            errors.push_back({ERR_FATAL,
+              "Transfer %zu: %s GFX index must be between 0 and %d (instead of %d) for rank %d",
+              i, role, numExecutors - 1, exe.exeIndex, exe.exeRank});
+            return true;
+          }
+          if (subIndex != -1) {
+#if defined(__NVCC__)
+            errors.push_back({ERR_FATAL,
+              "Transfer %zu: %s GFX executor subindex not supported on NVIDIA hardware", i, role});
+            return true;
+#else
+            useSubIndexCount[exe]++;
+            int numSubIndices = GetNumExecutorSubIndices(exe);
+            if (subIndex >= numSubIndices) {
+              errors.push_back({ERR_FATAL,
+                "Transfer %zu: %s GFX subIndex (XCC) must be between 0 and %d for rank %d",
+                i, role, numSubIndices - 1, exe.exeRank});
+              return true;
+            }
+#endif
+          }
+          return false;
+        };
+
+        if (validateGfxExecutor(t.exeDevice, t.exeSubIndex, "Ping") ||
+            validateGfxExecutor(t.exeDevicePong, t.exeSubIndexPong, "Pong")) {
+          hasFatalError = true;
+          break;
+        }
+      } else {
       // Check executor rank
       if (t.exeDevice.exeRank < 0 || t.exeDevice.exeRank >= GetNumRanks()) {
         errors.push_back({ERR_FATAL,
@@ -2602,6 +2692,8 @@ namespace {
       break;
       }
 
+      } // !isPingpong
+
       // Skip further tests if fatal error detected
       if (hasFatalError) break;
 
@@ -2614,17 +2706,30 @@ namespace {
         break;
 #endif
         // In order to support pod communication, the participanting ranks need to be members of the same pod
-        int exeRank = t.exeDevice.exeRank;
         bool samePod = true;
 
-        for (auto const& src : t.srcs) {
-          if (!(samePod = IsSamePod(src.memRank, exeRank)))
-            break;
-        }
-        if (samePod) {
-          for (auto const& dst : t.dsts) {
-            if (!(samePod = IsSamePod(dst.memRank, exeRank)))
+        if (isPingpong) {
+          for (int half = 0; half < 2 && samePod; half++) {
+            ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+            int const exeRank = exe.exeRank;
+            if (t.srcs[half].memType != MEM_NULL &&
+                !(samePod = IsSamePod(t.srcs[half].memRank, exeRank)))
               break;
+            if (t.dsts[half].memType != MEM_NULL &&
+                !(samePod = IsSamePod(t.dsts[half].memRank, exeRank)))
+              break;
+          }
+        } else {
+          int exeRank = t.exeDevice.exeRank;
+          for (auto const& src : t.srcs) {
+            if (!(samePod = IsSamePod(src.memRank, exeRank)))
+              break;
+          }
+          if (samePod) {
+            for (auto const& dst : t.dsts) {
+              if (!(samePod = IsSamePod(dst.memRank, exeRank)))
+                break;
+            }
           }
         }
 
@@ -2637,7 +2742,35 @@ namespace {
         // Pod (cross-rank) transfers with a GPU executor are exchanged via CUDA/HIP fabric handles,
         // which, for current version, only support device backed allocations.
         // Reject host memory allocations up front.
-        if (IsGpuExeType(t.exeDevice.exeType)) {
+        if (isPingpong) {
+          for (int half = 0; half < 2 && !hasFatalError; half++) {
+            ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+            if (!IsGpuExeType(exe.exeType)) continue;
+            if (t.srcs[half].memType != MEM_NULL &&
+                t.srcs[half].memRank != exe.exeRank && IsCpuMemType(t.srcs[half].memType)) {
+              errors.push_back({ERR_FATAL,
+                  "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                  "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                  "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
+                  i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
+                  "SRC", t.srcs[half].memRank, GetMemTypeName(t.srcs[half].memType), exe.exeRank});
+              hasFatalError = true;
+              break;
+            }
+            if (t.dsts[half].memType != MEM_NULL &&
+                t.dsts[half].memRank != exe.exeRank && IsCpuMemType(t.dsts[half].memType)) {
+              errors.push_back({ERR_FATAL,
+                  "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                  "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                  "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
+                  i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
+                  "DST", t.dsts[half].memRank, GetMemTypeName(t.dsts[half].memType), exe.exeRank});
+              hasFatalError = true;
+              break;
+            }
+          }
+          if (hasFatalError) break;
+        } else if (IsGpuExeType(t.exeDevice.exeType)) {
           bool hasRemoteCpuMem = false;
           MemDevice offender = {};
           char const* role = nullptr;
@@ -2669,8 +2802,11 @@ namespace {
       // Check subexecutors
       if (t.numSubExecs <= 0)
         errors.push_back({ERR_FATAL, "Transfer %d: # of subexecutors must be positive", i});
-      else
+      else {
         totalSubExecs[t.exeDevice] += t.numSubExecs;
+        if (isPingpong)
+          totalSubExecs[t.exeDevicePong] += t.numSubExecs;
+      }
 
     }
 
@@ -6980,6 +7116,7 @@ namespace {
           iss.seekg(lapsPos);
         }
 
+        // Temporary transfers to store ping and pong halves
         // Expand ping half
         std::vector<Transfer> pingTransfers;
         int numRanks = GetNumRanks();
@@ -6995,21 +7132,30 @@ namespace {
             break;
         }
 
-        // Cartesian product: pair every ping with every pong
+        // Cartesian product: pair every ping with every pong into one Transfer
         for (size_t p = 0; p < pingTransfers.size(); p++) {
           for (size_t q = 0; q < pongTransfers.size(); q++) {
-            Transfer ping = pingTransfers[p];
-            Transfer pong = pongTransfers[q];
-            ping.laps     =  numLaps;
-            pong.laps     = -numLaps;
-            ping.numBytes    = 8;
-            pong.numBytes    = 8;
-            ping.numSubExecs = 1;
-            pong.numSubExecs = 1;
-            ping.flag        = ping.dsts[0];
-            pong.flag        = pong.dsts[0];
-            transfers.push_back(ping);
-            transfers.push_back(pong);
+            Transfer const& pingHalf = pingTransfers[p];
+            Transfer const& pongHalf = pongTransfers[q];
+
+            auto singleMemOrNull = [](vector<MemDevice> const& mems) {
+              if (mems.empty()) return MemDevice{MEM_NULL, 0, 0};
+              return mems[0];
+            };
+
+            Transfer t;
+            t.laps         = numLaps;
+            t.numBytes     = 8;
+            t.numSubExecs  = 1;
+            t.srcs         = {singleMemOrNull(pingHalf.srcs), singleMemOrNull(pongHalf.srcs)};
+            t.dsts         = {singleMemOrNull(pingHalf.dsts), singleMemOrNull(pongHalf.dsts)};
+            t.exeDevice    = pingHalf.exeDevice;
+            t.exeSubIndex  = pingHalf.exeSubIndex;
+            t.exeSubSlot   = pingHalf.exeSubSlot;
+            t.exeDevicePong   = pongHalf.exeDevice;
+            t.exeSubIndexPong = pongHalf.exeSubIndex;
+            t.exeSubSlotPong  = pongHalf.exeSubSlot;
+            transfers.push_back(t);
           }
         }
 
@@ -7416,40 +7562,64 @@ namespace {
   {
     if (!dumpCfgFile || !rankDoesOutput) return;
 
+    auto printMem = [&](MemDevice const& m) {
+      if (m.memType == MEM_NULL)
+        fprintf(dumpCfgFile, "N");
+      else
+        fprintf(dumpCfgFile, "R%d%c%d", m.memRank, MemTypeStr[m.memType], m.memIndex);
+    };
+
+    auto printExe = [&](ExeDevice const& exe, int32_t subIndex, int32_t subSlot) {
+      fprintf(dumpCfgFile, "R%d%c%d", exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex);
+      if (exe.exeSlot != 0)
+        fprintf(dumpCfgFile, "%c", 'A' + exe.exeSlot);
+      if (subIndex != -1)
+        fprintf(dumpCfgFile, ".%d", subIndex);
+      if (subSlot != 0)
+        fprintf(dumpCfgFile, "%c", 'A' + subSlot);
+    };
+
     fprintf(dumpCfgFile, "-%lu ", transfers.size());
     for (auto const& t : transfers) {
       fprintf(dumpCfgFile, "(");
 
-      // Print SRCs
-      for (auto const& src : t.srcs) {
-        fprintf(dumpCfgFile, "R%d%c%d", src.memRank, MemTypeStr[src.memType], src.memIndex);
+      if (t.laps > 0) {
+        printMem(t.srcs[0]);
+        fprintf(dumpCfgFile, "->");
+        printExe(t.exeDevice, t.exeSubIndex, t.exeSubSlot);
+        fprintf(dumpCfgFile, "->");
+        printMem(t.dsts[0]);
+        fprintf(dumpCfgFile, " + ");
+        printMem(t.srcs[1]);
+        fprintf(dumpCfgFile, "->");
+        printExe(t.exeDevicePong, t.exeSubIndexPong, t.exeSubSlotPong);
+        fprintf(dumpCfgFile, "->");
+        printMem(t.dsts[1]);
+        fprintf(dumpCfgFile, " x%d %d %lu)", t.laps, t.numSubExecs, t.numBytes);
+      } else {
+        // Print SRCs
+        for (auto const& src : t.srcs) {
+          fprintf(dumpCfgFile, "R%d%c%d", src.memRank, MemTypeStr[src.memType], src.memIndex);
+        }
+        if (t.srcs.empty())
+          fprintf(dumpCfgFile, "N");
+
+        fprintf(dumpCfgFile, "->");
+
+        // Print Executor
+        printExe(t.exeDevice, t.exeSubIndex, t.exeSubSlot);
+
+        fprintf(dumpCfgFile, "->");
+
+        // Print DSTs
+        for (auto const& dst : t.dsts) {
+          fprintf(dumpCfgFile, "R%d%c%d", dst.memRank, MemTypeStr[dst.memType], dst.memIndex);
+        }
+        if (t.dsts.empty())
+          fprintf(dumpCfgFile, "N");
+
+        fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
       }
-      if (t.srcs.empty())
-        fprintf(dumpCfgFile, "N");
-
-      fprintf(dumpCfgFile, "->");
-
-      // Print Executor
-      fprintf(dumpCfgFile, "R%d%c%d", t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
-      if (t.exeDevice.exeSlot != 0)
-        fprintf(dumpCfgFile, "%c", 'A' + t.exeDevice.exeSlot);
-      if (t.exeSubIndex != -1) {
-        fprintf(dumpCfgFile, ".%d", t.exeSubIndex);
-      }
-      if (t.exeSubSlot != 0) {
-        fprintf(dumpCfgFile, "%c", 'A' + t.exeSubSlot);
-      }
-
-      fprintf(dumpCfgFile, "->");
-
-      // Print DSTs
-      for (auto const& dst : t.dsts) {
-        fprintf(dumpCfgFile, "R%d%c%d", dst.memRank, MemTypeStr[dst.memType], dst.memIndex);
-      }
-      if (t.dsts.empty())
-        fprintf(dumpCfgFile, "N");
-
-      fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
       fflush(dumpCfgFile);
     }
     fprintf(dumpCfgFile, "\n");

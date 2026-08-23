@@ -107,16 +107,24 @@ int main(int argc, char **argv)
     if (transfers.empty()) {
       Print("<none>\n");
     } else {
-      bool isMultiNode = GetNumRanks() > 1;
       for (size_t i = 0; i < transfers.size(); i++) {
         Transfer const& t = transfers[i];
-        Print("Transfer %5lu: (%s->", i, MemDevicesToStr(t.srcs).c_str());
-        if (isMultiNode) Print("R%d", t.exeDevice.exeRank);
-        Print("%c%d", ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
-        if (t.exeDevice.exeSlot) Print("%c", 'A' + t.exeDevice.exeSlot);
-        if (t.exeSubIndex != -1) Print(".%d", t.exeSubIndex);
-        if (t.exeSubSlot != 0) Print("%c", 'A' + t.exeSubSlot);
-        Print("->%s)\n", MemDevicesToStr(t.dsts).c_str());
+        if (t.laps > 0) {
+          Print("Transfer %5lu: PingPong x%d: (%s->%s->%s) <+> (%s->%s->%s)\n",
+                i, t.laps,
+                MemDeviceToStr(t.srcs[0]).c_str(),
+                ExeDeviceToStr(t.exeDevice, t.exeSubIndex, t.exeSubSlot).c_str(),
+                MemDeviceToStr(t.dsts[0]).c_str(),
+                MemDeviceToStr(t.srcs[1]).c_str(),
+                ExeDeviceToStr(t.exeDevicePong, t.exeSubIndexPong, t.exeSubSlotPong).c_str(),
+                MemDeviceToStr(t.dsts[1]).c_str());
+        } else {
+          Print("Transfer %5lu: (%s->%s->%s)\n",
+                i,
+                MemDevicesToStr(t.srcs).c_str(),
+                ExeDeviceToStr(t.exeDevice, t.exeSubIndex, t.exeSubSlot).c_str(),
+                MemDevicesToStr(t.dsts).c_str());
+        }
       }
     }
     return 0;

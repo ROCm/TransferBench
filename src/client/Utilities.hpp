@@ -137,6 +137,12 @@ namespace TransferBench::Utils
   // Helper function that converts MemDevices to a string
   std::string MemDevicesToStr(std::vector<MemDevice> const& memDevices);
 
+  // Helper function that converts a single MemDevice to a string ("N" for MEM_NULL)
+  std::string MemDeviceToStr(MemDevice const& memDevice);
+
+  // Helper function that converts an ExeDevice (with subindex/subslot) to a string
+  std::string ExeDeviceToStr(ExeDevice const& exeDevice, int32_t subIndex = -1, int32_t subSlot = 0);
+
   // Helper function to determine if current rank does output
   bool RankDoesOutput();
 
@@ -454,6 +460,33 @@ namespace TransferBench::Utils
         ss << "R" << m.memRank;
       ss << TransferBench::MemTypeStr[m.memType] << m.memIndex;
     }
+    return ss.str();
+  }
+
+  std::string MemDeviceToStr(MemDevice const& memDevice)
+  {
+    if (memDevice.memType == TransferBench::MEM_NULL) return "N";
+    bool isMultiNode = TransferBench::GetNumRanks() > 1;
+    std::stringstream ss;
+    if (isMultiNode)
+      ss << "R" << memDevice.memRank;
+    ss << TransferBench::MemTypeStr[memDevice.memType] << memDevice.memIndex;
+    return ss.str();
+  }
+
+  std::string ExeDeviceToStr(ExeDevice const& exeDevice, int32_t subIndex, int32_t subSlot)
+  {
+    bool isMultiNode = TransferBench::GetNumRanks() > 1;
+    std::stringstream ss;
+    if (isMultiNode)
+      ss << "R" << exeDevice.exeRank;
+    ss << TransferBench::ExeTypeStr[exeDevice.exeType] << exeDevice.exeIndex;
+    if (exeDevice.exeSlot)
+      ss << char('A' + exeDevice.exeSlot);
+    if (subIndex != -1)
+      ss << "." << subIndex;
+    if (subSlot != 0)
+      ss << char('A' + subSlot);
     return ss.str();
   }
 
