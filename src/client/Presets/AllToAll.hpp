@@ -190,6 +190,12 @@ int AllToAllPreset(EnvVars&          ev,
                numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
+  if (transfers.size() == 0) {
+    if (Utils::RankDoesOutput())
+      Utils::Print("[WARN] No transfers requested. Try adjusting A2A_DIRECT or A2A_LOCAL\n");
+    return ERR_NONE;
+  }
+
   // Execute Transfers
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;

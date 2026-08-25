@@ -6,14 +6,11 @@
 
 import re
 
-from rocm_docs import ROCmDocs
-
 with open('../src/header/TransferBench.hpp', encoding='utf-8') as f:
     match = re.search(r'constexpr char VERSION\[\] = "([0-9.]+)[^0-9.]+', f.read())
     if not match:
         raise ValueError("VERSION not found!")
     version_number = match[1]
-left_nav_title = f"TransferBench {version_number} Documentation"
 
 # for PDF output on Read the Docs
 project = "TransferBench Documentation"
@@ -24,11 +21,13 @@ release = version_number
 
 external_toc_path = "./sphinx/_toc.yml"
 
-docs_core = ROCmDocs(left_nav_title)
-docs_core.run_doxygen(doxygen_root="doxygen", doxygen_path="doxygen/xml")
-docs_core.setup()
+extensions = ["rocm_docs"]
+html_theme = "rocm_docs_theme"
+html_theme_options = {
+    "flavor": "rocm-extras",
+    "header_title": f"TransferBench {version_number}",
+    "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/latest/",
+"link_main_doc": True,
+}
 
 external_projects_current_project = "transferbench"
-
-for sphinx_var in ROCmDocs.SPHINX_VARS:
-    globals()[sphinx_var] = getattr(docs_core, sphinx_var)

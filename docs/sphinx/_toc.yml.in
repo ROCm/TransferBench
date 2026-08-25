@@ -2,19 +2,29 @@ defaults:
   numbered: False
 root: index
 subtrees:
+- entries:
+  - file: what-is-transferbench.rst
+
 - caption: Install
   entries:
-  - file: install/install.rst
-    title: Installation
-
-- caption: API reference
-  entries:
-  - file: reference/api.rst
-    title: API library
+  - file: install/build_from_source.rst
 
 - caption: How to
   entries:
-  - file: how to/use-transferbench.rst
+  - file: how to/running-transferbench-customized.rst
+
+- caption: Conceptual
+  entries:
+  - file: conceptual/transferbench-workflow.rst
+  - file: conceptual/transferbench-timing.rst
+  - file: conceptual/transferbench-data-validation.rst
+
+- caption: Reference
+  entries:
+  - file: reference/presets.rst
+  - file: reference/transfer-definition-syntax.rst
+  - file: reference/environment-variables.rst
+  - file: reference/faq.rst
 
 - caption: About
   entries:

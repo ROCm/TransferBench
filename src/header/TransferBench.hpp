@@ -52,12 +52,12 @@ THE SOFTWARE.
 #include <sys/socket.h>
 #include <sys/utsname.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
-#ifdef NIC_EXEC_ENABLED
-#include <infiniband/verbs.h>
-#endif
+#include "IbvDynLoad.hpp"
 
 #ifdef MPI_COMM_ENABLED
 #include <mpi.h>
@@ -92,7 +92,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.67";
+  constexpr char VERSION[] = "1.69";
 
   /**
    * Enumeration of supported Executor types
@@ -217,7 +217,7 @@ namespace TransferBench
    */
   struct DataOptions
   {
-    int           alwaysValidate   = 0;         ///< Validate after each iteration instead of once at end
+    int           alwaysValidate   = 0;         ///< <0 = disable validation, 0 = validate once at end, >0 = validate after each iteration
     int           blockBytes       = 256;       ///< Each subexecutor works on a multiple of this many bytes
     int           byteOffset       = 0;         ///< Byte-offset for memory allocations
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
@@ -795,6 +795,26 @@ namespace TransferBench
 // Helper functions ('hidden' in anonymous namespace)
 //========================================================================================
 namespace {
+
+#ifdef AMD_SMI_ENABLED
+template <typename T, typename = void>
+struct AmdSmiFabricInfoIsFlat : std::false_type {};
+
+template <typename T>
+struct AmdSmiFabricInfoIsFlat<T, std::void_t<decltype(std::declval<const T&>().fabric_info.v1)>>
+    : std::true_type {};
+
+template <typename T>
+const auto& AmdSmiFabricInfoV1(const T& info)
+{
+  if constexpr (AmdSmiFabricInfoIsFlat<T>::value) {
+    return info.fabric_info.v1;      // New layout (amd-smi 27+): fabric_info.v1
+  } else {
+    return info.fabric_info.fabric_version.v1;  // Old layout (pre-27): fabric_info.fabric_version.v1
+  }
+}
+
+#endif
 
 // Constants
 //========================================================================================
@@ -1478,6 +1498,22 @@ namespace {
     return "?";
   }
 
+  // Returns whether a memory allocation can be directly read by host code.
+  static ErrResult GetMemHostAccessibility(MemDevice const& memDevice, bool& hostAccessible)
+  {
+    hostAccessible = IsCpuMemType(memDevice.memType) || memDevice.memType == MEM_MANAGED;
+    if (hostAccessible || !IsGpuMemType(memDevice.memType)) return ERR_NONE;
+
+#if defined(__NVCC__)
+    return ERR_NONE;
+#else
+    int isLargeBar = 0;
+    ERR_CHECK(hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, memDevice.memIndex));
+    hostAccessible = (isLargeBar != 0);
+    return ERR_NONE;
+#endif
+  }
+
   // Allocate memory
   static ErrResult AllocateMemory(MemDevice memDevice, size_t numBytes, void** memPtr,
                                   size_t* actualBytes = NULL,
@@ -1669,14 +1705,32 @@ namespace {
     return ERR_NONE;
   }
 
-#if defined(NIC_EXEC_ENABLED) && defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
+#if defined(__NVCC__)
+  static bool CheckDmabufSupport()
+  {
+    return false;
+  }
+  static ErrResult ExportDmabuf(void* gpuPtr, size_t numBytes, int& dmabufFd, uint64_t& dmabufOffset)
+  {
+    return {ERR_FATAL, "DMA-BUF export not yet supported on NVIDIA platform"};
+  }
+#else
+  hsa_status_t (*pfn_hsa_amd_portable_export_dmabuf)(const void*, size_t, int*, uint64_t*);
   // Check kernel configuration for required DMA-BUF support
   // Returns true if kernel supports CONFIG_DMABUF_MOVE_NOTIFY and CONFIG_PCI_P2PDMA
-  static bool CheckKernelDmabufSupport()
+  static bool CheckDmabufSupport()
   {
     static int support = -1;  // -1: not checked, 0: disabled, 1: enabled
 
     if (support != -1) {
+      return support;
+    }
+    // Check hsa_amd_portable_export_dmabuf and ibv_reg_dmabuf_mr symbols are available
+    // rocr and hsa_ext_amd header is always mandatory, so no need to check for them
+    pfn_hsa_amd_portable_export_dmabuf =
+        (hsa_status_t (*)(const void*, size_t, int*, uint64_t*))dlsym(RTLD_DEFAULT, "hsa_amd_portable_export_dmabuf");
+    if (pfn_hsa_amd_portable_export_dmabuf == nullptr || !IsIbvDmabufPresent()) {
+      support = 0;
       return support;
     }
 
@@ -1802,7 +1856,7 @@ namespace {
 
     // Export the aligned GPU buffer as DMA-BUF
     uint64_t exportOffset = 0;
-    hsa_status_t status = hsa_amd_portable_export_dmabuf(alignedPtr, alignedSize, &dmabufFd, &exportOffset);
+    hsa_status_t status = pfn_hsa_amd_portable_export_dmabuf(alignedPtr, alignedSize, &dmabufFd, &exportOffset);
 
     if (status != HSA_STATUS_SUCCESS) {
       return {ERR_FATAL, "Failed to export DMA-BUF: hsa_amd_portable_export_dmabuf returned %d", status};
@@ -1923,7 +1977,7 @@ namespace {
       decltype(data.fillCompress)().swap(data.fillCompress);
       System::Get().Broadcast(root, sizeof(data), &data);
 
-      // data.alwaysValidate is permitted to be different across ranks
+      if (data.alwaysValidate != cfg.data.alwaysValidate) ADD_ERROR("cfg.data.alwaysValidate");
       if (data.blockBytes != cfg.data.blockBytes) ADD_ERROR("cfg.data.blockBytes");
       if (data.byteOffset != cfg.data.byteOffset) ADD_ERROR("cfg.data.byteOffset");
 
@@ -2110,14 +2164,14 @@ namespace {
     }
 
     // Check NIC options
-#ifdef NIC_EXEC_ENABLED
-    if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
-      errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+    if (IsIbvSymbolsReady()) {
+      if (cfg.nic.chunkBytes == 0 || (cfg.nic.chunkBytes % 4 != 0)) {
+        errors.push_back({ERR_FATAL, "[nic.chunkBytes] must be a non-negative multiple of 4"});
+      }
+      if (cfg.nic.cqPollBatch <= 0) {
+        errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
+      }
     }
-    if (cfg.nic.cqPollBatch <= 0) {
-      errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
-    }
-#endif
 
     // NVIDIA specific
 #if defined(__NVCC__)
@@ -2488,7 +2542,7 @@ namespace {
         break;
 #endif
       case EXE_NIC: case EXE_NIC_NEAREST:
-#ifdef NIC_EXEC_ENABLED
+      if (IsIbvSymbolsReady())
       {
         // NIC Executors can only execute a copy operation
         if (t.srcs.size() != 1 || t.dsts.size() != 1) {
@@ -2542,11 +2596,10 @@ namespace {
           hasFatalError = true;
           break;
         }
+      } else {
+        errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
+        hasFatalError = true;
       }
-#else
-      errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
-      hasFatalError = true;
-#endif
       break;
       }
 
@@ -2767,7 +2820,6 @@ namespace {
 #endif
 
     // For IBV executor
-#ifdef NIC_EXEC_ENABLED
     int                        srcNicIndex;       ///< SRC NIC index
     int                        dstNicIndex;       ///< DST NIC index
     ibv_context*               srcContext;        ///< Device context for SRC NIC
@@ -2792,7 +2844,6 @@ namespace {
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
-#endif
 
     // For BMA executor
 #ifdef BMA_EXEC_ENABLED
@@ -2820,6 +2871,7 @@ namespace {
 
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
     vector<hipStream_t>        streams;           ///< HIP streams to launch on
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
@@ -2850,7 +2902,6 @@ namespace {
     }
   };
 
-#ifdef NIC_EXEC_ENABLED
   // Structure to track information about IBV devices
   struct IbvDevice
   {
@@ -2863,12 +2914,11 @@ namespace {
     std::string gidDescriptor;
     bool        isRoce;
   };
-#endif
 
-#ifdef NIC_EXEC_ENABLED
 // Function to collect information about IBV devices
 //========================================================================================
-static bool IsConfiguredGid(union ibv_gid const& gid)
+
+  static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     const struct in6_addr *a = (struct in6_addr *) gid.raw;
     int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
@@ -2981,7 +3031,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     static vector<IbvDevice> ibvDeviceList = {};
 
     // Build list on first use
-    if (!isInitialized) {
+    if (IsIbvSymbolsReady() && !isInitialized) {
 
       // Query the number of IBV devices
       int numIbvDevices = 0;
@@ -3066,9 +3116,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     return ibvDeviceList;
   }
-#endif // NIC_EXEC_ENABLED
 
-#ifdef NIC_EXEC_ENABLED
 // PCIe-related functions
 //========================================================================================
 
@@ -3281,9 +3329,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     return matches;
   }
-#endif // NIC_EXEC_ENABLED
 
-#ifdef NIC_EXEC_ENABLED
 // IB Verbs-related functions
 //========================================================================================
 
@@ -3454,16 +3500,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       if (!dmabufStatusPrinted) {
         dmabufStatusPrinted = true;
         printf("[INFO] Rank %d DMA-BUF support: ", GetRank());
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-        bool kernelSupport = CheckKernelDmabufSupport();
+        bool kernelSupport = CheckDmabufSupport();
         if (kernelSupport) {
           printf("ENABLED\n");
         } else {
-          printf("DISABLED (kernel config missing, using standard ibv_reg_mr)\n");
+          printf("DISABLED (kernel config or export symbol missing, using standard ibv_reg_mr)\n");
         }
-#else
-        printf("DISABLED (using standard ibv_reg_mr)\n");
-#endif
       }
     }
 
@@ -3492,27 +3534,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.srcProtect, ibv_alloc_pd, rss.srcContext);
 
       // Export DMA-BUF for SRC memory if it's GPU memory
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-      if (!t.srcs.empty() && IsGpuMemType(t.srcs[0].memType) && CheckKernelDmabufSupport()) {
+      if (CheckDmabufSupport() && !t.srcs.empty() && IsGpuMemType(t.srcs[0].memType)) {
         ERR_CHECK(ExportDmabuf(rss.srcMem[0], rss.numBytes, rss.srcDmabufFd, rss.srcDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported SRC GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
                  GetRank(), rss.srcDmabufFd, rss.srcDmabufOffset);
         }
       }
-#endif
 
       // Register SRC memory region
-#ifdef HAVE_DMABUF_SUPPORT
       if (rss.srcDmabufFd >= 0) {
         IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_dmabuf_mr, rss.srcProtect, rss.srcDmabufOffset,
                      rss.numBytes, (uint64_t)rss.srcMem[0], rss.srcDmabufFd, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered SRC memory using ibv_reg_dmabuf_mr\n", GetRank());
         }
-      } else
-#endif
-      {
+      } else {
         IBV_PTR_CALL(rss.srcMemRegion, ibv_reg_mr, rss.srcProtect, rss.srcMem[0], rss.numBytes, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered SRC memory using ibv_reg_mr (standard path)\n", GetRank());
@@ -3558,27 +3595,22 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       IBV_PTR_CALL(rss.dstProtect, ibv_alloc_pd, rss.dstContext);
 
       // Export DMA-BUF for DST memory if it's GPU memory
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-      if (!t.dsts.empty() && IsGpuMemType(t.dsts[0].memType) && CheckKernelDmabufSupport()) {
+      if (CheckDmabufSupport() && !t.dsts.empty() && IsGpuMemType(t.dsts[0].memType)) {
         ERR_CHECK(ExportDmabuf(rss.dstMem[0], rss.numBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported DST GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
                  GetRank(), rss.dstDmabufFd, rss.dstDmabufOffset);
         }
       }
-#endif
 
       // Register DST memory region
-#ifdef HAVE_DMABUF_SUPPORT
       if (rss.dstDmabufFd >= 0) {
         IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_dmabuf_mr, rss.dstProtect, rss.dstDmabufOffset,
                      rss.numBytes, (uint64_t)rss.dstMem[0], rss.dstDmabufFd, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered DST memory using ibv_reg_dmabuf_mr\n", GetRank());
         }
-      } else
-#endif
-      {
+      } else {
         IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered DST memory using ibv_reg_mr (standard path)\n", GetRank());
@@ -3749,16 +3781,16 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (isDstRank) IBV_CALL(ibv_dereg_mr, rss.dstMemRegion);
 
     // Close DMA-BUF file descriptors
-#if defined(HAVE_DMABUF_SUPPORT) && !defined(__NVCC__)
-    if (isSrcRank && rss.srcDmabufFd >= 0) {
-      close(rss.srcDmabufFd);
-      rss.srcDmabufFd = -1;
+    if (CheckDmabufSupport()) {
+      if (isSrcRank && rss.srcDmabufFd >= 0) {
+        close(rss.srcDmabufFd);
+        rss.srcDmabufFd = -1;
+      }
+      if (isDstRank && rss.dstDmabufFd >= 0) {
+        close(rss.dstDmabufFd);
+        rss.dstDmabufFd = -1;
+      }
     }
-    if (isDstRank && rss.dstDmabufFd >= 0) {
-      close(rss.dstDmabufFd);
-      rss.dstDmabufFd = -1;
-    }
-#endif
 
     // Destroy queue pairs
     if (isSrcRank) {
@@ -3786,7 +3818,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     return ERR_NONE;
   }
-#endif // NIC_EXEC_ENABLED
 
 // Data validation-related functions
 //========================================================================================
@@ -4400,6 +4431,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
       ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
                                (void**)&exeInfo.subExecParamGpu));
+      ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
 
       // Create subexecutor parameter array for entire executor
       exeInfo.subExecParamCpu.clear();
@@ -4473,14 +4505,14 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // Prepare for NIC-based executors
     if (IsNicExeType(exeDevice.exeType)) {
-#ifdef NIC_EXEC_ENABLED
-      for (auto& rss : exeInfo.resources) {
-        Transfer const& t = transfers[rss.transferIdx];
-        ERR_CHECK(PrepareNicTransferResources(cfg, exeDevice, t, rss));
+      if (IsIbvSymbolsReady()) {
+        for (auto& rss : exeInfo.resources) {
+          Transfer const& t = transfers[rss.transferIdx];
+          ERR_CHECK(PrepareNicTransferResources(cfg, exeDevice, t, rss));
+        }
+      } else {
+        return {ERR_FATAL, "RDMA executor is not supported"};
       }
-#else
-      return {ERR_FATAL, "RDMA executor is not supported"};
-#endif
     }
 
     // Check that GPU wallclock rate is non-zero
@@ -4577,11 +4609,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 #endif
 
       // Destroy NIC related resources
-#ifdef NIC_EXEC_ENABLED
-      if (IsNicExeType(exeDevice.exeType)) {
+      if (IsIbvSymbolsReady() && IsNicExeType(exeDevice.exeType)) {
         ERR_CHECK(TeardownNicTransferResources(rss, t));
       }
-#endif
     }
 
     // Teardown additional requirements for GPU-based executors
@@ -4707,7 +4737,6 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
-#ifdef NIC_EXEC_ENABLED
   // Execution of a single NIC Transfer
   static ErrResult ExecuteNicTransfer(int           const  iteration,
                                       ConfigOptions const& cfg,
@@ -4808,7 +4837,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
     return ERR_NONE;
   }
-#endif
+
 // GFX Executor-related functions
 //========================================================================================
 
@@ -5064,24 +5093,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
+
+      // Wait for all threads to finish this subiteration
+      if (seType == 1) {
+        // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+        __builtin_amdgcn_wave_barrier();
+#else
+        __syncwarp();
+#endif
+      } else {
+        // For threadblock-level, sync all threads
+        __syncthreads();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
     }
 
-    // Wait for all threads to finish
-    if (seType == 1) {
-      // For warp-level, sync within warp only
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
-      __builtin_amdgcn_wave_barrier();
-#else
-      __syncwarp();
-#endif
-    } else {
-      // For threadblock-level, sync all threads
-      __syncthreads();
-    }
-
     if (shouldRecordTiming) {
+      // Previous sync ensures data from all threads in this subexecutor has landed in cache
+      // so only one thread needs to do system level threadfence.
+      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5241,25 +5274,28 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           }
         }
       }
+
+      // Wait for all threads to finish this subiteration
+      if (seType == 1) {
+        // For warp-level, sync within warp only
+#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
+        __builtin_amdgcn_wave_barrier();
+#else
+        __syncwarp();
+#endif
+      } else {
+        // For threadblock-level, sync all threads
+        __syncthreads();
+      }
+
       // Allows for numSubiterations == 0 to run infinitely
       if (++subIterations == numSubIterations) break;
     }
 
-    // Wait for all threads to finish
-    if (seType == 1) {
-      // For warp-level, sync within warp only
-#if defined(__HIP_PLATFORM_AMD__) && (HIP_VERSION_MAJOR < 7)
-      __builtin_amdgcn_wave_barrier();
-#else
-
-      __syncwarp();
-#endif
-    } else {
-      // For threadblock-level, sync all threads
-      __syncthreads();
-    }
-
     if (shouldRecordTiming) {
+      // Previous sync ensures data from all threads in this subexecutor has landed in cache
+      // so only one thread needs to do system level threadfence.
+      __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
       GetHwId(p.hwId);
@@ -5355,6 +5391,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                       int           const  xccDim,
                                       ConfigOptions const& cfg,
                                       int           const  gfxKernelIdx,
+                                      bool          const  subExecParamHostAccessible,
                                       TransferResources&   rss)
   {
     // Determine which kernel to launch
@@ -5411,9 +5448,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (cfg.general.recordPerIteration) {
           rss.perIterMsec.push_back(deltaMsec);
           std::set<std::pair<int,int>> CUs;
+          std::vector<SubExecParam> subExecParamHost;
+          SubExecParam const* subExecParam = rss.subExecParamGpuPtr;
+          if (!subExecParamHostAccessible) {
+            subExecParamHost.resize(numSubExecs);
+            ERR_CHECK(hipMemcpy(subExecParamHost.data(), rss.subExecParamGpuPtr,
+                                numSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+            subExecParam = subExecParamHost.data();
+          }
           for (int i = 0; i < numSubExecs; i++) {
-            CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
-                                      GetId(rss.subExecParamGpuPtr[i].hwId)));
+            CUs.insert(std::make_pair(subExecParam[i].xccId,
+                                      GetId(subExecParam[i].hwId)));
           }
           rss.perIterCUs.push_back(CUs);
         }
@@ -5448,6 +5493,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                                xccDim,
                                                std::cref(cfg),
                                                exeInfo.gfxKernelToUse,
+                                               exeInfo.subExecParamHostAccessible,
                                                std::ref(exeInfo.resources[i])));
       }
       for (auto& asyncTransfer : asyncTransfers)
@@ -5457,7 +5503,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
                          cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
                          cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                         xccDim, cfg, exeInfo.gfxKernelToUse, exeInfo.resources[0]);
+                         xccDim, cfg, exeInfo.gfxKernelToUse,
+                         exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
     }
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
@@ -5480,6 +5527,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       // If Transfers were combined into a single launch, figure out per-Transfer timing
       // Determine timing for each of the individual transfers that were part of this launch
       if (!cfg.gfx.useMultiStream) {
+        std::vector<SubExecParam> subExecParamHost;
+        SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
+        if (!exeInfo.subExecParamHostAccessible) {
+          subExecParamHost.resize(exeInfo.totalSubExecs);
+          ERR_CHECK(hipMemcpy(subExecParamHost.data(), exeInfo.subExecParamGpu,
+                              exeInfo.totalSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+          subExecParam = subExecParamHost.data();
+        }
+
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
           int64_t minStartCycle = std::numeric_limits<int64_t>::max();
@@ -5487,11 +5543,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           std::set<std::pair<int, int>> CUs;
 
           for (auto subExecIdx : rss.subExecIdx) {
-            minStartCycle = std::min(minStartCycle, exeInfo.subExecParamGpu[subExecIdx].startCycle);
-            maxStopCycle  = std::max(maxStopCycle,  exeInfo.subExecParamGpu[subExecIdx].stopCycle);
-            if (cfg.general.recordPerIteration) {
-              CUs.insert(std::make_pair(exeInfo.subExecParamGpu[subExecIdx].xccId,
-                                        GetId(exeInfo.subExecParamGpu[subExecIdx].hwId)));
+            if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
+              minStartCycle = std::min(minStartCycle, subExecParam[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
+                                          GetId(subExecParam[subExecIdx].hwId)));
+              }
             }
           }
 
@@ -5526,6 +5584,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int numDsts = (int)resources.dstMem.size();
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
+    size_t const initOffset = cfg.data.byteOffset / sizeof(float);
+    float* const src = resources.srcMem[0] + initOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
@@ -5539,12 +5599,13 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         // Queue for each output location
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+          float* const dst = resources.dstMem[dstIdx] + initOffset;
 #if defined(CUMEM_ENABLED)
-          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[dstIdx],
-                                  (CUdeviceptr)resources.srcMem[0],
+          ERR_CHECK(cuMemcpyAsync((CUdeviceptr)dst,
+                                  (CUdeviceptr)src,
                                   resources.numBytes, stream));
 #else
-          ERR_CHECK(hipMemcpyAsync(resources.dstMem[dstIdx], resources.srcMem[0], resources.numBytes,
+          ERR_CHECK(hipMemcpyAsync(dst, src, resources.numBytes,
                                    memcpyKind, stream));
 #endif
         }
@@ -5561,14 +5622,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       do {
         hsa_signal_store_screlease(resources.signal, numDsts);
         for (int dstIdx = 0; dstIdx < numDsts; dstIdx++) {
+          float* const dst = resources.dstMem[dstIdx] + initOffset;
           if (!useSubIndices) {
-            ERR_CHECK(hsa_amd_memory_async_copy(resources.dstMem[dstIdx], resources.dstAgent[dstIdx],
-                                                resources.srcMem[0], resources.srcAgent,
+            ERR_CHECK(hsa_amd_memory_async_copy(dst, resources.dstAgent[dstIdx],
+                                                src, resources.srcAgent,
                                                 resources.numBytes, 0, NULL,
                                                 resources.signal));
           } else {
-            HSA_CALL(hsa_amd_memory_async_copy_on_engine(resources.dstMem[dstIdx], resources.dstAgent[dstIdx],
-                                                         resources.srcMem[0], resources.srcAgent,
+            HSA_CALL(hsa_amd_memory_async_copy_on_engine(dst, resources.dstAgent[dstIdx],
+                                                         src, resources.srcAgent,
                                                          resources.numBytes, 0, NULL,
                                                          resources.signal,
                                                          resources.sdmaEngineId, true));
@@ -5729,9 +5791,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     case EXE_CPU:           return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-#ifdef NIC_EXEC_ENABLED
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-#endif
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
@@ -5868,6 +5928,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
     }
 
+    // Empty transfer list leaves minNumSrcs at its sentinel (MAX_SRCS + 1);
+    // clamp so the dstReference cleanup loop below can't index out of bounds.
+    if (transfers.empty()) minNumSrcs = 0;
+
     // Loop over each executor and prepare
     // - Allocates memory for each Transfer
     // - Set up work for subexecutors
@@ -5893,24 +5957,30 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Prepare reference src/dst arrays - only once for largest size
+    // Prepare reference src/dst arrays - only once for largest size.
+    // dstReference (expected results) is only needed when validation is enabled.
+    bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
     size_t maxN = maxNumBytes / sizeof(float);
-    vector<float> outputBuffer(maxN);
-    vector<vector<float>> dstReference(maxNumSrcs + 1, vector<float>(maxN));
+    vector<float> outputBuffer(validateEnabled ? maxN : 0);
+    vector<vector<float>> dstReference;
     {
       size_t initOffset = cfg.data.byteOffset / sizeof(float);
       vector<vector<float>> srcReference(maxNumSrcs, vector<float>(maxN));
-      memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
 
+      if (validateEnabled) {
+        dstReference.assign(maxNumSrcs + 1, vector<float>(maxN));
+        memset(dstReference[0].data(), MEMSET_CHAR, maxNumBytes);
+      }
       for (int numSrcs = 0; numSrcs < maxNumSrcs; numSrcs++) {
         PrepareReference(cfg, srcReference[numSrcs], numSrcs);
-        for (int i = 0; i < maxN; i++) {
-          dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
-        }
+        if (validateEnabled)
+          for (int i = 0; i < maxN; i++)
+            dstReference[numSrcs+1][i] = (numSrcs == 0 ? 0 : dstReference[numSrcs][i]) + srcReference[numSrcs][i];
       }
       // Release un-used partial sums
-      for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
-        dstReference[numSrcs].clear();
+      if (validateEnabled)
+        for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
+          dstReference[numSrcs].clear();
 
       // Initialize all src memory buffers (if on local rank)
       bool const verbose = System::Get().IsVerbose();
@@ -5932,6 +6002,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
             }
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
+            ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
         }
       }
@@ -6027,7 +6098,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
       double deltaSec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() / cfg.general.numSubIterations;
 
-      if (cfg.data.alwaysValidate) {
+      if (cfg.data.alwaysValidate > 0) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
       }
@@ -6038,11 +6109,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       }
     }
 
-    // Pause for interactive mode - run validation and show per-transfer result before prompt
-    if (cfg.general.useInteractive) {
+    // Interactive per-transfer PASS/FAIL display (skipped when validation disabled). This does its
+    // own comparison pass to show results; authoritative error reporting still comes from
+    // ValidateAllTransfers (mode 0) or the inline per-iteration validation (mode >0).
+    if (cfg.general.useInteractive && cfg.data.alwaysValidate >= 0) {
+      bool inputOk = true;
       if (localRank == 0) {
-        System::Get().Log("Transfers complete. Validation results:\n");
+        if (cfg.data.alwaysValidate == 0) {
+          System::Get().Log("Transfers complete. Hit <Enter> to run validation: ");
+          fflush(stdout);
+          if (getchar() == EOF) {
+            System::Get().Log("[ERROR] Unexpected EOF while waiting for input\n");
+            inputOk = false;
+          } else {
+            System::Get().Log("\nValidation results:\n");
+          }
+        } else {
+          System::Get().Log("Transfers complete.\nValidation results:\n");
+        }
+      }
 
+      // Coordinate any EOF abort so no rank is left waiting at the Barrier below
+      System::Get().Broadcast(0, sizeof(inputOk), &inputOk);
+      if (!inputOk)
+        ERR_APPEND((ErrResult{ERR_FATAL, "Unexpected EOF while waiting for interactive input"}), errResults);
+
+      if (localRank == 0) {
         size_t initOffset = cfg.data.byteOffset / sizeof(float);
         int numPass = 0, numFail = 0;
         for (auto rss : transferResources) {
@@ -6089,20 +6181,17 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           if (anyLocalDst) { if (transferOk) ++numPass; else ++numFail; }
         }
         System::Get().Log("  Summary: %d PASS  %d FAIL\n", numPass, numFail);
-        System::Get().Log("Hit <Enter> to continue: ");
-        fflush(stdout);
-        if (scanf("%*c") != 0)  {
-          System::Get().Log("[ERROR] Unexpected input\n");
-          exit(1);
-        }
-        System::Get().Log("\n");
         fflush(stdout);
       }
+      System::Get().Barrier();
+    } else if (cfg.general.useInteractive) {
+      if (localRank == 0)
+        System::Get().Log("Transfers complete. Validation disabled (ALWAYS_VALIDATE < 0)\n");
       System::Get().Barrier();
     }
 
     // Validate results
-    if (!cfg.data.alwaysValidate) {
+    if (cfg.data.alwaysValidate == 0) {
       ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                  errResults);
     }
@@ -6138,11 +6227,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
           TransferResult& tfrResult      = results.tfrResults[transferIdx];
           tfrResult.exeDevice            = exeDevice;
-#ifdef NIC_EXEC_ENABLED
           tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-#else
-          tfrResult.exeDstDevice         = exeDevice;
-#endif
           tfrResult.numBytes             = rss.numBytes;
           tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
           tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
@@ -7252,9 +7337,9 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         if (err == AMDSMI_STATUS_SUCCESS) {
           // NOTE: vpod_id is a uint32_t but System holds it as an int64_t to allow for
           //       vpodId == -1 to represent no pod present
-          memcpy(ppodId, &fabricInfo.fabric_info.fabric_version.v1.ppod_id,
-                 sizeof(fabricInfo.fabric_info.fabric_version.v1.ppod_id));
-          vpodId = fabricInfo.fabric_info.fabric_version.v1.vpod_id;
+          const auto& fabricV1 = AmdSmiFabricInfoV1(fabricInfo);
+          memcpy(ppodId, fabricV1.ppod_id, sizeof(fabricV1.ppod_id));
+          vpodId = fabricV1.vpod_id;
         } else if (verbose) {
           const char *errString = NULL;
           amdsmi_status_code_to_string(err, &errString);
@@ -7377,22 +7462,23 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     // NIC Executor
     int numNics = 0;
-#ifdef NIC_EXEC_ENABLED
-    numNics = GetIbvDeviceList().size();
-    for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
-      topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
-      topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
-      topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
-      if (verbose) {
-        auto const& nic = GetIbvDeviceList()[exeIndex];
-        Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s\n",
-            rank, exeIndex, numNics, nic.name.c_str(),
-            nic.busId.empty() ? "?" : nic.busId.c_str(),
-            topo.closestCpuNumaToNic[exeIndex],
-            nic.hasActivePort ? "yes" : "no");
+    if (IsIbvSymbolsReady())
+    {
+      numNics = GetIbvDeviceList().size();
+      for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
+        topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+        topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
+        topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
+        if (verbose) {
+          auto const& nic = GetIbvDeviceList()[exeIndex];
+          Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s\n",
+              rank, exeIndex, numNics, nic.name.c_str(),
+              nic.busId.empty() ? "?" : nic.busId.c_str(),
+              topo.closestCpuNumaToNic[exeIndex],
+              nic.hasActivePort ? "yes" : "no");
+        }
       }
     }
-#endif
     topo.numExecutors[EXE_NIC] = topo.numExecutors[EXE_NIC_NEAREST] = numNics;
 
     for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
@@ -7417,74 +7503,76 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Figure out closest NICs to GPUs
-#ifdef NIC_EXEC_ENABLED
-
     // Build up list of NIC bus addresses
     std::vector<std::string> ibvAddressList;
     auto const& ibvDeviceList = GetIbvDeviceList();
-    for (auto const& ibvDevice : ibvDeviceList)
-      ibvAddressList.push_back(ibvDevice.busId);
+    if (IsIbvSymbolsReady()) {
+      // Include all NICs regardless of link state -- PCIe proximity is a hardware
+      // property that does not depend on whether a port is currently active.
+      // hasActivePort is enforced separately via topo.nicIsActive / NicIsActive().
+      for (auto const& ibvDevice : ibvDeviceList)
+        ibvAddressList.push_back(ibvDevice.busId);
 
-    // Loop over each GPU to find the closest NIC(s) based on PCIe address
-    for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
-      if (gpuAddressList[gpuIndex].empty()) continue;
-      const char* hipPciBusId = gpuAddressList[gpuIndex].c_str();
+      // Loop over each GPU to find the closest NIC(s) based on PCIe address
+      for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
+        if (gpuAddressList[gpuIndex].empty()) continue;
+        const char* hipPciBusId = gpuAddressList[gpuIndex].c_str();
 
-      // Find closest NICs
-      std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
+        // Find closest NICs
+        std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
 
-      // The following will only use distance between bus IDs
-      // to determine the closest NIC to GPU if the PCIe tree approach fails
-      if (closestNicIdxs.empty()) {
-#ifdef VERBS_DEBUG
-        Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
-#endif
-        int minDistance = std::numeric_limits<int>::max();
-        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-          if (ibvDeviceList[nicIndex].busId != "") {
-            int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
-            if (distance >= 0 && distance < minDistance) {
-              minDistance = distance;
-              closestNicIdxs.clear();
-              closestNicIdxs.insert(nicIndex);
-            } else if (distance >= 0 && distance == minDistance) {
-              closestNicIdxs.insert(nicIndex);
+        // The following will only use distance between bus IDs
+        // to determine the closest NIC to GPU if the PCIe tree approach fails
+        if (closestNicIdxs.empty()) {
+  #ifdef VERBS_DEBUG
+          Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+  #endif
+          int minDistance = std::numeric_limits<int>::max();
+          for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+            if (ibvDeviceList[nicIndex].busId != "") {
+              int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
+              if (distance >= 0 && distance < minDistance) {
+                minDistance = distance;
+                closestNicIdxs.clear();
+                closestNicIdxs.insert(nicIndex);
+              } else if (distance >= 0 && distance == minDistance) {
+                closestNicIdxs.insert(nicIndex);
+              }
             }
           }
         }
+        for (auto idx : closestNicIdxs)
+          topo.closestNicsToGpu[gpuIndex].push_back(idx);
       }
-      for (auto idx : closestNicIdxs)
-        topo.closestNicsToGpu[gpuIndex].push_back(idx);
-    }
 
-    // Compute the reverse mapping: closest GPU(s) for each NIC
-    // Loop over each NIC to find the closest GPU(s) based on PCIe address
-    for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-      if (ibvDeviceList[nicIndex].busId.empty()) continue;
+      // Compute the reverse mapping: closest GPU(s) for each NIC
+      // Loop over each NIC to find the closest GPU(s) based on PCIe address
+      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+        if (ibvDeviceList[nicIndex].busId.empty()) continue;
 
-      // Find closest GPUs using LCA algorithm
-      std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
+        // Find closest GPUs using LCA algorithm
+        std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
 
-      if (closestGpuIdxs.empty()) {
-        // Fallback: use bus ID distance
-        int minDistance = std::numeric_limits<int>::max();
-        for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
-          if (gpuAddressList[gpuIdx].empty()) continue;
-          int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
-          if (distance >= 0 && distance < minDistance) {
-            minDistance = distance;
-            closestGpuIdxs.clear();
-            closestGpuIdxs.insert(gpuIdx);
-          } else if (distance >= 0 && distance == minDistance) {
-            closestGpuIdxs.insert(gpuIdx);
+        if (closestGpuIdxs.empty()) {
+          // Fallback: use bus ID distance
+          int minDistance = std::numeric_limits<int>::max();
+          for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
+            if (gpuAddressList[gpuIdx].empty()) continue;
+            int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
+            if (distance >= 0 && distance < minDistance) {
+              minDistance = distance;
+              closestGpuIdxs.clear();
+              closestGpuIdxs.insert(gpuIdx);
+            } else if (distance >= 0 && distance == minDistance) {
+              closestGpuIdxs.insert(gpuIdx);
+            }
           }
         }
-      }
-      for (int idx : closestGpuIdxs) {
-        topo.closestGpusToNic[nicIndex].push_back(idx);
+        for (int idx : closestGpuIdxs) {
+          topo.closestGpusToNic[nicIndex].push_back(idx);
+        }
       }
     }
-#endif
 
     if (verbose) {
       for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
@@ -7504,20 +7592,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           Log("\n");
         }
       }
-#ifdef NIC_EXEC_ENABLED
-      for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-        Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
-                          ibvDeviceList[nicIndex].name.c_str());
-        if (topo.closestGpusToNic[nicIndex].size() == 0) {
-          Log(" none");
-        } else {
-          for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
-            Log(" %d", gpuIndex);
+      if (IsIbvSymbolsReady()) {
+        for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
+          Log("[INFO] Rank %03d: NIC [%02d/%02d] %s Closest GPUs:", rank, nicIndex, numNics,
+                            ibvDeviceList[nicIndex].name.c_str());
+          if (topo.closestGpusToNic[nicIndex].size() == 0) {
+            Log(" none");
+          } else {
+            for (auto gpuIndex : topo.closestGpusToNic[nicIndex]) {
+              Log(" %d", gpuIndex);
+            }
           }
+          Log("\n");
         }
-        Log("\n");
       }
-#endif
     }
   }
 

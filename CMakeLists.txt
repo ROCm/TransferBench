@@ -103,8 +103,8 @@ set(ENV{ROCM_PATH} "${ROCM_PATH}")
 # TransferBench project definitions
 #==================================================================================================
 set(TRANSFERBENCH_VERSION_MAJOR 1)
-set(TRANSFERBENCH_VERSION_MINOR 67)
-set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "00")
+set(TRANSFERBENCH_VERSION_MINOR 69)
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "01")
 
 # Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
 # Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,
@@ -199,9 +199,7 @@ include(CMakePushCheckState)
 # Build options
 #==================================================================================================
 option(BUILD_LOCAL_GPU_TARGET_ONLY "Build only for GPUs detected on this machine" OFF)
-option(ENABLE_NIC_EXEC             "Enable RDMA NIC Executor in TransferBench"    OFF)
 option(ENABLE_MPI_COMM             "Enable MPI Communicator support"              OFF)
-option(ENABLE_DMA_BUF              "Enable DMA-BUF support for GPU Direct RDMA"   OFF)
 option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"        OFF)
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
 option(BUILD_RELOCATABLE_PACKAGE   "Build with RVS-style relocatable RPATH and amdrocm<MAJOR>-transferbench package naming" OFF)
@@ -313,71 +311,13 @@ else()
   message(FATAL_ERROR "HSA library or headers not found under ${ROCM_PATH}; TransferBench requires libhsa-runtime64")
 endif()
 
-## Check for infiniband verbs support
-if(DEFINED ENV{DISABLE_NIC_EXEC} AND "$ENV{DISABLE_NIC_EXEC}" STREQUAL "1")
-  message(STATUS "Disabling NIC Executor support as env. flag DISABLE_NIC_EXEC was enabled")
-elseif(NOT ENABLE_NIC_EXEC)
-  message(STATUS "For CMake builds, NIC Executor support requires explicit opt-in by setting CMake flag -DENABLE_NIC_EXEC=ON")
-  message(STATUS "- Disabling NIC Executor support")
-else()
-  message(STATUS "Attempting to build with NIC executor support")
-
-  find_library(IBVERBS_LIBRARY ibverbs)
-  find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
-  if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
-    add_library(ibverbs SHARED IMPORTED)
-    set_target_properties(ibverbs PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${IBVERBS_INCLUDE_DIR}" IMPORTED_LOCATION "${IBVERBS_LIBRARY}" INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${IBVERBS_INCLUDE_DIR}")
-    set(IBVERBS_FOUND 1)
-    message(STATUS "- Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable")
-  else()
-    if(NOT IBVERBS_LIBRARY)
-      message(WARNING "- IBVerbs library not found")
-    elseif(NOT IBVERBS_INCLUDE_DIR)
-      message(WARNING "- infiniband/verbs.h not found")
-    endif()
-    message(WARNING "- Building without NIC executor support. To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed")
-  endif()
-endif()
-
-## Check for DMA-BUF support (requires IBVERBS)
-if(IBVERBS_FOUND)
-  if(DEFINED ENV{DISABLE_DMA_BUF} AND "$ENV{DISABLE_DMA_BUF}" STREQUAL "1")
-    message(STATUS "Disabling DMA-BUF support as env. flag DISABLE_DMA_BUF was enabled")
-  elseif(NOT ENABLE_DMA_BUF)
-    message(STATUS "For CMake builds, DMA-BUF support requires explicit opt-in by setting CMake flags -DENABLE_DMA_BUF=ON")
-    message(STATUS "- Disabling DMA-BUF support")
-  else()
-    message(STATUS "Attempting to build with DMA-BUF support")
-
-    # Check for ibv_reg_dmabuf_mr
-    cmake_push_check_state()
-    set(CMAKE_REQUIRED_INCLUDES ${IBVERBS_INCLUDE_DIR})
-    set(CMAKE_REQUIRED_LIBRARIES ${IBVERBS_LIBRARY})
-    check_symbol_exists(ibv_reg_dmabuf_mr "infiniband/verbs.h" HAVE_IBV_DMABUF)
-    cmake_pop_check_state()
-
-    # Check for hsa_amd_portable_export_dmabuf
-    cmake_push_check_state()
-    set(CMAKE_REQUIRED_INCLUDES ${HSA_INCLUDE_DIR})
-    set(CMAKE_REQUIRED_LIBRARIES ${HSA_LIBRARY})
-    check_symbol_exists(hsa_amd_portable_export_dmabuf "hsa/hsa_ext_amd.h" HAVE_ROCM_DMABUF)
-    cmake_pop_check_state()
-
-    # Enable DMA-BUF only if both APIs are available
-    if(HAVE_IBV_DMABUF AND HAVE_ROCM_DMABUF)
-      set(DMABUF_SUPPORT_FOUND 1)
-      message(STATUS "- Building with DMA-BUF support")
-    else()
-      if(NOT HAVE_IBV_DMABUF AND NOT HAVE_ROCM_DMABUF)
-        message(WARNING "- Building without DMA-BUF support: missing both ibv_reg_dmabuf_mr and ROCm DMA-BUF export")
-      elseif(NOT HAVE_IBV_DMABUF)
-        message(WARNING "- Building without DMA-BUF support: missing ibv_reg_dmabuf_mr")
-      else()
-        message(WARNING "- Building without DMA-BUF support: missing ROCm DMA-BUF export")
-      endif()
-    endif()
-  endif()
-endif()
+## NIC / RDMA executor
+##
+## libibverbs is loaded dynamically at runtime via dlopen/dlsym
+## (see third-party/ibverbs/IbvDynLoad.hpp). The build neither links against
+## -libverbs nor requires libibverbs-dev to be installed on the build host.
+## Only libdl needs to be linked so that dlopen/dlsym resolve.
+message(STATUS "NIC executor: libibverbs is loaded dynamically at runtime (no -libverbs link, no build-host dependency)")
 
 ## Check for MPI support
 set(MPI_PATH "" CACHE PATH "Path to MPI installation (takes priority over system MPI)")
@@ -471,8 +411,6 @@ else()
             amdsmi_get_processor_handle_from_bdf(bdf, &h);
             amdsmi_fabric_info_t fi;
             amdsmi_get_gpu_fabric_info(h, &fi);
-            (void)fi.fabric_info.fabric_version.v1.ppod_id;
-            (void)fi.fabric_info.fabric_version.v1.vpod_id;
             return 0;
           }" AMDSMI_HAS_FABRIC)
         cmake_pop_check_state()
@@ -510,13 +448,11 @@ add_executable(TransferBench src/client/Client.cpp)
 target_include_directories(TransferBench PRIVATE
   src/header
   src/client
-  src/client/Presets)
+  src/client/Presets
+  third-party/ibverbs)
 
-if(IBVERBS_FOUND)
-  target_include_directories(TransferBench PRIVATE ${IBVERBS_INCLUDE_DIR})
-  target_link_libraries(TransferBench PRIVATE ${IBVERBS_LIBRARY})
-  target_compile_definitions(TransferBench PRIVATE NIC_EXEC_ENABLED)
-endif()
+# libdl supplies dlopen/dlsym used by third-party/ibverbs/IbvDynLoad.hpp.
+target_link_libraries(TransferBench PRIVATE ${CMAKE_DL_LIBS})
 if(MPI_COMM_FOUND)
   if(TARGET MPI::MPI_CXX)
     target_link_libraries(TransferBench PRIVATE MPI::MPI_CXX)
@@ -525,9 +461,6 @@ if(MPI_COMM_FOUND)
     target_link_libraries(TransferBench PRIVATE ${MPI_LIBRARY})
   endif()
   target_compile_definitions(TransferBench PRIVATE MPI_COMM_ENABLED)
-endif()
-if(DMABUF_SUPPORT_FOUND)
-  target_compile_definitions(TransferBench PRIVATE HAVE_DMABUF_SUPPORT)
 endif()
 if(AMD_SMI_FOUND)
   target_include_directories(TransferBench PRIVATE ${AMD_SMI_INCLUDE_DIR})
