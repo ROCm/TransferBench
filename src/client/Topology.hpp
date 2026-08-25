@@ -59,6 +59,7 @@ static void PrintNicToGPUTopo(bool outputToCsv)
     std::vector<int> nicsForGpu;
     TransferBench::GetClosestNicsToGpu(nicsForGpu, j);
     for (int nicIdx : nicsForGpu) {
+      if (nicIdx < 0 || nicIdx >= (int)closestGpusForNic.size()) continue;
       if (!closestGpusForNic[nicIdx].empty()) closestGpusForNic[nicIdx] += ",";
       closestGpusForNic[nicIdx] += std::to_string(j);
     }
@@ -195,14 +196,16 @@ void DisplaySingleRankTopology(bool outputToCsv)
 
       char pciBusId[20];
       HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
+      // Space-separated so the field stays a single column when sep is a comma (CSV mode),
+      // matching how the "Closest GPU(s)" column above is emitted
       std::vector<int> nicsForGpu;
       TransferBench::GetClosestNicsToGpu(nicsForGpu, i);
-      std::string nicStr = "";
+      std::string nicStr;
       for (int nicIdx : nicsForGpu) {
-        if (nicStr != "") nicStr += ",";
+        if (!nicStr.empty()) nicStr += ' ';
         nicStr += std::to_string(nicIdx);
       }
-      if (nicStr == "") nicStr = "-1";
+      if (nicStr.empty()) nicStr = "-1";
       printf(" %-11s %c %-4d %c %-4d %c %-4d %c %-4d %c %s\n",
              pciBusId, sep,
              TransferBench::GetNumSubExecutors({EXE_GPU_GFX, i}), sep,

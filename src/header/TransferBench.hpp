@@ -3176,15 +3176,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Add NICs to the tree
       auto const& ibvDeviceList = GetIbvDeviceList();
       for (IbvDevice const& ibvDevice : ibvDeviceList) {
-        // Include all NICs in the PCIe proximity tree regardless of link state.
-        // PCIe proximity is a hardware property determined by physical wiring through
-        // root complexes and PCIe switches -- it does not depend on whether a port is
-        // currently active.  Excluding inactive NICs would cause GPUs that share the
-        // same root complex with them to find no LCA match, falling back to a coarser
-        // distance heuristic and potentially selecting a more distant NIC instead.
-        // hasActivePort is enforced separately: it is stored in topo.nicIsActive and
-        // checked via NicIsActive() during transfer validation, before any QP is set up.
-        if (ibvDevice.busId == "") continue;
+        if (!ibvDevice.hasActivePort || ibvDevice.busId == "") continue;
         InsertPCIePathToTree(ibvDevice.busId, ibvDevice.name, pcieRoot);
       }
 
@@ -3250,8 +3242,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return -1;
   }
 
-  // Function to extract the domain and bus number from a PCIe address (domain:bus:device.function)
-  static std::pair<int,int> ExtractDomainAndBus(std::string const& pcieAddress)
+  // Function to extract the domain number from a PCIe address (domain:bus:device.function)
+  // The full address is parsed (not just the domain) so that a malformed address is rejected
+  static int ExtractDomain(std::string const& pcieAddress)
   {
     int domain, bus, device, function;
     char delimiter;
@@ -3262,36 +3255,33 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #ifdef VERBS_DEBUG
       System::Get().Log("Invalid PCIe address format: %s\n", pcieAddress.c_str());
 #endif
-      return {-1, -1};
+      return -1;
     }
-    return {domain, bus};
+    return domain;
   }
 
-  // Compute a proximity distance between two PCIe addresses, used as a secondary
-  // tiebreaker when candidates share the same LCA depth in the PCIe tree.
+  // Computes a proximity distance between two PCIe addresses.  Used as a secondary
+  // tiebreaker when candidates share the same LCA depth in the PCIe tree, and as the
+  // sole metric in the fallback path when the PCIe tree yields no match at all.
+  // Returns -1 if either address cannot be parsed.
   //
-  // Same domain (returns 0): within one PCIe domain all devices share a root
-  // complex, so the LCA tree already captures their true structural proximity.
-  // Bus numbers within a domain are firmware-assigned and do not reliably reflect
-  // physical closeness, so they are intentionally not used here (bus is extracted
-  // by ExtractDomainAndBus but unused in this function).
+  // Same domain (0): devices in one PCIe domain share a root complex, so the LCA tree
+  // already captures their structural proximity.  Bus numbers are firmware-assigned and
+  // do not reliably track physical closeness, so they are deliberately NOT used to
+  // discriminate within a domain -- doing so would break ties between NICs that are
+  // genuinely equidistant from a GPU (e.g. two NICs hanging off the same root complex
+  // at different bus numbers), which is exactly the case this metric must preserve.
   //
-  // Cross domain (returns |delta_domain| * 256): a PCIe domain holds at most 256
-  // bus numbers (0x00-0xFF), so scaling by 256 guarantees any cross-domain
-  // distance exceeds the maximum possible same-domain bus difference of 255.
-  // This creates a hard separation: a same-domain device is always ranked closer
-  // than any cross-domain device, regardless of individual bus numbers.
-  //
-  // On platforms where all devices share domain 0000 (standard x86), all
-  // distances collapse to 0 and the LCA tree is the sole proximity discriminator.
-  static int GetBusIdDistance(std::string const& pcieAddress1,
-                              std::string const& pcieAddress2)
+  // Cross domain (|delta domain|): any non-zero value ranks behind every same-domain
+  // candidate.  The magnitude only provides a deterministic ordering among cross-domain
+  // candidates; it carries no physical meaning.
+  static int GetDomainDistance(std::string const& pcieAddress1,
+                               std::string const& pcieAddress2)
   {
-    auto [domain1, bus1] = ExtractDomainAndBus(pcieAddress1);
-    auto [domain2, bus2] = ExtractDomainAndBus(pcieAddress2);
+    int domain1 = ExtractDomain(pcieAddress1);
+    int domain2 = ExtractDomain(pcieAddress2);
     if (domain1 < 0 || domain2 < 0) return -1;
-    if (domain1 == domain2) return 0;
-    return std::abs(domain1 - domain2) * 256;
+    return std::abs(domain1 - domain2);
   }
 
   // Given a target busID and a set of candidate devices, returns a set of indices
@@ -3311,18 +3301,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (!lca) continue;
 
       int depth = GetLcaDepth(lca->address, GetPCIeTreeRoot());
-      int currDistance = GetBusIdDistance(targetBusId, candidateBusId);
+      int currDistance = GetDomainDistance(targetBusId, candidateBusId);
 
+      // When more than one LCA match is found, choose the one with smallest domain difference
+      // NOTE: currDistance could be -1, which signals problem with parsing, however still
+      //       remains a valid "closest" candidate, so is included
       if (depth > maxDepth || (depth == maxDepth && depth >= 0 && currDistance < minDistance)) {
         maxDepth = depth;
-        // minDistance must be updated before matches.clear() so that any subsequent
-        // candidate at the same depth and distance correctly passes the == minDistance
-        // tie-check below.  With the old order (clear then update), a candidate
-        // arriving immediately after a depth-improving entry would compare against the
-        // stale minDistance from the previous depth level and be incorrectly excluded.
-        minDistance = currDistance;
         matches.clear();
         matches.insert(i);
+        minDistance = currDistance;
       } else if (depth == maxDepth && depth >= 0 && currDistance == minDistance) {
         matches.insert(i);
       }
@@ -7507,11 +7495,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     std::vector<std::string> ibvAddressList;
     auto const& ibvDeviceList = GetIbvDeviceList();
     if (IsIbvSymbolsReady()) {
-      // Include all NICs regardless of link state -- PCIe proximity is a hardware
-      // property that does not depend on whether a port is currently active.
-      // hasActivePort is enforced separately via topo.nicIsActive / NicIsActive().
       for (auto const& ibvDevice : ibvDeviceList)
-        ibvAddressList.push_back(ibvDevice.busId);
+        ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
 
       // Loop over each GPU to find the closest NIC(s) based on PCIe address
       for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
@@ -7521,16 +7506,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Find closest NICs
         std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
 
-        // The following will only use distance between bus IDs
+        // The following will only use distance between PCIe domains
         // to determine the closest NIC to GPU if the PCIe tree approach fails
         if (closestNicIdxs.empty()) {
   #ifdef VERBS_DEBUG
-          Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+          Log("[WARN] Falling back to PCIe domain distance to determine proximity\n");
   #endif
           int minDistance = std::numeric_limits<int>::max();
           for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
             if (ibvDeviceList[nicIndex].busId != "") {
-              int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
+              int distance = GetDomainDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
               if (distance >= 0 && distance < minDistance) {
                 minDistance = distance;
                 closestNicIdxs.clear();
@@ -7548,17 +7533,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Compute the reverse mapping: closest GPU(s) for each NIC
       // Loop over each NIC to find the closest GPU(s) based on PCIe address
       for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-        if (ibvDeviceList[nicIndex].busId.empty()) continue;
+        if (!ibvDeviceList[nicIndex].hasActivePort || ibvDeviceList[nicIndex].busId.empty()) {
+          continue;
+        }
 
         // Find closest GPUs using LCA algorithm
         std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
 
         if (closestGpuIdxs.empty()) {
-          // Fallback: use bus ID distance
+          // Fallback: use PCIe domain distance
           int minDistance = std::numeric_limits<int>::max();
           for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
             if (gpuAddressList[gpuIdx].empty()) continue;
-            int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
+            int distance = GetDomainDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
             if (distance >= 0 && distance < minDistance) {
               minDistance = distance;
               closestGpuIdxs.clear();
