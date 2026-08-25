@@ -2993,7 +2993,7 @@ namespace {
 
     // Pingpong
     int                        laps = 0;           ///< 0 = normal, >0 = ping, <0 = pong
-    void*                      flagMem = nullptr;  ///< Pointer to paired transfer's dstMem[0] (the flag to wait on)
+    void*                      flagMem = nullptr;  ///< Partner half's dstMem[0] (flag to wait on)
     int                        flagStride = 8;     ///< Stride in bytes between flag slots per lap
     int                        flagAllocBytes = 8; ///< Total flag allocation in bytes (for wrap-around)
 
@@ -4084,26 +4084,36 @@ namespace {
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
+      vector<MemDevice> srcs, dsts;
+      if (t.laps > 0) {
+        bool const isPong = (rss->laps < 0);
+        int const h = isPong ? 1 : 0;
+        if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
+        dsts.push_back(t.dsts[h]);
+      } else {
+        srcs = t.srcs;
+        dsts = t.dsts;
+      }
       size_t N = t.numBytes / sizeof(float);
 
-      float const* expected = dstReference[t.srcs.size()].data();
+      float const* expected = dstReference[srcs.size()].data();
       for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
-        if (t.dsts[dstIdx].memRank != GetRank()) continue;
-        if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+        if (dsts[dstIdx].memRank != GetRank()) continue;
+        if (IsCpuMemType(dsts[dstIdx].memType) || cfg.data.validateDirect) {
           output = (rss->dstMem[dstIdx]) + initOffset;
           if (verbose) {
             System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
                               transferIdx, dstIdx,
-                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                              GetMemTypeName(dsts[dstIdx].memType), dsts[dstIdx].memIndex,
                               t.numBytes, output);
           }
         } else {
-          ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
+          ERR_CHECK(hipSetDevice(dsts[dstIdx].memIndex));
           if (verbose) {
             System::Get().Log("[INFO] Validation memcpy: transfer %d DST[%d] %s%d->host  %zu bytes  src=%p dst=%p\n",
                               transferIdx, dstIdx,
-                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                              GetMemTypeName(dsts[dstIdx].memType), dsts[dstIdx].memIndex,
                               t.numBytes,
                               (rss->dstMem[dstIdx]) + initOffset,
                               outputBuffer.data());
@@ -4119,7 +4129,7 @@ namespace {
           for (size_t i = 0; i < N; i++) {
             if (output[i] != expected[i]) {
               dstErr = {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
-                transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
+                transferIdx, i, dstIdx, dsts[dstIdx].memRank, expected[i], output[i]};
               break;
             }
           }
@@ -4131,7 +4141,7 @@ namespace {
         if (verbose)
           System::Get().Log("[INFO] Validation: transfer %d DST[%d] %s%d — %s\n",
                             transferIdx, dstIdx,
-                            GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                            GetMemTypeName(dsts[dstIdx].memType), dsts[dstIdx].memIndex,
                             dstErr.errType == ERR_NONE ? "PASS" : "FAIL");
 
         if (dstErr.errType != ERR_NONE) {
@@ -4158,7 +4168,17 @@ namespace {
       if (exeInfo.resources.empty()) return false;
       for (auto const& rss : exeInfo.resources) {
         Transfer const& t = transfers[rss.transferIdx];
-        if (t.srcs.size() > 1 || t.dsts.size() > 1) return false;
+        vector<MemDevice> srcs, dsts;
+        if (t.laps > 0) {
+          bool const isPong = (rss.laps < 0);
+          int const h = isPong ? 1 : 0;
+          if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
+          dsts.push_back(t.dsts[h]);
+        } else {
+          srcs = t.srcs;
+          dsts = t.dsts;
+        }
+        if (srcs.size() > 1 || dsts.size() > 1) return false;
         if (cfg.gfx.useSingleTeam && t.numSubExecs > 1) return false;
       }
       return true;
@@ -4207,6 +4227,23 @@ namespace {
     int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                          (size_t)transfer.numSubExecs);
 
+    vector<MemDevice> srcs, dsts;
+    int32_t subIndex;
+    ExeDevice subExe;
+    if (transfer.laps > 0) {
+      bool const isPong = (rss.laps < 0);
+      int const h = isPong ? 1 : 0;
+      if (transfer.srcs[h].memType != MEM_NULL) srcs.push_back(transfer.srcs[h]);
+      dsts.push_back(transfer.dsts[h]);
+      subIndex = isPong ? transfer.exeSubIndexPong : transfer.exeSubIndex;
+      subExe   = isPong ? transfer.exeDevicePong    : transfer.exeDevice;
+    } else {
+      srcs = transfer.srcs;
+      dsts = transfer.dsts;
+      subIndex = transfer.exeSubIndex;
+      subExe   = transfer.exeDevice;
+    }
+
     vector<SubExecParam>& subExecParam = rss.subExecParamCpu;
     subExecParam.clear();
     subExecParam.resize(transfer.numSubExecs);
@@ -4217,7 +4254,7 @@ namespace {
       p.numSrcs        = rss.srcMem.size();
       p.numDsts        = rss.dstMem.size();
       p.flagMem        = nullptr;
-      p.laps           = transfer.laps;
+      p.laps           = rss.laps;
       p.flagStride     = 0;
       p.flagAllocBytes = 0;
       p.startCycle     = 0;
@@ -4226,7 +4263,7 @@ namespace {
       p.xccId          = 0;
 
       // In single team mode, subexecutors stripe across the entire array
-      if (cfg.gfx.useSingleTeam && transfer.exeDevice.exeType == EXE_GPU_GFX) {
+      if (cfg.gfx.useSingleTeam && subExe.exeType == EXE_GPU_GFX) {
         p.N        = N;
         p.teamSize = transfer.numSubExecs;
         p.teamIdx  = i;
@@ -4246,17 +4283,17 @@ namespace {
         assigned += p.N;
       }
 
-      p.preferredXccId = transfer.exeSubIndex;
+      p.preferredXccId = subIndex;
       // Override if XCC table has been specified
       vector<vector<int>> const& table = cfg.gfx.prefXccTable;
-      if (transfer.exeDevice.exeType == EXE_GPU_GFX && transfer.exeSubIndex == -1 && !table.empty() &&
-          transfer.dsts.size() == 1 && IsGpuMemType(transfer.dsts[0].memType)) {
-        if (table.size() <= transfer.exeDevice.exeIndex ||
-            table[transfer.exeDevice.exeIndex].size() <= transfer.dsts[0].memIndex) {
+      if (subExe.exeType == EXE_GPU_GFX && subIndex == -1 && !table.empty() &&
+          dsts.size() == 1 && IsGpuMemType(dsts[0].memType)) {
+        if (table.size() <= subExe.exeIndex ||
+            table[subExe.exeIndex].size() <= dsts[0].memIndex) {
           return {ERR_FATAL, "[gfx.xccPrefTable] is too small"};
         }
-        p.preferredXccId = table[transfer.exeDevice.exeIndex][transfer.dsts[0].memIndex];
-        if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(transfer.exeDevice)) {
+        p.preferredXccId = table[subExe.exeIndex][dsts[0].memIndex];
+        if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(subExe)) {
           return {ERR_FATAL, "[gfx.xccPrefTable] defines out-of-bound XCC index %d", p.preferredXccId};
         }
       }
@@ -4379,9 +4416,23 @@ namespace {
       Transfer const& t = transfers[rss.transferIdx];
       rss.numBytes = t.numBytes;
 
+      vector<MemDevice> srcs, dsts;
+      int32_t subIndex;
+      if (t.laps > 0) {
+        bool const isPong = (rss.laps < 0);
+        int const h = isPong ? 1 : 0;
+        if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
+        dsts.push_back(t.dsts[h]);
+        subIndex = isPong ? t.exeSubIndexPong : t.exeSubIndex;
+      } else {
+        srcs = t.srcs;
+        dsts = t.dsts;
+        subIndex = t.exeSubIndex;
+      }
+
       if (verbose) {
         System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
-                          localRank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
+                          localRank, rss.transferIdx, srcs.size(), dsts.size(), t.numBytes);
         System::Get().Log("[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
                           exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
                           exeNuma,
@@ -4390,11 +4441,11 @@ namespace {
       }
 
       // Allocate source memory
-      rss.srcMem.resize(t.srcs.size());
-      rss.srcActualBytes.resize(t.srcs.size());
-      rss.srcMemHandle.resize(t.srcs.size(), NULL);
-      for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        MemDevice const& srcMemDevice = t.srcs[iSrc];
+      rss.srcMem.resize(srcs.size());
+      rss.srcActualBytes.resize(srcs.size());
+      rss.srcMemHandle.resize(srcs.size(), NULL);
+      for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
+        MemDevice const& srcMemDevice = srcs[iSrc];
 
         // Ensure executing GPU can access source memory
         // This only applies to memory being accessed by a local GPU executor
@@ -4435,11 +4486,11 @@ namespace {
       }
 
       // Allocate destination memory
-      rss.dstMem.resize(t.dsts.size());
-      rss.dstActualBytes.resize(t.dsts.size());
-      rss.dstMemHandle.resize(t.dsts.size(), NULL);
-      for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        MemDevice const& dstMemDevice = t.dsts[iDst];
+      rss.dstMem.resize(dsts.size());
+      rss.dstActualBytes.resize(dsts.size());
+      rss.dstMemHandle.resize(dsts.size(), NULL);
+      for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
+        MemDevice const& dstMemDevice = dsts[iDst];
 
         // Ensure executing GPU can access destination memory
         if (IsGpuExeType(exeDevice.exeType)    &&
@@ -4457,8 +4508,8 @@ namespace {
         // Allocate destination memory (on the correct rank)
         // For pingpong transfers, allocate a larger buffer to hold multiple flag slots
         size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
-        if (t.laps != 0)
-          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * abs(t.laps)));
+        if (rss.laps != 0)
+          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * t.laps));
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           if (verbose) {
@@ -4483,7 +4534,7 @@ namespace {
       }
 
       // Prepare HSA DMA copy specific resources
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
+      if (exeDevice.exeType == EXE_GPU_DMA && (subIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
@@ -4495,14 +4546,16 @@ namespace {
           rss.dstAgent[dstIdx] = info.agentOwner;
         }
 
-        ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
-        rss.srcAgent = info.agentOwner;
+        if (!rss.srcMem.empty()) {
+          ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
+          rss.srcAgent = info.agentOwner;
+        }
 
         // Create HSA completion signal
         ERR_CHECK(hsa_signal_create(1, 0, NULL, &rss.signal));
 
-        if (t.exeSubIndex != -1)
-          rss.sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
+        if (subIndex != -1)
+          rss.sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << subIndex);
 #endif
       }
 
@@ -4673,26 +4726,39 @@ namespace {
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
+      vector<MemDevice> srcs, dsts;
+      int32_t subIndex;
+      if (t.laps > 0) {
+        bool const isPong = (rss.laps < 0);
+        int const h = isPong ? 1 : 0;
+        if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
+        dsts.push_back(t.dsts[h]);
+        subIndex = isPong ? t.exeSubIndexPong : t.exeSubIndex;
+      } else {
+        srcs = t.srcs;
+        dsts = t.dsts;
+        subIndex = t.exeSubIndex;
+      }
 
       if (verbose) {
         System::Get().Log("[INFO] Rank %d tearing down transfer %d\n", localRank, rss.transferIdx);
       }
 
       // Deallocate source memory
-      for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        if (t.srcs[iSrc].memRank == localRank) {
+      for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
+        if (srcs[iSrc].memRank == localRank) {
           if (verbose) {
             System::Get().Log("[INFO]   Free SRC[%d]: %s idx=%d %p (%zu bytes)\n",
-                              iSrc, GetMemTypeName(t.srcs[iSrc].memType),
-                              t.srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
+                              iSrc, GetMemTypeName(srcs[iSrc].memType),
+                              srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
           }
-          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
+          ERR_CHECK(DeallocateMemory(srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
         } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
           if (verbose) {
             System::Get().Log("[INFO]   Unmap remote SRC[%d]: %p (%zu bytes) from Rank %d\n",
-                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], t.srcs[iSrc].memRank);
+                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], srcs[iSrc].memRank);
           }
 #ifdef POD_COMM_ENABLED
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
@@ -4703,20 +4769,20 @@ namespace {
       }
 
       // Deallocate destination memory
-      for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        if (t.dsts[iDst].memRank == localRank) {
+      for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
+        if (dsts[iDst].memRank == localRank) {
           if (verbose) {
             System::Get().Log("[INFO]   Free DST[%d]: %s idx=%d %p (%zu bytes)\n",
-                              iDst, GetMemTypeName(t.dsts[iDst].memType),
-                              t.dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
+                              iDst, GetMemTypeName(dsts[iDst].memType),
+                              dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
           }
-          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
+          ERR_CHECK(DeallocateMemory(dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
         } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
           if (verbose) {
             System::Get().Log("[INFO]   Unmap remote DST[%d]: %p (%zu bytes) from Rank %d\n",
-                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], t.dsts[iDst].memRank);
+                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], dsts[iDst].memRank);
           }
 #ifdef POD_COMM_ENABLED
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
@@ -4728,7 +4794,7 @@ namespace {
 
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
+      if (exeDevice.exeType == EXE_GPU_DMA && (subIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
         ERR_CHECK(hsa_signal_destroy(rss.signal));
       }
 #endif
@@ -4874,7 +4940,7 @@ namespace {
                                  int           const  exeIndex,
                                  TransferResources&   rss)
   {
-    if (rss.laps >= 0 && rss.flagMem)
+    if (rss.laps > 0 && rss.flagMem)
       usleep(1);
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -4888,7 +4954,7 @@ namespace {
     childThreads.clear();
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+    int const divisor = (rss.laps != 0) ? rss.laps : cfg.general.numSubIterations;
     double deltaMsec = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0) / divisor;
 
     if (iteration >= 0) {
@@ -4970,10 +5036,9 @@ namespace {
       if (rss.laps == 0) continue;
       ppAsyncTransfers.emplace_back(std::async(std::launch::async,
         [&rss, &totalTimeMsec_i = totalTimeMsec[i], iteration, &cfg, exeIndex]() -> ErrResult {
-          if (rss.laps >= 0 && rss.flagMem)
+          if (rss.laps > 0 && rss.flagMem)
             usleep(1);
-          int const laps = abs(rss.laps);
-          for (int lap = 0; lap < laps; ++lap) {
+          for (int lap = 0; lap < rss.laps; ++lap) {
             if (rss.laps < 0)
               CpuWait(FlagSlot(static_cast<volatile int64_t*>(rss.flagMem), lap, rss.flagStride, rss.flagAllocBytes));
 
@@ -5078,7 +5143,7 @@ namespace {
       exeInfo.totalDurationMsec += deltaMsec;
       for (int i = 0; i < transferCount; i++) {
         auto& rss = exeInfo.resources[i];
-        int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+        int const divisor = (rss.laps != 0) ? rss.laps : cfg.general.numSubIterations;
         double transferTimeMsec = totalTimeMsec[i] / divisor;
         rss.totalDurationMsec += transferTimeMsec;
         if (cfg.general.recordPerIteration)
@@ -5391,8 +5456,8 @@ namespace {
 
     SubExecParam& p = params[subExecIdx];
 
-    // Delay non-pong transfers so pong can start waiting on the flag first
-    if (p.laps >= 0 && p.flagMem) {
+    // Delay ping so pong can start waiting on the flag first
+    if (p.laps > 0 && p.flagMem) {
       int64_t t0 = GetTimestamp();
       while (GetTimestamp() - t0 < 1000) {}
     }
@@ -5557,7 +5622,6 @@ namespace {
         __syncthreads();
       }
 
-      // TODO: Should this be before or after sync
       // Ping: wait for pong's signal before next lap
       if (p.laps > 0 && p.flagMem) {
         if (threadIdx.x == 0)
@@ -5677,7 +5741,7 @@ namespace {
     [[maybe_unused]] int const wordSizeIdx  = GetGpuKernelWordsizeIdx(cfg.gfx.wordSize);
     [[maybe_unused]] int const temporalIdx  = GetGpuKernelTemporalIdx(cfg.gfx.temporalMode);
 
-    if (rss.laps >= 0 && rss.flagMem)
+    if (rss.laps > 0 && rss.flagMem)
       usleep(1);
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -5711,18 +5775,19 @@ namespace {
 
     ERR_CHECK(hipStreamSynchronize(stream));
 
-//<<<<<<< HEAD
+    int const divisor = (rss.laps != 0) ? rss.laps : cfg.general.numSubIterations;
+
     // Record this timing if this Transfer is being run in multistream mode
     if (cfg.gfx.useMultiStream) {
-      if (iteration >= 0) {
+      if (iteration >= 0 && rss.laps >= 0) {
         auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / divisor;
 
         double deltaMsec = cpuDeltaMsec;
         if (startEvent != NULL) {
           float gpuDeltaMsec;
           ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-          deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
+          deltaMsec = gpuDeltaMsec / divisor;
         }
 
         rss.totalDurationMsec += deltaMsec;
@@ -5742,26 +5807,6 @@ namespace {
                                       GetId(subExecParam[i].hwId)));
           }
           rss.perIterCUs.push_back(CUs);
-/*=======
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
-    double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / divisor;
-
-    if (iteration >= 0) {
-      double deltaMsec = cpuDeltaMsec;
-      if (startEvent != NULL) {
-        float gpuDeltaMsec;
-        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
-        deltaMsec = gpuDeltaMsec / divisor;
-      }
-      rss.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration) {
-        rss.perIterMsec.push_back(deltaMsec);
-        std::set<std::pair<int,int>> CUs;
-        for (int i = 0; i < numSubExecs; i++) {
-          CUs.insert(std::make_pair(rss.subExecParamGpuPtr[i].xccId,
-                                    GetId(rss.subExecParamGpuPtr[i].hwId)));
->>>>>>> origin/pingpong*/
         }
       }
     }
@@ -5855,12 +5900,14 @@ namespace {
           }
 
           double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
-          int const divisor = (rss.laps != 0) ? abs(rss.laps) : cfg.general.numSubIterations;
+          int const divisor = (rss.laps != 0) ? rss.laps : cfg.general.numSubIterations;
           deltaMsec /= divisor;
-          rss.totalDurationMsec += deltaMsec;
-          if (cfg.general.recordPerIteration) {
-            rss.perIterMsec.push_back(deltaMsec);
-            rss.perIterCUs.push_back(CUs);
+          if (rss.laps >= 0) {
+            rss.totalDurationMsec += deltaMsec;
+            if (cfg.general.recordPerIteration) {
+              rss.perIterMsec.push_back(deltaMsec);
+              rss.perIterCUs.push_back(CUs);
+            }
           }
         }
       }
@@ -5881,14 +5928,14 @@ namespace {
                                       ConfigOptions const& cfg,
                                       TransferResources&   resources)
   {
-    if (resources.laps >= 0 && resources.flagMem)
+    if (resources.laps > 0 && resources.flagMem)
       usleep(1);
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
     int numDsts = (int)resources.dstMem.size();
     ERR_CHECK(hipSetDevice(exeIndex));
-    int const iterations = (resources.laps != 0) ? abs(resources.laps) : cfg.general.numSubIterations;
+    int const iterations = (resources.laps != 0) ? resources.laps : cfg.general.numSubIterations;
     int subIterations = 0;
     size_t const initOffset = cfg.data.byteOffset / sizeof(float);
     float* const src = resources.srcMem[0] + initOffset;
@@ -5909,7 +5956,7 @@ namespace {
             GpuDmaWaitKernel<<<1, 1, 0, stream>>>(FlagSlot(static_cast<volatile int64_t*>(resources.flagMem), subIterations, resources.flagStride, resources.flagAllocBytes));
 
           // For pingpong, offset dst per lap
-          int dstByteOff = (resources.laps != 0) ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
+          int dstByteOff = (subIterations * resources.flagStride) % resources.flagAllocBytes;
           void* lapDst = (char*)resources.dstMem[0] + dstByteOff;
 
           #if defined(__NVCC__)
@@ -5957,7 +6004,8 @@ namespace {
 
         //TODO: double check hsaLapDst, as well as behavior for multi src
         // For pingpong, offset dst per lap
-        int hsaDstByteOff = (resources.laps != 0) ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
+        int hsaDstByteOff = (resources.laps != 0)
+          ? (subIterations * resources.flagStride) % resources.flagAllocBytes : 0;
         void* hsaLapDst = (char*)resources.dstMem[0] + hsaDstByteOff;
 
         hsa_signal_store_screlease(resources.signal, numDsts);
@@ -6275,6 +6323,21 @@ namespace {
       minNumSrcs  = std::min(minNumSrcs, (int)t.srcs.size());
       maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
+
+      if (t.laps != 0) {
+        ExeDevice pongExe;
+        ERR_APPEND(GetActualExecutor(t.exeDevicePong, pongExe), errResults);
+
+        TransferResources pong = {};
+        pong.transferIdx = i;
+        pong.laps = -t.laps;
+
+        ExeInfo& pongInfo = executorMap[pongExe];
+        pongInfo.totalBytes    += t.numBytes;
+        pongInfo.totalSubExecs += t.numSubExecs;
+        pongInfo.useSubIndices |= (t.exeSubIndexPong != -1 || (t.exeDevicePong.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
+        pongInfo.resources.push_back(pong);
+      }
     }
 
     // Empty transfer list leaves minNumSrcs at its sentinel (MAX_SRCS + 1);
@@ -6309,21 +6372,29 @@ namespace {
     // Prepare reference src/dst arrays - only once for largest size.
     // dstReference (expected results) is only needed when validation is enabled.
     bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
-    // Cross-link flagMem for pingpong pairs (ping and pong are consecutive in transfers)
-    for (size_t i = 0; i + 1 < transfers.size(); i++) {
-      if (transfers[i].laps > 0 && transfers[i+1].laps < 0) {
-        auto pingRss = transferResources[i];
-        auto pongRss = transferResources[i + 1];
-        pingRss->flagMem        = pongRss->dstMem[0];
-        pongRss->flagMem        = pingRss->dstMem[0];
-        int stride              = cfg.general.pingpongStride;
-        int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * abs(transfers[i].laps));
-        pingRss->flagStride     = stride;
-        pongRss->flagStride     = stride;
-        pingRss->flagAllocBytes = allocBytes;
-        pongRss->flagAllocBytes = allocBytes;
-        i++;
-      }
+    // Cross-link flagMem for pingpong halves
+    // Construct a map of transferIdx -> pong resource, so that ping resources can find their pong counterparts.
+    // Only place where ping and pong resources need to be linked, 
+    // if further instances arise, we should add a partner field to TransferResources.
+    std::map<int, TransferResources*> pongByTransferIdx;
+    for (auto* rss : transferResources) {
+      if (rss->laps < 0) pongByTransferIdx[rss->transferIdx] = rss;
+    }
+    for (auto* pingRss : transferResources) {
+      if (pingRss->laps <= 0) continue;
+
+      auto it = pongByTransferIdx.find(pingRss->transferIdx);
+      if (it == pongByTransferIdx.end()) continue;
+      TransferResources* pongRss = it->second;
+
+      pingRss->flagMem        = pongRss->dstMem[0];
+      pongRss->flagMem        = pingRss->dstMem[0];
+      int stride              = cfg.general.pingpongStride;
+      int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->laps);
+      pingRss->flagStride     = stride;
+      pongRss->flagStride     = stride;
+      pingRss->flagAllocBytes = allocBytes;
+      pongRss->flagAllocBytes = allocBytes;
     }
 
     // Propagate flagMem into SubExecParam for pingpong transfers
@@ -6385,23 +6456,25 @@ namespace {
       for (auto resource : transferResources) {
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
-          if (t.srcs[srcIdx].memRank == localRank) {
-            if (IsGpuMemType(t.srcs[srcIdx].memType)) {
-              ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
+          int const tSrcIdx = (t.laps != 0) ? (resource->laps < 0 ? 1 : 0) : srcIdx;
+          if (t.srcs[tSrcIdx].memRank == localRank) {
+            if (IsGpuMemType(t.srcs[tSrcIdx].memType)) {
+              ERR_APPEND(hipSetDevice(t.srcs[tSrcIdx].memIndex), errResults);
             }
             if (verbose) {
-              MemDevice const& md = t.srcs[srcIdx];
+              MemDevice const& md = t.srcs[tSrcIdx];
               System::Get().Log("[INFO] Data prep memcpy: transfer %d SRC[%d] host->%s%d  %zu bytes  dst=%p src=%p\n",
-                                resource->transferIdx, srcIdx,
+                                resource->transferIdx, tSrcIdx,
                                 GetMemTypeName(md.memType), md.memIndex,
                                 resource->numBytes,
                                 resource->srcMem[srcIdx] + initOffset,
-                                srcReference[srcIdx].data());
+                                srcReference[tSrcIdx].data());
             }
-            ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
+            ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[tSrcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
             ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
+          if (t.laps != 0) break;
         }
       }
     }
@@ -6472,20 +6545,20 @@ namespace {
       System::Get().Barrier();
 
       // Zero flag memory for pingpong transfers so each lap's slot starts at 0
-      for (size_t i = 0; i + 1 < transfers.size(); i++) {
-        if (transfers[i].laps > 0 && transfers[i+1].laps < 0) {
-          size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(transfers[i].laps));
-          for (int k = 0; k < 2; k++) {
-            void* dst = transferResources[i + k]->dstMem[0];
-            if (!dst) continue;
-            MemType mt = transfers[i + k].dsts[0].memType;
-            if (mt == MEM_CPU || mt == MEM_NULL)
-              memset(dst, 0, allocBytes);
-            else
-              hipMemset(dst, 0, allocBytes);
-          }
-          i++;
-        }
+      for (auto* rss : transferResources) {
+        if (rss->laps == 0) continue;
+
+        void* dst = rss->dstMem[0];
+        if (!dst) continue;
+
+        Transfer const& t = transfers[rss->transferIdx];
+        bool const isPong = (rss->laps < 0);
+        MemType mt = t.dsts[isPong ? 1 : 0].memType;
+        size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(rss->laps));
+        if (IsCpuMemType(mt))
+          memset(dst, 0, allocBytes);
+        else
+          hipMemset(dst, 0, allocBytes);
       }
 
       // Start CPU timing for this iteration
@@ -6635,8 +6708,9 @@ namespace {
         exeResult.sumBandwidthGbPerSec = 0.0;
         exeResult.transferIdx.clear();
 
-        // Copy over transfer results
+        // Copy over transfer results (ping half owns pingpong latency)
         for (auto const& rss : exeInfo.resources) {
+          if (rss.laps < 0) continue;
           int const transferIdx = rss.transferIdx;
           exeResult.transferIdx.push_back(transferIdx);
 

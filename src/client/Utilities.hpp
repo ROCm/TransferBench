@@ -606,7 +606,7 @@ namespace TransferBench::Utils
       }
       if (ev.showIterations || !ev.showPercentiles.empty()) {
         for (int idx : exeResult.transferIdx) {
-          if (transfers[idx].laps < 0) continue;
+          if (transfers[idx].laps > 0) continue; // pingpong iteration rows handled below
           TransferResult const& r = results.tfrResults[idx];
           if (r.perIterMsec.size() != numTimedIterations) {
             Print("[ERROR] Per iteration timing data unavailable: Expected %lu data points, but have %lu\n",
@@ -652,8 +652,6 @@ namespace TransferBench::Utils
         Transfer const& t = transfers[idx];
         TransferResult const& r = results.tfrResults[idx];
 
-        if (t.laps < 0) continue;
-
         if (t.laps > 0) {
           // Pingpong row: show latency using ping's round-trip delta
           double latencyUs = r.avgDurationMsec * 1000.0;
@@ -662,23 +660,22 @@ namespace TransferBench::Utils
           table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
           table.Set(rowIdx, 3, "%8d laps "     , t.laps);
 
-          Transfer const& pong = transfers[idx + 1];
           if (isMultiRank) {
             table.Set(rowIdx, 4, " %s->R%d%c%d->%s <+> %s->R%d%c%d->%s",
-                      MemDevicesToStr(t.srcs).c_str(),
-                      exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-                      MemDevicesToStr(t.dsts).c_str(),
-                      MemDevicesToStr(pong.srcs).c_str(),
-                      pong.exeDevice.exeRank, ExeTypeStr[pong.exeDevice.exeType], pong.exeDevice.exeIndex,
-                      MemDevicesToStr(pong.dsts).c_str());
+                      MemDeviceToStr(t.srcs[0]).c_str(),
+                      t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      MemDeviceToStr(t.dsts[0]).c_str(),
+                      MemDeviceToStr(t.srcs[1]).c_str(),
+                      t.exeDevicePong.exeRank, ExeTypeStr[t.exeDevicePong.exeType], t.exeDevicePong.exeIndex,
+                      MemDeviceToStr(t.dsts[1]).c_str());
           } else {
             table.Set(rowIdx, 4, " %s->%c%d->%s <+> %s->%c%d->%s",
-                      MemDevicesToStr(t.srcs).c_str(),
+                      MemDeviceToStr(t.srcs[0]).c_str(),
                       ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-                      MemDevicesToStr(t.dsts).c_str(),
-                      MemDevicesToStr(pong.srcs).c_str(),
-                      ExeTypeStr[pong.exeDevice.exeType], pong.exeDevice.exeIndex,
-                      MemDevicesToStr(pong.dsts).c_str());
+                      MemDeviceToStr(t.dsts[0]).c_str(),
+                      MemDeviceToStr(t.srcs[1]).c_str(),
+                      ExeTypeStr[t.exeDevicePong.exeType], t.exeDevicePong.exeIndex,
+                      MemDeviceToStr(t.dsts[1]).c_str());
           }
           table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
           rowIdx++;
