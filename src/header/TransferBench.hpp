@@ -3243,7 +3243,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   }
 
   // Function to extract the domain number from a PCIe address (domain:bus:device.function)
-  // The full address is parsed (not just the domain) so that a malformed address is rejected
+  // All four fields are read (not just the domain) so that an address with too few fields, or
+  // with a non-hex field, is rejected.  The separator characters themselves are consumed but
+  // not checked, so this is a well-formedness guard rather than strict format validation
   static int ExtractDomain(std::string const& pcieAddress)
   {
     int domain, bus, device, function;
@@ -3303,9 +3305,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       int depth = GetLcaDepth(lca->address, GetPCIeTreeRoot());
       int currDistance = GetDomainDistance(targetBusId, candidateBusId);
 
+      // A candidate whose address could not be parsed (-1) remains eligible, but treat its
+      // distance as the largest possible so it can never outrank a candidate whose distance
+      // is actually known.  It can still be selected when nothing else matches at this depth,
+      // and still ties with other unparseable candidates.
+      if (currDistance < 0) currDistance = std::numeric_limits<int>::max();
+
       // When more than one LCA match is found, choose the one with smallest domain difference
-      // NOTE: currDistance could be -1, which signals problem with parsing, however still
-      //       remains a valid "closest" candidate, so is included
       if (depth > maxDepth || (depth == maxDepth && depth >= 0 && currDistance < minDistance)) {
         maxDepth = depth;
         matches.clear();
@@ -7514,8 +7520,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   #endif
           int minDistance = std::numeric_limits<int>::max();
           for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-            if (ibvDeviceList[nicIndex].busId != "") {
-              int distance = GetDomainDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
+            // Use ibvAddressList rather than the raw device list: it is already blanked out
+            // for NICs without an active port, so this stays consistent with the tree path
+            // above and never maps a GPU to a NIC that cannot execute a Transfer
+            if (ibvAddressList[nicIndex] != "") {
+              int distance = GetDomainDistance(hipPciBusId, ibvAddressList[nicIndex]);
               if (distance >= 0 && distance < minDistance) {
                 minDistance = distance;
                 closestNicIdxs.clear();
