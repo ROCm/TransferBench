@@ -8115,19 +8115,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       for (auto const& ibvDevice : ibvDeviceList)
         ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
 
-      // Track how many times a device has been assigned as "closest"
-      // This allows distributed work across devices using multiple ports (sharing the same busID)
-      // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
-      // Counter example:
-      //
-      //  G0 prefers (N0,N1), picks N0
-      //  G1 prefers (N1,N2), picks N1
-      //  G2 prefers N0,      picks N0
-      //
-      //  instead of G0->N1, G1->N2, G2->N0
-
-      std::vector<int> assignedCount(ibvDeviceList.size(), 0);
-
       // Loop over each GPU to find the closest NIC(s) based on PCIe address
       for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
         if (gpuAddressList[gpuIndex].empty()) continue;
@@ -8136,16 +8123,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Find closest NICs
         std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
 
-        // Pick the least-used NIC to assign as closest
-        int closestIdx = -1;
-        for (auto idx : closestNicIdxs) {
-          if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
-            closestIdx = idx;
-        }
-
         // The following will only use distance between bus IDs
         // to determine the closest NIC to GPU if the PCIe tree approach fails
-        if (closestIdx < 0) {
+        if (closestNicIdxs.empty()) {
   #ifdef VERBS_DEBUG
           Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
   #endif
@@ -8153,17 +8133,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
             if (ibvDeviceList[nicIndex].busId != "") {
               int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
-              if (distance < minDistance && distance >= 0) {
+              if (distance >= 0 && distance < minDistance) {
                 minDistance = distance;
-                closestIdx = nicIndex;
+                closestNicIdxs.clear();
+                closestNicIdxs.insert(nicIndex);
+              } else if (distance >= 0 && distance == minDistance) {
+                closestNicIdxs.insert(nicIndex);
               }
             }
           }
         }
-        if (closestIdx != -1) {
-          topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
-          assignedCount[closestIdx]++;
-        }
+        for (auto idx : closestNicIdxs)
+          topo.closestNicsToGpu[gpuIndex].push_back(idx);
       }
 
       // Compute the reverse mapping: closest GPU(s) for each NIC
@@ -8179,26 +8160,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         if (closestGpuIdxs.empty()) {
           // Fallback: use bus ID distance
           int minDistance = std::numeric_limits<int>::max();
-          int closestIdx = -1;
-
           for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
             if (gpuAddressList[gpuIdx].empty()) continue;
-
             int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
             if (distance >= 0 && distance < minDistance) {
               minDistance = distance;
-              closestIdx = gpuIdx;
+              closestGpuIdxs.clear();
+              closestGpuIdxs.insert(gpuIdx);
+            } else if (distance >= 0 && distance == minDistance) {
+              closestGpuIdxs.insert(gpuIdx);
             }
           }
-
-          if (closestIdx != -1) {
-            topo.closestGpusToNic[nicIndex].push_back(closestIdx);
-          }
-        } else {
-          // Store all GPUs that are equally close
-          for (int idx : closestGpuIdxs) {
-            topo.closestGpusToNic[nicIndex].push_back(idx);
-          }
+        }
+        for (int idx : closestGpuIdxs) {
+          topo.closestGpusToNic[nicIndex].push_back(idx);
         }
       }
     }
