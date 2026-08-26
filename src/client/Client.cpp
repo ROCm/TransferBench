@@ -109,9 +109,9 @@ int main(int argc, char **argv)
     } else {
       for (size_t i = 0; i < transfers.size(); i++) {
         Transfer const& t = transfers[i];
-        if (t.laps > 0) {
-          Print("Transfer %5lu: PingPong x%d: (%s->%s->%s) <+> (%s->%s->%s)\n",
-                i, t.laps,
+        if (t.numLaps > 0) {
+          Print("Transfer %5lu: PingPong +%d: (%s->%s->%s) <+> (%s->%s->%s)\n",
+                i, t.numLaps,
                 MemDeviceToStr(t.srcs[0]).c_str(),
                 ExeDeviceToStr(t.exeDevice, t.exeSubIndex, t.exeSubSlot).c_str(),
                 MemDeviceToStr(t.dsts[0]).c_str(),

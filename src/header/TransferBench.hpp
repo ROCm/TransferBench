@@ -187,17 +187,17 @@ namespace TransferBench
   /**
    * A Transfer adds together data from zero or more sources then writes the sum to zero or more desintations
    *
-   * Normal transfer (laps == 0):
+   * Normal transfer (numLaps == 0):
    *   srcs/dsts are variable-length lists as today.
    *
-   * Pingpong transfer (laps > 0):
+   * Pingpong transfer (numLaps > 0):
    *   srcs and dsts are each exactly 2 entries:
    *     [0] = ping half, [1] = pong half
    *   dsts[0] and dsts[1] are required (non-NULL); srcs[0] and srcs[1] are optional (MEM_NULL if absent)
    *   Ping/pong MemDevices are not restricted — any supported MemType is allowed per slot.
    *   exeDevice / exeSubIndex / exeSubSlot             = ping executor (any ExeType)
    *   exeDevicePong / exeSubIndexPong / exeSubSlotPong = pong executor (any ExeType)
-   *   laps = number of pingpong laps (must be > 0)
+   *   numLaps = number of pingpong laps (must be > 0); specify as "+N" after ping half ("+" alone defaults to 1)
    *
    * Ping/pong executors may differ in type (e.g. ping on GFX, pong on DMA). The struct is
    * executor-agnostic; additional executor types are enabled by implementing their dispatch
@@ -212,7 +212,7 @@ namespace TransferBench
     int32_t           exeSubIndex = -1;         ///< (Transfer or Ping) Executor subindex
     int32_t           exeSubSlot  = 0;          ///< (Transfer or Ping) Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
-    int               laps        = 0;          ///< 0 = normal transfer; >0 = pingpong lap count
+    int               numLaps     = 0;          ///< 0 = normal transfer; >0 = pingpong lap count
     ExeDevice         exeDevicePong   = {};     ///< Pong executor (pingpong only)
     int32_t           exeSubIndexPong = -1;     ///< Pong executor subindex (pingpong only)
     int32_t           exeSubSlotPong  = 0;      ///< Pong executor subslot (pingpong only)
@@ -2235,7 +2235,7 @@ namespace {
       System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
       System::Get().Broadcast(root, sizeof(t.exeSubSlot),  &t.exeSubSlot);
       System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
-      System::Get().Broadcast(root, sizeof(t.laps), &t.laps);
+      System::Get().Broadcast(root, sizeof(t.numLaps), &t.numLaps);
       System::Get().Broadcast(root, sizeof(t.exeDevicePong),   &t.exeDevicePong);
       System::Get().Broadcast(root, sizeof(t.exeSubIndexPong), &t.exeSubIndexPong);
       System::Get().Broadcast(root, sizeof(t.exeSubSlotPong),  &t.exeSubSlotPong);
@@ -2248,7 +2248,7 @@ namespace {
       if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
       if (t.exeSubSlot  != transfers[i].exeSubSlot)  ADD_ERROR("Executor dst slot");
       if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
-      if (t.laps        != transfers[i].laps)        ADD_ERROR("laps");
+      if (t.numLaps        != transfers[i].numLaps)        ADD_ERROR("numLaps");
       if (t.exeDevicePong < transfers[i].exeDevicePong ||
           transfers[i].exeDevicePong < t.exeDevicePong) ADD_ERROR("Pong executor device");
       if (t.exeSubIndexPong != transfers[i].exeSubIndexPong) ADD_ERROR("Pong executor subindex");
@@ -2265,7 +2265,7 @@ namespace {
   // Returns true if the given Transfer requires pod communication
   static bool IsPodTransfer(Transfer const& t)
   {
-    if (t.laps > 0) {
+    if (t.numLaps > 0) {
       for (int half = 0; half < 2; half++) {
         ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
         if (t.srcs[half].memType != MEM_NULL && t.srcs[half].memRank != exe.exeRank) return true;
@@ -2326,10 +2326,10 @@ namespace {
                             i, maxSubExecToUse, t.numSubExecs, cfg.data.blockBytes});
       }
 
-      bool const isPingpong = t.laps > 0;
-      if (t.laps < 0) {
+      bool const isPingpong = t.numLaps > 0;
+      if (t.numLaps < 0) {
         errors.push_back({ERR_FATAL,
-          "Transfer %zu: Signed laps values are not supported; use laps > 0 with ping/pong halves", i});
+          "Transfer %zu: numLaps must be > 0 for pingpong transfers (negative values belong on resources)", i});
         hasFatalError = true;
         break;
       }
@@ -2916,7 +2916,7 @@ namespace {
     float*                     dst[MAX_DSTS];     ///< Destination array pointers
     int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
     volatile int64_t*          flagMem;           ///< Pingpong flag base pointer (nullptr for normal transfers)
-    int                        laps;              ///< 0 = normal, >0 = ping, <0 = pong
+    int                        numLaps;           ///< 0 = normal, >0 = ping, <0 = pong
     int                        flagStride;        ///< Stride in bytes between flag slots per lap
     int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
 
@@ -2992,7 +2992,7 @@ namespace {
 #endif
 
     // Pingpong
-    int                        laps = 0;           ///< 0 = normal, >0 = ping, <0 = pong
+    int                        numLaps = 0;       ///< 0 = normal, >0 = ping, <0 = pong
     void*                      flagMem = nullptr;  ///< Partner half's dstMem[0] (flag to wait on)
     int                        flagStride = 8;     ///< Stride in bytes between flag slots per lap
     int                        flagAllocBytes = 8; ///< Total flag allocation in bytes (for wrap-around)
@@ -3013,7 +3013,7 @@ namespace {
     int                        numSubIndices;     ///< Number of subindices this ExeDevice has
     vector<SubExecParam>       subExecParamCpu;   ///< Subexecutor parameters for this executor
     vector<TransferResources>  resources;         ///< Per-Transfer resources (normal transfers only)
-    vector<TransferResources>  pingpongResources; ///< Pingpong half resources (laps != 0)
+    vector<TransferResources>  pingpongResources; ///< Pingpong half resources (numLaps != 0)
 
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
@@ -4086,8 +4086,8 @@ namespace {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
       vector<MemDevice> srcs, dsts;
-      if (t.laps > 0) {
-        bool const isPong = (rss->laps < 0);
+      if (t.numLaps > 0) {
+        bool const isPong = (rss->numLaps < 0);
         int const h = isPong ? 1 : 0;
         if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
         dsts.push_back(t.dsts[h]);
@@ -4170,8 +4170,8 @@ namespace {
       for (auto const& rss : exeInfo.resources) {
         Transfer const& t = transfers[rss.transferIdx];
         vector<MemDevice> srcs, dsts;
-        if (t.laps > 0) {
-          bool const isPong = (rss.laps < 0);
+        if (t.numLaps > 0) {
+          bool const isPong = (rss.numLaps < 0);
           int const h = isPong ? 1 : 0;
           if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
           dsts.push_back(t.dsts[h]);
@@ -4231,8 +4231,8 @@ namespace {
     vector<MemDevice> srcs, dsts;
     int32_t subIndex;
     ExeDevice subExe;
-    if (transfer.laps > 0) {
-      bool const isPong = (rss.laps < 0);
+    if (transfer.numLaps > 0) {
+      bool const isPong = (rss.numLaps < 0);
       int const h = isPong ? 1 : 0;
       if (transfer.srcs[h].memType != MEM_NULL) srcs.push_back(transfer.srcs[h]);
       dsts.push_back(transfer.dsts[h]);
@@ -4255,7 +4255,7 @@ namespace {
       p.numSrcs        = rss.srcMem.size();
       p.numDsts        = rss.dstMem.size();
       p.flagMem        = nullptr;
-      p.laps           = rss.laps;
+      p.numLaps           = rss.numLaps;
       p.flagStride     = 0;
       p.flagAllocBytes = 0;
       p.startCycle     = 0;
@@ -4424,8 +4424,8 @@ namespace {
 
       vector<MemDevice> srcs, dsts;
       int32_t subIndex;
-      if (t.laps > 0) {
-        bool const isPong = (rss.laps < 0);
+      if (t.numLaps > 0) {
+        bool const isPong = (rss.numLaps < 0);
         int const h = isPong ? 1 : 0;
         if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
         dsts.push_back(t.dsts[h]);
@@ -4514,8 +4514,8 @@ namespace {
         // Allocate destination memory (on the correct rank)
         // For pingpong transfers, allocate a larger buffer to hold multiple flag slots
         size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
-        if (rss.laps != 0)
-          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * t.laps));
+        if (rss.numLaps != 0)
+          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * t.numLaps));
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           if (verbose) {
@@ -4755,8 +4755,8 @@ namespace {
       Transfer const& t = transfers[rss.transferIdx];
       vector<MemDevice> srcs, dsts;
       int32_t subIndex;
-      if (t.laps > 0) {
-        bool const isPong = (rss.laps < 0);
+      if (t.numLaps > 0) {
+        bool const isPong = (rss.numLaps < 0);
         int const h = isPong ? 1 : 0;
         if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
         dsts.push_back(t.dsts[h]);
@@ -6294,13 +6294,13 @@ namespace {
 
       TransferResources resource = {};
       resource.transferIdx = i;
-      resource.laps = t.laps;
+      resource.numLaps = t.numLaps;
 
       ExeInfo& exeInfo = executorMap[exeDevice];
       exeInfo.totalBytes += t.numBytes;
       exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
       // Pingpong transfers are handled separately, exeInfo subExecParam is used exclusively for normal transfers
-      if (t.laps != 0) {
+      if (t.numLaps != 0) {
         exeInfo.pingpongResources.push_back(resource);
       } else {
         exeInfo.resources.push_back(resource);
@@ -6310,13 +6310,13 @@ namespace {
       maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
 
-      if (t.laps != 0) {
+      if (t.numLaps != 0) {
         ExeDevice pongExe;
         ERR_APPEND(GetActualExecutor(t.exeDevicePong, pongExe), errResults);
 
         TransferResources pong = {};
         pong.transferIdx = i;
-        pong.laps = -t.laps;
+        pong.numLaps = -t.numLaps;
 
         ExeInfo& pongInfo = executorMap[pongExe];
         pongInfo.totalBytes += t.numBytes;
@@ -6366,10 +6366,10 @@ namespace {
     // if further instances arise, we should add a partner field to TransferResources.
     std::map<int, TransferResources*> pongByTransferIdx;
     for (auto* rss : transferResources) {
-      if (rss->laps < 0) pongByTransferIdx[rss->transferIdx] = rss;
+      if (rss->numLaps < 0) pongByTransferIdx[rss->transferIdx] = rss;
     }
     for (auto* pingRss : transferResources) {
-      if (pingRss->laps <= 0) continue;
+      if (pingRss->numLaps <= 0) continue;
 
       auto it = pongByTransferIdx.find(pingRss->transferIdx);
       if (it == pongByTransferIdx.end()) continue;
@@ -6378,7 +6378,7 @@ namespace {
       pingRss->flagMem        = pongRss->dstMem[0];
       pongRss->flagMem        = pingRss->dstMem[0];
       int stride              = cfg.general.pingpongStride;
-      int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->laps);
+      int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->numLaps);
       pingRss->flagStride     = stride;
       pongRss->flagStride     = stride;
       pingRss->flagAllocBytes = allocBytes;
@@ -6441,7 +6441,7 @@ namespace {
       for (auto resource : transferResources) {
         Transfer const& t = transfers[resource->transferIdx];
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
-          int const tSrcIdx = (t.laps != 0) ? (resource->laps < 0 ? 1 : 0) : srcIdx;
+          int const tSrcIdx = (t.numLaps != 0) ? (resource->numLaps < 0 ? 1 : 0) : srcIdx;
           if (t.srcs[tSrcIdx].memRank == localRank) {
             if (IsGpuMemType(t.srcs[tSrcIdx].memType)) {
               ERR_APPEND(hipSetDevice(t.srcs[tSrcIdx].memIndex), errResults);
@@ -6459,7 +6459,7 @@ namespace {
                                  hipMemcpyDefault), errResults);
             ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
-          if (t.laps != 0) break;
+          if (t.numLaps != 0) break;
         }
       }
     }
@@ -6531,15 +6531,15 @@ namespace {
 
       // Zero flag memory for pingpong transfers so each lap's slot starts at 0
       for (auto* rss : transferResources) {
-        if (rss->laps == 0) continue;
+        if (rss->numLaps == 0) continue;
 
         void* dst = rss->dstMem[0];
         if (!dst) continue;
 
         Transfer const& t = transfers[rss->transferIdx];
-        bool const isPong = (rss->laps < 0);
+        bool const isPong = (rss->numLaps < 0);
         MemType mt = t.dsts[isPong ? 1 : 0].memType;
-        size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(rss->laps));
+        size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(rss->numLaps));
         if (IsCpuMemType(mt))
           memset(dst, 0, allocBytes);
         else
@@ -6711,7 +6711,7 @@ namespace {
           exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
         }
         for (auto const& rss : exeInfo.pingpongResources) {
-          if (rss.laps < 0) continue;
+          if (rss.numLaps < 0) continue;
           int const transferIdx = rss.transferIdx;
           exeResult.transferIdx.push_back(transferIdx);
 
@@ -7155,17 +7155,26 @@ namespace {
       ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
       ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
-      // Check for '+' to detect pingpong pair
+      // Check for '+' to detect pingpong; optional lap count immediately follows '+'
+      //   e.g. "+500" or "+" (default numLaps)
       std::string nextToken;
       auto pos = iss.tellg();
-      bool isPingpong = (iss >> nextToken && nextToken == "+");
-      if (!isPingpong) {
+      int numLaps = 1;
+      bool isPingpong = false;
+      if (iss >> nextToken && !nextToken.empty() && nextToken[0] == '+') {
+        isPingpong = true;
+        if (nextToken.size() > 1) {
+          numLaps = atoi(nextToken.c_str() + 1);
+          if (numLaps < 1)
+            return {ERR_FATAL, "Parsing error: Pingpong %d lap count must be positive (got %d)", i+1, numLaps};
+        }
+      } else {
         iss.clear();
         iss.seekg(pos);
       }
 
       if (isPingpong) {
-        // Parse the pong (backward) triplet
+        // Parse the pong triplet
         std::string pongSrcStr, pongExeStr, pongDstStr;
         iss >> pongSrcStr >> pongExeStr >> pongDstStr;
         if (iss.fail())
@@ -7176,20 +7185,6 @@ namespace {
         ERR_CHECK(ParseMemType(pongSrcStr, pongWct.mem[0]));
         ERR_CHECK(ParseMemType(pongDstStr, pongWct.mem[1]));
         ERR_CHECK(ParseExeType(pongExeStr, pongWct.exe));
-
-        // Check for optional trailing 'x<laps>' (e.g. x50)
-        int numLaps = 1;
-        auto lapsPos = iss.tellg();
-        std::string lapsToken;
-        if (iss >> lapsToken && lapsToken.size() > 1 &&
-            (lapsToken[0] == 'x' || lapsToken[0] == 'X')) {
-          numLaps = atoi(lapsToken.c_str() + 1);
-          if (numLaps < 1)
-            return {ERR_FATAL, "Parsing error: Pingpong %d lap count must be positive (got %d)", i+1, numLaps};
-        } else {
-          iss.clear();
-          iss.seekg(lapsPos);
-        }
 
         // Temporary transfers to store ping and pong halves
         // Expand ping half
@@ -7219,7 +7214,7 @@ namespace {
             };
 
             Transfer t;
-            t.laps         = numLaps;
+            t.numLaps         = numLaps;
             t.numBytes     = 8;
             t.numSubExecs  = 1;
             t.srcs         = {singleMemOrNull(pingHalf.srcs), singleMemOrNull(pongHalf.srcs)};
@@ -7658,19 +7653,22 @@ namespace {
     for (auto const& t : transfers) {
       fprintf(dumpCfgFile, "(");
 
-      if (t.laps > 0) {
+      if (t.numLaps > 0) {
         printMem(t.srcs[0]);
         fprintf(dumpCfgFile, "->");
         printExe(t.exeDevice, t.exeSubIndex, t.exeSubSlot);
         fprintf(dumpCfgFile, "->");
         printMem(t.dsts[0]);
-        fprintf(dumpCfgFile, " + ");
+        fprintf(dumpCfgFile, " +");
+        if (t.numLaps != 1)
+          fprintf(dumpCfgFile, "%d", t.numLaps);
+        fprintf(dumpCfgFile, " ");
         printMem(t.srcs[1]);
         fprintf(dumpCfgFile, "->");
         printExe(t.exeDevicePong, t.exeSubIndexPong, t.exeSubSlotPong);
         fprintf(dumpCfgFile, "->");
         printMem(t.dsts[1]);
-        fprintf(dumpCfgFile, " x%d %d %lu)", t.laps, t.numSubExecs, t.numBytes);
+        fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
       } else {
         // Print SRCs
         for (auto const& src : t.srcs) {

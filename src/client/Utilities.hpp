@@ -596,7 +596,7 @@ namespace TransferBench::Utils
       ExeResult const& exeResult = exeInfoPair.second;
       int displayCount = 0;
       for (int idx : exeResult.transferIdx)
-        if (transfers[idx].laps >= 0) displayCount++;
+        if (transfers[idx].numLaps >= 0) displayCount++;
       numRows += 1 + displayCount;
       if (!ev.showPercentiles.empty()) {
         numRows += static_cast<int>(ev.showPercentiles.size()) * static_cast<int>(exeResult.transferIdx.size());
@@ -606,7 +606,7 @@ namespace TransferBench::Utils
       }
       if (ev.showIterations || !ev.showPercentiles.empty()) {
         for (int idx : exeResult.transferIdx) {
-          if (transfers[idx].laps > 0) continue; // pingpong iteration rows handled below
+          if (transfers[idx].numLaps > 0) continue; // pingpong iteration rows handled below
           TransferResult const& r = results.tfrResults[idx];
           if (r.perIterMsec.size() != numTimedIterations) {
             Print("[ERROR] Per iteration timing data unavailable: Expected %lu data points, but have %lu\n",
@@ -652,13 +652,13 @@ namespace TransferBench::Utils
         Transfer const& t = transfers[idx];
         TransferResult const& r = results.tfrResults[idx];
 
-        if (t.laps > 0) {
+        if (t.numLaps > 0) {
           // Pingpong row: show latency using ping's round-trip delta
           double latencyUs = r.avgDurationMsec * 1000.0;
           table.Set(rowIdx, 0, "PingPong %-4d ", idx);
           table.Set(rowIdx, 1, "%8.3f us "     , latencyUs);
           table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
-          table.Set(rowIdx, 3, "%8d laps "     , t.laps);
+          table.Set(rowIdx, 3, "%8d laps "     , t.numLaps);
 
           if (isMultiRank) {
             table.Set(rowIdx, 4, " %s->R%d%c%d->%s <+> %s->R%d%c%d->%s",
@@ -705,7 +705,7 @@ namespace TransferBench::Utils
             table.DrawRowBorder(rowIdx);
           }
         } else {
-          // Regular transfer row (laps == 0)
+          // Regular transfer row (numLaps == 0)
           table.Set(rowIdx, 0, "Transfer %-4d ", idx);
           table.Set(rowIdx, 1, "%8.3f GB/s "   , r.avgBandwidthGbPerSec);
           table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
