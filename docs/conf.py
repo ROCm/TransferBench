@@ -4,7 +4,7 @@
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
-version_number = "1.66.02"
+version_number = "1.69.01"
 
 # for PDF output on Read the Docs
 project = "TransferBench Documentation"
@@ -20,7 +20,7 @@ html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "rocm-extras",
     "header_title": f"ROCm™ TransferBench {version_number}",
-    "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/docs-1.66.02/",
+    "header_link": f"https://rocm.docs.amd.com/projects/TransferBench/en/docs-1.69.01/",
     "link_main_doc": True,
 }
 
