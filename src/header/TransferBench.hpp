@@ -726,30 +726,75 @@ namespace TransferBench
 // Helper macro functions
 //==========================================================================================
 
-// Macro for collecting CU/SM GFX kernel is running on
-#if defined(__GFX9__)
-  #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId))
-#elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
-  #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)" : "=s" (hwId))
-#elif defined(__NVCC__)
-  #define GetHwId(hwId) asm("mov.u32 %0, %smid;" : "=r"(hwId))
-#else
-  #define GetHwId(hwId) hwId = 0
-#endif
-
-// Macro for collecting XCC GFX kernel is running on
+// Returns xccId and a unified cuId for the current wavefront.
+// cuId encoding is arch-specific (see comments) but is always a dense index
+// suitable for CU-set tracking.
+__device__ __forceinline__ void GetXccHwId(uint32_t& xccId, uint32_t& cuId)
+{
 #if defined(__gfx942__) || defined(__gfx950__)
-#define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val))
-#elif defined(__GFX12__)
-#define GetXccId(val) \
-  { asm volatile ("s_sendmsg_rtn_b32 %0, 0x87 \n" \
-                  "s_wait_kmcnt 0"                \
-                  : "=s" (val));                  \
-    val = ((val >> 16) & 0xF);                    \
-  }
+  // CDNA3: HW_REG_HW_ID (code 4) + HW_REG_XCC_ID (code 20)
+  // CDNA3 ISA §5.8 Table 19, §3.12 Table 6
+  uint32_t hwId = 0, xccReg = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)"  : "=s"(hwId));
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s"(xccReg));
+  xccId = xccReg & 0xF;
+  cuId  = (((hwId >> 12) & 1) << 5)   // SH_ID
+        | (((hwId >>  8) & 15) << 2)  // CU_ID
+        |  ((hwId >> 13) & 3);        // SE_ID
+
+#elif defined(__gfx1250__)
+  // CDNA5: HW_ID1 (code 23) + RTN_GET_SE_HW_ID (0x87)
+  // CDNA5 ISA §3.4.9, §5.4 Table 19
+  uint32_t hwId = 0, seHwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)"       : "=s"(hwId));
+  asm volatile("s_sendmsg_rtn_b32 %0, 0x87\ns_wait_kmcnt 0"  : "=s"(seHwId));
+  xccId = (seHwId >> 16) & 0xF;        // Virtual_XCC_ID [19:16]
+  cuId  = ((seHwId & 0xF) << 4)        // SE_ID   [3:0]  (gfx1250: 2 SEs → 1 bit)
+        | (((hwId >> 16) & 0x1) << 3)  // SA_ID   [16]   (gfx1250: 2 SAs → 1 bit)
+        |  ((hwId >> 10) & 0x7);       // WGP_ID  [12:10] (gfx1250: 8 WGPs per SA → 3 bits)
+
+#elif defined(__GFX9__)
+  // Other GFX9 (gfx90a/MI200, gfx908, gfx906) — single die, no XCC
+  // CDNA2 ISA §3.12 Table 6
+  uint32_t hwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s"(hwId));
+  xccId = 0;
+  cuId  = (((hwId >> 12) & 1) << 5)
+        | (((hwId >>  8) & 15) << 2)
+        |  ((hwId >> 13) & 3);
+
+#elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
+  // RDNA2/3/4 (non-CDNA5) — HW_ID1 present, no XCC
+  uint32_t hwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)" : "=s"(hwId));
+  xccId = 0;
+  cuId = hwId;
+
+#elif defined(__NVCC__)
+  xccId = 0;
+  asm("mov.u32 %0, %smid;" : "=r"(cuId));
 #else
-#define GetXccId(val) val = 0
+  xccId = 0;
+  cuId  = 0;
 #endif
+}
+
+// Returns only the XCC ID for the current wavefront; cheaper than GetXccHwId
+// when the cuId is not needed.
+__device__ __forceinline__ uint32_t GetXccId()
+{
+#if defined(__gfx942__) || defined(__gfx950__)
+  uint32_t xccReg = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s"(xccReg));
+  return xccReg & 0xF;
+#elif defined(__gfx1250__)
+  uint32_t seHwId = 0;
+  asm volatile("s_sendmsg_rtn_b32 %0, 0x87\ns_wait_kmcnt 0" : "=s"(seHwId));
+  return (seHwId >> 16) & 0xF;  // Virtual_XCC_ID [19:16]
+#else
+  return 0;
+#endif
+}
 
 // Error check macro (NOTE: This will return even for ERR_WARN)
 #define ERR_CHECK(cmd)                                                       \
@@ -5113,20 +5158,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 // GFX Executor-related functions
 //========================================================================================
 
-  // Converts register value to a CU/SM index
-  static uint32_t GetId(uint32_t hwId)
-  {
-#if defined(__NVCC_)
-    return hwId;
-#else
-    // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
-    int const shId = (hwId >> 12) &  1;
-    int const cuId = (hwId >>  8) & 15;
-    int const seId = (hwId >> 13) &  3;
-    return (shId << 5) + (cuId << 2) + seId;
-#endif
-  }
-
   // Device level timestamp function
   __device__ int64_t GetTimestamp()
   {
@@ -5259,11 +5290,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (seType == 1 && p.N == 0) return;
 
     // Filter by XCC
-#if !defined(__NVCC__)
-    int32_t xccId;
-    GetXccId(xccId);
-    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
-#endif
+    { uint32_t xccId, cuId; GetXccHwId(xccId, cuId);
+      if (p.preferredXccId != -1 && (int32_t)xccId != p.preferredXccId) return; }
 
     // Collect data information
     bool hasSrc = p.numSrcs > 0;
@@ -5389,8 +5417,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
-      GetHwId(p.hwId);
-      GetXccId(p.xccId);
+      GetXccHwId(p.xccId, p.hwId);
     }
   }
 
@@ -5422,11 +5449,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (seType == 1 && p.N == 0) return;
 
     // Filter by XCC
-#if !defined(__NVCC__)
-    int32_t xccId;
-    GetXccId(xccId);
-    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
-#endif
+    { uint32_t xccId, cuId; GetXccHwId(xccId, cuId);
+      if (p.preferredXccId != -1 && (int32_t)xccId != p.preferredXccId) return; }
 
     // Collect data information
     int32_t const  numSrcs  = p.numSrcs;
@@ -5570,8 +5594,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
-      GetHwId(p.hwId);
-      GetXccId(p.xccId);
+      GetXccHwId(p.xccId, p.hwId);
     }
   }
 
@@ -5730,7 +5753,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           }
           for (int i = 0; i < numSubExecs; i++) {
             CUs.insert(std::make_pair(subExecParam[i].xccId,
-                                      GetId(subExecParam[i].hwId)));
+                                      subExecParam[i].hwId));
           }
           rss.perIterCUs.push_back(CUs);
         }
@@ -5818,7 +5841,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
               if (cfg.general.recordPerIteration) {
                 CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
-                                          GetId(subExecParam[subExecIdx].hwId)));
+                                          subExecParam[subExecIdx].hwId));
               }
             }
           }
@@ -6076,8 +6099,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
-      GetHwId(p.hwId);
-      GetXccId(p.xccId);
+      GetXccHwId(p.xccId, p.hwId);
     }
   }
 #else
@@ -6148,7 +6170,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           }
           for (int i = 0; i < numSubExecs; i++) {
             CUs.insert(std::make_pair(subExecParam[i].xccId,
-                                      GetId(subExecParam[i].hwId)));
+                                      subExecParam[i].hwId));
           }
           rss.perIterCUs.push_back(CUs);
         }
@@ -6230,7 +6252,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
               if (cfg.general.recordPerIteration) {
                 CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
-                                          GetId(subExecParam[subExecIdx].hwId)));
+                                          subExecParam[subExecIdx].hwId));
               }
             }
           }
@@ -8917,10 +8939,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #undef hipMemExportToShareableHandle
 #undef hipMemImportFromShareableHandle
 #endif
-
-// Kernel macros
-#undef GetHwId
-//#undef GetXccId
 
 // Undefine helper macros
 #undef ERR_CHECK

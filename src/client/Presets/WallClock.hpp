@@ -54,8 +54,7 @@ __global__ void GetTimestamps(uint64_t*     timestamps,
     auto start = GetTimestamp();
 
     // Collect XCD for this
-    int xccId;
-    GetXccId(xccId);
+    uint32_t xccId = GetXccId();
     int idx = (indexType == 0) ? xccId : blockIdx.x;
     if (xccMask & (1U << xccId)) {
       timestamps[idx] = 0;
