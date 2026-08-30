@@ -4228,6 +4228,45 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
   }
 
+  // Scans output vs expected byte-by-byte and returns a summary of contiguous mismatch
+  // ranges (byte indices, inclusive). Reports up to 5 ranges then "..." if more exist,
+  // followed by the total mismatch byte count.
+  static std::string ByteMismatchSummary(void const* output, void const* expected, size_t numBytes)
+  {
+    unsigned char const* out = static_cast<unsigned char const*>(output);
+    unsigned char const* exp = static_cast<unsigned char const*>(expected);
+
+    // Collect all contiguous mismatch ranges in one pass
+    struct Range { size_t start, end; };
+    std::vector<Range> ranges;
+    size_t totalMismatch = 0;
+    size_t i = 0;
+    while (i < numBytes) {
+      if (out[i] != exp[i]) {
+        size_t start = i;
+        while (i < numBytes && out[i] != exp[i]) ++i;
+        totalMismatch += i - start;
+        ranges.push_back({start, i - 1});
+      } else {
+        ++i;
+      }
+    }
+
+    std::string result;
+    int const maxReport = 5;
+    for (int r = 0; r < (int)ranges.size() && r < maxReport; ++r) {
+      if (r > 0) result += ", ";
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%zu-%zu", ranges[r].start, ranges[r].end);
+      result += buf;
+    }
+    if ((int)ranges.size() > maxReport) result += ", ...";
+    char summary[64];
+    snprintf(summary, sizeof(summary), " (total %zu mismatched bytes)", totalMismatch);
+    result += summary;
+    return result;
+  }
+
   // Checks that destination buffers match expected values
   static ErrResult ValidateAllTransfers(ConfigOptions              const& cfg,
                                         vector<Transfer>           const& transfers,
@@ -4243,7 +4282,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
-      size_t N = t.numBytes / sizeof(float);
 
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
@@ -4274,17 +4312,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
         ErrResult dstErr = ERR_NONE;
         if (memcmp(output, expected, t.numBytes)) {
-          // Difference found - find first error
-          for (size_t i = 0; i < N; i++) {
-            if (output[i] != expected[i]) {
-              dstErr = {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
-                transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
-              break;
-            }
-          }
-          if (dstErr.errType == ERR_NONE)
-            // memcmp found a difference but float != didn't (e.g. +0.0f vs -0.0f bit pattern)
-            dstErr = {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
+          std::string ranges = ByteMismatchSummary(output, expected, t.numBytes);
+          dstErr = {ERR_FATAL, "Transfer %d: Mismatch at destination %d on rank %d: bytes %s",
+                    transferIdx, dstIdx, t.dsts[dstIdx].memRank, ranges.c_str()};
         }
 
         if (verbose)
@@ -6655,7 +6685,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         for (auto rss : transferResources) {
           int transferIdx = rss->transferIdx;
           Transfer const& t = transfers[transferIdx];
-          size_t N = t.numBytes / sizeof(float);
           float const* expected = dstReference[t.srcs.size()].data();
           bool transferOk = true;
           bool anyLocalDst = false;
@@ -6680,15 +6709,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             if (memcmp(output, expected, t.numBytes) == 0) {
               System::Get().Log("  DST[%d]=PASS", dstIdx);
             } else {
-              size_t firstErr = 0;
-              for (; firstErr < N; firstErr++)
-                if (output[firstErr] != expected[firstErr]) break;
-              if (firstErr < N)
-                System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
-                                  dstIdx, firstErr, expected[firstErr], output[firstErr]);
-              else
-                System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
-                                  dstIdx);
+              std::string ranges = ByteMismatchSummary(output, expected, t.numBytes);
+              System::Get().Log("  DST[%d]=FAIL(bytes %s)", dstIdx, ranges.c_str());
               transferOk = false;
             }
           }
