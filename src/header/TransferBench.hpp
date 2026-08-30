@@ -6599,6 +6599,23 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (cfg.data.alwaysValidate > 0) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
+
+        // Clear destination memory after validation so each iteration starts from a known-zero state
+        size_t const initOffset = cfg.data.byteOffset / sizeof(float);
+        for (auto rss : transferResources) {
+          Transfer const& t = transfers[rss->transferIdx];
+          for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
+            if (t.dsts[dstIdx].memRank != localRank) continue;
+            float* dstPtr = rss->dstMem[dstIdx] + initOffset;
+            if (IsCpuMemType(t.dsts[dstIdx].memType)) {
+              memset(dstPtr, 0, rss->numBytes);
+            } else if (IsGpuMemType(t.dsts[dstIdx].memType)) {
+              ERR_APPEND(hipSetDevice(t.dsts[dstIdx].memIndex), errResults);
+              ERR_APPEND(hipMemset(dstPtr, 0, rss->numBytes), errResults);
+              ERR_APPEND(hipDeviceSynchronize(), errResults);
+            }
+          }
+        }
       }
 
       if (iteration >= 0) {

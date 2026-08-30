@@ -170,7 +170,7 @@ int RunTest(int                        testNum,
             allPass = false;
             std::string entry = "Test " + std::to_string(testNum) + " | " + std::string(transferStr) + " | numBytes=" + std::to_string(numBytes);
             for (auto const& e : results.errResults)
-              if (e.errType != ERR_NONE) entry += "\n  ERROR: " + e.errMsg;
+              if (e.errType == ERR_FATAL) entry += "\n  ERROR: " + e.errMsg;
             failLog.push_back(entry);
           }
         } else { // Otherwise accumulate the transfers to run in parallel
@@ -192,7 +192,7 @@ int RunTest(int                        testNum,
           entry += buf;
         }
         for (auto const& e : results.errResults)
-          if (e.errType != ERR_NONE) entry += "\n  ERROR: " + e.errMsg;
+          if (e.errType == ERR_FATAL) entry += "\n  ERROR: " + e.errMsg;
         failLog.push_back(entry);
       }
     }
