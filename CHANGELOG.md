@@ -5,6 +5,9 @@ Documentation for TransferBench is available at
 
 ## v1.70.00
 ### Added
+- Added VALIDATE_ON_DEVICE to validate GPU destination (and source) memory via an on-device kernel instead of
+  copying back to the host. Expected values are pre-uploaded during preparation; only a mismatch count and the
+  first mismatch offset are returned. Takes precedence over VALIDATE_DIRECT for GPU destinations.
 - Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
 - Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware.  This provides
   an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory

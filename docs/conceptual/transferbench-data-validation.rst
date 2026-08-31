@@ -142,6 +142,12 @@ environment variables or in a configuration file.
       - To compare GPU DST directly, set to ``1``. Supported on AMD hardware only and requires no host copy.
         To copy to host and compare, set to ``0``.
 
+    * - ``validateOnDevice``
+      - ``VALIDATE_ON_DEVICE``
+      - To compare GPU memory on the device via a kernel (expected values pre-uploaded during prep), set to ``1``.
+        Avoids the device-to-host copy; returns only a mismatch count and the first mismatch offset.
+        Takes precedence over ``validateDirect`` for GPU destinations.
+
     * - ``validateSource``
       - ``VALIDATE_SOURCE``
       - To validate the SRC memory right after it's initialized, set to ``1`` (optional early check).

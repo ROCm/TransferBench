@@ -139,6 +139,12 @@ Data and validation options
         On AMD hardware, the CPU can directly access GPU device memory, avoiding the need for a staging buffer. This feature is not supported on NVIDIA hardware.
       - ``0``
 
+    * - ``VALIDATE_ON_DEVICE``
+      - Specifies whether to validate GPU memory on the device instead of copying it back to the host. Set to ``1`` to validate on-device, ``0`` to copy to host and compare.
+
+        The expected values are pre-uploaded to the GPU during preparation, and a comparison kernel checks the destination in place, avoiding the device-to-host copy. Only a small result (mismatch count and first mismatch offset) is returned. Takes precedence over ``VALIDATE_DIRECT`` for GPU destinations; CPU destinations are always compared on the host.
+      - ``0``
+
     * - ``VALIDATE_SOURCE``
       - Specifies whether to validate the source immediately after preparation. Set to ``1`` to validate, ``0`` to skip.
 
