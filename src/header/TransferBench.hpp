@@ -202,6 +202,9 @@ namespace TransferBench
    * Ping/pong executors may differ in type (e.g. ping on GFX, pong on DMA). The struct is
    * executor-agnostic; additional executor types are enabled by implementing their dispatch
    * paths. As of now, pingpong execution is implemented for EXE_GPU_GFX only.
+   *
+   * On a GFX executor, all ping/pong halves assigned to that executor are launched on one
+   * dedicated HIP stream, with one threadblock per half (transfer.numSubExecs is ignored).
    */
   struct Transfer
   {
@@ -2292,6 +2295,7 @@ namespace {
     std::map<ExeDevice, int> transferCount;
     std::map<ExeDevice, int> useSubIndexCount;
     std::map<ExeDevice, int> totalSubExecs;
+    std::map<ExeDevice, int> totalPingpong;
 
     // Check that the set of requested transfers is consistent across all ranks
     CheckMultiNodeTransferConsistency(transfers, errors);
@@ -2802,10 +2806,15 @@ namespace {
       // Check subexecutors
       if (t.numSubExecs <= 0)
         errors.push_back({ERR_FATAL, "Transfer %d: # of subexecutors must be positive", i});
-      else {
+      else if (isPingpong) {
+        if (t.numSubExecs != 1)
+          errors.push_back({ERR_WARN,
+                            "Transfer %d: pingpong uses one threadblock per half; numSubExecs (%d) is ignored",
+                            i, t.numSubExecs});
+        totalPingpong[t.exeDevice]++;
+        totalPingpong[t.exeDevicePong]++;
+      } else {
         totalSubExecs[t.exeDevice] += t.numSubExecs;
-        if (isPingpong)
-          totalSubExecs[t.exeDevicePong] += t.numSubExecs;
       }
 
     }
@@ -2837,11 +2846,12 @@ namespace {
           int warpsPerBlock = cfg.gfx.blockSize / GetWarpSize(&errors);
           numGpuSubExec *= warpsPerBlock;
         }
-        if (totalSubExecs[exeDevice] > numGpuSubExec)
+        int totalTotalSubExecs = totalSubExecs[exeDevice] + totalPingpong[exeDevice];
+        if (totalTotalSubExecs > numGpuSubExec)
           errors.push_back({ERR_WARN,
                             "GPU %d requests %d total %s however only %d available. "
                             "Serialization will occur",
-                            exeDevice.exeIndex, totalSubExecs[exeDevice],
+                            exeDevice.exeIndex, totalTotalSubExecs,
                             cfg.gfx.seType == 0 ? "CUs" : "warps", numGpuSubExec});
         // Check that if executor subindices are used, all Transfers specify executor subindices
         if (useSubIndexCount[exeDevice] > 0 && useSubIndexCount[exeDevice] != transferCount[exeDevice]) {
@@ -2852,10 +2862,22 @@ namespace {
           break;
         }
 
-        if (cfg.gfx.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
-          errors.push_back({ERR_WARN,
-                            "GPU %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
-                            exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
+        // Parallel HIP stream count: one stream per normal transfer in multistream mode
+        // (or one shared stream for all normal transfers otherwise), plus one shared
+        // pingpong stream when this executor has any ping/pong halves.
+        {
+          int const normalTransferCount = transferCount[exeDevice] - totalPingpong[exeDevice];
+          int streamCount = cfg.gfx.useMultiStream ? normalTransferCount
+                                                  : (normalTransferCount > 0 ? 1 : 0);
+          if (totalPingpong[exeDevice] > 0)
+            streamCount++;
+          if (streamCount > gpuMaxHwQueues) {
+            errors.push_back({ERR_WARN,
+                              "GPU %d attempting %d parallel streams (%d normal transfer stream(s)"
+                              " + %d pingpong stream), however GPU_MAX_HW_QUEUES only set to %d",
+                              exeDevice.exeIndex, streamCount, normalTransferCount,
+                              totalPingpong[exeDevice] > 0 ? 1 : 0, gpuMaxHwQueues});
+          }
         }
         break;
       }
@@ -2915,10 +2937,6 @@ namespace {
     float*                     src[MAX_SRCS];     ///< Source array pointers
     float*                     dst[MAX_DSTS];     ///< Destination array pointers
     int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
-    volatile int64_t*          flagMem;           ///< Pingpong flag base pointer (nullptr for normal transfers)
-    int                        numLaps;           ///< 0 = normal, >0 = ping, <0 = pong
-    int                        flagStride;        ///< Stride in bytes between flag slots per lap
-    int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
 
     // Prepared
     int                        teamSize;          ///< Index of this sub executor amongst team
@@ -2929,6 +2947,22 @@ namespace {
     int64_t                    stopCycle;         ///< Stop  timestamp for in-kernel timing (GPU-GFX executor)
     uint32_t                   hwId;              ///< Hardware ID
     uint32_t                   xccId;             ///< XCC ID
+  };
+
+  // Pingpong parameters (parallel to SubExecParam; one entry per Ping/Pong)
+  struct PingpongParam
+  {
+    volatile int64_t*          srcMem[2];         ///< Device pointers to int64_t values {0, 1} (even/odd laps)
+    volatile int64_t*          localFlagMem;      ///< Partner half's dst; poll here for signal arrival
+    volatile int64_t*          flagMem;           ///< Own dst; write here to signal partner
+    int                        numLaps;           ///< 0 = normal, >0 = ping, <0 = pong
+    int                        flagStride;        ///< Stride in bytes between flag slots per lap
+    int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
+    int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
+
+    // Outputs (ping half only)
+    int64_t                    startCycle;        ///< Start timestamp for in-kernel timing
+    int64_t                    stopCycle;         ///< Stop  timestamp for in-kernel timing
   };
 
   // Internal resources allocated per Transfer
@@ -2944,11 +2978,14 @@ namespace {
     vector<memHandle_t>        srcMemHandle;      ///< Memory handles for source memory
     vector<memHandle_t>        dstMemHandle;      ///< Memory handles for destination memory
     vector<SubExecParam>       subExecParamCpu;   ///< Defines subarrays for each subexecutor
+    PingpongParam              pingpongParamCpu;  ///< Pingpong parameter
     vector<int>                subExecIdx;        ///< Indices into subExecParamGpu
+    int                        pingpongParamIdx = -1; ///< Index into exeInfo.pingpongParamCpu/Gpu
     int                        numaNode;          ///< NUMA node to use for this Transfer
 
     // For GFX executor
     SubExecParam*              subExecParamGpuPtr;
+    PingpongParam*             pingpongParamGpuPtr;
 
     // For targeted-SDMA
 #if !defined(__NVCC__)
@@ -2991,11 +3028,8 @@ namespace {
     vector<size_t>             batchBytes;        ///< Bytes to copy (per batch item)
 #endif
 
-    // Pingpong
-    int                        numLaps = 0;       ///< 0 = normal, >0 = ping, <0 = pong
-    void*                      flagMem = nullptr;  ///< Partner half's dstMem[0] (flag to wait on)
-    int                        flagStride = 8;     ///< Stride in bytes between flag slots per lap
-    int                        flagAllocBytes = 8; ///< Total flag allocation in bytes (for wrap-around)
+    // Pingpong role/lap count on this resource half (0 = normal, >0 = ping, <0 = pong)
+    int                        numLaps = 0;
 
     // Counters
     double                     totalDurationMsec; ///< Total duration for all iterations for this Transfer
@@ -3008,16 +3042,19 @@ namespace {
   {
     size_t                     totalBytes;        ///< Total bytes this executor transfers
     double                     totalDurationMsec; ///< Total duration for all iterations for this Executor
-    int                        totalSubExecs;     ///< Total number of subExecutors to use
+    int                        totalSubExecs;     ///< Total normal-transfer threadblocks across this executor
+    int                        totalPingpong;     ///< Total pingpong threadblocks (one per ping/pong resource half)
     bool                       useSubIndices;     ///< Use subexecutor indicies
     int                        numSubIndices;     ///< Number of subindices this ExeDevice has
     vector<SubExecParam>       subExecParamCpu;   ///< Subexecutor parameters for this executor
-    vector<TransferResources>  resources;         ///< Per-Transfer resources (normal transfers only)
-    vector<TransferResources>  pingpongResources; ///< Pingpong half resources (numLaps != 0)
+    vector<PingpongParam>      pingpongParamCpu;  ///< Pingpong parameters for this executor
+    vector<TransferResources>  resources;         ///< Per-transfer resources (normal and ping/pong halves)
 
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    PingpongParam*             pingpongParamGpu;  ///< GPU copy of pingpong parameters
     bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
+    bool                       pingpongParamHostAccessible; ///< Host can directly read pingpongParamGpu
     vector<hipStream_t>        streams;           ///< HIP streams (normal transfers, then pingpong)
     vector<hipEvent_t>         startEvents;       ///< HIP start timing event
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
@@ -4209,6 +4246,28 @@ namespace {
 // Preparation-related functions
 //========================================================================================
 
+  // Resolve src/dst MemDevices and subIndex for a TransferResources entry (normal or ping/pong half).
+  static void ResolveTransferResourceMem(Transfer const& transfer,
+                                         TransferResources const& rss,
+                                         vector<MemDevice>& srcs,
+                                         vector<MemDevice>& dsts,
+                                         int32_t& subIndex)
+  {
+    srcs.clear();
+    dsts.clear();
+    if (transfer.numLaps > 0) {
+      bool const isPong  = (rss.numLaps < 0);
+      int const  halfIdx = isPong ? 1 : 0;
+      if (transfer.srcs[halfIdx].memType != MEM_NULL) srcs.push_back(transfer.srcs[halfIdx]);
+      dsts.push_back(transfer.dsts[halfIdx]);
+      subIndex = isPong ? transfer.exeSubIndexPong : transfer.exeSubIndex;
+    } else {
+      srcs = transfer.srcs;
+      dsts = transfer.dsts;
+      subIndex = transfer.exeSubIndex;
+    }
+  }
+
   // Prepares input parameters for each subexecutor
   // Determines how sub-executors will split up the work
   // Initializes counters
@@ -4228,23 +4287,6 @@ namespace {
     int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                          (size_t)transfer.numSubExecs);
 
-    vector<MemDevice> srcs, dsts;
-    int32_t subIndex;
-    ExeDevice subExe;
-    if (transfer.numLaps > 0) {
-      bool const isPong = (rss.numLaps < 0);
-      int const h = isPong ? 1 : 0;
-      if (transfer.srcs[h].memType != MEM_NULL) srcs.push_back(transfer.srcs[h]);
-      dsts.push_back(transfer.dsts[h]);
-      subIndex = isPong ? transfer.exeSubIndexPong : transfer.exeSubIndex;
-      subExe   = isPong ? transfer.exeDevicePong    : transfer.exeDevice;
-    } else {
-      srcs = transfer.srcs;
-      dsts = transfer.dsts;
-      subIndex = transfer.exeSubIndex;
-      subExe   = transfer.exeDevice;
-    }
-
     vector<SubExecParam>& subExecParam = rss.subExecParamCpu;
     subExecParam.clear();
     subExecParam.resize(transfer.numSubExecs);
@@ -4254,17 +4296,13 @@ namespace {
       SubExecParam& p  = subExecParam[i];
       p.numSrcs        = rss.srcMem.size();
       p.numDsts        = rss.dstMem.size();
-      p.flagMem        = nullptr;
-      p.numLaps           = rss.numLaps;
-      p.flagStride     = 0;
-      p.flagAllocBytes = 0;
       p.startCycle     = 0;
       p.stopCycle      = 0;
       p.hwId           = 0;
       p.xccId          = 0;
 
       // In single team mode, subexecutors stripe across the entire array
-      if (cfg.gfx.useSingleTeam && subExe.exeType == EXE_GPU_GFX) {
+      if (cfg.gfx.useSingleTeam && transfer.exeDevice.exeType == EXE_GPU_GFX) {
         p.N        = N;
         p.teamSize = transfer.numSubExecs;
         p.teamIdx  = i;
@@ -4284,17 +4322,17 @@ namespace {
         assigned += p.N;
       }
 
-      p.preferredXccId = subIndex;
+      p.preferredXccId = transfer.exeSubIndex;
       // Override if XCC table has been specified
       vector<vector<int>> const& table = cfg.gfx.prefXccTable;
-      if (subExe.exeType == EXE_GPU_GFX && subIndex == -1 && !table.empty() &&
-          dsts.size() == 1 && IsGpuMemType(dsts[0].memType)) {
-        if (table.size() <= subExe.exeIndex ||
-            table[subExe.exeIndex].size() <= dsts[0].memIndex) {
+      if (transfer.exeDevice.exeType == EXE_GPU_GFX && transfer.exeSubIndex == -1 && !table.empty() &&
+          transfer.dsts.size() == 1 && IsGpuMemType(transfer.dsts[0].memType)) {
+        if (table.size() <= transfer.exeDevice.exeIndex ||
+            table[transfer.exeDevice.exeIndex].size() <= transfer.dsts[0].memIndex) {
           return {ERR_FATAL, "[gfx.xccPrefTable] is too small"};
         }
-        p.preferredXccId = table[subExe.exeIndex][dsts[0].memIndex];
-        if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(subExe)) {
+        p.preferredXccId = table[transfer.exeDevice.exeIndex][transfer.dsts[0].memIndex];
+        if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(transfer.exeDevice)) {
           return {ERR_FATAL, "[gfx.xccPrefTable] defines out-of-bound XCC index %d", p.preferredXccId};
         }
       }
@@ -4319,6 +4357,59 @@ namespace {
     // Clear counters
     rss.totalDurationMsec = 0.0;
 
+    return ERR_NONE;
+  }
+
+  // Prepares pingpong parameters for a ping or pong resource half.
+  // Assumes PrepareExecutor has already allocated rss.srcMem / rss.dstMem for this half.
+  // Flag cross-linking (localFlagMem, flagStride, flagAllocBytes) is deferred to PingpongPostPrep.
+  static ErrResult PreparePingpongParam(ConfigOptions const& cfg,
+                                        Transfer      const& transfer,
+                                        TransferResources&   rss)
+  {
+    int const initOffset = cfg.data.byteOffset / sizeof(float);
+    bool const isPong    = (rss.numLaps < 0);
+    int const halfIdx    = isPong ? 1 : 0;
+
+    ExeDevice const& exeDevice      = isPong ? transfer.exeDevicePong : transfer.exeDevice;
+    int32_t const    subIndex       = isPong ? transfer.exeSubIndexPong : transfer.exeSubIndex;
+    MemDevice const& dstMemDevice   = transfer.dsts[halfIdx];
+
+    PingpongParam& p = rss.pingpongParamCpu;
+    p.srcMem[0]      = nullptr;
+    p.srcMem[1]      = nullptr;
+    p.localFlagMem   = nullptr;
+    p.flagMem        = static_cast<volatile int64_t*>(static_cast<void*>(rss.dstMem[0]));
+    p.numLaps        = rss.numLaps;
+    p.flagStride     = 0;
+    p.flagAllocBytes = 0;
+    p.preferredXccId = subIndex;
+    p.startCycle     = 0;
+    p.stopCycle      = 0;
+
+    // Device-resident int64_t values {0, 1} at rss.srcMem[0] + byteOffset (even/odd lap signaling)
+    if (exeDevice.exeType == EXE_GPU_GFX && !rss.srcMem.empty()) {
+      volatile int64_t* base = static_cast<volatile int64_t*>(
+        static_cast<void*>(rss.srcMem[0] + initOffset));
+      p.srcMem[0] = base;
+      p.srcMem[1] = base + 1;
+    }
+
+    // Override if XCC table has been specified
+    vector<vector<int>> const& table = cfg.gfx.prefXccTable;
+    if (exeDevice.exeType == EXE_GPU_GFX && subIndex == -1 && !table.empty() &&
+        IsGpuMemType(dstMemDevice.memType)) {
+      if (table.size() <= exeDevice.exeIndex ||
+          table[exeDevice.exeIndex].size() <= dstMemDevice.memIndex) {
+        return {ERR_FATAL, "[gfx.xccPrefTable] is too small"};
+      }
+      p.preferredXccId = table[exeDevice.exeIndex][dstMemDevice.memIndex];
+      if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(exeDevice)) {
+        return {ERR_FATAL, "[gfx.xccPrefTable] defines out-of-bound XCC index %d", p.preferredXccId};
+      }
+    }
+
+    rss.totalDurationMsec = 0.0;
     return ERR_NONE;
   }
 
@@ -4413,28 +4504,13 @@ namespace {
     }
 
     // Loop over each transfer this executor is involved in
-    std::vector<TransferResources*> rssList;
-    rssList.reserve(exeInfo.resources.size() + exeInfo.pingpongResources.size());
-    for (auto& r : exeInfo.resources) rssList.push_back(&r);
-    for (auto& r : exeInfo.pingpongResources) rssList.push_back(&r);
-    for (TransferResources* rssPtr : rssList) {
-      TransferResources& rss = *rssPtr;
+    for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
       rss.numBytes = t.numBytes;
 
       vector<MemDevice> srcs, dsts;
       int32_t subIndex;
-      if (t.numLaps > 0) {
-        bool const isPong = (rss.numLaps < 0);
-        int const h = isPong ? 1 : 0;
-        if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
-        dsts.push_back(t.dsts[h]);
-        subIndex = isPong ? t.exeSubIndexPong : t.exeSubIndex;
-      } else {
-        srcs = t.srcs;
-        dsts = t.dsts;
-        subIndex = t.exeSubIndex;
-      }
+      ResolveTransferResourceMem(t, rss, srcs, dsts, subIndex);
 
       if (verbose) {
         System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
@@ -4450,8 +4526,11 @@ namespace {
       rss.srcMem.resize(srcs.size());
       rss.srcActualBytes.resize(srcs.size());
       rss.srcMemHandle.resize(srcs.size(), NULL);
-      for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
+      for (int iSrc = 0; iSrc < srcs.size(); ++iSrc) {
         MemDevice const& srcMemDevice = srcs[iSrc];
+        size_t srcAllocBytes = t.numBytes + cfg.data.byteOffset;
+        if (rss.numLaps != 0)
+          srcAllocBytes = std::max(srcAllocBytes, cfg.data.byteOffset + 2 * sizeof(int64_t));
 
         // Ensure executing GPU can access source memory
         // This only applies to memory being accessed by a local GPU executor
@@ -4476,10 +4555,10 @@ namespace {
                               iSrc, GetMemTypeName(srcMemDevice.memType), srcMemDevice.memIndex,
                               GetMemDeviceNuma(srcMemDevice).c_str(),
                               bdf.empty() ? "" : " BDF ", bdf.c_str(),
-                              srcMemDevice.memRank, t.numBytes + cfg.data.byteOffset,
+                              srcMemDevice.memRank, srcAllocBytes,
                               requiresFabricHandle ? " [fabric-exportable]" : "");
           }
-          ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
+          ERR_CHECK(AllocateMemory(srcMemDevice, srcAllocBytes, (void**)&rss.srcMem[iSrc],
                                    &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : nullptr));
           if (verbose) {
             System::Get().Log("[INFO]   SRC[%d]: allocated at %p\n", iSrc, rss.srcMem[iSrc]);
@@ -4489,13 +4568,22 @@ namespace {
         // Exchange memory pointer across ranks
         ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, &rss.srcActualBytes[iSrc],
                                  &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
+
+        // Pingpong: seed int64_t lap values {0, 1} into an existing src buffer
+        if (rss.numLaps != 0 && rss.srcMem[iSrc] &&
+            srcMemDevice.memRank == localRank && IsGpuMemType(srcMemDevice.memType)) {
+          int const initOffset = cfg.data.byteOffset / sizeof(float);
+          int64_t const vals[2] = {0, 1};
+          ERR_CHECK(hipSetDevice(srcMemDevice.memIndex));
+          ERR_CHECK(hipMemcpy(rss.srcMem[iSrc] + initOffset, vals, 2 * sizeof(int64_t), hipMemcpyHostToDevice));
+        }
       }
 
       // Allocate destination memory
       rss.dstMem.resize(dsts.size());
       rss.dstActualBytes.resize(dsts.size());
       rss.dstMemHandle.resize(dsts.size(), NULL);
-      for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
+      for (int iDst = 0; iDst < dsts.size(); ++iDst) {
         MemDevice const& dstMemDevice = dsts[iDst];
 
         // Ensure executing GPU can access destination memory
@@ -4512,7 +4600,7 @@ namespace {
         }
 
         // Allocate destination memory (on the correct rank)
-        // For pingpong transfers, allocate a larger buffer to hold multiple flag slots
+        // For pingpong transfers, allocate a larger buffer to hold multiple flag slots for UALoE station rotation
         size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
         if (rss.numLaps != 0)
           dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * t.numLaps));
@@ -4566,7 +4654,11 @@ namespace {
       }
 
       // Prepare subexecutor parameters (on all ranks)
-      ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
+      if (rss.numLaps == 0) {
+        ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
+      } else {
+        ERR_CHECK(PreparePingpongParam(cfg, t, rss));
+      }
     }
 
     // Prepare additional requirements for GPU-based executors
@@ -4575,10 +4667,10 @@ namespace {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
-      int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
-                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
-                                  ? exeInfo.resources.size() + exeInfo.pingpongResources.size() 
-                                  : 1 + exeInfo.pingpongResources.size(); // single stream GFX executor
+      int numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
+                             (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
+                            ? exeInfo.resources.size() : 1;
+      if (exeInfo.totalPingpong) numStreamsToUse++;
       exeInfo.streams.resize(numStreamsToUse);
 
       // Create streams
@@ -4614,6 +4706,20 @@ namespace {
 #else
       MemType memType = MEM_MANAGED;  // NVIDIA hardware requires managed memory to access from host
 #endif
+      if (exeInfo.totalSubExecs > 0) {
+        ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
+                                 (void**)&exeInfo.subExecParamGpu));
+        ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
+      }
+      if (exeInfo.totalPingpong > 0) {
+        ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalPingpong * sizeof(PingpongParam),
+                                 (void**)&exeInfo.pingpongParamGpu));
+        ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.pingpongParamHostAccessible));
+      }
+
+      // Create subexecutor parameter array for entire executor
+      exeInfo.subExecParamCpu.clear();
+      exeInfo.pingpongParamCpu.clear();
       exeInfo.numSubIndices = GetNumExecutorSubIndices(exeDevice);
 #if defined(__NVCC__)
       exeInfo.wallClockRate = 1000000;
@@ -4621,87 +4727,81 @@ namespace {
       ERR_CHECK(hipDeviceGetAttribute(&exeInfo.wallClockRate, hipDeviceAttributeWallClockRate,
                                       exeDevice.exeIndex));
 #endif
-
-      if (exeInfo.totalSubExecs > 0) {
-        ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
-                                 (void**)&exeInfo.subExecParamGpu));
-        ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
-
-        // Create subexecutor parameter array for entire executor
-        exeInfo.subExecParamCpu.clear();
-        int transferOffset = 0;
-        if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
-          // Threadblocks are ordered sequentially one transfer at a time
-          for (auto& rss : exeInfo.resources) {
-            rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
-            for (auto p : rss.subExecParamCpu) {
-              rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
-              exeInfo.subExecParamCpu.push_back(p);
-              transferOffset++;
-            }
-          }
-        } else if (cfg.gfx.blockOrder == 1) {
-          // Interleave threadblocks of different Transfers
-          for (int subExecIdx = 0; exeInfo.subExecParamCpu.size() < exeInfo.totalSubExecs; ++subExecIdx) {
-            for (auto& rss : exeInfo.resources) {
-              Transfer const& t = transfers[rss.transferIdx];
-              if (subExecIdx < t.numSubExecs) {
-                rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
-                exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[subExecIdx]);
-              }
-            }
-          }
-        } else if (cfg.gfx.blockOrder == 2) {
-          // Build randomized threadblock list
-          std::vector<std::pair<int,int>> indices;
-          for (int i = 0; i < exeInfo.resources.size(); i++) {
-            auto const& rss = exeInfo.resources[i];
-            Transfer const& t = transfers[rss.transferIdx];
-            for (int j = 0; j < t.numSubExecs; j++)
-              indices.push_back(std::make_pair(i,j));
-          }
-
-          std::random_device rd;
-          std::mt19937 gen(rd());
-          std::shuffle(indices.begin(), indices.end(), gen);
-
-          // Build randomized threadblock list
-          for (auto p : indices) {
-            auto& rss = exeInfo.resources[p.first];
+      int transferOffset = 0;
+      int pingpongOffset = 0;
+      if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
+        // Threadblocks are ordered sequentially one transfer at a time
+        for (auto& rss : exeInfo.resources) {
+          if (rss.numLaps != 0) continue;
+          rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
+          for (auto p : rss.subExecParamCpu) {
             rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
-            exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[p.second]);
+            exeInfo.subExecParamCpu.push_back(p);
+            transferOffset++;
           }
         }
-
-        // Copy sub executor parameters to GPU
-        ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
-        if (verbose) {
-          System::Get().Log("[INFO] SubExecParam upload: GPU%d  %zu bytes (%zu params)  host=%p dev=%p\n",
-                            exeDevice.exeIndex,
-                            exeInfo.totalSubExecs * sizeof(SubExecParam),
-                            exeInfo.totalSubExecs,
-                            exeInfo.subExecParamCpu.data(),
-                            exeInfo.subExecParamGpu);
+      } else if (cfg.gfx.blockOrder == 1) {
+        // Interleave threadblocks of different Transfers
+        for (int subExecIdx = 0; exeInfo.subExecParamCpu.size() < exeInfo.totalSubExecs; ++subExecIdx) {
+          for (auto& rss : exeInfo.resources) {
+            if (rss.numLaps != 0) continue;
+            Transfer const& t = transfers[rss.transferIdx];
+            if (subExecIdx < t.numSubExecs) {
+              rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
+              exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[subExecIdx]);
+            }
+          }
         }
-        ERR_CHECK(hipMemcpy(exeInfo.subExecParamGpu,
-                            exeInfo.subExecParamCpu.data(),
-                            exeInfo.totalSubExecs * sizeof(SubExecParam),
-                            hipMemcpyHostToDevice));
-        ERR_CHECK(hipDeviceSynchronize());
+      } else if (cfg.gfx.blockOrder == 2) {
+        // Build randomized threadblock list
+        std::vector<std::pair<int,int>> indices;
+        for (int i = 0; i < exeInfo.resources.size(); i++) {
+          auto const& rss = exeInfo.resources[i];
+          if (rss.numLaps != 0) continue;
+          Transfer const& t = transfers[rss.transferIdx];
+          for (int j = 0; j < t.numSubExecs; j++)
+            indices.push_back(std::make_pair(i,j));
+        }
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::shuffle(indices.begin(), indices.end(), gen);
+
+        // Build randomized threadblock list
+        for (auto p : indices) {
+          auto& rss = exeInfo.resources[p.first];
+          rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
+          exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[p.second]);
+        }
       }
 
-      for (auto& rss : exeInfo.pingpongResources) {
-        int const n = (int)rss.subExecParamCpu.size();
-        if (n == 0) continue;
-        ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, n * sizeof(SubExecParam),
-                                 (void**)&rss.subExecParamGpuPtr));
-        rss.subExecIdx.clear();
-        for (int i = 0; i < n; i++)
-          rss.subExecIdx.push_back(i);
-        ERR_CHECK(hipMemcpy(rss.subExecParamGpuPtr, rss.subExecParamCpu.data(),
-                            n * sizeof(SubExecParam), hipMemcpyHostToDevice));
+      // Copy sub executor parameters to GPU
+      ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+      if (verbose) {
+        System::Get().Log("[INFO] SubExecParam upload: GPU%d  %zu bytes (%zu params)  host=%p dev=%p\n",
+                          exeDevice.exeIndex,
+                          exeInfo.totalSubExecs * sizeof(SubExecParam),
+                          exeInfo.totalSubExecs,
+                          exeInfo.subExecParamCpu.data(),
+                          exeInfo.subExecParamGpu);
       }
+      ERR_CHECK(hipMemcpy(exeInfo.subExecParamGpu,
+                          exeInfo.subExecParamCpu.data(),
+                          exeInfo.totalSubExecs * sizeof(SubExecParam),
+                          hipMemcpyHostToDevice));
+      ERR_CHECK(hipDeviceSynchronize());
+
+      // Pingpong resources are always single stream
+      for (auto& rss : exeInfo.resources) {
+        if (rss.numLaps == 0) continue;
+        rss.pingpongParamIdx    = exeInfo.pingpongParamCpu.size();
+        rss.pingpongParamGpuPtr = exeInfo.pingpongParamGpu + pingpongOffset;
+        exeInfo.pingpongParamCpu.push_back(rss.pingpongParamCpu);
+        pingpongOffset++;
+      }
+      // PingpongParam upload deferred to PingpongPostPrep (after flag cross-linking)
     }
+    
 
     // Prepare for NIC-based executors
     if (IsNicExeType(exeDevice.exeType)) {
@@ -4733,6 +4833,68 @@ namespace {
     return ERR_NONE;
   }
 
+  // Pingpong post-prep: cross-link flag slots, then propagate into PingpongParam.
+  static ErrResult PingpongPostPrep(ConfigOptions const& cfg,
+                                    int const localRank,
+                                    vector<TransferResources*> const& transferResources,
+                                    std::map<ExeDevice, ExeInfo>& executorMap)
+  {
+    // Cross-link ping and pong flag memory to their partners
+    std::map<int, TransferResources*> pongByTransferIdx;
+    for (auto* rss : transferResources) {
+      if (rss->numLaps < 0) pongByTransferIdx[rss->transferIdx] = rss;
+    }
+    for (auto* pingRss : transferResources) {
+      if (pingRss->numLaps <= 0) continue;
+
+      auto it = pongByTransferIdx.find(pingRss->transferIdx);
+      if (it == pongByTransferIdx.end()) continue;
+      TransferResources* pongRss = it->second;
+
+      int stride              = cfg.general.pingpongStride;
+      int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->numLaps);
+      for (auto* rss : {pingRss, pongRss}) {
+        TransferResources* partnerRss = (rss == pingRss ? pongRss : pingRss);
+        volatile int64_t* partnerFlag = static_cast<volatile int64_t*>(static_cast<void*>(
+          partnerRss->dstMem[0]));
+        PingpongParam& pp = rss->pingpongParamCpu;
+        pp.localFlagMem   = partnerFlag;
+        pp.flagStride     = stride;
+        pp.flagAllocBytes = allocBytes;
+      }
+    }
+
+    // Upload updated PingpongParam to GPU (one bulk copy per executor)
+    bool const verbose = System::Get().IsVerbose();
+    for (auto& exeInfoPair : executorMap) {
+      ExeDevice const& exeDevice = exeInfoPair.first;
+      ExeInfo&         exeInfo   = exeInfoPair.second;
+      if (exeDevice.exeRank != localRank) continue;
+      if (!exeInfo.pingpongParamGpu || exeInfo.totalPingpong == 0) continue;
+
+      for (auto& rss : exeInfo.resources) {
+        if (rss.numLaps == 0 || rss.pingpongParamIdx < 0) continue;
+        exeInfo.pingpongParamCpu[rss.pingpongParamIdx] = rss.pingpongParamCpu;
+      }
+
+      ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+      ERR_CHECK(hipMemcpy(exeInfo.pingpongParamGpu,
+                          exeInfo.pingpongParamCpu.data(),
+                          exeInfo.totalPingpong * sizeof(PingpongParam),
+                          hipMemcpyHostToDevice));
+
+      if (verbose) {
+        System::Get().Log("[INFO] PingpongParam upload: GPU%d  %zu bytes (%zu params)  host=%p dev=%p\n",
+                          exeDevice.exeIndex,
+                          exeInfo.totalPingpong * sizeof(PingpongParam),
+                          exeInfo.totalPingpong,
+                          exeInfo.pingpongParamCpu.data(),
+                          exeInfo.pingpongParamGpu);
+      }
+    }
+    return ERR_NONE;
+  }
+
 // Teardown-related functions
 //========================================================================================
 
@@ -4745,30 +4907,17 @@ namespace {
     int const localRank = GetRank();
     bool const verbose  = System::Get().IsVerbose();
 
-    // Loop over each transfer this executor is involved in
-    std::vector<TransferResources*> rssList;
-    rssList.reserve(exeInfo.resources.size() + exeInfo.pingpongResources.size());
-    for (auto& r : exeInfo.resources) rssList.push_back(&r);
-    for (auto& r : exeInfo.pingpongResources) rssList.push_back(&r);
-    for (TransferResources* rssPtr : rssList) {
-      TransferResources& rss = *rssPtr;
+    // Free per-transfer src/dst memory and executor-specific transfer resources
+    for (TransferResources& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
       vector<MemDevice> srcs, dsts;
       int32_t subIndex;
-      if (t.numLaps > 0) {
-        bool const isPong = (rss.numLaps < 0);
-        int const h = isPong ? 1 : 0;
-        if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
-        dsts.push_back(t.dsts[h]);
-        subIndex = isPong ? t.exeSubIndexPong : t.exeSubIndex;
-      } else {
-        srcs = t.srcs;
-        dsts = t.dsts;
-        subIndex = t.exeSubIndex;
-      }
+      ResolveTransferResourceMem(t, rss, srcs, dsts, subIndex);
 
       if (verbose) {
-        System::Get().Log("[INFO] Rank %d tearing down transfer %d\n", localRank, rss.transferIdx);
+        System::Get().Log("[INFO] Rank %d tearing down transfer %d%s\n",
+                          localRank, rss.transferIdx,
+                          rss.numLaps > 0 ? " (ping)" : rss.numLaps < 0 ? " (pong)" : "");
       }
 
       // Deallocate source memory
@@ -4853,11 +5002,9 @@ namespace {
 #endif
       if (exeInfo.totalSubExecs > 0)
         ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
-      for (auto& rss : exeInfo.pingpongResources) {
-        int const n = (int)rss.subExecParamCpu.size();
-        if (rss.subExecParamGpuPtr && n > 0)
-          ERR_CHECK(DeallocateMemory(memType, rss.subExecParamGpuPtr, n * sizeof(SubExecParam)));
-      }
+      if (exeInfo.pingpongParamGpu)
+        ERR_CHECK(DeallocateMemory(memType, exeInfo.pingpongParamGpu,
+                                   exeInfo.totalPingpong * sizeof(PingpongParam)));
     }
 
     return ERR_NONE;
@@ -4866,41 +5013,18 @@ namespace {
 // PingPong Wait primitives
 //========================================================================================
 
-  // Dispatcher: selects the appropriate wait implementation based on executor type and flag memory type.
-  void PingpongWait(void* flagMem, MemType flagMemType, ExeType exeType)
-  {
-    //TODO
-  }
-
-  // CPU-side spin wait: polls a flag until it becomes non-zero.
-  // Used by CPU executors and NIC pingpong lambdas.
-  template <typename T>
-  static void CpuWait(volatile T* flag)
-  {
-    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) == T(0))
-      ;
-  }
-
-  // GPU-side spin wait: polls a flag until it becomes non-zero.
+  // GPU-side spin wait: polls a flag until it equals the expected value.
   // Used by GPU-GFX executors (called inline from the transfer kernel).
-  template <typename T>
-  __device__ void GpuWait(volatile T* flag)
+  __device__ void GpuWait(volatile int64_t* flag, int64_t val)
   {
 #if defined(__NVCC__)
-    while (atomicAdd(const_cast<T*>(flag), T(0)) == T(0))
+    while (static_cast<int64_t>(atomicAdd(
+             reinterpret_cast<unsigned long long*>(const_cast<int64_t*>(flag)), 0ULL)) != val)
       ;
 #else
-    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) == T(0))
+    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != val)
       ;
 #endif
-  }
-
-  // Standalone GPU wait kernel: enqueued on a HIP stream for GPU-DMA executors.
-  // Launched with grid(1,1,1) block(1,1,1) on the same stream as the DMA transfer.
-  template <typename T>
-  __global__ void GpuDmaWaitKernel(volatile T* flag)
-  {
-    GpuWait(flag);
   }
 
   // Returns a pointer to the flag slot for the given lap, using strided wrap-around.
@@ -5394,18 +5518,6 @@ namespace {
     }
   }
 
-
-  // Pingpong GFX kernel (stub; implementation TBD)
-  template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
-  __global__ void __launch_bounds__(LAUNCH_BOUND)
-    GpuPingpongReduceKernel(SubExecParam* params, int seType, int waveOrder, int numSubIterations)
-  {
-    (void)params;
-    (void)seType;
-    (void)waveOrder;
-    (void)numSubIterations;
-  }
-
   // Kernel for GFX execution
   template <typename PACKED_FLOAT, int LAUNCH_BOUND, int UNROLL, int TEMPORAL_MODE>
   __global__ void __launch_bounds__(LAUNCH_BOUND)
@@ -5657,55 +5769,61 @@ namespace {
   };
 #endif
 
-
-  // Table of pingpong GFX kernels (reduce path only)
-#define GPU_PINGPONG_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL) \
-  GpuPingpongReduceKernel<DWORD, LAUNCH_BOUND, UNROLL, TEMPORAL>
-
-#define GPU_PINGPONG_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, DWORD)           \
-  {GPU_PINGPONG_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_NONE),  \
-   GPU_PINGPONG_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_LOAD),  \
-   GPU_PINGPONG_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_STORE), \
-   GPU_PINGPONG_KERNEL_KERNEL_DECL(LAUNCH_BOUND, UNROLL, DWORD, TEMPORAL_BOTH)}
-
-#define GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND, UNROLL)           \
-  {GPU_PINGPONG_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float),      \
-   GPU_PINGPONG_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float2),     \
-   GPU_PINGPONG_KERNEL_TEMPORAL_DECL(LAUNCH_BOUND, UNROLL, float4)}
-
-#define GPU_PINGPONG_KERNEL_UNROLL_DECL(LAUNCH_BOUND) \
-  {GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  1),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  2),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  3),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  4),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  5),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  6),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  7),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND,  8),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND, 16),  \
-   GPU_PINGPONG_KERNEL_DWORD_DECL(LAUNCH_BOUND, 32)}
-
-  typedef void (*GpuPingpongKernelFuncPtr)(SubExecParam*, int, int, int);
-#ifndef SINGLE_KERNEL
-  GpuPingpongKernelFuncPtr GpuPingpongKernelsTable[KERN_BOUNDS][KERN_UNROLLS][KERN_WORDSIZES][KERN_TEMPORALS] =
-  {
-    GPU_PINGPONG_KERNEL_UNROLL_DECL(256),
-    GPU_PINGPONG_KERNEL_UNROLL_DECL(512),
-    GPU_PINGPONG_KERNEL_UNROLL_DECL(768),
-    GPU_PINGPONG_KERNEL_UNROLL_DECL(1024),
-  };
-#endif
-  #undef GPU_PINGPONG_KERNEL_UNROLL_DECL
-  #undef GPU_PINGPONG_KERNEL_DWORD_DECL
-  #undef GPU_PINGPONG_KERNEL_TEMPORAL_DECL
-  #undef GPU_PINGPONG_KERNEL_KERNEL_DECL
-
   #undef GPU_KERNEL_UNROLL_DECL
   #undef GPU_KERNEL_DWORD_DECL
   #undef GPU_KERNEL_TEMPORAL_DECL
 
   int GetGpuKernelBlocksizeIdx(int blocksize) {
     return (blocksize + 255) / 256 - 1;
+  }
+
+  __global__ void GpuPingpongKernel(PingpongParam* params /*int seType*/)
+  {
+    int const pingpongIdx = blockIdx.y;
+    PingpongParam& p = params[pingpongIdx];
+
+#if !defined(__NVCC__)
+    int32_t xccId;
+    GetXccId(xccId);
+    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
+#endif
+
+    if (threadIdx.x != 0) return;
+
+    bool const isPing = p.numLaps > 0;
+    int  const laps   = isPing ? p.numLaps : -p.numLaps;
+
+    int64_t startCycle = GetTimestamp();
+
+    for (int lap = 0; lap < laps; lap++) {
+      volatile int64_t* localFlag  = FlagSlot(p.localFlagMem, lap, p.flagStride, p.flagAllocBytes);
+      volatile int64_t* remoteFlag = FlagSlot(p.flagMem,      lap, p.flagStride, p.flagAllocBytes);
+      // TODO: replace with hip_atomic_store
+      if (!p.srcMem[0]) {
+        if (isPing) {
+          __atomic_store_n((int64_t*)remoteFlag, lap & 1, __ATOMIC_RELEASE);
+          GpuWait(localFlag, lap & 1);
+        } else {
+          GpuWait(localFlag, lap & 1);
+          __atomic_store_n((int64_t*)remoteFlag, lap & 1, __ATOMIC_RELEASE);
+        }
+      } else{
+        if (isPing) {
+          __atomic_store((int64_t*)remoteFlag, const_cast<int64_t*>(p.srcMem[lap & 1]), __ATOMIC_RELEASE);
+          GpuWait(localFlag, lap & 1);
+        } else {
+          GpuWait(localFlag, lap & 1);
+          __atomic_store((int64_t*)remoteFlag, const_cast<int64_t*>(p.srcMem[lap & 1]), __ATOMIC_RELEASE);
+        }
+
+      }
+    }
+
+    if (isPing) {
+      __threadfence_system();
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+    }
   }
 
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
@@ -5794,28 +5912,35 @@ namespace {
     return ERR_NONE;
   }
 
-  // Execute a single pingpong GFX transfer (stub; implementation TBD)
+  // Launch all pingpong halves on the executor's shared pingpong stream (one threadblock per half).
   static ErrResult ExecuteGpuPingpong(int           const  iteration,
-                                      int           const  numSubExecs,
-                                      SubExecParam*        params,
+                                      int           const  numPingpong,
+                                      PingpongParam*       params,
                                       hipStream_t   const  stream,
                                       hipEvent_t    const  startEvent,
                                       hipEvent_t    const  stopEvent,
                                       int           const  xccDim,
-                                      ConfigOptions const& cfg,
-                                      bool          const  subExecParamHostAccessible,
-                                      TransferResources&   rss)
+                                      ConfigOptions const& cfg)
   {
     (void)iteration;
-    (void)numSubExecs;
-    (void)params;
-    (void)stream;
-    (void)startEvent;
-    (void)stopEvent;
-    (void)xccDim;
-    (void)cfg;
-    (void)subExecParamHostAccessible;
-    (void)rss;
+
+    dim3 const gridSize(xccDim, numPingpong, 1);
+    dim3 const blockSize(1);
+
+#if defined(__NVCC__)
+    if (cfg.gfx.useHipEvents && startEvent)
+      ERR_CHECK(hipEventRecord(startEvent, stream));
+    GpuPingpongKernel<<<gridSize, blockSize, 0, stream>>>(params);
+    if (cfg.gfx.useHipEvents && stopEvent)
+      ERR_CHECK(hipEventRecord(stopEvent, stream));
+#else
+    hipExtLaunchKernelGGL(GpuPingpongKernel, gridSize, blockSize, 0, stream,
+                          cfg.gfx.useHipEvents ? startEvent : NULL,
+                          cfg.gfx.useHipEvents ? stopEvent  : NULL, 0,
+                          params);
+#endif
+
+    ERR_CHECK(hipStreamSynchronize(stream));
     return ERR_NONE;
   }
 
@@ -5829,59 +5954,52 @@ namespace {
     ERR_CHECK(hipSetDevice(exeIndex));
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
-    int const normalStreamCount = cfg.gfx.useMultiStream ? (int)exeInfo.resources.size()
-                                                         : (exeInfo.resources.empty() ? 0 : 1);
 
     if (cfg.gfx.useMultiStream) {
-      // Launch one thread per Transfer in separate streams
+      // Launch one thread per normal transfer in separate streams
       vector<std::future<ErrResult>> asyncTransfers;
-      for (int i = 0; i < normalStreamCount; i++) {
+      int streamIdx = 0;
+      for (int i = 0; i < exeInfo.resources.size(); i++) {
+        if (exeInfo.resources[i].numLaps != 0) continue;
         asyncTransfers.emplace_back(std::async(std::launch::async,
                                                ExecuteGpuTransfer,
                                                iteration,
                                                exeInfo.totalSubExecs,
                                                exeInfo.subExecParamGpu,
-                                               exeInfo.streams[i],
-                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                               exeInfo.streams[streamIdx],
+                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[streamIdx] : NULL,
+                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[streamIdx] : NULL,
                                                xccDim,
                                                std::cref(cfg),
                                                exeInfo.gfxKernelToUse,
                                                exeInfo.subExecParamHostAccessible,
                                                std::ref(exeInfo.resources[i])));
+        streamIdx++;
       }
       for (auto& asyncTransfer : asyncTransfers)
         ERR_CHECK(asyncTransfer.get());
-    } else if (!exeInfo.resources.empty()) {
-      // Launch all Transfers in one kernel launch (avoid extra thread creation)
-      ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
-                         cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                         cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                         xccDim, cfg, exeInfo.gfxKernelToUse,
-                         exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
+    } else if (exeInfo.totalSubExecs > 0) {
+      // Launch all normal transfers in one kernel launch (avoid extra thread creation)
+      TransferResources* normalRss = nullptr;
+      for (auto& rss : exeInfo.resources) {
+        if (rss.numLaps == 0) { normalRss = &rss; break; }
+      }
+      ERR_CHECK(ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
+                                   cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                                   cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                                   xccDim, cfg, exeInfo.gfxKernelToUse,
+                                   exeInfo.subExecParamHostAccessible, *normalRss));
     }
 
-    // Pingpong transfers: one stream per resource (appended after normal streams)
-    if (!exeInfo.pingpongResources.empty()) {
-      vector<std::future<ErrResult>> asyncPingpong;
-      for (int i = 0; i < (int)exeInfo.pingpongResources.size(); i++) {
-        TransferResources& rss = exeInfo.pingpongResources[i];
-        int const streamIdx = normalStreamCount + i;
-        asyncPingpong.emplace_back(std::async(std::launch::async,
-                                              ExecuteGpuPingpong,
-                                              iteration,
-                                              (int)rss.subExecParamCpu.size(),
-                                              rss.subExecParamGpuPtr,
-                                              exeInfo.streams[streamIdx],
-                                              cfg.gfx.useHipEvents ? exeInfo.startEvents[streamIdx] : NULL,
-                                              cfg.gfx.useHipEvents ? exeInfo.stopEvents[streamIdx] : NULL,
-                                              xccDim,
-                                              std::cref(cfg),
-                                              exeInfo.subExecParamHostAccessible,
-                                              std::ref(rss)));
-      }
-      for (auto& asyncPingpongTransfer : asyncPingpong)
-        ERR_CHECK(asyncPingpongTransfer.get());
+    if (exeInfo.totalPingpong > 0) {
+      ERR_CHECK(ExecuteGpuPingpong(iteration,
+                                   exeInfo.totalPingpong,
+                                   exeInfo.pingpongParamGpu,
+                                   exeInfo.streams[exeInfo.streams.size() - 1],
+                                   cfg.gfx.useHipEvents ? exeInfo.startEvents[exeInfo.streams.size() - 1] : NULL,
+                                   cfg.gfx.useHipEvents ? exeInfo.stopEvents[exeInfo.streams.size() - 1] : NULL,
+                                   xccDim,
+                                   cfg));
     }
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
@@ -5892,7 +6010,14 @@ namespace {
       // - Otherwise, Use CPU timing
       if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
         float gpuDeltaMsec;
-        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        if (exeInfo.totalSubExecs > 0) {
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        } else if (exeInfo.totalPingpong > 0) {
+          int const ppIdx = exeInfo.streams.size() - 1;
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[ppIdx], exeInfo.stopEvents[ppIdx]));
+        } else {
+          gpuDeltaMsec = 0.0f;
+        }
         gpuDeltaMsec /= cfg.general.numSubIterations;
         exeInfo.totalDurationMsec += gpuDeltaMsec;
       } else {
@@ -5915,6 +6040,7 @@ namespace {
 
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
+          if (rss.numLaps != 0) continue;
           int64_t minStartCycle = std::numeric_limits<int64_t>::max();
           int64_t maxStopCycle  = std::numeric_limits<int64_t>::min();
           std::set<std::pair<int, int>> CUs;
@@ -6296,21 +6422,23 @@ namespace {
       resource.transferIdx = i;
       resource.numLaps = t.numLaps;
 
+      bool isPingpong = t.numLaps != 0;
+
       ExeInfo& exeInfo = executorMap[exeDevice];
       exeInfo.totalBytes += t.numBytes;
-      exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
-      // Pingpong transfers are handled separately, exeInfo subExecParam is used exclusively for normal transfers
-      if (t.numLaps != 0) {
-        exeInfo.pingpongResources.push_back(resource);
-      } else {
-        exeInfo.resources.push_back(resource);
+      if (!isPingpong) {
         exeInfo.totalSubExecs += t.numSubExecs;
+      } else {
+        exeInfo.totalPingpong ++;
       }
+      exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
+      exeInfo.resources.push_back(resource);
       minNumSrcs  = std::min(minNumSrcs, (int)t.srcs.size());
       maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
 
-      if (t.numLaps != 0) {
+      // proceed to check latter half of a Transfer (pong)
+      if (isPingpong) {
         ExeDevice pongExe;
         ERR_APPEND(GetActualExecutor(t.exeDevicePong, pongExe), errResults);
 
@@ -6320,8 +6448,9 @@ namespace {
 
         ExeInfo& pongInfo = executorMap[pongExe];
         pongInfo.totalBytes += t.numBytes;
+        pongInfo.totalPingpong ++;
         pongInfo.useSubIndices |= (t.exeSubIndexPong != -1 || (t.exeDevicePong.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
-        pongInfo.pingpongResources.push_back(pong);
+        pongInfo.resources.push_back(pong);
       }
     }
 
@@ -6343,9 +6472,6 @@ namespace {
       for (auto& resource : exeInfo.resources) {
         transferResources.push_back(&resource);
       }
-      for (auto& resource : exeInfo.pingpongResources) {
-        transferResources.push_back(&resource);
-      }
       // Track executors that are on this rank
       if (exeDevice.exeRank == localRank) {
         localExecutors.push_back(exeDevice);
@@ -6357,63 +6483,12 @@ namespace {
       }
     }
 
+    // After all Executors are prepared and subExecParam is set up, we need to link ping and pong flag memory.
+    ERR_APPEND(PingpongPostPrep(cfg, localRank, transferResources, executorMap), errResults);
+
     // Prepare reference src/dst arrays - only once for largest size.
     // dstReference (expected results) is only needed when validation is enabled.
     bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
-    // Cross-link flagMem for pingpong halves
-    // Construct a map of transferIdx -> pong resource, so that ping resources can find their pong counterparts.
-    // Only place where ping and pong resources need to be linked, 
-    // if further instances arise, we should add a partner field to TransferResources.
-    std::map<int, TransferResources*> pongByTransferIdx;
-    for (auto* rss : transferResources) {
-      if (rss->numLaps < 0) pongByTransferIdx[rss->transferIdx] = rss;
-    }
-    for (auto* pingRss : transferResources) {
-      if (pingRss->numLaps <= 0) continue;
-
-      auto it = pongByTransferIdx.find(pingRss->transferIdx);
-      if (it == pongByTransferIdx.end()) continue;
-      TransferResources* pongRss = it->second;
-
-      pingRss->flagMem        = pongRss->dstMem[0];
-      pongRss->flagMem        = pingRss->dstMem[0];
-      int stride              = cfg.general.pingpongStride;
-      int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->numLaps);
-      pingRss->flagStride     = stride;
-      pongRss->flagStride     = stride;
-      pingRss->flagAllocBytes = allocBytes;
-      pongRss->flagAllocBytes = allocBytes;
-    }
-
-    // Propagate flagMem into SubExecParam for pingpong transfers
-    for (auto& exeInfoPair : executorMap) {
-      ExeDevice const& exeDevice = exeInfoPair.first;
-      ExeInfo&         exeInfo   = exeInfoPair.second;
-      if (exeDevice.exeRank != localRank) continue;
-
-      for (auto& rss : exeInfo.pingpongResources) {
-        volatile int64_t* flag = static_cast<volatile int64_t*>(rss.flagMem);
-
-        // Update per-transfer CPU-side SubExecParam (used by CPU executor)
-        for (auto& p : rss.subExecParamCpu) {
-          p.flagMem        = flag;
-          p.flagStride     = rss.flagStride;
-          p.flagAllocBytes = rss.flagAllocBytes;
-        }
-
-        // For GFX executors, also update the GPU-side buffer
-        if (exeDevice.exeType == EXE_GPU_GFX && rss.subExecParamGpuPtr) {
-          for (int subIdx : rss.subExecIdx) {
-            ERR_APPEND(hipMemcpy(rss.subExecParamGpuPtr + subIdx,
-                                 &rss.subExecParamCpu[subIdx],
-                                 sizeof(SubExecParam),
-                                 hipMemcpyHostToDevice), errResults);
-          }
-        }
-      }
-    }
-
-    // Prepare reference src/dst arrays - only once for largest size
     size_t maxN = maxNumBytes / sizeof(float);
     vector<float> outputBuffer(validateEnabled ? maxN : 0);
     vector<vector<float>> dstReference;
@@ -6440,26 +6515,26 @@ namespace {
       bool const verbose = System::Get().IsVerbose();
       for (auto resource : transferResources) {
         Transfer const& t = transfers[resource->transferIdx];
+        // Ping and Pong will start with src value of 0
+        if (t.numLaps != 0) continue;
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
-          int const tSrcIdx = (t.numLaps != 0) ? (resource->numLaps < 0 ? 1 : 0) : srcIdx;
-          if (t.srcs[tSrcIdx].memRank == localRank) {
-            if (IsGpuMemType(t.srcs[tSrcIdx].memType)) {
-              ERR_APPEND(hipSetDevice(t.srcs[tSrcIdx].memIndex), errResults);
+          if (t.srcs[srcIdx].memRank == localRank) {
+            if (IsGpuMemType(t.srcs[srcIdx].memType)) {
+              ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
             }
             if (verbose) {
-              MemDevice const& md = t.srcs[tSrcIdx];
+              MemDevice const& md = t.srcs[srcIdx];
               System::Get().Log("[INFO] Data prep memcpy: transfer %d SRC[%d] host->%s%d  %zu bytes  dst=%p src=%p\n",
-                                resource->transferIdx, tSrcIdx,
+                                resource->transferIdx, srcIdx,
                                 GetMemTypeName(md.memType), md.memIndex,
                                 resource->numBytes,
                                 resource->srcMem[srcIdx] + initOffset,
-                                srcReference[tSrcIdx].data());
+                                srcReference[srcIdx].data());
             }
-            ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[tSrcIdx].data(), resource->numBytes,
+            ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
             ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
-          if (t.numLaps != 0) break;
         }
       }
     }
@@ -6526,25 +6601,37 @@ namespace {
       System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
       if (shouldStop) break;
 
-      // Wait for all ranks before starting any timing
-      System::Get().Barrier();
-
-      // Zero flag memory for pingpong transfers so each lap's slot starts at 0
+      // Reset pingpong flag memory to idle (-1) before each iteration
       for (auto* rss : transferResources) {
         if (rss->numLaps == 0) continue;
 
-        void* dst = rss->dstMem[0];
-        if (!dst) continue;
-
         Transfer const& t = transfers[rss->transferIdx];
         bool const isPong = (rss->numLaps < 0);
-        MemType mt = t.dsts[isPong ? 1 : 0].memType;
+        MemDevice const& dstMem = t.dsts[isPong ? 1 : 0];
+
+        // Flag buffers are physically allocated on the owning rank only
+        if (dstMem.memRank != localRank) continue;
+
+        void* dst = rss->dstMem[0];
+        if (!dst) {
+          // Defensive against future executors
+          // TODO: improve exit path to prevent hang
+          System::Get().Log("[ERROR] dstMem[0] is NULL for ping/pong transfer %d on rank %d\n",
+                            rss->transferIdx, localRank);
+          exit(1);
+        }
+
         size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(rss->numLaps));
-        if (IsCpuMemType(mt))
-          memset(dst, 0, allocBytes);
-        else
-          hipMemset(dst, 0, allocBytes);
+        if (IsCpuMemType(dstMem.memType)) {
+          memset(dst, -1, allocBytes);
+        } else if (IsGpuMemType(dstMem.memType)) {
+          ERR_APPEND(ErrResult(hipSetDevice(dstMem.memIndex)), errResults);
+          ERR_APPEND(ErrResult(hipMemset(dst, -1, allocBytes)), errResults);
+        }
       }
+
+      // Wait for all ranks before starting any timing
+      System::Get().Barrier();
 
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
@@ -6695,23 +6782,7 @@ namespace {
 
         // Copy over transfer results (ping half owns pingpong latency)
         for (auto const& rss : exeInfo.resources) {
-          int const transferIdx = rss.transferIdx;
-          exeResult.transferIdx.push_back(transferIdx);
-
-          TransferResult& tfrResult      = results.tfrResults[transferIdx];
-          tfrResult.exeDevice            = exeDevice;
-          tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-          tfrResult.numBytes             = rss.numBytes;
-          tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
-          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
-          if (cfg.general.recordPerIteration) {
-            tfrResult.perIterMsec = rss.perIterMsec;
-            tfrResult.perIterCUs  = rss.perIterCUs;
-          }
-          exeResult.sumBandwidthGbPerSec += tfrResult.avgBandwidthGbPerSec;
-        }
-        for (auto const& rss : exeInfo.pingpongResources) {
-          if (rss.numLaps < 0) continue;
+          if (rss.numLaps < 0) continue;  // skip pong half — ping owns the result row
           int const transferIdx = rss.transferIdx;
           exeResult.transferIdx.push_back(transferIdx);
 
@@ -8905,3 +8976,4 @@ namespace {
 #undef ERR_CHECK
 #undef ERR_APPEND
 }
+
