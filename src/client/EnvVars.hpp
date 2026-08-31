@@ -87,6 +87,7 @@ public:
   int sweepMaxPow2;                  // Maximum power of two to sweep up to when whnumber of bytes to transfer is set to 0
   int sweepMinPow2;                  // Minimum power of two to sweep up from when number of bytes to transfer is set to 0
   int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
+  int validateOnDevice;              // Validate GPU dst/src memory via an on-device kernel instead of host memcmp
   int validateSource;                // Validate source GPU memory immediately after preparation
 
   // DMA options
@@ -191,6 +192,7 @@ public:
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
+    validateOnDevice  = GetEnvVar("VALIDATE_ON_DEVICE"  , 0);
     validateSource    = GetEnvVar("VALIDATE_SOURCE"     , 0);
 
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        ,-1);
@@ -414,6 +416,7 @@ public:
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
     printf(" USE_SINGLE_STREAM   - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
     printf(" VALIDATE_DIRECT     - Validate GPU destination memory directly instead of staging GPU memory on host\n");
+    printf(" VALIDATE_ON_DEVICE  - Validate GPU dst/src memory via an on-device kernel instead of copying to host\n");
     printf(" VALIDATE_SOURCE     - Validate GPU src memory immediately after preparation\n");
     printf("\n");
     printf("Environment variables (back-end):\n");
@@ -581,6 +584,8 @@ public:
     }
     Print("VALIDATE_DIRECT", validateDirect,
           "Validate GPU destination memory %s", validateDirect ? "directly" : "via CPU staging buffer");
+    Print("VALIDATE_ON_DEVICE", validateOnDevice,
+          "Validate GPU memory %s", validateOnDevice ? "on-device via kernel" : "by copying to host");
     Print("VALIDATE_SOURCE", validateSource,
           validateSource ? "Validate source after preparation" : "Do not perform source validation after prep");
     printf("\n");
@@ -741,6 +746,7 @@ public:
     cfg.data.fillCompress          = fillCompress;
     cfg.data.fillPattern           = fillPattern;
     cfg.data.validateDirect        = validateDirect;
+    cfg.data.validateOnDevice      = validateOnDevice;
     cfg.data.validateSource        = validateSource;
 
     cfg.dma.useHsaCopy             = useHsaDma;

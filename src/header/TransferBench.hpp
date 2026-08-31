@@ -235,6 +235,7 @@ namespace TransferBench
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
     vector<int>   fillCompress     = {};        ///< Customized data patterns (overrides fillPattern if non-empty)
     int           validateDirect   = 0;         ///< Validate GPU results directly instead of copying to host
+    int           validateOnDevice = 0;         ///< Validate GPU dst/src memory via an on-device kernel instead of host memcmp
     int           validateSource   = 0;         ///< Validate src GPU memory immediately after preparation
   };
 
@@ -2987,6 +2988,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // For GFX executor
     SubExecParam*              subExecParamGpuPtr;
 
+    // For on-device validation (VALIDATE_ON_DEVICE)
+    vector<float*>             dstExpectedMem;      ///< Per-dst device copy of expected values
+    vector<size_t>             dstExpectedBytes;    ///< Allocated size of each dst expected buffer
+    vector<unsigned long long*>dstValidateScratch;  ///< Per-dst device scratch [0]=count, [1]=firstOffset
+    vector<float*>             srcExpectedMem;      ///< Per-src device copy of expected values (validateSource)
+    vector<size_t>             srcExpectedBytes;    ///< Allocated size of each src expected buffer
+    vector<unsigned long long*>srcValidateScratch;  ///< Per-src device scratch [0]=count, [1]=firstOffset
+
     // For targeted-SDMA
 #if !defined(__NVCC__)
     vector<hsa_agent_t>        dstAgent;          ///< DMA destination memory agents
@@ -4267,6 +4276,61 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return result;
   }
 
+  // On-device validation kernel: byte-compares a buffer against expected values, recording the
+  // number of mismatched bytes and the offset of the first mismatch. Compiles under HIP and CUDA.
+  __global__ void GpuValidateKernel(unsigned char const* __restrict__ data,
+                                    unsigned char const* __restrict__ expected,
+                                    size_t                            numBytes,
+                                    unsigned long long*               result)  // [0]=count, [1]=firstOffset
+  {
+    size_t const stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numBytes; i += stride) {
+      if (data[i] != expected[i]) {
+        atomicAdd(result, 1ULL);
+        atomicMin(result + 1, (unsigned long long)i);
+      }
+    }
+  }
+
+  // Launches GpuValidateKernel on the given device and returns the mismatch count / first offset.
+  // scratch is a 2-element device buffer ([count, firstOffset]) allocated on the same device.
+  static ErrResult ValidateBufferOnDevice(int                 deviceIndex,
+                                          float const*        devData,
+                                          float const*        devExpected,
+                                          size_t              numBytes,
+                                          unsigned long long* scratch,
+                                          unsigned long long* outCount,
+                                          unsigned long long* outFirst)
+  {
+    ERR_CHECK(hipSetDevice(deviceIndex));
+
+    // Reset scratch: count=0, firstOffset=numBytes (sentinel meaning "no mismatch")
+    unsigned long long init[2] = {0ULL, (unsigned long long)numBytes};
+    ERR_CHECK(hipMemcpy(scratch, init, sizeof(init), hipMemcpyHostToDevice));
+
+    int    const blockSize = 256;
+    size_t const numBlocks = (numBytes + blockSize - 1) / blockSize;
+    int    const gridSize  = (int)std::min<size_t>(numBlocks, 4096);
+    dim3 const grid(gridSize > 0 ? gridSize : 1);
+    dim3 const block(blockSize);
+
+#if defined(__NVCC__)
+    GpuValidateKernel<<<grid, block, 0, 0>>>((unsigned char const*)devData,
+                                             (unsigned char const*)devExpected, numBytes, scratch);
+#else
+    hipLaunchKernelGGL(GpuValidateKernel, grid, block, 0, 0,
+                       (unsigned char const*)devData, (unsigned char const*)devExpected,
+                       numBytes, scratch);
+#endif
+    ERR_CHECK(hipDeviceSynchronize());
+
+    unsigned long long out[2];
+    ERR_CHECK(hipMemcpy(out, scratch, sizeof(out), hipMemcpyDeviceToHost));
+    *outCount = out[0];
+    *outFirst = out[0] ? out[1] : 0ULL;
+    return ERR_NONE;
+  }
+
   // Checks that destination buffers match expected values
   static ErrResult ValidateAllTransfers(ConfigOptions              const& cfg,
                                         vector<Transfer>           const& transfers,
@@ -4287,34 +4351,54 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
         if (t.dsts[dstIdx].memRank != GetRank()) continue;
-        if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
-          output = (rss->dstMem[dstIdx]) + initOffset;
-          if (verbose) {
-            System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
-                              transferIdx, dstIdx,
-                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
-                              t.numBytes, output);
-          }
-        } else {
-          ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
-          if (verbose) {
-            System::Get().Log("[INFO] Validation memcpy: transfer %d DST[%d] %s%d->host  %zu bytes  src=%p dst=%p\n",
-                              transferIdx, dstIdx,
-                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
-                              t.numBytes,
-                              (rss->dstMem[dstIdx]) + initOffset,
-                              outputBuffer.data());
-          }
-          ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
-          ERR_CHECK(hipDeviceSynchronize());
-          output = outputBuffer.data();
-        }
 
         ErrResult dstErr = ERR_NONE;
-        if (memcmp(output, expected, t.numBytes)) {
-          std::string ranges = ByteMismatchSummary(output, expected, t.numBytes);
-          dstErr = {ERR_FATAL, "Transfer %d: Mismatch at destination %d on rank %d: bytes %s",
-                    transferIdx, dstIdx, t.dsts[dstIdx].memRank, ranges.c_str()};
+        if (cfg.data.validateOnDevice && IsGpuMemType(t.dsts[dstIdx].memType)) {
+          // Compare on the GPU against the pre-uploaded expected buffer; only a tiny result copies back
+          if (verbose) {
+            System::Get().Log("[INFO] Validation on-device: transfer %d DST[%d] %s%d  %zu bytes  ptr=%p\n",
+                              transferIdx, dstIdx,
+                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                              t.numBytes, (rss->dstMem[dstIdx]) + initOffset);
+          }
+          unsigned long long count = 0, firstOff = 0;
+          ERR_CHECK(ValidateBufferOnDevice(t.dsts[dstIdx].memIndex,
+                                           (rss->dstMem[dstIdx]) + initOffset,
+                                           rss->dstExpectedMem[dstIdx], t.numBytes,
+                                           rss->dstValidateScratch[dstIdx], &count, &firstOff));
+          if (count) {
+            dstErr = {ERR_FATAL, "Transfer %d: Mismatch at destination %d on rank %d: %llu mismatched bytes, first at offset %llu",
+                      transferIdx, dstIdx, t.dsts[dstIdx].memRank, count, firstOff};
+          }
+        } else {
+          if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+            output = (rss->dstMem[dstIdx]) + initOffset;
+            if (verbose) {
+              System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
+                                transferIdx, dstIdx,
+                                GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                                t.numBytes, output);
+            }
+          } else {
+            ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
+            if (verbose) {
+              System::Get().Log("[INFO] Validation memcpy: transfer %d DST[%d] %s%d->host  %zu bytes  src=%p dst=%p\n",
+                                transferIdx, dstIdx,
+                                GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                                t.numBytes,
+                                (rss->dstMem[dstIdx]) + initOffset,
+                                outputBuffer.data());
+            }
+            ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
+            ERR_CHECK(hipDeviceSynchronize());
+            output = outputBuffer.data();
+          }
+
+          if (memcmp(output, expected, t.numBytes)) {
+            std::string ranges = ByteMismatchSummary(output, expected, t.numBytes);
+            dstErr = {ERR_FATAL, "Transfer %d: Mismatch at destination %d on rank %d: bytes %s",
+                      transferIdx, dstIdx, t.dsts[dstIdx].memRank, ranges.c_str()};
+          }
         }
 
         if (verbose)
@@ -4943,6 +5027,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
 #endif
         }
+      }
+
+      // Deallocate on-device validation buffers (VALIDATE_ON_DEVICE)
+      for (int iDst = 0; iDst < (int)rss.dstExpectedMem.size(); ++iDst) {
+        if (rss.dstExpectedMem[iDst])
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstExpectedMem[iDst], rss.dstExpectedBytes[iDst]));
+        if (rss.dstValidateScratch[iDst])
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstValidateScratch[iDst], 2 * sizeof(unsigned long long)));
+      }
+      for (int iSrc = 0; iSrc < (int)rss.srcExpectedMem.size(); ++iSrc) {
+        if (rss.srcExpectedMem[iSrc])
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcExpectedMem[iSrc], rss.srcExpectedBytes[iSrc]));
+        if (rss.srcValidateScratch[iSrc])
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcValidateScratch[iSrc], 2 * sizeof(unsigned long long)));
       }
 
       // Destroy HSA signal for DMA executor
@@ -6524,6 +6622,63 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
             ERR_APPEND(hipDeviceSynchronize(), errResults);
+
+            // Optionally validate source memory right after preparation
+            if (cfg.data.validateSource) {
+              if (cfg.data.validateOnDevice && IsGpuMemType(t.srcs[srcIdx].memType)) {
+                resource->srcExpectedMem.resize(resource->srcMem.size(), nullptr);
+                resource->srcExpectedBytes.resize(resource->srcMem.size(), 0);
+                resource->srcValidateScratch.resize(resource->srcMem.size(), nullptr);
+                ERR_APPEND(AllocateMemory(t.srcs[srcIdx], resource->numBytes,
+                                          (void**)&resource->srcExpectedMem[srcIdx],
+                                          &resource->srcExpectedBytes[srcIdx]), errResults);
+                ERR_APPEND(AllocateMemory(t.srcs[srcIdx], 2 * sizeof(unsigned long long),
+                                          (void**)&resource->srcValidateScratch[srcIdx]), errResults);
+                ERR_APPEND(hipMemcpy(resource->srcExpectedMem[srcIdx], srcReference[srcIdx].data(),
+                                     resource->numBytes, hipMemcpyDefault), errResults);
+                ERR_APPEND(hipDeviceSynchronize(), errResults);
+                unsigned long long count = 0, firstOff = 0;
+                ERR_APPEND(ValidateBufferOnDevice(t.srcs[srcIdx].memIndex,
+                                                  resource->srcMem[srcIdx] + initOffset,
+                                                  resource->srcExpectedMem[srcIdx], resource->numBytes,
+                                                  resource->srcValidateScratch[srcIdx], &count, &firstOff), errResults);
+                if (count)
+                  ERR_APPEND((ErrResult{ERR_FATAL, "Transfer %d: Source %d mismatch after prep: %llu mismatched bytes, first at offset %llu",
+                                        resource->transferIdx, srcIdx, count, firstOff}), errResults);
+              } else {
+                size_t const N = resource->numBytes / sizeof(float);
+                vector<float> tmp(N);
+                ERR_APPEND(hipMemcpy(tmp.data(), resource->srcMem[srcIdx] + initOffset, resource->numBytes, hipMemcpyDefault), errResults);
+                ERR_APPEND(hipDeviceSynchronize(), errResults);
+                if (memcmp(tmp.data(), srcReference[srcIdx].data(), resource->numBytes))
+                  ERR_APPEND((ErrResult{ERR_FATAL, "Transfer %d: Source %d mismatch after prep",
+                                        resource->transferIdx, srcIdx}), errResults);
+              }
+            }
+          }
+        }
+      }
+
+      // Pre-upload expected destination values to device for on-device validation
+      if (validateEnabled && cfg.data.validateOnDevice) {
+        for (auto resource : transferResources) {
+          Transfer const& t = transfers[resource->transferIdx];
+          float const* dstExpected = dstReference[t.srcs.size()].data();
+          resource->dstExpectedMem.resize(resource->dstMem.size(), nullptr);
+          resource->dstExpectedBytes.resize(resource->dstMem.size(), 0);
+          resource->dstValidateScratch.resize(resource->dstMem.size(), nullptr);
+          for (int dstIdx = 0; dstIdx < (int)resource->dstMem.size(); dstIdx++) {
+            if (t.dsts[dstIdx].memRank != localRank) continue;
+            if (!IsGpuMemType(t.dsts[dstIdx].memType)) continue;
+            ERR_APPEND(hipSetDevice(t.dsts[dstIdx].memIndex), errResults);
+            ERR_APPEND(AllocateMemory(t.dsts[dstIdx], resource->numBytes,
+                                      (void**)&resource->dstExpectedMem[dstIdx],
+                                      &resource->dstExpectedBytes[dstIdx]), errResults);
+            ERR_APPEND(AllocateMemory(t.dsts[dstIdx], 2 * sizeof(unsigned long long),
+                                      (void**)&resource->dstValidateScratch[dstIdx]), errResults);
+            ERR_APPEND(hipMemcpy(resource->dstExpectedMem[dstIdx], dstExpected,
+                                 resource->numBytes, hipMemcpyDefault), errResults);
+            ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
         }
       }
@@ -6696,6 +6851,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               continue;
             }
             anyLocalDst = true;
+            if (cfg.data.validateOnDevice && IsGpuMemType(t.dsts[dstIdx].memType)) {
+              unsigned long long count = 0, firstOff = 0;
+              (void)ValidateBufferOnDevice(t.dsts[dstIdx].memIndex, rss->dstMem[dstIdx] + initOffset,
+                                           rss->dstExpectedMem[dstIdx], t.numBytes,
+                                           rss->dstValidateScratch[dstIdx], &count, &firstOff);
+              if (count == 0) {
+                System::Get().Log("  DST[%d]=PASS", dstIdx);
+              } else {
+                System::Get().Log("  DST[%d]=FAIL(%llu bytes, first @ %llu)", dstIdx, count, firstOff);
+                transferOk = false;
+              }
+              continue;
+            }
             float* output;
             if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
               output = rss->dstMem[dstIdx] + initOffset;
