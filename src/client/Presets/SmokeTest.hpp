@@ -34,6 +34,131 @@ const std::string pass = "*";
 const std::string fail = "F";
 const std::string skip = ".";
 
+struct GpuCapabilityResult {
+  int rank;
+  int gpuIdx;
+  int vmmSupported;     // 1 = supported, 0 = unsupported, -1 = query failed, -2 = not checked
+  int fabricSupported;  // 1 = supported, 0 = unsupported, -1 = query failed, -2 = not checked
+};
+
+// Reports capabilities using the same pass/skip/fail symbols as the test table,
+// centered within the given column width
+static std::string CapabilityStr(int supported, int width)
+{
+  std::string const& sym = (supported ==  1) ? pass :
+                           (supported == -2) ? skip : fail;
+  int const padding = width - (int)sym.size();
+  if (padding <= 0) return sym;
+  return std::string(padding / 2, ' ') + sym + std::string(padding - padding / 2, ' ');
+}
+
+static int QueryVmmSupported(int gpuIdx)
+{
+  int vmm = 0;
+  hipError_t err = hipDeviceGetAttribute(
+      &vmm, hipDeviceAttributeVirtualMemoryManagementSupported, gpuIdx);
+  if (err != hipSuccess) return -1;
+  return vmm ? 1 : 0;
+}
+
+static int QueryFabricSupported(int gpuIdx)
+{
+#if defined(__NVCC__)
+  int fabric = 0;
+  hipError_t err = hipDeviceGetAttribute(
+      &fabric, cudaDevAttrHandleTypeFabricSupported, gpuIdx);
+  if (err != hipSuccess) return -1;
+  return fabric ? 1 : 0;
+#elif defined(POD_COMM_ENABLED)
+  hipMemAllocationProp prop = {};
+  prop.type = hipMemAllocationTypePinned;
+  prop.requestedHandleTypes = hipMemHandleTypeFabric;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = gpuIdx;
+  size_t granularity = 0;
+  hipError_t err = hipMemGetAllocationGranularity(
+      &granularity, &prop, hipMemAllocationGranularityRecommended);
+  if (err != hipSuccess) return 0;
+  return 1;
+#else
+  (void)gpuIdx;
+  return -2;
+#endif
+}
+
+// Query VMM and fabric-handle support on each local GPU; gather and print per rank.
+// Returns ERR_FATAL when multi-rank and any GPU lacks required support.
+static ErrResult CheckVmmAndFabricSupport(int numRanks)
+{
+  int const myRank = TransferBench::GetRank();
+  int const numLocalGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX, myRank);
+
+  std::vector<GpuCapabilityResult> localResults(numLocalGpus);
+  for (int gpuIdx = 0; gpuIdx < numLocalGpus; gpuIdx++) {
+    localResults[gpuIdx].rank = myRank;
+    localResults[gpuIdx].gpuIdx = gpuIdx;
+    localResults[gpuIdx].vmmSupported     = QueryVmmSupported(gpuIdx);
+    localResults[gpuIdx].fabricSupported  = QueryFabricSupported(gpuIdx);
+  }
+
+  std::vector<int> numGpusOnRank(numRanks, 0);
+  for (int rank = 0; rank < numRanks; rank++) {
+    int nGpus = (rank == myRank) ? numLocalGpus : 0;
+    TransferBench::System::Get().Broadcast(rank, sizeof(int), &nGpus);
+    numGpusOnRank[rank] = nGpus;
+  }
+
+  bool requireSupport = (numRanks > 1);
+  bool allSupported = true;
+  bool fabricChecked = false;
+
+  if (Utils::RankDoesOutput()) {
+    Utils::Print("\nGPU capability check (VMM / fabric handles, per rank):\n");
+    Utils::Print("| Rank | GPU | VMM | Fabric |\n");
+    Utils::Print("|------|-----|-----|--------|\n");
+  }
+
+  for (int rank = 0; rank < numRanks; rank++) {
+    for (int gpu = 0; gpu < numGpusOnRank[rank]; gpu++) {
+      GpuCapabilityResult result = {};
+      if (rank == myRank) result = localResults[gpu];
+      TransferBench::System::Get().Broadcast(rank, sizeof(result), &result);
+
+      if (result.fabricSupported != -2)
+        fabricChecked = true;
+
+      if (Utils::RankDoesOutput()) {
+        Utils::Print("| %4d | %3d | %s | %s |\n",
+                     result.rank, result.gpuIdx,
+                     CapabilityStr(result.vmmSupported,    3).c_str(),
+                     CapabilityStr(result.fabricSupported, 6).c_str());
+      }
+
+      if (requireSupport) {
+        if (result.vmmSupported != 1)
+          allSupported = false;
+        if (result.fabricSupported == 0 || result.fabricSupported == -1)
+          allSupported = false;
+      }
+    }
+  }
+
+  if (Utils::RankDoesOutput()) {
+    Utils::Print("\n");
+    if (requireSupport && !allSupported) {
+      Utils::Print("[ERROR] Multi-rank smoketest requires VMM and fabric-handle support on every GPU\n");
+    } else if (requireSupport && !fabricChecked) {
+      Utils::Print("[WARN] Fabric-handle support could not be verified (build without POD_COMM); "
+                   "cross-rank GPU tests may fail at runtime\n");
+    }
+  }
+
+  if (requireSupport && !allSupported)
+    return ERR_FATAL;
+
+  return ERR_NONE;
+}
+
 int RunTest(int                        testNum,
             std::set<int> const&       testsToRun,
             std::vector<size_t> const& sizeList,
@@ -372,6 +497,9 @@ int SmokeTestPreset(EnvVars&          ev,
 
   Utils::Print("Running tests on %d GPUs total across %d rank(s)\n", totalGpus, numRanks);
   Utils::Print("Legend: %s=Pass %s=Skip %s=Fail\n", pass.c_str(), skip.c_str(), fail.c_str());
+
+  if (CheckVmmAndFabricSupport(numRanks).errType == ERR_FATAL)
+    return ERR_FATAL;
 
   // Print headers
   Utils::Print("                                          %s   %s       |", l1.c_str(), r1.c_str());
