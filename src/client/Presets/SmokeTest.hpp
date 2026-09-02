@@ -21,6 +21,8 @@ THE SOFTWARE.
 */
 
 #include <set>
+#include <cstdio>
+#include <ctime>
 
 namespace  {
 
@@ -43,7 +45,8 @@ int RunTest(int                        testNum,
             bool                       isParallel,
             bool                       useBdma,
             int                        targetGpu,
-            int                        totalGpus)
+            int                        totalGpus,
+            std::vector<std::string>&  failLog)
 {
   int numFail = 0;
 
@@ -114,10 +117,10 @@ int RunTest(int                        testNum,
     allTransfers.clear();
 
     // Combine transfers from each GPU and run them all in parallel (unless isParallel=false)
-    for (int rank = 0; allPass && rank < numRanks; rank++) {
+    for (int rank = 0; rank < numRanks; rank++) {
       if (!isParallel && rank != targetRank) continue;
       int numGpus = GetNumExecutors(exeType, rank);
-      for (int gpuIdx = 0; allPass && gpuIdx < numGpus; gpuIdx++) {
+      for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
         if (!isParallel && gpuIdx != targetIdx) continue;
         if (isH2D || isD2H) {
           // Copy to/from closest CPU NUMA node for this GPU
@@ -165,7 +168,10 @@ int RunTest(int                        testNum,
         if (isBroadcast || isGather) {
           if (!RunTransfers(cfg, transfers, results)) {
             allPass = false;
-            break;
+            std::string entry = "Test " + std::to_string(testNum) + " | " + std::string(transferStr) + " | numBytes=" + std::to_string(numBytes);
+            for (auto const& e : results.errResults)
+              if (e.errType == ERR_FATAL) entry += "\n  ERROR: " + e.errMsg;
+            failLog.push_back(entry);
           }
         } else { // Otherwise accumulate the transfers to run in parallel
           allTransfers.insert(allTransfers.end(), transfers.begin(), transfers.end());
@@ -175,6 +181,19 @@ int RunTest(int                        testNum,
     if (!(isBroadcast || isGather)) {
       if (!RunTransfers(cfg, allTransfers, results)) {
         allPass = false;
+        // Build a summary entry covering all accumulated transfers
+        std::string entry = "Test " + std::to_string(testNum) + " | numBytes=" + std::to_string(numBytes) + " | transfers:";
+        for (auto const& t : allTransfers) {
+          char buf[MAX_TRANSFER_STRLEN];
+          snprintf(buf, MAX_TRANSFER_STRLEN, " (R%d%c%d->R%d%c%d->R%d%c%d)",
+                   t.srcs.empty() ? 0 : t.srcs[0].memRank,  t.srcs.empty() ? '?' : MemTypeStr[t.srcs[0].memType],  t.srcs.empty() ? 0 : t.srcs[0].memIndex,
+                   t.exeDevice.exeRank,                      ExeTypeStr[t.exeDevice.exeType],                       t.exeDevice.exeIndex,
+                   t.dsts.empty() ? 0 : t.dsts[0].memRank,  t.dsts.empty() ? '?' : MemTypeStr[t.dsts[0].memType],  t.dsts.empty() ? 0 : t.dsts[0].memIndex);
+          entry += buf;
+        }
+        for (auto const& e : results.errResults)
+          if (e.errType == ERR_FATAL) entry += "\n  ERROR: " + e.errMsg;
+        failLog.push_back(entry);
       }
     }
     Utils::Print("%s", allPass ? pass.c_str() : fail.c_str()); fflush(stdout);
@@ -310,6 +329,7 @@ int SmokeTestPreset(EnvVars&          ev,
   std::string l2(lPad2Size, ' '), r2(rPad2Size, ' ');
 
   int testsFailed = 0;
+  std::vector<std::string> failLog;
   auto ExecuteTests = [&](std::string label, int x, int y, bool isParallel) {
     int numLines = isParallel ? 1 : totalGpus;
 
@@ -328,7 +348,7 @@ int SmokeTestPreset(EnvVars&          ev,
       Utils::Print("%s", l2.c_str());
       fflush(stdout);
 
-      testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, useBdma, line, totalGpus);
+      testsFailed += RunTest(x, testsToRun, sizeList, 1, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, useBdma, line, totalGpus, failLog);
       Utils::Print("%s|", r2.c_str());
       if (line == 0) {
         Utils::Print("  %02d  |", y);
@@ -338,7 +358,7 @@ int SmokeTestPreset(EnvVars&          ev,
       for (auto numSubExec : gfxSesList) {
         Utils::Print("%s", l2.c_str());
         fflush(stdout);
-        testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, useBdma, line, totalGpus);
+        testsFailed += RunTest(y, testsToRun, sizeList, numSubExec, cfg, cpuMemType, gpuMemType, seMaxBytes, isParallel, useBdma, line, totalGpus, failLog);
         Utils::Print("%s|", r2.c_str());
       }
       Utils::Print("\n");
@@ -379,7 +399,21 @@ int SmokeTestPreset(EnvVars&          ev,
 
   // Show summary
   if (testsFailed) {
-    Utils::Print("[WARN] %d Tests FAILED\n", testsFailed);
+    // Write failure details to a log file
+    char logPath[128];
+    snprintf(logPath, sizeof(logPath), "/tmp/transferbench_smoketest_%d.log", (int)getpid());
+    FILE* logFile = fopen(logPath, "w");
+    if (logFile) {
+      time_t now = time(nullptr);
+      fprintf(logFile, "TransferBench smoketest failures — %s\n", ctime(&now));
+      fprintf(logFile, "Total failed tests: %d\n\n", testsFailed);
+      for (size_t i = 0; i < failLog.size(); i++)
+        fprintf(logFile, "[%zu] %s\n\n", i + 1, failLog[i].c_str());
+      fclose(logFile);
+      Utils::Print("[WARN] %d Tests FAILED — details written to %s\n", testsFailed, logPath);
+    } else {
+      Utils::Print("[WARN] %d Tests FAILED (could not write log to %s)\n", testsFailed, logPath);
+    }
   } else {
     Utils::Print("All tests passed\n");
   }

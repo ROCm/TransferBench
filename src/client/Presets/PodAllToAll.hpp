@@ -64,9 +64,20 @@ int PodAllToAllPreset(EnvVars&          ev,
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
+  int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int groupStride   = EnvVars::GetEnvVar("GROUP_STRIDE"   , 1);
   int numGroups     = EnvVars::GetEnvVar("NUM_GROUPS"     , 1);
+
+  // USE_DMA_EXEC and USE_TDM_EXEC are mutually exclusive; prefer DMA when both are requested
+  if (useDmaExec && useTdmExec) {
+    Utils::Print("[WARN] Both USE_DMA_EXEC and USE_TDM_EXEC are set. Using DMA executor\n");
+    useTdmExec = 0;
+  }
+
+  // Determine which GPU executor to use
+  ExeType     exeType    = useDmaExec ? EXE_GPU_DMA : (useTdmExec ? EXE_GPU_TDM : EXE_GPU_GFX);
+  char const* execName   = useDmaExec ? "DMA" : (useTdmExec ? "TDM" : "GFX");
 
   // Check that all ranks have at least the number of GPUs requested
   // Warn if NIC configuration is slightly different from one another
@@ -115,6 +126,7 @@ int PodAllToAllPreset(EnvVars&          ev,
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
+      ev.Print("USE_TDM_EXEC"   , useTdmExec   , "Using %s executor", useTdmExec ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("GROUP_STRIDE"   , groupStride  , "Stride permutation on device list before splitting into groups");
       ev.Print("NUM_GROUPS"     , numGroups    , "Splitting each pod into %d group(s) for a2a", numGroups);
@@ -126,8 +138,8 @@ int PodAllToAllPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return ERR_FATAL;
   }
-  if (useDmaExec && (numSrcs != 1 || numDsts != 1)) {
-    Utils::Print("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
+  if ((useDmaExec || useTdmExec) && (numSrcs != 1 || numDsts != 1)) {
+    Utils::Print("[ERROR] %s execution can only be used for copies (A2A_MODE=0)\n", execName);
     return ERR_FATAL;
   }
 
@@ -136,14 +148,13 @@ int PodAllToAllPreset(EnvVars&          ev,
     return ERR_FATAL;
   }
 
-  Utils::Print("GPU-%s IntraPod All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
+  Utils::Print("GPU-%s IntraPod All-To-All benchmark:\n", execName);
   Utils::Print("==============================\n");
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
-               numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts,
+               numBytesPerTransfer, execName, numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
-  ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
   Utils::RankPerPodMap& rankToPod = Utils::GetRankPerPodMap();
   for (auto const& [pod, ranks] : rankToPod) {

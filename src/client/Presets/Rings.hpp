@@ -28,11 +28,10 @@ int RingsPreset(EnvVars&          ev,
                 std::string const presetName,
                 bool        const bytesSpecified)
 {
-  // Check for homogeneous ranks
-  if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] rings preset can only be run across ranks that are homogeneous\n");
+  // Check that all ranks have the same number of GPUs
+  if (!Utils::AllRanksHaveSameGpuCount()) {
+    Utils::Print("[ERROR] rings preset requires all ranks to have the same number of GPUs\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return ERR_FATAL;
   }
 
@@ -51,9 +50,20 @@ int RingsPreset(EnvVars&          ev,
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
+  int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC"   , 0);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
   int stride        = EnvVars::GetEnvVar("STRIDE"         , 1);
   int ringSize      = EnvVars::GetEnvVar("RING_SIZE"      , numRanks * numGpus);
+
+  // USE_DMA_EXEC and USE_TDM_EXEC are mutually exclusive; prefer DMA when both are requested
+  if (useDmaExec && useTdmExec) {
+    Utils::Print("[WARN] Both USE_DMA_EXEC and USE_TDM_EXEC are set. Using DMA executor\n");
+    useTdmExec = 0;
+  }
+
+  // Determine which GPU executor to use
+  ExeType     exeType    = useDmaExec ? EXE_GPU_DMA : (useTdmExec ? EXE_GPU_TDM : EXE_GPU_GFX);
+  char const* execName   = useDmaExec ? "DMA" : (useTdmExec ? "TDM" : "GFX");
 
 
   if (numGpus <= 0 || numGpus > numDetectedGpus) {
@@ -87,6 +97,7 @@ int RingsPreset(EnvVars&          ev,
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
+      ev.Print("USE_TDM_EXEC"   , useTdmExec   , "Using %s executor", useTdmExec ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       ev.Print("STRIDE"         , stride       , "Reordering devices by taking %d steps", stride);
       ev.Print("RING_SIZE"      , ringSize     , "Building rings of size %d", ringSize);
@@ -94,14 +105,13 @@ int RingsPreset(EnvVars&          ev,
     }
   }
 
-  Utils::Print("GPU-%s Rings benchmark:\n", useDmaExec ? "DMA" : "GFX");
+  Utils::Print("GPU-%s Rings benchmark:\n", execName);
   Utils::Print("==============================\n");
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
-               numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs,
+               numBytesPerTransfer, execName, numSubExecs,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
-  ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
 
   int numRings = totalGpus / ringSize;
   Utils::Print("Running %d parallel ring(s) each of %d devices.  All numbers in GB/s:\n", numRings, ringSize);
@@ -192,7 +202,7 @@ int RingsPreset(EnvVars&          ev,
         for (int i = 0; i < colsPerRing; i++)
           table.Set(headerRow, currCol+i, "Ring%02d", ringIdx);
         table.Set(headerRow+1, currCol, "Device");
-        table.Set(headerRow+1, currCol+1, "%s BW", useDmaExec ? "DMA" : "GFX");
+        table.Set(headerRow+1, currCol+1, "%s BW", execName);
         if (numQueuePairs) {
           table.Set(headerRow+1, currCol+2, "NIC BW");
         }

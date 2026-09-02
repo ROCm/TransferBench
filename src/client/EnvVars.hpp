@@ -84,7 +84,10 @@ public:
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
   vector<int> fillCompress;          // Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0
+  int sweepMaxPow2;                  // Maximum power of two to sweep up to when number of bytes to transfer is set to 0
+  int sweepMinPow2;                  // Minimum power of two to sweep up from when number of bytes to transfer is set to 0
   int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
+  int validateOnDevice;              // Validate GPU dst/src memory via an on-device kernel instead of host memcmp
   int validateSource;                // Validate source GPU memory immediately after preparation
 
   // DMA options
@@ -124,6 +127,11 @@ public:
   int nicTrafficClass;               // DSCP/traffic class byte for RoCE GRH
   int roceVersion;                   // RoCE version number
 
+  // TDM options
+  int tdmBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
+  int tdmBlockSize;                  // Size of each threadblock for TDM kernels (must be multiple of 32)
+  int tdmLdsBytes;                   // Size of LDS (shared memory) bytes per threadblock for TDM kernels (0 = use device max)
+
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
 
@@ -144,10 +152,11 @@ public:
     // Different hardware pick different GPU kernels
     // This performance difference is generally only noticable when executing fewer CUs
     int defaultGfxUnroll = 4;
-    if      (archName == "gfx906") defaultGfxUnroll = 8;
-    else if (archName == "gfx90a") defaultGfxUnroll = 8;
-    else if (archName == "gfx942") defaultGfxUnroll = 4;
-    else if (archName == "gfx950") defaultGfxUnroll = 4;
+    if      (archName == "gfx906")  defaultGfxUnroll = 8;
+    else if (archName == "gfx90a")  defaultGfxUnroll = 8;
+    else if (archName == "gfx942")  defaultGfxUnroll = 4;
+    else if (archName == "gfx950")  defaultGfxUnroll = 4;
+    else if (archName == "gfx1250") defaultGfxUnroll = 32;
 
     alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
@@ -173,11 +182,20 @@ public:
     showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
     showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
+    sweepMaxPow2      = GetEnvVar("SWEEP_MAX_POW2"      , 29);
+    sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
+    sweepMinPow2      = std::clamp(sweepMinPow2, 0, 62);
+    sweepMaxPow2      = std::clamp(sweepMaxPow2, 0, 62);
+    if (sweepMinPow2 > sweepMaxPow2) std::swap(sweepMinPow2, sweepMaxPow2);
+    tdmBlockOrder     = GetEnvVar("TDM_BLOCK_ORDER"     , 0);
+    tdmBlockSize      = GetEnvVar("TDM_BLOCK_SIZE"      , 256);
+    tdmLdsBytes       = GetEnvVar("TDM_LDS_BYTES"       , 0);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
     useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
     validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
+    validateOnDevice  = GetEnvVar("VALIDATE_ON_DEVICE"  , 0);
     validateSource    = GetEnvVar("VALIDATE_SOURCE"     , 0);
 
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        ,-1);
@@ -390,28 +408,37 @@ public:
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
     printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
+    printf(" SWEEP_MAX_POW2      - When 0 is specified for data size, this is the ending power of two exponent\n");
+    printf(" SWEEP_MIN_POW2      - When 0 is specified for data size, this is the starting power of two exponent\n");
+    printf(" TDM_BLOCK_ORDER     - How blocks for TDM transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" TDM_BLOCK_SIZE      - # of threads per threadblock for TDM (async tensor) kernels (Must be multiple of 32)\n");
+    printf(" TDM_LDS_BYTES       - Amount of LDS bytes to allocate per workgroup for TDM kernels (0 = device max; K/M/G suffixes accepted)\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
+    printf(" USE_HIP_EVENTS      - Use HIP events for GFX/DMA/TDM executor timing (0=CPU wall-clock)\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
     printf(" USE_SINGLE_STREAM   - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
     printf(" VALIDATE_DIRECT     - Validate GPU destination memory directly instead of staging GPU memory on host\n");
+    printf(" VALIDATE_ON_DEVICE  - Validate GPU dst/src memory via an on-device kernel instead of copying to host\n");
     printf(" VALIDATE_SOURCE     - Validate GPU src memory immediately after preparation\n");
     printf("\n");
     printf("Environment variables (back-end):\n");
     printf("====================================\n");
-    printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
-    printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
+    printf(" TB_DUMP_CFG_FILE    - Writes executed transfers to a config file\n");
+    printf(" TB_DUMP_LINES       - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
+    printf(" TB_FORCE_SINGLE_POD - Forces all ranks into one pod (skips pod query)\n");
     printf(" TB_MASTER_ADDR      - Rank 0 hostname or IPv4 for workers; optional on rank 0 (auto-detected if unset)\n");
     printf(" TB_MASTER_IFACE     - When TB_MASTER_ADDR unset on rank 0, optional interface for IPv4 detection (e.g. eth0)\n");
     printf(" TB_MASTER_PORT      - Used to set Rank 0 port for socket communicator (default: 29500)\n");
+    printf(" TB_NIC_FILTER       - Regex filter to limit NIC visibility for NIC executors\n");
+    printf(" TB_NUM_RANKS        - Total ranks for socket mode (>=2); alone on rank 0 starts listener and logs worker env\n");
+    printf(" TB_PAUSE            - Pauses startup for debugger attachment\n");
+    printf(" TB_RANK             - Rank for socket communicator (0-based); defaults to 0 if unset or empty\n");
+    printf(" TB_SEND_USLEEP      - Microseconds to sleep after each socket SendData call (default: 0)\n");
+    printf(" TB_SHOW_ALL_NUMA    - Shows all CPU NUMA nodes incl. those with no cores (default: skip core-less)\n");
     printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
     printf(" TB_VERBOSE          - Enables additional internal logging\n");
-    printf(" TB_DUMP_CFG_FILE    - Writes executed transfers to a config file\n");
-    printf(" TB_DUMP_LINES       - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
-    printf(" TB_NIC_FILTER       - Regex filter to limit NIC visibility for NIC executors\n");
-    printf(" TB_FORCE_SINGLE_POD - Forces all ranks into one pod (skips pod query)\n");
     printf(" TB_WALLCLOCK_RATE   - Overrides queried GPU wallclock rate if needed\n");
-    printf(" TB_PAUSE            - Pauses startup for debugger attachment\n");
   }
 
   void Print(std::string const& name, int32_t const value, const char* format, ...) const
@@ -533,8 +560,14 @@ public:
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("SHOW_PERCENTILES", showPercentiles.empty() ? 0 : 1, "%s",
           showPercentiles.empty() ? "Disabled" : GetStr(showPercentiles).c_str());
+    Print("TDM_BLOCK_ORDER", tdmBlockOrder,
+          "TDM Thread block ordering: %s", tdmBlockOrder == 0 ? "Sequential" : "Interleaved");
+    Print("TDM_BLOCK_SIZE", tdmBlockSize, "TDM threadblock size of %d", tdmBlockSize);
+    Print("TDM_LDS_BYTES", tdmLdsBytes, "%s",
+          tdmLdsBytes == 0 ? "Using device max LDS bytes per workgroup"
+          : (std::string("Setting LDS to ") + std::to_string(tdmLdsBytes) + " bytes per workgroup").c_str());
     Print("USE_HIP_EVENTS", useHipEvents,
-          "Using %s for GFX/DMA Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
+          "Using %s for GFX/DMA/TDM Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
           "Using %s for DMA execution", useHsaDma ? "hsa_amd_async_copy" : "hipMemcpyAsync");
     Print("USE_INTERACTIVE", useInteractive,
@@ -554,6 +587,8 @@ public:
     }
     Print("VALIDATE_DIRECT", validateDirect,
           "Validate GPU destination memory %s", validateDirect ? "directly" : "via CPU staging buffer");
+    Print("VALIDATE_ON_DEVICE", validateOnDevice,
+          "Validate GPU memory %s", validateOnDevice ? "on-device via kernel" : "by copying to host");
     Print("VALIDATE_SOURCE", validateSource,
           validateSource ? "Validate source after preparation" : "Do not perform source validation after prep");
     printf("\n");
@@ -704,7 +739,9 @@ public:
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
     cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
+    cfg.general.useHipEvents       = useHipEvents;
     cfg.general.useInteractive     = useInteractive;
+    cfg.general.useMultiStream     = !useSingleStream;
 
     cfg.data.alwaysValidate        = alwaysValidate;
     cfg.data.blockBytes            = blockBytes;
@@ -712,9 +749,9 @@ public:
     cfg.data.fillCompress          = fillCompress;
     cfg.data.fillPattern           = fillPattern;
     cfg.data.validateDirect        = validateDirect;
+    cfg.data.validateOnDevice      = validateOnDevice;
     cfg.data.validateSource        = validateSource;
 
-    cfg.dma.useHipEvents           = useHipEvents;
     cfg.dma.useHsaCopy             = useHsaDma;
 
     cfg.gfx.blockOrder             = gfxBlockOrder;
@@ -725,8 +762,6 @@ public:
     cfg.gfx.seType                 = gfxSeType;
     cfg.gfx.unrollFactor           = gfxUnroll;
     cfg.gfx.temporalMode           = gfxTemporal;
-    cfg.gfx.useHipEvents           = useHipEvents;
-    cfg.gfx.useMultiStream         = !useSingleStream;
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
     cfg.gfx.waveOrder              = gfxWaveOrder;
     cfg.gfx.wordSize               = gfxWordSize;
@@ -740,6 +775,10 @@ public:
     cfg.nic.serviceLevel           = nicServiceLevel;
     cfg.nic.trafficClass           = nicTrafficClass;
     cfg.nic.roceVersion            = roceVersion;
+
+    cfg.tdm.blockOrder             = tdmBlockOrder;
+    cfg.tdm.blockSize              = tdmBlockSize;
+    cfg.tdm.ldsBytes               = tdmLdsBytes;
 
     return cfg;
   }

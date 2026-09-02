@@ -3,6 +3,29 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.70.00
+### Added
+- Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware (gfx1250, NVIDIA sm_90+ via TMA).
+  This provides an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
+- Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
+- Added new "tdmsweep" preset that sweeps TDM executor options (block size / LDS / block order / subExecs)
+- Added TB_SEND_USLEEP to insert a configurable microsecond delay after each socket SendData call (default: 0); useful for diagnosing small-message timing issues on sensitive clusters
+- Adding ppodId / vpodId printing to verbose mode
+- Added VALIDATE_ON_DEVICE to validate GPU destination (and source) memory via an on-device kernel instead of
+  copying back to the host. Expected values are pre-uploaded during preparation; only a mismatch count and the
+  first mismatch offset are returned. Takes precedence over VALIDATE_DIRECT for GPU destinations.
+### Modified
+- a2a, p2p, rings, poda2a, and podp2p presets now support the TDM executor
+- CPU NUMA nodes with 0 cores will now be hidden.  To re-enable, set TB_SHOW_ALL_NUMA=1
+- Switching to use of persistent threadpools to cut-down on thread creation overheads
+- Updating default GFX unroll on GFX1250 to 32
+- Improved socket communicator robustness (TCP_NODELAY, partial send/recv handling, MSG_NOSIGNAL)
+- Improved mismatch logging and smoketest fail reporting
+- Destination memory is now cleared after each iteration when ALWAYS_VALIDATE is enabled, so each iteration starts from a known-zero state
+### Fixed
+- Guard before ibv_free_device_list to avoid invalid free
+- Fix NIC to GPU proximity detection on systems with multiple PCIe domains
+
 ## v1.69.01
 ### Added
 - Added support for ABI change introduced in amd-smi 27.0.0 (ROCm 10.0)
@@ -21,7 +44,7 @@ Documentation for TransferBench is available at
   - Created a top level third-party/ folder for ibverbs related files. Will also harbor future external source which TransferBench depends
   - Created a separate minimal header IbvHeader.hpp for ib verbs structs and IbvDynLoad.hpp for dynamic loading and status report for ib verbs functionality.
   - Dynamic loading is a singleton and done once per process, and TransferBench header will probe in runtime if basic ibverbs function as well as dmabuf export is supported.
-  - Also got rid HAVE_DMABUF_SUPPORT macro. Got rid of redundant dependency check on hsa header and rocr binaries (they are mandatory for AMD platform) in build process. Similar to ibv, it now dynamically checks for hsa_amd_portable_export_dmabuf symbol as part of check kernel support, and returns dmabuf support in runtime.
+  - Also got rid of HAVE_DMABUF_SUPPORT macro. Got rid of redundant dependency check on hsa header and rocr binaries (they are mandatory for AMD platform) in build process. Similar to ibv, it now dynamically checks for hsa_amd_portable_export_dmabuf symbol as part of check kernel support, and returns dmabuf support in runtime.
 
 ## v1.68.00
 ### Fixed

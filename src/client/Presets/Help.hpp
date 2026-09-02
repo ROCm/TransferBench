@@ -37,13 +37,15 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                SRC 1 -> Executor -> DST 1\n");
   printf("#                SRC X                DST Y\n");
   printf("\n");
-  printf("# Five Executors are supported by TransferBench\n");
-  printf("#   Executor:        SubExecutor:\n");
-  printf("#   1) CPU           CPU thread\n");
-  printf("#   2) GPU           GPU threadblock/Compute Unit (CU)\n");
-  printf("#   3) DMA           N/A.                                 (Must have single SRC, at least one DST)\n");
-  printf("#   4) NIC           Queue Pair\n");
-  printf("#   5) Batched-DMA   Batch item                           (Must have single SRC, at least one DST)\n");
+  printf("# Six Executors are supported by TransferBench\n");
+  printf("#   Executor:              SubExecutor:\n");
+  printf("#   1) CPU                 CPU thread\n");
+  printf("#   2) GPU                 GPU threadblock/Compute Unit (CU)\n");
+  printf("#   3) DMA                 N/A.                                 (Must have single SRC, at least one DST)\n");
+  printf("#   4) NIC                 Queue Pair\n");
+  printf("#   5) Batched-DMA         Batch item                           (Must have single SRC, at least one DST)\n");
+  printf("#   6) TDM                 GPU threadblock/Compute Unit (CU)    (Requires hardware support: AMD gfx1250 or NVIDIA sm_90+)\n");
+
   printf("\n");
   printf("# Each single line in the configuration file defines a set of Transfers (a Test) to run in parallel\n");
   printf("\n");
@@ -71,6 +73,7 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                 - B:    Batched-DMA-executor  (Indexed from 0 to # GPUs - 1)\n");
   printf("#                 - I#.#: NIC executor          (Indexed from 0 to # NICs - 1)\n");
   printf("#                 - N#.#: Nearest NIC executor  (Indexed from 0 to # GPUs - 1)\n");
+  printf("#                 - T:    TDM-executor          (Indexed from 0 to # GPUs - 1)\n");
   printf("#   dstMemL   :   Destination memory locations (Where the data is to be written to)\n");
   printf("#   bytesL    :   Number of bytes to copy (0 means use command-line specified size)\n");
   printf("#                 Must be a multiple of 4 and may be suffixed with ('K','M', or 'G')\n");

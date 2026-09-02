@@ -101,10 +101,9 @@ int EmptyKernelPreset(EnvVars&          ev,
                       std::string const presetName,
                       [[maybe_unused]] bool const bytesSpecified)
 {
-  if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] %s preset can only be run across ranks that are homogeneous\n", presetName.c_str());
+  if (!Utils::AllRanksHaveSameGpuCount()) {
+    Utils::Print("[ERROR] %s preset requires all ranks to have the same number of GPUs\n", presetName.c_str());
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return ERR_FATAL;
   }
 

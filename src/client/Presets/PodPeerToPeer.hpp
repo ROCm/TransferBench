@@ -25,9 +25,8 @@ int PodPeerToPeerPreset(EnvVars&          ev,
                         std::string const presetName,
                         bool        const bytesSpecified)
 {
-  if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] Pod p2p preset can only be run across ranks that are homogenous\n");
-    Utils::Print("[ERROR] All ranks currently have to be under the same physical and virtual pod\n");
+  if (!Utils::AllRanksHaveSameGpuCount()) {
+    Utils::Print("[ERROR] Pod p2p preset requires all ranks to have the same number of GPUs\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
     return ERR_FATAL;
   }
@@ -42,6 +41,14 @@ int PodPeerToPeerPreset(EnvVars&          ev,
 
   // Collect env vars for this preset
   int useDmaCopy     = EnvVars::GetEnvVar("USE_GPU_DMA",     0);
+  int useTdmCopy     = EnvVars::GetEnvVar("USE_GPU_TDM",     0);
+
+  // USE_GPU_DMA and USE_GPU_TDM are mutually exclusive; prefer DMA when both are requested
+  if (useDmaCopy && useTdmCopy) {
+    Utils::Print("[WARN] Both USE_GPU_DMA and USE_GPU_TDM are set. Using DMA executor\n");
+    useTdmCopy = 0;
+  }
+  char const* gpuExecName = useDmaCopy ? "DMA" : (useTdmCopy ? "TDM" : "GFX");
   int gpuMemTypeIdx  = EnvVars::GetEnvVar("GPU_MEM_TYPE",    0);
   int numGpuDevices  = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numGpuSubExecs = EnvVars::GetEnvVar("NUM_GPU_SE",      useDmaCopy ? 1 : TransferBench::GetNumSubExecutors({EXE_GPU_GFX, 0}));
@@ -67,6 +74,7 @@ int PodPeerToPeerPreset(EnvVars&          ev,
                                                                                        : "Bidirectional");
       ev.Print("PARALLEL_LVL",    parallelLevel,  "Executing p2p in parallel level %d (0: no parallel, 1: node pairs in parallel)", parallelLevel);
       ev.Print("USE_GPU_DMA",     useDmaCopy,     "Using GPU-%s as GPU executor", useDmaCopy ? "DMA" : "GFX");
+      ev.Print("USE_GPU_TDM",     useTdmCopy,     "Using GPU-%s as GPU executor", useTdmCopy ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
     }
@@ -95,7 +103,7 @@ int PodPeerToPeerPreset(EnvVars&          ev,
     for (int i = 0; i < n; i++)
       deviceLookup[{devices[i].memRank, devices[i].memIndex}] = i;
 
-    ExeType const gpuExeType = useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
+    ExeType const gpuExeType = useDmaCopy ? EXE_GPU_DMA : (useTdmCopy ? EXE_GPU_TDM : EXE_GPU_GFX);
 
     for (int isBidirectional = 0; isBidirectional <= 1; isBidirectional++) {
       if ((p2pMode == 1 && isBidirectional == 1) ||
@@ -105,7 +113,7 @@ int PodPeerToPeerPreset(EnvVars&          ev,
                    isBidirectional ? "Bi" : "Uni",
                    useRemoteRead ? "Remote" : "Local",
                    useRemoteRead ? "Local" : "Remote",
-                   useDmaCopy    ? "DMA"   : "GFX");
+                   gpuExecName);
 
       std::vector<double> avgBandwidth(n * n, 0.0);
 

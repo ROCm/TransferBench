@@ -25,6 +25,10 @@ THE SOFTWARE.
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
+#include <cassert>
+#include <climits>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -33,10 +37,12 @@ THE SOFTWARE.
 #include <functional>
 #include <future>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
 #include <random>
@@ -77,7 +83,10 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
+
 #endif
+
+#include "tdmCopy.h"
 /// @endcond
 
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
@@ -92,7 +101,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.69";
+  constexpr char VERSION[] = "1.70";
 
   /**
    * Enumeration of supported Executor types
@@ -107,10 +116,11 @@ namespace TransferBench
     EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
+    EXE_GPU_TDM      = 6,                       ///<  GPU TDM executor          (subExecutor = threadblock/CU)
   };
-  char const ExeTypeStr[7] = "CGDINB";
+  char const ExeTypeStr[8] = "CGDINBT";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA; }
+  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM; }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
@@ -209,7 +219,9 @@ namespace TransferBench
     int numSubIterations   = 1;                 ///< Number of sub-iterations per iteration
     int numWarmups         = 3;                 ///< Number of un-timed warmup iterations to perform
     int recordPerIteration = 0;                 ///< Record per-iteration timing information
+    int useHipEvents       = 1;                 ///< Use HIP events for timing Executors that support it
     int useInteractive     = 0;                 ///< Pause for user-input before starting transfer loop
+    int useMultiStream     = 0;                 ///< Split GFX/TDM Transfers into separate kernel launches in separate stream
   };
 
   /**
@@ -223,6 +235,7 @@ namespace TransferBench
     vector<float> fillPattern      = {};        ///< Pattern of floats used to fill source data
     vector<int>   fillCompress     = {};        ///< Customized data patterns (overrides fillPattern if non-empty)
     int           validateDirect   = 0;         ///< Validate GPU results directly instead of copying to host
+    int           validateOnDevice = 0;         ///< Validate GPU dst/src memory via an on-device kernel instead of host memcmp
     int           validateSource   = 0;         ///< Validate src GPU memory immediately after preparation
   };
 
@@ -239,8 +252,6 @@ namespace TransferBench
     int                 seType         = 0;     ///< SubExecutor granularity type (0=threadblock, 1=warp)
     int                 temporalMode   = 0;     ///< Non-temporal load/store mode 0=none, 1=load, 2=store, 3=both
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
-    int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
-    int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
     int                 wordSize       = 4;     ///< GFX-kernel packed data size (4=dwordx4, 2=dwordx2, 1=dwordx1)
@@ -251,7 +262,6 @@ namespace TransferBench
    */
   struct DmaOptions
   {
-    int useHipEvents = 1;                       ///< Use HIP events for timing DMA Executor
     int useHsaCopy   = 0;                       ///< Use HSA copy instead of HIP copy to perform DMA
   };
 
@@ -275,6 +285,12 @@ namespace TransferBench
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
+  struct TdmOptions
+  {
+    int blockOrder = 0;                         ///< Determines how threadblocks are ordered (0=sequential, 1=interleaved, 2=random)
+    int blockSize  = 256;                       ///< Size of each threadblock
+    int ldsBytes   = 0;                         ///< Amount of __shared__ memory per threadblock to use as bounce buffer (0 = device max)
+  };
 
   /**
    * Configuration options for performing Transfers
@@ -287,6 +303,7 @@ namespace TransferBench
     GfxOptions     gfx;                         ///< GFX executor options
     DmaOptions     dma;                         ///< DMA executor options
     NicOptions     nic;                         ///< NIC executor options
+    TdmOptions     tdm;                         ///< TDM executor options
   };
 
   /**
@@ -475,6 +492,14 @@ namespace TransferBench
   int GetClosestCpuNumaToGpu(int gpuIndex, int targetRank = -1);
 
   /**
+   * Returns the physical NUMA node id backing a logical CPU NUMA index
+   *
+   * @param[in] cpuIndex        Logical CPU NUMA index (as exposed by GetNumExecutors(EXE_CPU))
+   * @returns Physical NUMA node id, or cpuIndex unchanged if out of range
+   */
+  int GetCpuNumaPhysicalNode(int cpuIndex);
+
+  /**
    * Returns the index of the NUMA node closest to the given NIC
    *
    * @param[in] nicIndex        Index of the NIC to query
@@ -620,6 +645,7 @@ namespace TransferBench
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
   #define hipDeviceAttributeMultiprocessorCount              cudaDevAttrMultiProcessorCount
+  #define hipDeviceAttributeMaxSharedMemoryPerBlock          cudaDevAttrMaxSharedMemoryPerBlock
   #define hipDeviceAttributeWarpSize                         cudaDevAttrWarpSize
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
@@ -649,6 +675,7 @@ namespace TransferBench
   #define hipGetDeviceCount                                  cudaGetDeviceCount
   #define hipGetDeviceProperties                             cudaGetDeviceProperties
   #define hipGetErrorString                                  cudaGetErrorString
+  #define hipGetLastError                                    cudaGetLastError
   #define hipHostFree                                        cudaFreeHost
   #define hipHostMalloc                                      cudaMallocHost
   #define hipMalloc                                          cudaMalloc
@@ -700,30 +727,75 @@ namespace TransferBench
 // Helper macro functions
 //==========================================================================================
 
-// Macro for collecting CU/SM GFX kernel is running on
-#if defined(__GFX9__)
-  #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s" (hwId))
-#elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
-  #define GetHwId(hwId) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)" : "=s" (hwId))
-#elif defined(__NVCC__)
-  #define GetHwId(hwId) asm("mov.u32 %0, %smid;" : "=r"(hwId))
-#else
-  #define GetHwId(hwId) hwId = 0
-#endif
-
-// Macro for collecting XCC GFX kernel is running on
+// Returns xccId and a unified cuId for the current wavefront.
+// cuId encoding is arch-specific (see comments) but is always a dense index
+// suitable for CU-set tracking.
+__device__ __forceinline__ void GetXccHwId(uint32_t& xccId, uint32_t& cuId)
+{
 #if defined(__gfx942__) || defined(__gfx950__)
-#define GetXccId(val) asm volatile ("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s" (val))
-#elif defined(__GFX12__)
-#define GetXccId(val) \
-  { asm volatile ("s_sendmsg_rtn_b32 %0, 0x87 \n" \
-                  "s_wait_kmcnt 0"                \
-                  : "=s" (val));                  \
-    val = ((val >> 16) & 0xF);                    \
-  }
+  // CDNA3: HW_REG_HW_ID (code 4) + HW_REG_XCC_ID (code 20)
+  // CDNA3 ISA §5.8 Table 19, §3.12 Table 6
+  uint32_t hwId = 0, xccReg = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)"  : "=s"(hwId));
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s"(xccReg));
+  xccId = xccReg & 0xF;
+  cuId  = (((hwId >> 12) & 1) << 5)   // SH_ID
+        | (((hwId >>  8) & 15) << 2)  // CU_ID
+        |  ((hwId >> 13) & 3);        // SE_ID
+
+#elif defined(__gfx1250__)
+  // CDNA5: HW_ID1 (code 23) + RTN_GET_SE_HW_ID (0x87)
+  // CDNA5 ISA §3.4.9, §5.4 Table 19
+  uint32_t hwId = 0, seHwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)"       : "=s"(hwId));
+  asm volatile("s_sendmsg_rtn_b32 %0, 0x87\ns_wait_kmcnt 0"  : "=s"(seHwId));
+  xccId = (seHwId >> 16) & 0xF;        // Virtual_XCC_ID [19:16]
+  cuId  = ((seHwId & 0xF) << 4)        // SE_ID   [3:0]  (gfx1250: 2 SEs → 1 bit)
+        | (((hwId >> 16) & 0x1) << 3)  // SA_ID   [16]   (gfx1250: 2 SAs → 1 bit)
+        |  ((hwId >> 10) & 0x7);       // WGP_ID  [12:10] (gfx1250: 8 WGPs per SA → 3 bits)
+
+#elif defined(__GFX9__)
+  // Other GFX9 (gfx90a/MI200, gfx908, gfx906) — single die, no XCC
+  // CDNA2 ISA §3.12 Table 6
+  uint32_t hwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s"(hwId));
+  xccId = 0;
+  cuId  = (((hwId >> 12) & 1) << 5)
+        | (((hwId >>  8) & 15) << 2)
+        |  ((hwId >> 13) & 3);
+
+#elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
+  // RDNA2/3/4 (non-CDNA5) — HW_ID1 present, no XCC
+  uint32_t hwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)" : "=s"(hwId));
+  xccId = 0;
+  cuId = hwId;
+
+#elif defined(__NVCC__)
+  xccId = 0;
+  asm("mov.u32 %0, %smid;" : "=r"(cuId));
 #else
-#define GetXccId(val) val = 0
+  xccId = 0;
+  cuId  = 0;
 #endif
+}
+
+// Returns only the XCC ID for the current wavefront; cheaper than GetXccHwId
+// when the cuId is not needed.
+__device__ __forceinline__ uint32_t GetXccId()
+{
+#if defined(__gfx942__) || defined(__gfx950__)
+  uint32_t xccReg = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s"(xccReg));
+  return xccReg & 0xF;
+#elif defined(__gfx1250__)
+  uint32_t seHwId = 0;
+  asm volatile("s_sendmsg_rtn_b32 %0, 0x87\ns_wait_kmcnt 0" : "=s"(seHwId));
+  return (seHwId >> 16) & 0xF;  // Virtual_XCC_ID [19:16]
+#else
+  return 0;
+#endif
+}
 
 // Error check macro (NOTE: This will return even for ERR_WARN)
 #define ERR_CHECK(cmd)                                                       \
@@ -915,7 +987,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     /**
      * Barrier that all ranks must arrive at before proceeding
      */
-    void Barrier();
+    void Barrier() const;
 
     /**
      * Send data to a single destination rank
@@ -1039,6 +1111,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
 
+    // Translate a logical CPU NUMA index (as exposed to users) into the physical
+    // NUMA node id used by libnuma / HSA.  Returns the index unchanged if out of range.
+    int GetCpuPhysicalNode(int logicalIdx) const;
+    // Translate a physical NUMA node id into its logical CPU index, or -1 if the node
+    // is not exposed (e.g. a core-less node skipped by default).
+    int GetCpuLogicalNode(int physicalNode) const;
+
 #if !defined(__NVCC__)
     ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
     ErrResult GetHsaAgent(MemDevice const& memDevice, hsa_agent_t& agent) const;
@@ -1070,6 +1149,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     std::vector<hsa_agent_t> gpuAgents;
 #endif
 
+    // CPU NUMA remapping (logical index <-> physical NUMA node)
+    // By default core-less NUMA nodes are skipped; TB_SHOW_ALL_NUMA=1 exposes every node.
+    bool                showAllNuma = false;  ///< Expose all configured NUMA nodes (legacy behavior)
+    std::vector<int>    cpuNumaMap;           ///< logical index -> physical NUMA node
+    std::map<int, int>  cpuNumaRevMap;        ///< physical NUMA node -> logical index
+
     int commMode;                             ///< Communication mode
 
 #ifdef MPI_COMM_ENABLED
@@ -1080,8 +1165,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Socket related
     std::string      masterAddr;              ///< Rank 0 master address
     int              masterPort;              ///< Rank 0 master port
-    std::vector<int> sockets;                 ///< Master list of sockets
-    int              listenSocket;            ///< Master listener socket
+    std::vector<int>         sockets;          ///< Master list of sockets
+    mutable std::vector<int> socketEpoch;     ///< Per-socket send/recv epoch counter
+    int                      listenSocket;    ///< Master listener socket
+    int                      sendUsleep = 0;  ///< Microseconds to sleep after each SendData (TB_SEND_USLEEP)
 
     // Topology related
     struct RankTopology
@@ -1106,6 +1193,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     void SetupSocketCommunicator();
     void SetupMpiCommunicator();
     void CollectPodMembership(char* ppodId, int64_t& vpodId);
+    void BuildCpuNumaMap();
+    // Return the logical index of the exposed CPU NUMA node nearest (by numa_distance) to a
+    // physical node; used when the physical node itself is not exposed (e.g. core-less).
+    int  GetClosestLogicalCpu(int physicalNode) const;
     void GetRankTopology(RankTopology& topo);
     void CollectTopology();
     std::string GetCpuName() const;
@@ -1530,9 +1621,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       deviceIdx = GetClosestCpuNumaToGpu(memDevice.memIndex);
     }
 
+    // For CPU memory, deviceIdx is a logical CPU NUMA index; translate to the physical
+    // NUMA node for all libnuma operations (policy, allocation, page verification).
+    int cpuPhysNode = IsCpuMemType(memType) ? System::Get().GetCpuPhysicalNode(deviceIdx) : deviceIdx;
+
     if (IsCpuMemType(memType)) {
       // Set NUMA policy prior to call to hipHostMalloc
-      numa_set_preferred(deviceIdx);
+      numa_set_preferred(cpuPhysNode);
     } else if (IsGpuMemType(memType)) {
       // Switch to the appropriate GPU
       // IMP: if the remapping above changes, remember to modify this!
@@ -1574,7 +1669,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (IsCpuMemType(memType)) {
         memset(*memPtr, 0, roundedUpBytes);
         // Check that the allocated pages are actually on the correct NUMA node
-        ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, deviceIdx));
+        ERR_CHECK(CheckPages((char*)*memPtr, roundedUpBytes, cpuPhysNode));
         numa_set_preferred(-1);
       } else if (IsGpuMemType(memType)) {
         ERR_CHECK(hipMemset(*memPtr, 0, numBytes));
@@ -1621,12 +1716,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #endif
 #endif
       } else if (memType == MEM_CPU_UNPINNED) {
-        *memPtr = numa_alloc_onnode(numBytes, deviceIdx);
+        *memPtr = numa_alloc_onnode(numBytes, cpuPhysNode);
       }
 
       // Check that the allocated pages are actually on the correct NUMA node
       memset(*memPtr, 0, numBytes);
-      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, deviceIdx));
+      ERR_CHECK(CheckPages((char*)*memPtr, numBytes, cpuPhysNode));
 
       // Reset to default numa mem policy
       numa_set_preferred(-1);
@@ -1917,7 +2012,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         return {ERR_FATAL,
                 "CPU index must be between 0 and %d (instead of %d) on rank %d", numCpus - 1, memDevice.memIndex, memDevice.memRank};
 
-      if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), memDevice.memIndex)) {
+      if (GetRank() == memDevice.memRank &&
+          !numa_bitmask_isbitset(numa_get_mems_allowed(),
+                                 System::Get().GetCpuPhysicalNode(memDevice.memIndex))) {
         return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
           memDevice.memIndex, memDevice.memRank};
       }
@@ -1934,7 +2031,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         if (actualNumaIdx == -1) {
           return {ERR_FATAL, "Unable to determine closest NUMA node for GPU %d on rank %d", memDevice.memIndex, memDevice.memRank};
         }
-        if (GetRank() == memDevice.memRank && !numa_bitmask_isbitset(numa_get_mems_allowed(), actualNumaIdx))
+        if (GetRank() == memDevice.memRank &&
+            !numa_bitmask_isbitset(numa_get_mems_allowed(),
+                                   System::Get().GetCpuPhysicalNode(actualNumaIdx)))
           return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
             memDevice.memIndex, memDevice.memRank};
       }
@@ -1964,7 +2063,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
+      if (general.useHipEvents       != cfg.general.useHipEvents)       ADD_ERROR("cfg.general.useHipEvents");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
+      if (general.useMultiStream     != cfg.general.useMultiStream)     ADD_ERROR("cfg.general.useMultiStream");
     }
 
     // Compare data options
@@ -2030,8 +2131,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (gfx.seType         != cfg.gfx.seType)         ADD_ERROR("cfg.gfx.seType");
       if (gfx.temporalMode   != cfg.gfx.temporalMode)   ADD_ERROR("cfg.gfx.temporalMode");
       if (gfx.unrollFactor   != cfg.gfx.unrollFactor)   ADD_ERROR("cfg.gfx.unrollFactor)");
-      if (gfx.useHipEvents   != cfg.gfx.useHipEvents)   ADD_ERROR("cfg.gfx.useHipEvents");
-      if (gfx.useMultiStream != cfg.gfx.useMultiStream) ADD_ERROR("cfg.gfx.useMultiStream");
       if (gfx.useSingleTeam  != cfg.gfx.useSingleTeam)  ADD_ERROR("cfg.gfx.useSingleTeam");
       if (gfx.waveOrder      != cfg.gfx.waveOrder)      ADD_ERROR("cfg.gfx.waveOrder");
       if (gfx.wordSize       != cfg.gfx.wordSize)       ADD_ERROR("cfg.gfx.wordSize");
@@ -2041,7 +2140,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     {
       DmaOptions dma = cfg.dma;
       System::Get().Broadcast(root, sizeof(dma), &dma);
-      if (dma.useHipEvents != cfg.dma.useHipEvents) ADD_ERROR("cfg.dma.useHipEvents");
       if (dma.useHsaCopy   != cfg.dma.useHsaCopy)   ADD_ERROR("cfg.dma.useHsaCopy");
     }
 
@@ -2064,6 +2162,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
     }
 
+    // Compare TDM options
+    {
+      TdmOptions tdm = cfg.tdm;
+      System::Get().Broadcast(root, sizeof(tdm), &tdm);
+      if (tdm.blockOrder     != cfg.tdm.blockOrder)     ADD_ERROR("cfg.tdm.blockOrder");
+      if (tdm.blockSize      != cfg.tdm.blockSize)      ADD_ERROR("cfg.tdm.blockSize");
+      if (tdm.ldsBytes       != cfg.tdm.ldsBytes)       ADD_ERROR("cfg.tdm.ldsBytes");
+    }
     #undef ADD_ERROR
   }
 
@@ -2105,7 +2211,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       errors.push_back({ERR_FATAL,
           "[gfx.blockOrder] must be 0 for sequential, 1 for interleaved, or 2 for random"});
 
-    if (cfg.gfx.useMultiStream && cfg.gfx.blockOrder > 0)
+    if (cfg.general.useMultiStream && cfg.gfx.blockOrder > 0)
       errors.push_back({ERR_WARN, "[gfx.blockOrder] will be ignored when running in multi-stream mode"});
 
     if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
@@ -2159,6 +2265,34 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               }
             }
           }
+        }
+      }
+    }
+
+    // Check TDM options (TDM-capable hardware: gfx1250 on AMD, sm_90+ on NVIDIA)
+    if (cfg.tdm.blockSize <= 0 || cfg.tdm.blockSize % 32 || cfg.tdm.blockSize > MAX_BLOCKSIZE)
+      errors.push_back({ERR_FATAL,
+                        "[tdm.blockSize] must be a positive multiple of 32 less than or equal to %d",
+                        MAX_BLOCKSIZE});
+
+    if (cfg.tdm.ldsBytes < 0)
+      errors.push_back({ERR_FATAL, "[tdm.ldsBytes] must be positive or 0"});
+    else {
+      int const numGpus = GetNumExecutors(EXE_GPU_TDM);
+      for (int i = 0; i < numGpus; i++) {
+        int deviceMax = 0;
+        if (hipDeviceGetAttribute(&deviceMax, hipDeviceAttributeMaxSharedMemoryPerBlock, i) == hipSuccess) {
+          if (cfg.tdm.ldsBytes > deviceMax) {
+            errors.push_back({ERR_FATAL,
+                "[tdm.ldsBytes] (%d) exceeds device max shared memory per block (%d)",
+                cfg.tdm.ldsBytes, deviceMax});
+          } else if (deviceMax == 0) {
+            errors.push_back({ERR_FATAL,
+                "TDM Executor requires shared memory but GPU %d reports none available\n", i});
+          }
+        } else {
+          errors.push_back({ERR_FATAL,
+              "Unable to query max amount of shared memory per block on GPU %d\n", i});
         }
       }
     }
@@ -2296,7 +2430,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
       // mean that some subexecutors might not have any work assigned to them if the amount to
       // transfer is small
-      if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU || t.exeDevice.exeType == EXE_GPU_BDMA) {
+
+      if (t.exeDevice.exeType != EXE_GPU_DMA) { // GPU DMA-Executor ignores subexecutors
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
         int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
@@ -2354,6 +2489,33 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           hasFatalError = true;
         }
         break;
+      case EXE_GPU_TDM:
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM kernel currently requires exactly 1 SRC and 1 DST", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM kernel: device index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
+        }
+        if (t.exeSubIndex != -1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM executor does not support subindices", i});
+          hasFatalError = true;
+          break;
+        }
+        if (!tdm::IsTdmCopySupported(t.exeDevice.exeIndex)) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM kernel requires TDM-capable hardware (gfx1250 or NVIDIA sm_90+), but GPU %d is not supported",
+                            i, t.exeDevice.exeIndex});
+          hasFatalError = true;
+        }
+        break;
       case EXE_GPU_GFX:
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
@@ -2374,7 +2536,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               errors.push_back({ERR_FATAL,
                   "Transfer %d: GFX subIndex (XCC) must be between 0 and %d for rank %d", i, numSubIndices - 1, t.exeDevice.exeRank});
               hasFatalError = true;
-              break;
             }
 #endif
           }
@@ -2717,10 +2878,26 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           break;
         }
 
-        if (cfg.gfx.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
+        if (cfg.general.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
           errors.push_back({ERR_WARN,
                             "GPU %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
                             exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
+        }
+        break;
+      }
+      case EXE_GPU_TDM:
+      {
+        int numGpuSubExec = GetNumSubExecutors(exeDevice);
+        if (totalSubExecs[exeDevice] > numGpuSubExec)
+          errors.push_back({ERR_WARN,
+                            "TDM %d requests %d total subexecutors however only %d available. "
+                            "Serialization will occur",
+                            exeDevice.exeIndex, totalSubExecs[exeDevice], numGpuSubExec});
+
+        if (cfg.general.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
+          errors.push_back({ERR_WARN,
+              "TDM %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
+              exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
         }
         break;
       }
@@ -2811,6 +2988,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // For GFX executor
     SubExecParam*              subExecParamGpuPtr;
 
+    // For on-device validation (VALIDATE_ON_DEVICE)
+    vector<float*>             dstExpectedMem;      ///< Per-dst device copy of expected values
+    vector<size_t>             dstExpectedBytes;    ///< Allocated size of each dst expected buffer
+    vector<unsigned long long*>dstValidateScratch;  ///< Per-dst device scratch [0]=count, [1]=firstOffset
+    vector<float*>             srcExpectedMem;      ///< Per-src device copy of expected values (validateSource)
+    vector<size_t>             srcExpectedBytes;    ///< Allocated size of each src expected buffer
+    vector<unsigned long long*>srcValidateScratch;  ///< Per-src device scratch [0]=count, [1]=firstOffset
+
     // For targeted-SDMA
 #if !defined(__NVCC__)
     vector<hsa_agent_t>        dstAgent;          ///< DMA destination memory agents
@@ -2858,33 +3043,139 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     vector<set<pair<int,int>>> perIterCUs;        ///< GFX-Executor only. XCC:CU used per iteration
   };
 
+  // Persistent pool of worker threads, created once and reused across all iterations to
+  // avoid the per-iteration thread creation overhead of std::async/std::thread.
+  // Each worker runs an optional init hook once at startup (used to bind NUMA affinity and
+  // set the HIP device for the executor the pool serves).
+  class ThreadPool
+  {
+  public:
+    // numThreads worker threads are spawned immediately.  perThreadInit (if provided) runs
+    // once on each worker before it starts servicing tasks.
+    ThreadPool(int numThreads, std::function<void()> perThreadInit = {})
+    {
+      numThreads = std::max(1, numThreads);
+      workers.reserve(numThreads);
+      for (int i = 0; i < numThreads; ++i)
+        workers.emplace_back(&ThreadPool::WorkerLoop, this, perThreadInit);
+    }
+
+    ~ThreadPool()
+    {
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        stop = true;
+      }
+      cv.notify_all();
+      for (auto& worker : workers)
+        if (worker.joinable()) worker.join();
+    }
+
+    ThreadPool(ThreadPool const&)            = delete;
+    ThreadPool& operator=(ThreadPool const&) = delete;
+
+    // Run fn(i) for i in [0, count), spreading the calls across the worker threads, and block
+    // until every call has completed.  Safe to call repeatedly; no allocation per call.
+    void ParallelFor(int count, std::function<void(int)> const& fn)
+    {
+      if (count <= 0) return;
+      {
+        // Publish the new batch.  Every worker is woken and runs until the shared index is
+        // exhausted; completion is signalled once all workers have parked again (not when the
+        // last task finishes) so a lagging worker can never observe the next batch's reset.
+        std::unique_lock<std::mutex> lock(mutex);
+        task        = &fn;
+        nextIndex.store(0);
+        totalTasks  = count;
+        doneWorkers = 0;
+        ++generation;
+      }
+      cv.notify_all();
+
+      // All work runs on the (NUMA-pinned) worker threads; the caller only waits so that a
+      // subexecutor's memory traffic is never issued from an unpinned dispatch thread.
+      std::unique_lock<std::mutex> lock(mutex);
+      doneCv.wait(lock, [this] { return doneWorkers == (int)workers.size(); });
+    }
+
+  private:
+    void WorkerLoop(std::function<void()> perThreadInit)
+    {
+      if (perThreadInit) perThreadInit();
+
+      uint64_t lastGeneration = 0;
+      while (true) {
+        std::function<void(int)> const* localTask = nullptr;
+        int localCount = 0;
+        {
+          std::unique_lock<std::mutex> lock(mutex);
+          cv.wait(lock, [this, &lastGeneration] { return stop || generation != lastGeneration; });
+          if (stop) return;
+          lastGeneration = generation;
+          localTask  = task;
+          localCount = totalTasks;
+        }
+
+        // Claim task indices off the shared counter until exhausted
+        while (true) {
+          int idx = nextIndex.fetch_add(1);
+          if (idx >= localCount) break;
+          (*localTask)(idx);
+        }
+
+        // Mark this worker parked; the last one to park wakes the waiting caller
+        std::unique_lock<std::mutex> lock(mutex);
+        if (++doneWorkers == (int)workers.size())
+          doneCv.notify_one();
+      }
+    }
+
+    std::vector<std::thread>        workers;
+    std::mutex                      mutex;           ///< Guards dispatch, generation, completion
+    std::condition_variable         cv;              ///< Wakes workers for a new batch
+    std::condition_variable         doneCv;          ///< Wakes ParallelFor when batch completes
+    std::function<void(int)> const* task = nullptr;  ///< Current batch task (owned by caller)
+    std::atomic<int>                nextIndex{0};    ///< Next task index to claim
+    int                             totalTasks = 0;  ///< Size of current batch
+    int                             doneWorkers = 0; ///< Workers parked for the current batch
+    uint64_t                        generation = 0;  ///< Incremented per batch to wake workers
+    bool                            stop = false;    ///< Set at destruction
+  };
+
   // Internal resources allocated per Executor
   struct ExeInfo
   {
-    size_t                     totalBytes;        ///< Total bytes this executor transfers
-    double                     totalDurationMsec; ///< Total duration for all iterations for this Executor
-    int                        totalSubExecs;     ///< Total number of subExecutors to use
-    bool                       useSubIndices;     ///< Use subexecutor indicies
-    int                        numSubIndices;     ///< Number of subindices this ExeDevice has
-    vector<SubExecParam>       subExecParamCpu;   ///< Subexecutor parameters for this executor
-    vector<TransferResources>  resources;         ///< Per-Transfer resources
+    size_t                     totalBytes;           ///< Total bytes this executor transfers
+    double                     totalDurationMsec;    ///< Total duration for all iterations for this Executor
+    int                        totalSubExecs;        ///< Total number of subExecutors to use
+    bool                       useSubIndices;        ///< Use subexecutor indicies
+    int                        numSubIndices;        ///< Number of subindices this ExeDevice has
+    vector<SubExecParam>       subExecParamCpu;      ///< Subexecutor parameters for this executor
+    vector<TransferResources>  resources;            ///< Per-Transfer resources
 
     // For GPU-Executors
-    SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    SubExecParam*              subExecParamGpu;      ///< GPU copy of subExecutor parameters
     bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
-    vector<hipStream_t>        streams;           ///< HIP streams to launch on
-    vector<hipEvent_t>         startEvents;       ///< HIP start timing event
-    vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
-    int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
-    int                        gfxKernelToUse;    ///< (GFX-only) Which GFX kernel to use
+    vector<hipStream_t>        streams;              ///< HIP streams to launch on
+    vector<hipEvent_t>         startEvents;          ///< HIP start timing event
+    vector<hipEvent_t>         stopEvents;           ///< HIP stop timing event
+    int                        wallClockRate;        ///< (GFX-only) Device wall clock rate
+    int                        gfxKernelToUse;       ///< (GFX-only) Which GFX kernel to use
+
+    // For TDM-Executors
+    uint32_t                   ldsBytesActual;       ///< Actual number of LDS bytes to use as buffer
+
+    // Persistent worker pool servicing this executor's Transfers/subexecutors across all
+    // iterations.  Created in PrepareExecutor (NUMA-pinned), destroyed in TeardownExecutor.
+    std::unique_ptr<ThreadPool> pool;
   };
 
   // Structure to track PCIe topology
   struct PCIeNode
   {
-    std::string        address;                   ///< PCIe address for this PCIe node
-    std::string        description;               ///< Description for this PCIe node
-    std::set<PCIeNode> children;                  ///< Children PCIe nodes
+    std::string        address;                      ///< PCIe address for this PCIe node
+    std::string        description;                  ///< Description for this PCIe node
+    std::set<PCIeNode> children;                     ///< Children PCIe nodes
 
     // Default constructor
     PCIeNode() : address(""), description("") {}
@@ -3111,7 +3402,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ibvDeviceList.push_back(ibvDevice);
         }
       }
-      ibv_free_device_list(deviceList);
+      if (deviceList) ibv_free_device_list(deviceList);
       isInitialized = true;
     }
     return ibvDeviceList;
@@ -3242,8 +3533,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return -1;
   }
 
-  // Function to extract the bus number from a PCIe address (domain:bus:device.function)
-  static int ExtractBusNumber(std::string const& pcieAddress)
+  // Function to extract the domain number from a PCIe address (domain:bus:device.function)
+  // All four fields are read (not just the domain) so that an address with too few fields, or
+  // with a non-hex field, is rejected.  The separator characters themselves are consumed but
+  // not checked, so this is a well-formedness guard rather than strict format validation
+  static int ExtractDomain(std::string const& pcieAddress)
   {
     int domain, bus, device, function;
     char delimiter;
@@ -3256,16 +3550,31 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #endif
       return -1;
     }
-    return bus;
+    return domain;
   }
 
-  // Function to compute the distance between two bus IDs
-  static int GetBusIdDistance(std::string const& pcieAddress1,
-                              std::string const& pcieAddress2)
+  // Computes a proximity distance between two PCIe addresses.  Used as a secondary
+  // tiebreaker when candidates share the same LCA depth in the PCIe tree, and as the
+  // sole metric in the fallback path when the PCIe tree yields no match at all.
+  // Returns -1 if either address cannot be parsed.
+  //
+  // Same domain (0): devices in one PCIe domain share a root complex, so the LCA tree
+  // already captures their structural proximity.  Bus numbers are firmware-assigned and
+  // do not reliably track physical closeness, so they are deliberately NOT used to
+  // discriminate within a domain -- doing so would break ties between NICs that are
+  // genuinely equidistant from a GPU (e.g. two NICs hanging off the same root complex
+  // at different bus numbers), which is exactly the case this metric must preserve.
+  //
+  // Cross domain (|delta domain|): any non-zero value ranks behind every same-domain
+  // candidate.  The magnitude only provides a deterministic ordering among cross-domain
+  // candidates; it carries no physical meaning.
+  static int GetDomainDistance(std::string const& pcieAddress1,
+                               std::string const& pcieAddress2)
   {
-    int bus1 = ExtractBusNumber(pcieAddress1);
-    int bus2 = ExtractBusNumber(pcieAddress2);
-    return (bus1 < 0 || bus2 < 0) ? -1 : std::abs(bus1 - bus2);
+    int domain1 = ExtractDomain(pcieAddress1);
+    int domain2 = ExtractDomain(pcieAddress2);
+    if (domain1 < 0 || domain2 < 0) return -1;
+    return std::abs(domain1 - domain2);
   }
 
   // Given a target busID and a set of candidate devices, returns a set of indices
@@ -3285,11 +3594,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (!lca) continue;
 
       int depth = GetLcaDepth(lca->address, GetPCIeTreeRoot());
-      int currDistance = GetBusIdDistance(targetBusId, candidateBusId);
+      int currDistance = GetDomainDistance(targetBusId, candidateBusId);
 
-      // When more than one LCA match is found, choose the one with smallest busId difference
-      // NOTE: currDistance could be -1, which signals problem with parsing, however still
-      //       remains a valid "closest" candidate, so is included
+      // A candidate whose address could not be parsed (-1) remains eligible, but treat its
+      // distance as the largest possible so it can never outrank a candidate whose distance
+      // is actually known.  It can still be selected when nothing else matches at this depth,
+      // and still ties with other unparseable candidates.
+      if (currDistance < 0) currDistance = std::numeric_limits<int>::max();
+
+      // When more than one LCA match is found, choose the one with smallest domain difference
       if (depth > maxDepth || (depth == maxDepth && depth >= 0 && currDistance < minDistance)) {
         maxDepth = depth;
         matches.clear();
@@ -3924,6 +4237,100 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
   }
 
+  // Scans output vs expected byte-by-byte and returns a summary of contiguous mismatch
+  // ranges (byte indices, inclusive). Reports up to 5 ranges then "..." if more exist,
+  // followed by the total mismatch byte count.
+  static std::string ByteMismatchSummary(void const* output, void const* expected, size_t numBytes)
+  {
+    unsigned char const* out = static_cast<unsigned char const*>(output);
+    unsigned char const* exp = static_cast<unsigned char const*>(expected);
+
+    // Collect all contiguous mismatch ranges in one pass
+    struct Range { size_t start, end; };
+    std::vector<Range> ranges;
+    size_t totalMismatch = 0;
+    size_t i = 0;
+    while (i < numBytes) {
+      if (out[i] != exp[i]) {
+        size_t start = i;
+        while (i < numBytes && out[i] != exp[i]) ++i;
+        totalMismatch += i - start;
+        ranges.push_back({start, i - 1});
+      } else {
+        ++i;
+      }
+    }
+
+    std::string result;
+    int const maxReport = 5;
+    for (int r = 0; r < (int)ranges.size() && r < maxReport; ++r) {
+      if (r > 0) result += ", ";
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%zu-%zu", ranges[r].start, ranges[r].end);
+      result += buf;
+    }
+    if ((int)ranges.size() > maxReport) result += ", ...";
+    char summary[64];
+    snprintf(summary, sizeof(summary), " (total %zu mismatched bytes)", totalMismatch);
+    result += summary;
+    return result;
+  }
+
+  // On-device validation kernel: byte-compares a buffer against expected values, recording the
+  // number of mismatched bytes and the offset of the first mismatch. Compiles under HIP and CUDA.
+  __global__ void GpuValidateKernel(unsigned char const* __restrict__ data,
+                                    unsigned char const* __restrict__ expected,
+                                    size_t                            numBytes,
+                                    unsigned long long*               result)  // [0]=count, [1]=firstOffset
+  {
+    size_t const stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numBytes; i += stride) {
+      if (data[i] != expected[i]) {
+        atomicAdd(result, 1ULL);
+        atomicMin(result + 1, (unsigned long long)i);
+      }
+    }
+  }
+
+  // Launches GpuValidateKernel on the given device and returns the mismatch count / first offset.
+  // scratch is a 2-element device buffer ([count, firstOffset]) allocated on the same device.
+  static ErrResult ValidateBufferOnDevice(int                 deviceIndex,
+                                          float const*        devData,
+                                          float const*        devExpected,
+                                          size_t              numBytes,
+                                          unsigned long long* scratch,
+                                          unsigned long long* outCount,
+                                          unsigned long long* outFirst)
+  {
+    ERR_CHECK(hipSetDevice(deviceIndex));
+
+    // Reset scratch: count=0, firstOffset=numBytes (sentinel meaning "no mismatch")
+    unsigned long long init[2] = {0ULL, (unsigned long long)numBytes};
+    ERR_CHECK(hipMemcpy(scratch, init, sizeof(init), hipMemcpyHostToDevice));
+
+    int    const blockSize = 256;
+    size_t const numBlocks = (numBytes + blockSize - 1) / blockSize;
+    int    const gridSize  = (int)std::min<size_t>(numBlocks, 4096);
+    dim3 const grid(gridSize > 0 ? gridSize : 1);
+    dim3 const block(blockSize);
+
+#if defined(__NVCC__)
+    GpuValidateKernel<<<grid, block, 0, 0>>>((unsigned char const*)devData,
+                                             (unsigned char const*)devExpected, numBytes, scratch);
+#else
+    hipLaunchKernelGGL(GpuValidateKernel, grid, block, 0, 0,
+                       (unsigned char const*)devData, (unsigned char const*)devExpected,
+                       numBytes, scratch);
+#endif
+    ERR_CHECK(hipDeviceSynchronize());
+
+    unsigned long long out[2];
+    ERR_CHECK(hipMemcpy(out, scratch, sizeof(out), hipMemcpyDeviceToHost));
+    *outCount = out[0];
+    *outFirst = out[0] ? out[1] : 0ULL;
+    return ERR_NONE;
+  }
+
   // Checks that destination buffers match expected values
   static ErrResult ValidateAllTransfers(ConfigOptions              const& cfg,
                                         vector<Transfer>           const& transfers,
@@ -3939,48 +4346,59 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
-      size_t N = t.numBytes / sizeof(float);
 
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
         if (t.dsts[dstIdx].memRank != GetRank()) continue;
-        if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
-          output = (rss->dstMem[dstIdx]) + initOffset;
-          if (verbose) {
-            System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
-                              transferIdx, dstIdx,
-                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
-                              t.numBytes, output);
-          }
-        } else {
-          ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
-          if (verbose) {
-            System::Get().Log("[INFO] Validation memcpy: transfer %d DST[%d] %s%d->host  %zu bytes  src=%p dst=%p\n",
-                              transferIdx, dstIdx,
-                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
-                              t.numBytes,
-                              (rss->dstMem[dstIdx]) + initOffset,
-                              outputBuffer.data());
-          }
-          ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
-          ERR_CHECK(hipDeviceSynchronize());
-          output = outputBuffer.data();
-        }
 
         ErrResult dstErr = ERR_NONE;
-        if (memcmp(output, expected, t.numBytes)) {
-          // Difference found - find first error
-          for (size_t i = 0; i < N; i++) {
-            if (output[i] != expected[i]) {
-              dstErr = {ERR_FATAL, "Transfer %d: Unexpected mismatch at index %lu of destination %d on rank %d: Expected %10.5f Actual: %10.5f",
-                transferIdx, i, dstIdx, t.dsts[dstIdx].memRank, expected[i], output[i]};
-              break;
-            }
+        if (cfg.data.validateOnDevice && IsGpuMemType(t.dsts[dstIdx].memType)) {
+          // Compare on the GPU against the pre-uploaded expected buffer; only a tiny result copies back
+          if (verbose) {
+            System::Get().Log("[INFO] Validation on-device: transfer %d DST[%d] %s%d  %zu bytes  ptr=%p\n",
+                              transferIdx, dstIdx,
+                              GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                              t.numBytes, (rss->dstMem[dstIdx]) + initOffset);
           }
-          if (dstErr.errType == ERR_NONE)
-            // memcmp found a difference but float != didn't (e.g. +0.0f vs -0.0f bit pattern)
-            dstErr = {ERR_FATAL, "Transfer %d: Unexpected output mismatch for destination %d", transferIdx, dstIdx};
+          unsigned long long count = 0, firstOff = 0;
+          ERR_CHECK(ValidateBufferOnDevice(t.dsts[dstIdx].memIndex,
+                                           (rss->dstMem[dstIdx]) + initOffset,
+                                           rss->dstExpectedMem[dstIdx], t.numBytes,
+                                           rss->dstValidateScratch[dstIdx], &count, &firstOff));
+          if (count) {
+            dstErr = {ERR_FATAL, "Transfer %d: Mismatch at destination %d on rank %d: %llu mismatched bytes, first at offset %llu",
+                      transferIdx, dstIdx, t.dsts[dstIdx].memRank, count, firstOff};
+          }
+        } else {
+          if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+            output = (rss->dstMem[dstIdx]) + initOffset;
+            if (verbose) {
+              System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
+                                transferIdx, dstIdx,
+                                GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                                t.numBytes, output);
+            }
+          } else {
+            ERR_CHECK(hipSetDevice(t.dsts[dstIdx].memIndex));
+            if (verbose) {
+              System::Get().Log("[INFO] Validation memcpy: transfer %d DST[%d] %s%d->host  %zu bytes  src=%p dst=%p\n",
+                                transferIdx, dstIdx,
+                                GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                                t.numBytes,
+                                (rss->dstMem[dstIdx]) + initOffset,
+                                outputBuffer.data());
+            }
+            ERR_CHECK(hipMemcpy(outputBuffer.data(), (rss->dstMem[dstIdx]) + initOffset, t.numBytes, hipMemcpyDefault));
+            ERR_CHECK(hipDeviceSynchronize());
+            output = outputBuffer.data();
+          }
+
+          if (memcmp(output, expected, t.numBytes)) {
+            std::string ranges = ByteMismatchSummary(output, expected, t.numBytes);
+            dstErr = {ERR_FATAL, "Transfer %d: Mismatch at destination %d on rank %d: bytes %s",
+                      transferIdx, dstIdx, t.dsts[dstIdx].memRank, ranges.c_str()};
+          }
         }
 
         if (verbose)
@@ -4358,13 +4776,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     // Prepare additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
-        && exeDevice.exeRank == localRank) {
+    if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
-                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
+                                   (cfg.general.useMultiStream && (exeDevice.exeType == EXE_GPU_GFX ||
+                                                                   exeDevice.exeType == EXE_GPU_TDM)))
                                   ? exeInfo.resources.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
 
@@ -4382,7 +4800,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
       }
 
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+      if (cfg.general.useHipEvents) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4390,10 +4808,23 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ERR_CHECK(hipEventCreate(&exeInfo.stopEvents[i]));
         }
       }
+
+      // Determine how much shared memory to use for TDM
+      if (exeDevice.exeType == EXE_GPU_TDM) {
+        if (cfg.tdm.ldsBytes == 0) {
+          int ldsMaxBytes;
+          ERR_CHECK(hipDeviceGetAttribute(&ldsMaxBytes,
+                                          hipDeviceAttributeMaxSharedMemoryPerBlock, exeDevice.exeIndex));
+          exeInfo.ldsBytesActual = static_cast<uint32_t>(ldsMaxBytes);
+        } else {
+          exeInfo.ldsBytesActual = cfg.tdm.ldsBytes;
+        }
+      }
     }
 
-    // Prepare for GPU GFX executor
-    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
+    // Prepare for GPU GFX / TDM executor (both consume SubExecParam from GPU memory)
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
+        exeDevice.exeRank == localRank) {
       // Allocate one contiguous chunk of GPU memory for threadblock parameters
       // This allows support for executing one transfer per stream, or all transfers in a single stream
 #if !defined(__NVCC__)
@@ -4415,7 +4846,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                       exeDevice.exeIndex));
 #endif
       int transferOffset = 0;
-      if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
+      if (cfg.general.useMultiStream || cfg.gfx.blockOrder == 0) {
         // Threadblocks are ordered sequentially one transfer at a time
         for (auto& rss : exeInfo.resources) {
           rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
@@ -4487,8 +4918,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
     }
 
-    // Check that GPU wallclock rate is non-zero
-    if (exeDevice.exeType == EXE_GPU_GFX && exeInfo.wallClockRate == 0 && exeDevice.exeRank == localRank) {
+    // Check that GPU wallclock rate is non-zero (GFX and TDM both use it for in-kernel cycle timing)
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
+        exeInfo.wallClockRate == 0 && exeDevice.exeRank == localRank) {
       if (getenv("TB_WALLCLOCK_RATE")) {
         exeInfo.wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
         return {ERR_WARN,
@@ -4496,9 +4928,30 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           exeDevice.exeIndex, exeInfo.wallClockRate};
       } else {
         exeInfo.wallClockRate = 100000;
+        /*
         return {ERR_WARN,
           "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
           exeDevice.exeIndex, exeInfo.wallClockRate};
+        */
+      }
+    }
+
+    // Create the persistent, NUMA-pinned worker pool that services this executor across all
+    // iterations.  Sized to the executor's peak intra-executor concurrency.  NIC executors
+    // post work single-threaded and need no pool.
+    if (exeDevice.exeRank == localRank) {
+      if (exeDevice.exeType == EXE_CPU) {
+        int const physNode = System::Get().GetCpuPhysicalNode(exeDevice.exeIndex);
+        exeInfo.pool.reset(new ThreadPool(std::max(1, exeInfo.totalSubExecs),
+                                          [physNode] { numa_run_on_node(physNode); }));
+      } else if (IsGpuExeType(exeDevice.exeType)) {
+        int const numThreads = std::max({1, (int)exeInfo.resources.size(), (int)exeInfo.streams.size()});
+        int const exeIndex   = exeDevice.exeIndex;
+        int const physNode   = (exeNuma >= 0) ? System::Get().GetCpuPhysicalNode(exeNuma) : -1;
+        exeInfo.pool.reset(new ThreadPool(numThreads, [physNode, exeIndex] {
+          if (physNode >= 0) numa_run_on_node(physNode);
+          (void)hipSetDevice(exeIndex);
+        }));
       }
     }
 
@@ -4516,6 +4969,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   {
     int const localRank = GetRank();
     bool const verbose  = System::Get().IsVerbose();
+
+    // Tear down the persistent worker pool (joins all workers) now that all iterations are done.
+    exeInfo.pool.reset();
 
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
@@ -4573,6 +5029,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
       }
 
+      // Deallocate on-device validation buffers (VALIDATE_ON_DEVICE)
+      for (int iDst = 0; iDst < (int)rss.dstExpectedMem.size(); ++iDst) {
+        if (rss.dstExpectedMem[iDst])
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstExpectedMem[iDst], rss.dstExpectedBytes[iDst]));
+        if (rss.dstValidateScratch[iDst])
+          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstValidateScratch[iDst], 2 * sizeof(unsigned long long)));
+      }
+      for (int iSrc = 0; iSrc < (int)rss.srcExpectedMem.size(); ++iSrc) {
+        if (rss.srcExpectedMem[iSrc])
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcExpectedMem[iSrc], rss.srcExpectedBytes[iSrc]));
+        if (rss.srcValidateScratch[iSrc])
+          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcValidateScratch[iSrc], 2 * sizeof(unsigned long long)));
+      }
+
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
       if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
@@ -4587,19 +5057,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     // Teardown additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
-        && exeDevice.exeRank == localRank) {
+    if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
-        for (auto event : exeInfo.startEvents)
-          ERR_CHECK(hipEventDestroy(event));
-        for (auto event : exeInfo.stopEvents)
-          ERR_CHECK(hipEventDestroy(event));
-      }
+      for (auto event : exeInfo.startEvents)
+        ERR_CHECK(hipEventDestroy(event));
+      for (auto event : exeInfo.stopEvents)
+        ERR_CHECK(hipEventDestroy(event));
     }
 
-    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
+        exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
       MemType memType = MEM_GPU;
 #else
@@ -4655,57 +5123,62 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     } while (++subIteration != numSubIterations);
   }
 
-  // Execution of a single CPU Transfers
-  static void ExecuteCpuTransfer(int           const  iteration,
-                                 ConfigOptions const& cfg,
-                                 int           const  exeIndex,
-                                 TransferResources&   rss)
-  {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-    vector<std::thread> childThreads;
-
-    for (auto const& subExecParam : rss.subExecParamCpu)
-      childThreads.emplace_back(std::thread(CpuReduceKernel, std::cref(subExecParam), cfg.general.numSubIterations));
-
-    for (auto& subExecThread : childThreads)
-      subExecThread.join();
-    childThreads.clear();
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = (std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0) / cfg.general.numSubIterations;
-
-    if (iteration >= 0) {
-      rss.totalDurationMsec += deltaMsec;
-      if (cfg.general.recordPerIteration)
-        rss.perIterMsec.push_back(deltaMsec);
-    }
-  }
-
   // Execution of a single CPU executor
   static ErrResult RunCpuExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    numa_run_on_node(exeIndex);
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    using Clock = std::chrono::high_resolution_clock;
 
-    vector<std::thread> asyncTransfers;
-    for (auto& rss : exeInfo.resources) {
-      asyncTransfers.emplace_back(std::thread(ExecuteCpuTransfer,
-                                              iteration,
-                                              std::cref(cfg),
-                                              exeIndex,
-                                              std::ref(rss)));
+    // Flatten every subexecutor across all of this executor's Transfers into a single task
+    // list serviced by the persistent, NUMA-pinned worker pool.  This collapses the former
+    // per-transfer + per-subexecutor thread creation into zero per-iteration thread spawns.
+    struct CpuTask { SubExecParam const* param; int rssIdx; };
+    std::vector<CpuTask> tasks;
+    tasks.reserve(exeInfo.totalSubExecs);
+    for (int r = 0; r < (int)exeInfo.resources.size(); ++r)
+      for (auto const& p : exeInfo.resources[r].subExecParamCpu)
+        tasks.push_back({&p, r});
+
+    int const numTasks = (int)tasks.size();
+    std::vector<Clock::time_point> starts(numTasks), stops(numTasks);
+
+    auto cpuStart = Clock::now();
+    exeInfo.pool->ParallelFor(numTasks, [&](int i) {
+      starts[i] = Clock::now();
+      CpuReduceKernel(*tasks[i].param, cfg.general.numSubIterations);
+      stops[i]  = Clock::now();
+    });
+    auto cpuDelta = Clock::now() - cpuStart;
+
+    if (iteration >= 0) {
+      // Executor duration: wall-clock span of the whole batch
+      exeInfo.totalDurationMsec += std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count()
+                                   * 1000.0 / cfg.general.numSubIterations;
+
+      // Per-transfer duration: span from the earliest subexecutor start to the latest stop
+      // among that Transfer's subexecutors (they run concurrently in the pool).
+      for (int r = 0; r < (int)exeInfo.resources.size(); ++r) {
+        TransferResources& rss = exeInfo.resources[r];
+        auto minStart = Clock::time_point::max();
+        auto maxStop  = Clock::time_point::min();
+        bool any = false;
+        for (int i = 0; i < numTasks; ++i) {
+          if (tasks[i].rssIdx != r) continue;
+          any = true;
+          minStart = std::min(minStart, starts[i]);
+          maxStop  = std::max(maxStop,  stops[i]);
+        }
+        double deltaMsec = any
+          ? std::chrono::duration_cast<std::chrono::duration<double>>(maxStop - minStart).count()
+              * 1000.0 / cfg.general.numSubIterations
+          : 0.0;
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration)
+          rss.perIterMsec.push_back(deltaMsec);
+      }
     }
-    for (auto& asyncTransfer : asyncTransfers)
-      asyncTransfer.join();
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
-    double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
-
-    if (iteration >= 0)
-      exeInfo.totalDurationMsec += deltaMsec;
     return ERR_NONE;
   }
 
@@ -4812,20 +5285,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
 // GFX Executor-related functions
 //========================================================================================
-
-  // Converts register value to a CU/SM index
-  static uint32_t GetId(uint32_t hwId)
-  {
-#if defined(__NVCC_)
-    return hwId;
-#else
-    // Based on instinct-mi200-cdna2-instruction-set-architecture.pdf
-    int const shId = (hwId >> 12) &  1;
-    int const cuId = (hwId >>  8) & 15;
-    int const seId = (hwId >> 13) &  3;
-    return (shId << 5) + (cuId << 2) + seId;
-#endif
-  }
 
   // Device level timestamp function
   __device__ int64_t GetTimestamp()
@@ -4959,11 +5418,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (seType == 1 && p.N == 0) return;
 
     // Filter by XCC
-#if !defined(__NVCC__)
-    int32_t xccId;
-    GetXccId(xccId);
-    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
-#endif
+    { uint32_t xccId, cuId; GetXccHwId(xccId, cuId);
+      if (p.preferredXccId != -1 && (int32_t)xccId != p.preferredXccId) return; }
 
     // Collect data information
     bool hasSrc = p.numSrcs > 0;
@@ -5089,8 +5545,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
-      GetHwId(p.hwId);
-      GetXccId(p.xccId);
+      GetXccHwId(p.xccId, p.hwId);
     }
   }
 
@@ -5122,11 +5577,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (seType == 1 && p.N == 0) return;
 
     // Filter by XCC
-#if !defined(__NVCC__)
-    int32_t xccId;
-    GetXccId(xccId);
-    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
-#endif
+    { uint32_t xccId, cuId; GetXccHwId(xccId, cuId);
+      if (p.preferredXccId != -1 && (int32_t)xccId != p.preferredXccId) return; }
 
     // Collect data information
     int32_t const  numSrcs  = p.numSrcs;
@@ -5270,8 +5722,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       __threadfence_system();
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
-      GetHwId(p.hwId);
-      GetXccId(p.xccId);
+      GetXccHwId(p.xccId, p.hwId);
     }
   }
 
@@ -5379,32 +5830,32 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #endif
 
     // Compute kernel launch parameters
-    int  const numSubExecs = cfg.gfx.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
+    int  const numSubExecs = cfg.general.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
     int  const gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
     dim3 const gridSize(xccDim, gridY, 1);
     dim3 const blockSize(cfg.gfx.blockSize);
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    SubExecParam* params = cfg.gfx.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
+    SubExecParam* params = cfg.general.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
 
 #if defined(__NVCC__)
-    if (cfg.gfx.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
     gpuKernel<<<gridSize, blockSize, 0 , stream>>>(params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-    if (cfg.gfx.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
-                          cfg.gfx.useHipEvents ? startEvent : NULL,
-                          cfg.gfx.useHipEvents ? stopEvent  : NULL, 0,
+                          cfg.general.useHipEvents ? startEvent : NULL,
+                          cfg.general.useHipEvents ? stopEvent  : NULL, 0,
                           params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
 
     // Record this timing if this Transfer is being run in multistream mode
-    if (cfg.gfx.useMultiStream) {
+    if (cfg.general.useMultiStream) {
       if (iteration >= 0) {
         auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
         double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5430,7 +5881,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           }
           for (int i = 0; i < numSubExecs; i++) {
             CUs.insert(std::make_pair(subExecParam[i].xccId,
-                                      GetId(subExecParam[i].hwId)));
+                                      subExecParam[i].hwId));
           }
           rss.perIterCUs.push_back(CUs);
         }
@@ -5450,31 +5901,29 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
-    if (cfg.gfx.useMultiStream) {
-      // Launch one thread per Transfer in separate streams
-      vector<std::future<ErrResult>> asyncTransfers;
-      for (int i = 0; i < exeInfo.streams.size(); i++) {
-        asyncTransfers.emplace_back(std::async(std::launch::async,
-                                               ExecuteGpuTransfer,
-                                               iteration,
-                                               exeInfo.totalSubExecs,
-                                               exeInfo.subExecParamGpu,
-                                               exeInfo.streams[i],
-                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
-                                               xccDim,
-                                               std::cref(cfg),
-                                               exeInfo.gfxKernelToUse,
-                                               exeInfo.subExecParamHostAccessible,
-                                               std::ref(exeInfo.resources[i])));
-      }
-      for (auto& asyncTransfer : asyncTransfers)
-        ERR_CHECK(asyncTransfer.get());
+    if (cfg.general.useMultiStream) {
+      // Launch one task per Transfer in separate streams on the persistent worker pool
+      int const numStreams = (int)exeInfo.streams.size();
+      std::vector<ErrResult> tfrErr(numStreams);
+      exeInfo.pool->ParallelFor(numStreams, [&](int i) {
+        tfrErr[i] = ExecuteGpuTransfer(iteration,
+                                       exeInfo.totalSubExecs,
+                                       exeInfo.subExecParamGpu,
+                                       exeInfo.streams[i],
+                                       cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                       cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                       xccDim,
+                                       cfg,
+                                       exeInfo.gfxKernelToUse,
+                                       exeInfo.subExecParamHostAccessible,
+                                       exeInfo.resources[i]);
+      });
+      for (auto& e : tfrErr) ERR_CHECK(e);
     } else {
       // Launch all Transfers in one kernel launch (avoid extra thread creation)
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
-                         cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                         cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                         cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                         cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
                          xccDim, cfg, exeInfo.gfxKernelToUse,
                          exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
     }
@@ -5485,7 +5934,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Determine executor timing
       // - Use HIP event timing if enabled and not using multi-stream
       // - Otherwise, Use CPU timing
-      if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
+      if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
         gpuDeltaMsec /= cfg.general.numSubIterations;
@@ -5498,7 +5947,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       // If Transfers were combined into a single launch, figure out per-Transfer timing
       // Determine timing for each of the individual transfers that were part of this launch
-      if (!cfg.gfx.useMultiStream) {
+      if (!cfg.general.useMultiStream) {
         std::vector<SubExecParam> subExecParamHost;
         SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
         if (!exeInfo.subExecParamHostAccessible) {
@@ -5520,7 +5969,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
               if (cfg.general.recordPerIteration) {
                 CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
-                                          GetId(subExecParam[subExecIdx].hwId)));
+                                          subExecParam[subExecIdx].hwId));
               }
             }
           }
@@ -5559,7 +6008,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     size_t const initOffset = cfg.data.byteOffset / sizeof(float);
     float* const src = resources.srcMem[0] + initOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
-      if (cfg.dma.useHipEvents)
+      if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
 
       // Force the use of SDMA engine if possible
@@ -5583,7 +6032,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
       } while (++subIterations != cfg.general.numSubIterations);
 
-      if (cfg.dma.useHipEvents)
+      if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(stopEvent, stream));
       ERR_CHECK(hipStreamSynchronize(stream));
     } else {
@@ -5620,7 +6069,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
-      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
+      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.general.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
         deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
@@ -5641,22 +6090,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteDmaTransfer,
-                                             iteration,
-                                             exeInfo.useSubIndices,
-                                             exeIndex,
-                                             exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
-
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+    int const numTransfers = (int)exeInfo.resources.size();
+    std::vector<ErrResult> tfrErr(numTransfers);
+    exeInfo.pool->ParallelFor(numTransfers, [&](int i) {
+      tfrErr[i] = ExecuteDmaTransfer(iteration,
+                                     exeInfo.useSubIndices,
+                                     exeIndex,
+                                     exeInfo.streams[i],
+                                     cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                     cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                     cfg,
+                                     exeInfo.resources[i]);
+    });
+    for (auto& e : tfrErr) ERR_CHECK(e);
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5682,7 +6128,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     ERR_CHECK(hipSetDevice(exeIndex));
 
     int subIterations = 0;
-    if (cfg.dma.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
 
     [[maybe_unused]] size_t failIdx = 0;
@@ -5699,7 +6145,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                     stream));
     } while (++subIterations != cfg.general.numSubIterations);
 
-    if (cfg.dma.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
     ERR_CHECK(hipStreamSynchronize(stream));
 
@@ -5708,7 +6154,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
-      if (cfg.dma.useHipEvents) {
+      if (cfg.general.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
         deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
@@ -5728,21 +6174,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     auto cpuStart = std::chrono::high_resolution_clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
-    vector<std::future<ErrResult>> asyncTransfers;
-    for (int i = 0; i < exeInfo.resources.size(); i++) {
-      asyncTransfers.emplace_back(std::async(std::launch::async,
-                                             ExecuteBatchDmaTransfer,
-                                             iteration,
-                                             exeIndex,
-                                             exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
-                                             std::cref(cfg),
-                                             std::ref(exeInfo.resources[i])));
-    }
-
-    for (auto& asyncTransfer : asyncTransfers)
-      ERR_CHECK(asyncTransfer.get());
+    int const numTransfers = (int)exeInfo.resources.size();
+    std::vector<ErrResult> tfrErr(numTransfers);
+    exeInfo.pool->ParallelFor(numTransfers, [&](int i) {
+      tfrErr[i] = ExecuteBatchDmaTransfer(iteration,
+                                          exeIndex,
+                                          exeInfo.streams[i],
+                                          cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                          cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                          cfg,
+                                          exeInfo.resources[i]);
+    });
+    for (auto& e : tfrErr) ERR_CHECK(e);
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
     double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5751,6 +6194,209 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 #endif // BMA_EXEC_ENABLED
+
+// TDM Executor-related functions
+//========================================================================================
+#if TDM_SUPPORTED
+  __global__ void  GpuTdmKernel(SubExecParam* params,
+                                uint32_t      ldsBytes,
+                                int           numSubIterations)
+  {
+    int64_t startCycle;
+    bool const shouldRecordTiming = (threadIdx.x == 0);
+    if (shouldRecordTiming) startCycle = GetTimestamp();
+
+    extern __shared__ __align__(128) float shmem[];
+
+    // Each threadblock is a subexecutor (mirrors GpuCopyKernel).
+    SubExecParam& p = params[blockIdx.x];
+    if (p.N == 0) return;
+
+    float const* __restrict__ src = (float const*)p.src[0];
+    float*       __restrict__ dst = (float*)p.dst[0];
+    size_t const sizeBytes        = p.N * sizeof(float);
+
+    int subIterations = 0;
+    while (1) {
+      tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+      __syncthreads(); // Wait for all warps to finish
+      if (++subIterations == numSubIterations) break;
+    }
+
+    if (shouldRecordTiming) {
+      __threadfence_system();
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+      GetXccHwId(p.xccId, p.hwId);
+    }
+  }
+#else
+  // gfx1250 tensor TDM builtins unavailable for this translation: emit empty kernel stubs with
+  // the exact launch signatures so the host-side launch path still links. They are never
+  // dispatched on non-gfx1250 or nvidia hardware (see TransfersHaveErrors).
+  __global__ void GpuTdmKernel(SubExecParam*, uint32_t, int) {}
+#endif // TDM_SUPPORTED
+
+  static ErrResult ExecuteTdmTransfer(int           const  iteration,
+                                      int           const  exeTotalSubExecs,
+                                      SubExecParam*        exeSubExecParam,
+                                      hipStream_t   const  stream,
+                                      hipEvent_t    const  startEvent,
+                                      hipEvent_t    const  stopEvent,
+                                      ConfigOptions const& cfg,
+                                      bool          const  subExecParamHostAccessible,
+                                      uint32_t      const  ldsBytes,
+                                      TransferResources&   rss)
+  {
+    // Compute kernel launch parameters
+    int  const numSubExecs = cfg.general.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
+    dim3 const gridSize(numSubExecs);
+    dim3 const blockSize(cfg.tdm.blockSize);
+    SubExecParam* params = cfg.general.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+#if defined(__NVCC__)
+    if (cfg.general.useHipEvents)
+      ERR_CHECK(hipEventRecord(startEvent, stream));
+    GpuTdmKernel<<<gridSize, blockSize, ldsBytes, stream>>>(params,
+                                                            ldsBytes,
+                                                            cfg.general.numSubIterations);
+    if (cfg.general.useHipEvents)
+      ERR_CHECK(hipEventRecord(stopEvent, stream));
+#else
+    hipExtLaunchKernelGGL(GpuTdmKernel, gridSize, blockSize, (int)ldsBytes, stream,
+                          startEvent, stopEvent, 0,
+                          params, ldsBytes, cfg.general.numSubIterations);
+#endif
+    ERR_CHECK(hipStreamSynchronize(stream));
+
+    // Record this timing if this Transfer is being run in multistream mode
+    if (cfg.general.useMultiStream) {
+      if (iteration >= 0) {
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+
+        double deltaMsec = cpuDeltaMsec;
+        if (startEvent != NULL) {
+          float gpuDeltaMsec;
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+          deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
+        }
+
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration) {
+          rss.perIterMsec.push_back(deltaMsec);
+          std::set<std::pair<int,int>> CUs;
+          std::vector<SubExecParam> subExecParamHost;
+          SubExecParam const* subExecParam = rss.subExecParamGpuPtr;
+          if (!subExecParamHostAccessible) {
+            subExecParamHost.resize(numSubExecs);
+            ERR_CHECK(hipMemcpy(subExecParamHost.data(), rss.subExecParamGpuPtr,
+                                numSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+            subExecParam = subExecParamHost.data();
+          }
+          for (int i = 0; i < numSubExecs; i++) {
+            CUs.insert(std::make_pair(subExecParam[i].xccId,
+                                      subExecParam[i].hwId));
+          }
+          rss.perIterCUs.push_back(CUs);
+        }
+      }
+    }
+    return ERR_NONE;
+  }
+
+  static ErrResult RunTdmExecutor(int           const  iteration,
+                                  ConfigOptions const& cfg,
+                                  int           const  exeIndex,
+                                  ExeInfo&             exeInfo)
+  {
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    ERR_CHECK(hipSetDevice(exeIndex));
+
+    if (cfg.general.useMultiStream && exeInfo.streams.size() > 1 ) {
+      // Launch one task per Transfer in separate streams on the persistent worker pool
+      int const numStreams = (int)exeInfo.streams.size();
+      std::vector<ErrResult> tfrErr(numStreams);
+      exeInfo.pool->ParallelFor(numStreams, [&](int i) {
+        tfrErr[i] = ExecuteTdmTransfer(iteration,
+                                       exeInfo.totalSubExecs,
+                                       exeInfo.subExecParamGpu,
+                                       exeInfo.streams[i],
+                                       cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                       cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                       cfg,
+                                       exeInfo.subExecParamHostAccessible,
+                                       exeInfo.ldsBytesActual,
+                                       exeInfo.resources[i]);
+      });
+      for (auto& e : tfrErr) ERR_CHECK(e);
+    } else {
+      // Launch all Transfers in one kernel launch (avoid extra thread creation)
+      ExecuteTdmTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
+                         cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                         cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                         cfg, exeInfo.subExecParamHostAccessible, exeInfo.ldsBytesActual, exeInfo.resources[0]);
+    }
+
+    if (iteration >= 0) {
+      // Determine executor timing
+      // - Use HIP event timing if enabled and not using multi-stream
+      // - Otherwise, Use CPU timing
+      if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        gpuDeltaMsec /= cfg.general.numSubIterations;
+        exeInfo.totalDurationMsec += gpuDeltaMsec;
+      } else {
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+          / cfg.general.numSubIterations;
+        exeInfo.totalDurationMsec += cpuDeltaMsec;
+      }
+
+      // If Transfers were combined into a single launch, figure out per-Transfer timing
+      // Determine timing for each of the individual transfers that were part of this launch
+      if (!cfg.general.useMultiStream) {
+        std::vector<SubExecParam> subExecParamHost;
+        SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
+        if (!exeInfo.subExecParamHostAccessible) {
+          subExecParamHost.resize(exeInfo.totalSubExecs);
+          ERR_CHECK(hipMemcpy(subExecParamHost.data(), exeInfo.subExecParamGpu,
+                              exeInfo.totalSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+          subExecParam = subExecParamHost.data();
+        }
+
+        for (int i = 0; i < exeInfo.resources.size(); i++) {
+          TransferResources& rss = exeInfo.resources[i];
+          int64_t minStartCycle = std::numeric_limits<int64_t>::max();
+          int64_t maxStopCycle  = std::numeric_limits<int64_t>::min();
+          std::set<std::pair<int, int>> CUs;
+
+          for (auto subExecIdx : rss.subExecIdx) {
+            if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
+              minStartCycle = std::min(minStartCycle, subExecParam[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
+                                          subExecParam[subExecIdx].hwId));
+              }
+            }
+          }
+
+          double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
+          deltaMsec /= cfg.general.numSubIterations;
+          rss.totalDurationMsec += deltaMsec;
+          if (cfg.general.recordPerIteration) {
+            rss.perIterMsec.push_back(deltaMsec);
+            rss.perIterCUs.push_back(CUs);
+          }
+        }
+      }
+    }
+    return ERR_NONE;
+  }
 
 // Executor-related functions
 //========================================================================================
@@ -5761,8 +6407,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   {
     switch (exeDevice.exeType) {
     case EXE_CPU:           return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_TDM:       return RunTdmExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
@@ -5975,6 +6622,63 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
             ERR_APPEND(hipDeviceSynchronize(), errResults);
+
+            // Optionally validate source memory right after preparation
+            if (cfg.data.validateSource) {
+              if (cfg.data.validateOnDevice && IsGpuMemType(t.srcs[srcIdx].memType)) {
+                resource->srcExpectedMem.resize(resource->srcMem.size(), nullptr);
+                resource->srcExpectedBytes.resize(resource->srcMem.size(), 0);
+                resource->srcValidateScratch.resize(resource->srcMem.size(), nullptr);
+                ERR_APPEND(AllocateMemory(t.srcs[srcIdx], resource->numBytes,
+                                          (void**)&resource->srcExpectedMem[srcIdx],
+                                          &resource->srcExpectedBytes[srcIdx]), errResults);
+                ERR_APPEND(AllocateMemory(t.srcs[srcIdx], 2 * sizeof(unsigned long long),
+                                          (void**)&resource->srcValidateScratch[srcIdx]), errResults);
+                ERR_APPEND(hipMemcpy(resource->srcExpectedMem[srcIdx], srcReference[srcIdx].data(),
+                                     resource->numBytes, hipMemcpyDefault), errResults);
+                ERR_APPEND(hipDeviceSynchronize(), errResults);
+                unsigned long long count = 0, firstOff = 0;
+                ERR_APPEND(ValidateBufferOnDevice(t.srcs[srcIdx].memIndex,
+                                                  resource->srcMem[srcIdx] + initOffset,
+                                                  resource->srcExpectedMem[srcIdx], resource->numBytes,
+                                                  resource->srcValidateScratch[srcIdx], &count, &firstOff), errResults);
+                if (count)
+                  ERR_APPEND((ErrResult{ERR_FATAL, "Transfer %d: Source %d mismatch after prep: %llu mismatched bytes, first at offset %llu",
+                                        resource->transferIdx, srcIdx, count, firstOff}), errResults);
+              } else {
+                size_t const N = resource->numBytes / sizeof(float);
+                vector<float> tmp(N);
+                ERR_APPEND(hipMemcpy(tmp.data(), resource->srcMem[srcIdx] + initOffset, resource->numBytes, hipMemcpyDefault), errResults);
+                ERR_APPEND(hipDeviceSynchronize(), errResults);
+                if (memcmp(tmp.data(), srcReference[srcIdx].data(), resource->numBytes))
+                  ERR_APPEND((ErrResult{ERR_FATAL, "Transfer %d: Source %d mismatch after prep",
+                                        resource->transferIdx, srcIdx}), errResults);
+              }
+            }
+          }
+        }
+      }
+
+      // Pre-upload expected destination values to device for on-device validation
+      if (validateEnabled && cfg.data.validateOnDevice) {
+        for (auto resource : transferResources) {
+          Transfer const& t = transfers[resource->transferIdx];
+          float const* dstExpected = dstReference[t.srcs.size()].data();
+          resource->dstExpectedMem.resize(resource->dstMem.size(), nullptr);
+          resource->dstExpectedBytes.resize(resource->dstMem.size(), 0);
+          resource->dstValidateScratch.resize(resource->dstMem.size(), nullptr);
+          for (int dstIdx = 0; dstIdx < (int)resource->dstMem.size(); dstIdx++) {
+            if (t.dsts[dstIdx].memRank != localRank) continue;
+            if (!IsGpuMemType(t.dsts[dstIdx].memType)) continue;
+            ERR_APPEND(hipSetDevice(t.dsts[dstIdx].memIndex), errResults);
+            ERR_APPEND(AllocateMemory(t.dsts[dstIdx], resource->numBytes,
+                                      (void**)&resource->dstExpectedMem[dstIdx],
+                                      &resource->dstExpectedBytes[dstIdx]), errResults);
+            ERR_APPEND(AllocateMemory(t.dsts[dstIdx], 2 * sizeof(unsigned long long),
+                                      (void**)&resource->dstValidateScratch[dstIdx]), errResults);
+            ERR_APPEND(hipMemcpy(resource->dstExpectedMem[dstIdx], dstExpected,
+                                 resource->numBytes, hipMemcpyDefault), errResults);
+            ERR_APPEND(hipDeviceSynchronize(), errResults);
           }
         }
       }
@@ -6031,6 +6735,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     // Perform iterations
+    // Persistent pool that dispatches the local executors concurrently each iteration,
+    // replacing per-iteration std::async.  Each RunExecutor still sets its own device/NUMA.
+    // ExeInfo pointers are resolved up-front so the parallel lambda never touches the map
+    // (std::map::operator[] is non-const and not safe to call concurrently).
+    std::vector<ExeInfo*> localExeInfos;
+    localExeInfos.reserve(localExecutors.size());
+    for (auto const& exeDevice : localExecutors)
+      localExeInfos.push_back(&executorMap[exeDevice]);
+
+    ThreadPool executorPool((int)localExecutors.size());
+    std::vector<ErrResult> exeErrors(localExecutors.size());
+
     size_t numTimedIterations = 0;
     double totalCpuTimeSec = 0.0;
     for (int iteration = -cfg.general.numWarmups; ; iteration++) {
@@ -6048,19 +6764,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Start CPU timing for this iteration
       auto cpuStart = std::chrono::high_resolution_clock::now();
 
-      // Execute all Transfers in parallel
-      std::vector<std::future<ErrResult>> asyncExecutors;
-      for (auto const& exeDevice : localExecutors) {
-        asyncExecutors.emplace_back(std::async(std::launch::async, RunExecutor,
-                                               iteration,
-                                               std::cref(cfg),
-                                               std::cref(exeDevice),
-                                               std::ref(executorMap[exeDevice])));
-      }
+      // Execute all local executors in parallel on the persistent executor pool
+      executorPool.ParallelFor((int)localExecutors.size(), [&](int i) {
+        exeErrors[i] = RunExecutor(iteration, cfg, localExecutors[i], *localExeInfos[i]);
+      });
 
-      // Wait for all threads to finish
-      for (auto& asyncExecutor : asyncExecutors) {
-        ERR_APPEND(asyncExecutor.get(), errResults);
+      // Collect any errors reported by the executors
+      for (auto& exeErr : exeErrors) {
+        ERR_APPEND(exeErr, errResults);
       }
 
       // Wait for all ranks to finish
@@ -6073,6 +6784,23 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (cfg.data.alwaysValidate > 0) {
         ERR_APPEND(ValidateAllTransfers(cfg, transfers, transferResources, dstReference, outputBuffer),
                    errResults);
+
+        // Clear destination memory after validation so each iteration starts from a known-zero state
+        size_t const initOffset = cfg.data.byteOffset / sizeof(float);
+        for (auto rss : transferResources) {
+          Transfer const& t = transfers[rss->transferIdx];
+          for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
+            if (t.dsts[dstIdx].memRank != localRank) continue;
+            float* dstPtr = rss->dstMem[dstIdx] + initOffset;
+            if (IsCpuMemType(t.dsts[dstIdx].memType)) {
+              memset(dstPtr, 0, rss->numBytes);
+            } else if (IsGpuMemType(t.dsts[dstIdx].memType)) {
+              ERR_APPEND(hipSetDevice(t.dsts[dstIdx].memIndex), errResults);
+              ERR_APPEND(hipMemset(dstPtr, 0, rss->numBytes), errResults);
+              ERR_APPEND(hipDeviceSynchronize(), errResults);
+            }
+          }
+        }
       }
 
       if (iteration >= 0) {
@@ -6112,7 +6840,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         for (auto rss : transferResources) {
           int transferIdx = rss->transferIdx;
           Transfer const& t = transfers[transferIdx];
-          size_t N = t.numBytes / sizeof(float);
           float const* expected = dstReference[t.srcs.size()].data();
           bool transferOk = true;
           bool anyLocalDst = false;
@@ -6124,6 +6851,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               continue;
             }
             anyLocalDst = true;
+            if (cfg.data.validateOnDevice && IsGpuMemType(t.dsts[dstIdx].memType)) {
+              unsigned long long count = 0, firstOff = 0;
+              (void)ValidateBufferOnDevice(t.dsts[dstIdx].memIndex, rss->dstMem[dstIdx] + initOffset,
+                                           rss->dstExpectedMem[dstIdx], t.numBytes,
+                                           rss->dstValidateScratch[dstIdx], &count, &firstOff);
+              if (count == 0) {
+                System::Get().Log("  DST[%d]=PASS", dstIdx);
+              } else {
+                System::Get().Log("  DST[%d]=FAIL(%llu bytes, first @ %llu)", dstIdx, count, firstOff);
+                transferOk = false;
+              }
+              continue;
+            }
             float* output;
             if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
               output = rss->dstMem[dstIdx] + initOffset;
@@ -6137,15 +6877,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             if (memcmp(output, expected, t.numBytes) == 0) {
               System::Get().Log("  DST[%d]=PASS", dstIdx);
             } else {
-              size_t firstErr = 0;
-              for (; firstErr < N; firstErr++)
-                if (output[firstErr] != expected[firstErr]) break;
-              if (firstErr < N)
-                System::Get().Log("  DST[%d]=FAIL(first mismatch idx=%zu exp=%.5f got=%.5f)",
-                                  dstIdx, firstErr, expected[firstErr], output[firstErr]);
-              else
-                System::Get().Log("  DST[%d]=FAIL(bitwise mismatch, no float-level diff found)",
-                                  dstIdx);
+              std::string ranges = ByteMismatchSummary(output, expected, t.numBytes);
+              System::Get().Log("  DST[%d]=FAIL(bytes %s)", dstIdx, ranges.c_str());
               transferOk = false;
             }
           }
@@ -6480,7 +7213,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       return result;
     } else if (wc.exe.exeSubIndices[0] == -2) {
       switch (wc.exe.exeType) {
-      case EXE_CPU:
+      case EXE_CPU: case EXE_GPU_TDM:
+        // These Executors do not support subindices
         wc.exe.exeSubIndices[0] = -1;
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
@@ -6658,9 +7392,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // TB_SINGLE_LOG    = Only rank 0 will produce output (useful if spawning multi-node socket)
     // TB_DUMP_CFG_FILE = Config file to dump executed Transfers
     // TB_PAUSE         = Insert a pause for debug attachment
+    // TB_SHOW_ALL_NUMA = Expose all CPU NUMA nodes (default skips nodes with no cores)
+    // TB_SEND_USLEEP   = microseconds to sleep after each socket SendData (default 0)
 
-    verbose = getenv("TB_VERBOSE") ? atoi(getenv("TB_VERBOSE")) : 0;
+    verbose    = getenv("TB_VERBOSE")    ? atoi(getenv("TB_VERBOSE"))    : 0;
+    sendUsleep = getenv("TB_SEND_USLEEP") ? atoi(getenv("TB_SEND_USLEEP")) : 0;
     bool singleLog = getenv("TB_SINGLE_LOG") ? atoi(getenv("TB_SINGLE_LOG")) : 0;
+    showAllNuma = getenv("TB_SHOW_ALL_NUMA") ? atoi(getenv("TB_SHOW_ALL_NUMA")) : 0;
 
     char* dumpCfgFilename = getenv("TB_DUMP_CFG_FILE");
     if (dumpCfgFilename) {
@@ -6701,8 +7439,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       Log("[INFO] Running in single node mode\n");
     }
 
+    // Build the CPU NUMA remapping before collecting topology so that all
+    // subsequent CPU indexing (agents, executors, memory) is consistent.
+    BuildCpuNumaMap();
+
     // Collect topology and distribute across all ranks
     CollectTopology();
+    if (verbose) {
+      Log("[INFO] Finished topology exchange\n");
+    }
   }
 
   System::~System()
@@ -6874,6 +7619,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     sockets.resize(numRanks, -1);
+    socketEpoch.resize(numRanks, 0);
 
     // Rank 0 acts as server for others to connect to
     int opt = 1;
@@ -6937,9 +7683,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           exit(1);
         }
 
+        // Disable Nagle's algorithm to prevent small-message coalescing delays
+        setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
         // Receive rank ID from client
-        int clientRank;
-        recv(clientSocket, (char*)&clientRank, sizeof(clientRank), 0);
+        int clientRank = -1;
+        size_t totalRecv = 0;
+        while (totalRecv < sizeof(clientRank)) {
+          auto r = recv(clientSocket, (char*)&clientRank + totalRecv, sizeof(clientRank) - totalRecv, 0);
+          if (r <= 0) {
+            Log("[ERROR] Failed to receive rank ID from connecting client\n");
+            exit(1);
+          }
+          totalRecv += r;
+        }
 
         if (clientRank < 0 || clientRank >= numRanks) {
           close(clientSocket);
@@ -6951,6 +7708,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
         sockets[clientRank] = clientSocket;
       }
+      Log("[INFO] %d other rank(s) have connected\n", numRanks - 1);
     } else {
       // All other ranks connect to rank 0
       int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -6991,8 +7749,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         exit(1);
       }
 
+      // Disable Nagle's algorithm to prevent small-message coalescing delays
+      setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
       // Send local rank to the server
-      send(sock, (char*)&rank, sizeof(rank), 0);
+      size_t totalSent = 0;
+      while (totalSent < sizeof(rank)) {
+        auto s = send(sock, (char*)&rank + totalSent, sizeof(rank) - totalSent, MSG_NOSIGNAL);
+        if (s <= 0) {
+          Log("[ERROR] Failed to send rank ID to master\n");
+          exit(1);
+        }
+        totalSent += s;
+      }
       sockets[0] = sock;
     }
 
@@ -7077,7 +7846,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     fprintf(dumpCfgFile, "\n");
   }
 
-  void System::Barrier()
+  void System::Barrier() const
   {
 #ifdef MPI_COMM_ENABLED
     if (commMode == COMM_MPI) {
@@ -7122,16 +7891,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
       auto sock = sockets[dstRank];
 
-      // Send data
+      if (verbose)
+        Log("[SOCK] SendData #%d: rank %d -> rank %d, %zu bytes (usleep=%dus)\n",
+            socketEpoch[dstRank], rank, dstRank, numBytes, sendUsleep);
+      socketEpoch[dstRank]++;
+
       size_t totalSent = 0;
       while (totalSent < numBytes) {
-        auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, 0);
+        auto sent = send(sock, (char*)sendData + totalSent, numBytes - totalSent, MSG_NOSIGNAL);
         if (sent == -1) {
           Log("[ERROR] Send failed (rank %d to rank %d)\n", rank, dstRank);
           exit(1);
         }
         totalSent += sent;
       }
+
+      if (sendUsleep > 0) usleep(sendUsleep);
     }
   }
 
@@ -7151,6 +7926,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
 
       auto sock = sockets[srcRank];
+
+      if (verbose)
+        Log("[SOCK] RecvData #%d: rank %d <- rank %d, %zu bytes\n",
+            socketEpoch[srcRank], rank, srcRank, numBytes);
+      socketEpoch[srcRank]++;
+
       size_t totalRecv = 0;
       while (totalRecv < numBytes) {
         auto recvd = recv(sock, (char*)recvData + totalRecv, numBytes - totalRecv, 0);
@@ -7323,6 +8104,83 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #endif
   }
 
+  // Build the logical<->physical CPU NUMA node mapping.
+  // Default: skip NUMA nodes that have no CPU cores.
+  // TB_SHOW_ALL_NUMA=1: reproduce legacy behavior (logical index == physical node).
+  void System::BuildCpuNumaMap()
+  {
+    cpuNumaMap.clear();
+    cpuNumaRevMap.clear();
+
+    if (showAllNuma) {
+      // Legacy behavior: expose every configured node with identity mapping
+      int numConfigured = numa_num_configured_nodes();
+      for (int node = 0; node < numConfigured; node++)
+        cpuNumaMap.push_back(node);
+    } else {
+      // Skip NUMA nodes that have no CPU cores
+      int numConfiguredCpus = numa_num_configured_cpus();
+      for (int node = 0; node <= numa_max_node(); node++) {
+        int coreCount = 0;
+        for (int cpu = 0; cpu < numConfiguredCpus; cpu++)
+          if (numa_node_of_cpu(cpu) == node) coreCount++;
+        if (coreCount > 0)
+          cpuNumaMap.push_back(node);
+      }
+      // Safety fallback: if no node reported cores, fall back to legacy enumeration
+      if (cpuNumaMap.empty()) {
+        int numConfigured = numa_num_configured_nodes();
+        for (int node = 0; node < numConfigured; node++)
+          cpuNumaMap.push_back(node);
+      }
+    }
+
+    for (int logical = 0; logical < (int)cpuNumaMap.size(); logical++)
+      cpuNumaRevMap[cpuNumaMap[logical]] = logical;
+
+    if (verbose) {
+      std::string mapStr;
+      for (int logical = 0; logical < (int)cpuNumaMap.size(); logical++)
+        mapStr += " " + std::to_string(logical) + "->" + std::to_string(cpuNumaMap[logical]);
+      Log("[INFO] Rank %03d: CPU NUMA map (logical->physical)%s%s\n", rank, mapStr.c_str(),
+          showAllNuma ? " [TB_SHOW_ALL_NUMA]" : "");
+    }
+  }
+
+  int System::GetCpuPhysicalNode(int logicalIdx) const
+  {
+    if (logicalIdx < 0 || logicalIdx >= (int)cpuNumaMap.size())
+      return logicalIdx;
+    return cpuNumaMap[logicalIdx];
+  }
+
+  int System::GetCpuLogicalNode(int physicalNode) const
+  {
+    auto it = cpuNumaRevMap.find(physicalNode);
+    return (it == cpuNumaRevMap.end()) ? -1 : it->second;
+  }
+
+  int System::GetClosestLogicalCpu(int physicalNode) const
+  {
+    if (physicalNode < 0 || cpuNumaMap.empty()) return -1;
+
+    // Exact match: the physical node is itself exposed
+    int logical = GetCpuLogicalNode(physicalNode);
+    if (logical >= 0) return logical;
+
+    // Otherwise pick the exposed node with the smallest NUMA distance
+    int bestLogical = -1;
+    int bestDist    = std::numeric_limits<int>::max();
+    for (int i = 0; i < (int)cpuNumaMap.size(); i++) {
+      int dist = numa_distance(physicalNode, cpuNumaMap[i]);
+      if (dist < bestDist) {
+        bestDist    = dist;
+        bestLogical = i;
+      }
+    }
+    return bestLogical;
+  }
+
   void System::GetRankTopology(RankTopology& topo)
   {
     // Clear topology structure first
@@ -7342,19 +8200,36 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Collect Pod membership
     CollectPodMembership(topo.ppodId, topo.vpodId);
 
-    // CPU Executor
-    int numCpus = numa_num_configured_nodes();
+    if (verbose) {
+      if (topo.vpodId == -1) {
+        Log("[INFO] Rank %03d: No pod membership detected\n", rank);
+      } else {
+        auto* p = (unsigned char*)topo.ppodId;
+        char ppodUuid[37];
+        snprintf(ppodUuid, sizeof(ppodUuid),
+                 "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                 p[0],p[1],p[2],p[3], p[4],p[5], p[6],p[7],
+                 p[8],p[9], p[10],p[11],p[12],p[13],p[14],p[15]);
+        Log("[INFO] Rank %03d: ppod_id=%s vpod_id=%lld\n", rank, ppodUuid, (long long)topo.vpodId);
+      }
+    }
+
+    // CPU Executor (indexed by logical CPU NUMA index; core-less nodes may be skipped)
+    int numCpus = static_cast<int>(cpuNumaMap.size());
     topo.numExecutors[EXE_CPU] = numCpus;
 
     std::string cpuName = GetCpuName();
 
     for (int exeIndex = 0; exeIndex < numCpus; exeIndex++) {
       topo.numExecutorSubIndices[{EXE_CPU, exeIndex}] = 0;
+      topo.numSubExecutors[{EXE_CPU, exeIndex}] = 0;
       topo.executorName[{EXE_CPU, exeIndex}] = cpuName;
     }
 
     for (int cpuCore = 0; cpuCore < numa_num_configured_cpus(); cpuCore++) {
-      topo.numSubExecutors[{EXE_CPU, numa_node_of_cpu(cpuCore)}]++;
+      int logical = GetCpuLogicalNode(numa_node_of_cpu(cpuCore));
+      if (logical >= 0)
+        topo.numSubExecutors[{EXE_CPU, logical}]++;
     }
 
     if (verbose) {
@@ -7369,9 +8244,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int numGpus = 0;
     hipError_t status = hipGetDeviceCount(&numGpus);
     if (status != hipSuccess) numGpus = 0;
-    topo.numExecutors[EXE_GPU_GFX] = numGpus;
-    topo.numExecutors[EXE_GPU_DMA] = numGpus;
+    topo.numExecutors[EXE_GPU_GFX]  = numGpus;
+    topo.numExecutors[EXE_GPU_DMA]  = numGpus;
     topo.numExecutors[EXE_GPU_BDMA] = numGpus;
+    topo.numExecutors[EXE_GPU_TDM]  = numGpus;
 
     std::vector<std::string> gpuArchNames(numGpus);
 
@@ -7392,9 +8268,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         std::string fullName = props.gcnArchName;
         gpuArchNames[exeIndex] = fullName.substr(0, fullName.find(':'));
       }
-      topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
-      topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_GFX,  exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_DMA,  exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_BDMA, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_TDM,  exeIndex}] = gpuName;
 
 #if !defined(__NVCC__)
       hsa_agent_t gpuAgent = gpuAgents[exeIndex];
@@ -7421,15 +8298,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
       }
 #endif
-      topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}] = numXccs;
-      topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
+      topo.numExecutorSubIndices[{EXE_GPU_GFX,  exeIndex}] = numXccs;
+      topo.numExecutorSubIndices[{EXE_GPU_DMA,  exeIndex}] = numDmaEngines;
       topo.numExecutorSubIndices[{EXE_GPU_BDMA, exeIndex}] = 0;
-      topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
-      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
+      topo.numExecutorSubIndices[{EXE_GPU_TDM,  exeIndex}] = 0;
+
+      topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}]  = numDeviceCUs;
+      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}]  = 1;
       topo.numSubExecutors[{EXE_GPU_BDMA, exeIndex}] = numDmaEngines;
+      topo.numSubExecutors[{EXE_GPU_TDM, exeIndex}]  = numDeviceCUs;
+
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
-
     }
 
     // NIC Executor
@@ -7438,7 +8318,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     {
       numNics = GetIbvDeviceList().size();
       for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
-        topo.closestCpuNumaToNic[exeIndex] = GetIbvDeviceList()[exeIndex].numaNode;
+        // Report the closest CPU NUMA as a logical index (matching CPU executor indices).
+        // If the NIC's physical node is not exposed (e.g. core-less), fall back to the
+        // nearest exposed node by NUMA distance so the value stays a valid CPU index.
+        int nicPhysNode = GetIbvDeviceList()[exeIndex].numaNode;
+        topo.closestCpuNumaToNic[exeIndex] = GetClosestLogicalCpu(nicPhysNode);
         topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
         topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
         if (verbose) {
@@ -7482,19 +8366,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       for (auto const& ibvDevice : ibvDeviceList)
         ibvAddressList.push_back(ibvDevice.hasActivePort ? ibvDevice.busId : "");
 
-      // Track how many times a device has been assigned as "closest"
-      // This allows distributed work across devices using multiple ports (sharing the same busID)
-      // NOTE: This isn't necessarily optimal, but likely to work in most cases involving multi-port
-      // Counter example:
-      //
-      //  G0 prefers (N0,N1), picks N0
-      //  G1 prefers (N1,N2), picks N1
-      //  G2 prefers N0,      picks N0
-      //
-      //  instead of G0->N1, G1->N2, G2->N0
-
-      std::vector<int> assignedCount(ibvDeviceList.size(), 0);
-
       // Loop over each GPU to find the closest NIC(s) based on PCIe address
       for (int gpuIndex = 0; gpuIndex < numGpus; gpuIndex++) {
         if (gpuAddressList[gpuIndex].empty()) continue;
@@ -7503,34 +8374,31 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Find closest NICs
         std::set<int> closestNicIdxs = GetNearestDevicesInTree(hipPciBusId, ibvAddressList);
 
-        // Pick the least-used NIC to assign as closest
-        int closestIdx = -1;
-        for (auto idx : closestNicIdxs) {
-          if (closestIdx == -1 || assignedCount[idx] < assignedCount[closestIdx])
-            closestIdx = idx;
-        }
-
-        // The following will only use distance between bus IDs
+        // The following will only use distance between PCIe domains
         // to determine the closest NIC to GPU if the PCIe tree approach fails
-        if (closestIdx < 0) {
+        if (closestNicIdxs.empty()) {
   #ifdef VERBS_DEBUG
-          Log("[WARN] Falling back to PCIe bus ID distance to determine proximity\n");
+          Log("[WARN] Falling back to PCIe domain distance to determine proximity\n");
   #endif
           int minDistance = std::numeric_limits<int>::max();
           for (int nicIndex = 0; nicIndex < numNics; nicIndex++) {
-            if (ibvDeviceList[nicIndex].busId != "") {
-              int distance = GetBusIdDistance(hipPciBusId, ibvDeviceList[nicIndex].busId);
-              if (distance < minDistance && distance >= 0) {
+            // Use ibvAddressList rather than the raw device list: it is already blanked out
+            // for NICs without an active port, so this stays consistent with the tree path
+            // above and never maps a GPU to a NIC that cannot execute a Transfer
+            if (ibvAddressList[nicIndex] != "") {
+              int distance = GetDomainDistance(hipPciBusId, ibvAddressList[nicIndex]);
+              if (distance >= 0 && distance < minDistance) {
                 minDistance = distance;
-                closestIdx = nicIndex;
+                closestNicIdxs.clear();
+                closestNicIdxs.insert(nicIndex);
+              } else if (distance >= 0 && distance == minDistance) {
+                closestNicIdxs.insert(nicIndex);
               }
             }
           }
         }
-        if (closestIdx != -1) {
-          topo.closestNicsToGpu[gpuIndex].push_back(closestIdx);
-          assignedCount[closestIdx]++;
-        }
+        for (auto idx : closestNicIdxs)
+          topo.closestNicsToGpu[gpuIndex].push_back(idx);
       }
 
       // Compute the reverse mapping: closest GPU(s) for each NIC
@@ -7544,28 +8412,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         std::set<int> closestGpuIdxs = GetNearestDevicesInTree(ibvDeviceList[nicIndex].busId, gpuAddressList);
 
         if (closestGpuIdxs.empty()) {
-          // Fallback: use bus ID distance
+          // Fallback: use PCIe domain distance
           int minDistance = std::numeric_limits<int>::max();
-          int closestIdx = -1;
-
           for (int gpuIdx = 0; gpuIdx < numGpus; gpuIdx++) {
             if (gpuAddressList[gpuIdx].empty()) continue;
-
-            int distance = GetBusIdDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
+            int distance = GetDomainDistance(ibvDeviceList[nicIndex].busId, gpuAddressList[gpuIdx]);
             if (distance >= 0 && distance < minDistance) {
               minDistance = distance;
-              closestIdx = gpuIdx;
+              closestGpuIdxs.clear();
+              closestGpuIdxs.insert(gpuIdx);
+            } else if (distance >= 0 && distance == minDistance) {
+              closestGpuIdxs.insert(gpuIdx);
             }
           }
-
-          if (closestIdx != -1) {
-            topo.closestGpusToNic[nicIndex].push_back(closestIdx);
-          }
-        } else {
-          // Store all GPUs that are equally close
-          for (int idx : closestGpuIdxs) {
-            topo.closestGpusToNic[nicIndex].push_back(idx);
-          }
+        }
+        for (int idx : closestGpuIdxs) {
+          topo.closestGpusToNic[nicIndex].push_back(idx);
         }
       }
     }
@@ -7846,7 +8708,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
       agent = cpuAgents[exeDevice.exeIndex];
       break;
-    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
+    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_TDM:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
@@ -7917,12 +8779,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       std::map<int, hsa_agent_t> cpuAgentMap;
       hsa_iterate_agents(cpuAgentCallback, &cpuAgentMap);
 
+      // Index CPU agents by logical CPU index (physical node = cpuNumaMap[logical])
       cpuAgents.clear();
-      int numCpus = numa_num_configured_nodes();
+      int numCpus = static_cast<int>(cpuNumaMap.size());
       cpuAgents.resize(numCpus);
       for (int i = 0; i < numCpus; i++) {
-        if (cpuAgentMap.count(i)) {
-          cpuAgents[i] = cpuAgentMap[i];
+        int physNode = cpuNumaMap[i];
+        if (cpuAgentMap.count(physNode)) {
+          cpuAgents[i] = cpuAgentMap[physNode];
         }
       }
     }
@@ -8120,6 +8984,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return System::Get().GetClosestCpuNumaToGpu(gpuIndex, targetRank);
   }
 
+  int GetCpuNumaPhysicalNode(int cpuIndex)
+  {
+    return System::Get().GetCpuPhysicalNode(cpuIndex);
+  }
+
   int GetClosestCpuNumaToNic(int nicIndex, int targetRank)
   {
     return System::Get().GetClosestCpuNumaToNic(nicIndex, targetRank);
@@ -8222,6 +9091,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 // Enumerations
 #undef hipDeviceAttributeClockRate
 #undef hipDeviceAttributeMultiprocessorCount
+#undef hipDeviceAttributeMaxSharedMemoryPerBlock
 #undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
 #undef hipFuncCachePreferShared
@@ -8252,6 +9122,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #undef hipGetDeviceCount
 #undef hipGetDeviceProperties
 #undef hipGetErrorString
+#undef hipGetLastError
 #undef hipHostFree
 #undef hipHostMalloc
 #undef hipMalloc
@@ -8275,10 +9146,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #undef hipMemExportToShareableHandle
 #undef hipMemImportFromShareableHandle
 #endif
-
-// Kernel macros
-#undef GetHwId
-//#undef GetXccId
 
 // Undefine helper macros
 #undef ERR_CHECK

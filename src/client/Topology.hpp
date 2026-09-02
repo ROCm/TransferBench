@@ -27,20 +27,9 @@ THE SOFTWARE.
 
 static int RemappedCpuIndex(int origIdx)
 {
-  static std::vector<int> remappingCpu;
-
-  // Build CPU remapping on first use
-  // Skip numa nodes that are not configured
-  if (remappingCpu.empty()) {
-    for (int node = 0; node <= numa_max_node(); node++) {
-      if (numa_bitmask_isbitset(numa_get_mems_allowed(), node))
-        remappingCpu.push_back(node);
-      else {
-        remappingCpu.push_back(-1);
-      }
-    }
-  }
-  return remappingCpu[origIdx];
+  // Map a logical CPU NUMA index to its physical NUMA node using the same mapping
+  // the core library uses (honors TB_SHOW_ALL_NUMA and core-less node skipping).
+  return TransferBench::GetCpuNumaPhysicalNode(origIdx);
 }
 
 static void PrintNicToGPUTopo(bool outputToCsv)
@@ -52,16 +41,21 @@ static void PrintNicToGPUTopo(bool outputToCsv)
 
   int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   auto const& ibvDeviceList = GetIbvDeviceList();
-  for (int i = 0; i < ibvDeviceList.size(); i++) {
 
-    std::string closestGpusStr = "";
-    for (int j = 0; j < numGpus; j++) {
-      if (TransferBench::GetClosestNicToGpu(j) == i) {
-        if (closestGpusStr != "") closestGpusStr += ",";
-        closestGpusStr += std::to_string(j);
-      }
+  // Build inverse map: for each NIC, which GPUs list it as closest?
+  std::vector<std::string> closestGpusForNic(ibvDeviceList.size(), "");
+  for (int j = 0; j < numGpus; j++) {
+    std::vector<int> nicsForGpu;
+    TransferBench::GetClosestNicsToGpu(nicsForGpu, j);
+    for (int nicIdx : nicsForGpu) {
+      if (nicIdx < 0 || nicIdx >= (int)closestGpusForNic.size()) continue;
+      if (!closestGpusForNic[nicIdx].empty()) closestGpusForNic[nicIdx] += ",";
+      closestGpusForNic[nicIdx] += std::to_string(j);
     }
+  }
 
+  for (int i = 0; i < ibvDeviceList.size(); i++) {
+    std::string closestGpusStr = closestGpusForNic[i];
     printf(" %-3d | %-11s | %-6s | %-12s | %-4d | %-14s | %-9s | %-20s\n",
            i, ibvDeviceList[i].name.c_str(),
            ibvDeviceList[i].hasActivePort ? "Yes" : "No",
@@ -89,7 +83,13 @@ void DisplaySingleRankTopology(bool outputToCsv)
   } else {
     printf("\nDetected Topology:\n");
     printf("==================\n");
-    printf("  %d configured CPU NUMA node(s) [%d total]\n", numCpus, numa_max_node() + 1);
+    int hiddenNuma = numa_num_configured_nodes() - numCpus;
+    if (hiddenNuma > 0) {
+      printf("  %d configured CPU NUMA node(s) [%d total] (%d core-less node(s) hidden; set TB_SHOW_ALL_NUMA=1 to show)\n",
+             numCpus, numa_max_node() + 1, hiddenNuma);
+    } else {
+      printf("  %d configured CPU NUMA node(s) [%d total]\n", numCpus, numa_max_node() + 1);
+    }
     printf("  %d GPU device(s)\n", numGpus);
     printf("  %d Supported NIC device(s)\n", numNics);
   }
@@ -121,8 +121,9 @@ void DisplaySingleRankTopology(bool outputToCsv)
       if (numa_node_of_cpu(j) == nodeI) numCpuCores++;
     printf(" %5d %c", numCpuCores, sep);
 
+    // GetClosestCpuNumaToGpu returns a logical CPU index, so compare against i (logical)
     for (int j = 0; j < numGpus; j++) {
-      if (TransferBench::GetClosestCpuNumaToGpu(j) == nodeI) {
+      if (TransferBench::GetClosestCpuNumaToGpu(j) == i) {
         printf(" %d", j);
       }
     }
@@ -191,13 +192,23 @@ void DisplaySingleRankTopology(bool outputToCsv)
 
       char pciBusId[20];
       HIP_CALL(hipDeviceGetPCIBusId(pciBusId, 20, i));
-      printf(" %-11s %c %-4d %c %-4d %c %-4d %c %-4d %c %-4d\n",
+      // Space-separated so the field stays a single column when sep is a comma (CSV mode),
+      // matching how the "Closest GPU(s)" column above is emitted
+      std::vector<int> nicsForGpu;
+      TransferBench::GetClosestNicsToGpu(nicsForGpu, i);
+      std::string nicStr;
+      for (int nicIdx : nicsForGpu) {
+        if (!nicStr.empty()) nicStr += ' ';
+        nicStr += std::to_string(nicIdx);
+      }
+      if (nicStr.empty()) nicStr = "-1";
+      printf(" %-11s %c %-4d %c %-4d %c %-4d %c %-4d %c %s\n",
              pciBusId, sep,
              TransferBench::GetNumSubExecutors({EXE_GPU_GFX, i}), sep,
              TransferBench::GetClosestCpuNumaToGpu(i), sep,
              TransferBench::GetNumExecutorSubIndices({EXE_GPU_DMA, i}), sep,
              TransferBench::GetNumExecutorSubIndices({EXE_GPU_GFX, i}), sep,
-             TransferBench::GetClosestNicToGpu(i));
+             nicStr.c_str());
     }
   }
 #endif

@@ -54,8 +54,7 @@ __global__ void GetTimestamps(uint64_t*     timestamps,
     auto start = GetTimestamp();
 
     // Collect XCD for this
-    int xccId;
-    GetXccId(xccId);
+    uint32_t xccId = GetXccId();
     int idx = (indexType == 0) ? xccId : blockIdx.x;
     if (xccMask & (1U << xccId)) {
       timestamps[idx] = 0;
@@ -99,11 +98,10 @@ int WallClockPreset(EnvVars&          ev,
   int numRanks = GetNumRanks();
   int myRank   = GetRank();
 
-  // Check for single homogenous group
-  if (Utils::GetNumRankGroups() > 1) {
-    Utils::Print("[ERROR] wallclock preset can only be run across ranks that are homogenous\n");
+  // Check that all ranks have the same number of GPUs
+  if (!Utils::AllRanksHaveSameGpuCount()) {
+    Utils::Print("[ERROR] wallclock preset requires all ranks to have the same number of GPUs\n");
     Utils::Print("[ERROR] Run ./TransferBench without any args to display topology information\n");
-    Utils::Print("[ERROR] TB_NIC_FILTER may also be used to limit NIC visibility\n");
     return ERR_FATAL;
   }
 

@@ -54,7 +54,6 @@ int GfxSweepPreset(EnvVars&          ev,
       if (!ev.outputToCsv)
         Utils::Print("[GFX Sweep Related]\n");
       ev.Print("BLOCKSIZES",     blockList.size(),     EnvVars::ToStr(blockList).c_str());
-      ev.Print("GFX_TRANSFER",   transferStr,          "GFX Transfer to sweep (see config file format)");
       ev.Print("KERNELS",        kernelList.size(),    EnvVars::ToStr(kernelList).c_str());
       ev.Print("NUM_TRANSFERS",  numTransfers,         "Number of Transfers specified in GFX_TRANSFER");
       ev.Print("NUM_SUB_EXECS",  numSesList.size(),    EnvVars::ToStr(numSesList).c_str());
@@ -63,6 +62,7 @@ int GfxSweepPreset(EnvVars&          ev,
       ev.Print("UNROLLS",        unrollList.size(),    EnvVars::ToStr(unrollList).c_str());
       ev.Print("WAVE_ORDERS",    waveOrderList.size(), EnvVars::ToStr(waveOrderList).c_str());
       ev.Print("WORDSIZES",      wordSizeList.size(),  EnvVars::ToStr(wordSizeList).c_str());
+      ev.Print("GFX_TRANSFER",   transferStr,          "GFX Transfer to sweep (see config file format)");
       Utils::Print("\n");
     }
   }

@@ -103,8 +103,8 @@ set(ENV{ROCM_PATH} "${ROCM_PATH}")
 # TransferBench project definitions
 #==================================================================================================
 set(TRANSFERBENCH_VERSION_MAJOR 1)
-set(TRANSFERBENCH_VERSION_MINOR 69)
-set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "01")
+set(TRANSFERBENCH_VERSION_MINOR 70)
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "00")
 
 # Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
 # Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,

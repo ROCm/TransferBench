@@ -10,11 +10,10 @@ Using TransferBench
 
 You can control the SRC and DST memory locations by indicating the memory type followed by the device index. TransferBench supports the following memory types:
 
-* Coarse-grained pinned host
+* Pinned host (default, closest-GPU, coherent, non-coherent, and uncached)
 * Unpinned host
-* Fine-grained host
-* Coarse-grained global device
-* Fine-grained global device
+* Coarse-grained, fine-grained, and uncached global device
+* Managed device
 * Null (for an empty transfer)
 
 In addition, you can determine the size of the transfer (number of bytes to copy) for the tests.
@@ -120,12 +119,20 @@ Here is the list of arguments used to specify transfers in the config file:
        | Memory locations are specified by one or more device characters or device index pairs.
        | Characters indicate memory type and are followed by device index (0-indexed).
        | Here are the characters and their respective memory locations:
-       | - C:    Pinned host memory       (on NUMA node, indexed from 0 to [NUMA nodes-1])
-       | - U:    Unpinned host memory     (on NUMA node, indexed from 0 to [NUMA nodes-1])
-       | - B:    Fine-grain host memory   (on NUMA node, indexed from 0 to [NUMA nodes-1])
-       | - G:    Global device memory     (on GPU device, indexed from 0 to [GPUs - 1])
-       | - F:    Fine-grain device memory (on GPU device, indexed from 0 to [GPUs - 1])
-       | - N:    Null memory              (index ignored)
+       | - C:    Pinned host memory              (on NUMA node, indexed from 0 to [NUMA nodes-1])
+       | - P:    Pinned host memory              (indexed by closest GPU, 0 to [GPUs-1])
+       | - B:    Coherent pinned host memory     (on NUMA node, indexed from 0 to [NUMA nodes-1])
+       | - D:    Non-coherent pinned host memory (on NUMA node, indexed from 0 to [NUMA nodes-1])
+       | - K:    Uncached pinned host memory     (on NUMA node, indexed from 0 to [NUMA nodes-1])
+       | - H:    Unpinned host memory            (on NUMA node, indexed from 0 to [NUMA nodes-1])
+       | - G:    Global device memory            (on GPU device, indexed from 0 to [GPUs-1])
+       | - F:    Fine-grain device memory        (on GPU device, indexed from 0 to [GPUs-1])
+       | - U:    Uncached device memory          (on GPU device, indexed from 0 to [GPUs-1])
+       | - M:    Managed device memory           (on GPU device, indexed from 0 to [GPUs-1])
+       | - N:    Null memory                     (index ignored)
+       |
+       | ``D`` in an executor position is the DMA executor. ``D`` in a SRC/DST position is
+       | non-coherent pinned host memory.
 
 Round brackets and arrows "->" can be included for human clarity, but will be ignored.
 Lines starting with # are ignored while lines starting with ## are echoed to the output.
@@ -139,6 +146,10 @@ Single GPU-executed transfer between GPU 0 and 1 using 4 CUs::
 Single DMA-executed transfer between GPU 0 and 1::
 
    1 1 (G0->D0->G1)
+
+Unpinned host to GPU 0 using the DMA executor (PCIe H2D)::
+
+   1 1 (H0->D0->G0)
 
 Copying 1Mb from GPU 0 to GPU 1 with 4 CUs, and 2Mb from GPU 1 to GPU 0 with 8 CUs::
 
