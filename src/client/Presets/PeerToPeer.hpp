@@ -35,6 +35,14 @@ int PeerToPeerPreset(EnvVars&          ev,
 
   // Collect env vars for this preset
   int useDmaCopy     = EnvVars::GetEnvVar("USE_GPU_DMA",     0);
+  int useTdmCopy     = EnvVars::GetEnvVar("USE_GPU_TDM",     0);
+
+  // USE_GPU_DMA and USE_GPU_TDM are mutually exclusive; prefer DMA when both are requested
+  if (useDmaCopy && useTdmCopy) {
+    Utils::Print("[WARN] Both USE_GPU_DMA and USE_GPU_TDM are set. Using DMA executor\n");
+    useTdmCopy = 0;
+  }
+  char const* gpuExecName = useDmaCopy ? "DMA" : (useTdmCopy ? "TDM" : "GFX");
 
   int cpuMemTypeIdx  = EnvVars::GetEnvVar("CPU_MEM_TYPE",    0);
   int gpuMemTypeIdx  = EnvVars::GetEnvVar("GPU_MEM_TYPE",    0);
@@ -67,6 +75,7 @@ int PeerToPeerPreset(EnvVars&          ev,
       ev.Print("SHOW_ITERATIONS", ev.showIterations, (ev.showIterations ? "Showing detailed iteration info" :
                                                       "Showing compact info"));
       ev.Print("USE_GPU_DMA",     useDmaCopy,     "Using GPU-%s as GPU executor", useDmaCopy ? "DMA" : "GFX");
+      ev.Print("USE_GPU_TDM",     useTdmCopy,     "Using GPU-%s as GPU executor", useTdmCopy ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead,  "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
     }
@@ -89,7 +98,7 @@ int PeerToPeerPreset(EnvVars&          ev,
     printf("%sdirectional copy peak bandwidth GB/s [%s read / %s write] (GPU-Executor: %s)\n", isBidirectional ? "Bi" : "Uni",
            useRemoteRead ? "Remote" : "Local",
            useRemoteRead ? "Local" : "Remote",
-           useDmaCopy    ? "DMA"   : "GFX");
+           gpuExecName);
 
     // Print header
     if (isBidirectional) {
@@ -115,7 +124,7 @@ int PeerToPeerPreset(EnvVars&          ev,
     double avgBwSum[2][2] = {};
     int    avgCount[2][2] = {};
 
-    ExeType const gpuExeType = useDmaCopy ? EXE_GPU_DMA : EXE_GPU_GFX;
+    ExeType const gpuExeType = useDmaCopy ? EXE_GPU_DMA : (useTdmCopy ? EXE_GPU_TDM : EXE_GPU_GFX);
 
     // Loop over all possible src/dst pairs
     for (int src = 0; src < numDevices; src++) {

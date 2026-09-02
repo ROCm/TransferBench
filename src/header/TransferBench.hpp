@@ -25,6 +25,9 @@ THE SOFTWARE.
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
+#include <cassert>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -75,6 +78,9 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
+
+#include "tdmCopy.h"
+
 #endif
 /// @endcond
 
@@ -105,10 +111,11 @@ namespace TransferBench
     EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
+    EXE_GPU_TDM      = 6,                       ///<  GPU TDM executor          (subExecutor = threadblock/CU)
   };
-  char const ExeTypeStr[7] = "CGDINB";
+  char const ExeTypeStr[8] = "CGDINBT";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA; }
+  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM; }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
@@ -207,7 +214,9 @@ namespace TransferBench
     int numSubIterations   = 1;                 ///< Number of sub-iterations per iteration
     int numWarmups         = 3;                 ///< Number of un-timed warmup iterations to perform
     int recordPerIteration = 0;                 ///< Record per-iteration timing information
+    int useHipEvents       = 1;                 ///< Use HIP events for timing Executors that support it
     int useInteractive     = 0;                 ///< Pause for user-input before starting transfer loop
+    int useMultiStream     = 0;                 ///< Split GFX/TDM Transfers into separate kernel launches in separate stream
   };
 
   /**
@@ -237,8 +246,6 @@ namespace TransferBench
     int                 seType         = 0;     ///< SubExecutor granularity type (0=threadblock, 1=warp)
     int                 temporalMode   = 0;     ///< Non-temporal load/store mode 0=none, 1=load, 2=store, 3=both
     int                 unrollFactor   = 4;     ///< GFX-kernel unroll factor
-    int                 useHipEvents   = 1;     ///< Use HIP events for timing GFX Executor
-    int                 useMultiStream = 0;     ///< Use multiple streams for GFX
     int                 useSingleTeam  = 0;     ///< Team all subExecutors across the data array
     int                 waveOrder      = 0;     ///< GFX-kernel wavefront ordering
     int                 wordSize       = 4;     ///< GFX-kernel packed data size (4=dwordx4, 2=dwordx2, 1=dwordx1)
@@ -249,7 +256,6 @@ namespace TransferBench
    */
   struct DmaOptions
   {
-    int useHipEvents = 1;                       ///< Use HIP events for timing DMA Executor
     int useHsaCopy   = 0;                       ///< Use HSA copy instead of HIP copy to perform DMA
   };
 
@@ -273,6 +279,12 @@ namespace TransferBench
     int         useNuma         = 0;            ///< Switch to closest numa thread for execution
   };
 
+  struct TdmOptions
+  {
+    int blockOrder = 0;                         ///< Determines how threadblocks are ordered (0=sequential, 1=interleaved, 2=random)
+    int blockSize  = 256;                       ///< Size of each threadblock
+    int ldsBytes   = 0;                         ///< Amount of __shared__ memory per threadblock to use as bounce buffer (0 = device max)
+  };
 
   /**
    * Configuration options for performing Transfers
@@ -285,6 +297,7 @@ namespace TransferBench
     GfxOptions     gfx;                         ///< GFX executor options
     DmaOptions     dma;                         ///< DMA executor options
     NicOptions     nic;                         ///< NIC executor options
+    TdmOptions     tdm;                         ///< TDM executor options
   };
 
   /**
@@ -618,6 +631,7 @@ namespace TransferBench
   // Enumerations
   #define hipDeviceAttributeClockRate                        cudaDevAttrClockRate
   #define hipDeviceAttributeMultiprocessorCount              cudaDevAttrMultiProcessorCount
+  #define hipDeviceAttributeMaxSharedMemoryPerBlock          cudaDevAttrMaxSharedMemoryPerBlock
   #define hipDeviceAttributeWarpSize                         cudaDevAttrWarpSize
   #define hipErrorPeerAccessAlreadyEnabled                   cudaErrorPeerAccessAlreadyEnabled
   #define hipFuncCachePreferShared                           cudaFuncCachePreferShared
@@ -647,6 +661,7 @@ namespace TransferBench
   #define hipGetDeviceCount                                  cudaGetDeviceCount
   #define hipGetDeviceProperties                             cudaGetDeviceProperties
   #define hipGetErrorString                                  cudaGetErrorString
+  #define hipGetLastError                                    cudaGetLastError
   #define hipHostFree                                        cudaFreeHost
   #define hipHostMalloc                                      cudaMallocHost
   #define hipMalloc                                          cudaMalloc
@@ -1942,7 +1957,9 @@ namespace {
       if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
+      if (general.useHipEvents       != cfg.general.useHipEvents)       ADD_ERROR("cfg.general.useHipEvents");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
+      if (general.useMultiStream     != cfg.general.useMultiStream)     ADD_ERROR("cfg.general.useMultiStream");
     }
 
     // Compare data options
@@ -2008,8 +2025,6 @@ namespace {
       if (gfx.seType         != cfg.gfx.seType)         ADD_ERROR("cfg.gfx.seType");
       if (gfx.temporalMode   != cfg.gfx.temporalMode)   ADD_ERROR("cfg.gfx.temporalMode");
       if (gfx.unrollFactor   != cfg.gfx.unrollFactor)   ADD_ERROR("cfg.gfx.unrollFactor)");
-      if (gfx.useHipEvents   != cfg.gfx.useHipEvents)   ADD_ERROR("cfg.gfx.useHipEvents");
-      if (gfx.useMultiStream != cfg.gfx.useMultiStream) ADD_ERROR("cfg.gfx.useMultiStream");
       if (gfx.useSingleTeam  != cfg.gfx.useSingleTeam)  ADD_ERROR("cfg.gfx.useSingleTeam");
       if (gfx.waveOrder      != cfg.gfx.waveOrder)      ADD_ERROR("cfg.gfx.waveOrder");
       if (gfx.wordSize       != cfg.gfx.wordSize)       ADD_ERROR("cfg.gfx.wordSize");
@@ -2019,7 +2034,6 @@ namespace {
     {
       DmaOptions dma = cfg.dma;
       System::Get().Broadcast(root, sizeof(dma), &dma);
-      if (dma.useHipEvents != cfg.dma.useHipEvents) ADD_ERROR("cfg.dma.useHipEvents");
       if (dma.useHsaCopy   != cfg.dma.useHsaCopy)   ADD_ERROR("cfg.dma.useHsaCopy");
     }
 
@@ -2042,6 +2056,14 @@ namespace {
       if (nic.useNuma         != cfg.nic.useNuma)         ADD_ERROR("cfg.nic.useNuma");
     }
 
+    // Compare TDM options
+    {
+      TdmOptions tdm = cfg.tdm;
+      System::Get().Broadcast(root, sizeof(tdm), &tdm);
+      if (tdm.blockOrder     != cfg.tdm.blockOrder)     ADD_ERROR("cfg.tdm.blockOrder");
+      if (tdm.blockSize      != cfg.tdm.blockSize)      ADD_ERROR("cfg.tdm.blockSize");
+      if (tdm.ldsBytes       != cfg.tdm.ldsBytes)       ADD_ERROR("cfg.tdm.ldsBytes");
+    }
     #undef ADD_ERROR
   }
 
@@ -2083,7 +2105,7 @@ namespace {
       errors.push_back({ERR_FATAL,
           "[gfx.blockOrder] must be 0 for sequential, 1 for interleaved, or 2 for random"});
 
-    if (cfg.gfx.useMultiStream && cfg.gfx.blockOrder > 0)
+    if (cfg.general.useMultiStream && cfg.gfx.blockOrder > 0)
       errors.push_back({ERR_WARN, "[gfx.blockOrder] will be ignored when running in multi-stream mode"});
 
     if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
@@ -2140,6 +2162,36 @@ namespace {
         }
       }
     }
+
+    // Check TDM options
+#if !defined(__NVCC__)
+    if (cfg.tdm.blockSize <= 0 || cfg.tdm.blockSize % 32 || cfg.tdm.blockSize > MAX_BLOCKSIZE)
+      errors.push_back({ERR_FATAL,
+                        "[tdm.blockSize] must be a positive multiple of 32 less than or equal to %d",
+                        MAX_BLOCKSIZE});
+
+    if (cfg.tdm.ldsBytes < 0)
+      errors.push_back({ERR_FATAL, "[tdm.ldsBytes] must be positive or 0"});
+    else {
+      int const numGpus = GetNumExecutors(EXE_GPU_TDM);
+      for (int i = 0; i < numGpus; i++) {
+        int deviceMax = 0;
+        if (hipDeviceGetAttribute(&deviceMax, hipDeviceAttributeMaxSharedMemoryPerBlock, i) == hipSuccess) {
+          if (cfg.tdm.ldsBytes > deviceMax) {
+            errors.push_back({ERR_FATAL,
+                "[tdm.ldsBytes] (%d) exceeds device max shared memory per block (%d)",
+                cfg.tdm.ldsBytes, deviceMax});
+          } else if (deviceMax == 0) {
+            errors.push_back({ERR_FATAL,
+                "TDM Executor requires shared memory but GPU %d reports none available\n", i});
+          }
+        } else {
+          errors.push_back({ERR_FATAL,
+              "Unable to query max amount of shared memory per block on GPU %%d\n", i});
+        }
+      }
+    }
+#endif
 
     // Check NIC options
     if (IsIbvSymbolsReady()) {
@@ -2274,7 +2326,8 @@ namespace {
       // Each subexecutor is assigned a multiple of cfg.data.blockBytes, however this may
       // mean that some subexecutors might not have any work assigned to them if the amount to
       // transfer is small
-      if (t.exeDevice.exeType == EXE_GPU_GFX || t.exeDevice.exeType == EXE_CPU || t.exeDevice.exeType == EXE_GPU_BDMA) {
+
+      if (t.exeDevice.exeType != EXE_GPU_DMA) { // GPU DMA-Executor ignores subexecutors
         size_t const N               = t.numBytes / sizeof(float);
         int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
         int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
@@ -2332,6 +2385,39 @@ namespace {
           hasFatalError = true;
         }
         break;
+      case EXE_GPU_TDM:
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM kernel currently requires exactly 1 SRC and 1 DST", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM kernel: device index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
+        }
+        if (t.exeSubIndex != -1) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM executor does not support subindices", i});
+          hasFatalError = true;
+          break;
+        }
+#if defined(__NVCC__)
+        errors.push_back({ERR_FATAL,
+                          "Transfer %d: GPU TDM kernel is not supported on NVIDIA hardware", i});
+        hasFatalError = true;
+#else
+        if (!tdm::IsTdmCopySupported(t.exeDevice.exeIndex)) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: GPU TDM kernel requires gfx1250 hardware, but GPU %d is not supported",
+                            i, t.exeDevice.exeIndex});
+          hasFatalError = true;
+        }
+#endif
+        break;
       case EXE_GPU_GFX:
         if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
           errors.push_back({ERR_FATAL,
@@ -2352,7 +2438,6 @@ namespace {
               errors.push_back({ERR_FATAL,
                   "Transfer %d: GFX subIndex (XCC) must be between 0 and %d for rank %d", i, numSubIndices - 1, t.exeDevice.exeRank});
               hasFatalError = true;
-              break;
             }
 #endif
           }
@@ -2695,10 +2780,26 @@ namespace {
           break;
         }
 
-        if (cfg.gfx.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
+        if (cfg.general.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
           errors.push_back({ERR_WARN,
                             "GPU %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
                             exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
+        }
+        break;
+      }
+      case EXE_GPU_TDM:
+      {
+        int numGpuSubExec = GetNumSubExecutors(exeDevice);
+        if (totalSubExecs[exeDevice] > numGpuSubExec)
+          errors.push_back({ERR_WARN,
+                            "TDM %d requests %d total subexecutors however only %d available. "
+                            "Serialization will occur",
+                            exeDevice.exeIndex, totalSubExecs[exeDevice], numGpuSubExec});
+
+        if (cfg.general.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
+          errors.push_back({ERR_WARN,
+              "TDM %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
+              exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
         }
         break;
       }
@@ -2855,6 +2956,9 @@ namespace {
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
     int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
     int                        gfxKernelToUse;    ///< (GFX-only) Which GFX kernel to use
+
+    // For TDM-Executors
+    uint32_t                   ldsBytesActual;    ///< Actual number of LDS bytes to use as buffer
   };
 
   // Structure to track PCIe topology
@@ -4336,13 +4440,13 @@ namespace {
     }
 
     // Prepare additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
-        && exeDevice.exeRank == localRank) {
+    if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
       int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
-                                  (exeDevice.exeType == EXE_GPU_GFX && cfg.gfx.useMultiStream))
+                                   (cfg.general.useMultiStream && (exeDevice.exeType == EXE_GPU_GFX ||
+                                                                   exeDevice.exeType == EXE_GPU_TDM)))
                                   ? exeInfo.resources.size() : 1;
       exeInfo.streams.resize(numStreamsToUse);
 
@@ -4360,7 +4464,7 @@ namespace {
         }
       }
 
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+      if (cfg.general.useHipEvents) {
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4368,10 +4472,23 @@ namespace {
           ERR_CHECK(hipEventCreate(&exeInfo.stopEvents[i]));
         }
       }
+
+      // Determine how much shared memory to use for TDS
+      if (exeDevice.exeType == EXE_GPU_TDM) {
+        if (cfg.tdm.ldsBytes == 0) {
+          int ldsMaxBytes;
+          ERR_CHECK(hipDeviceGetAttribute(&ldsMaxBytes,
+                                          hipDeviceAttributeMaxSharedMemoryPerBlock, exeDevice.exeIndex));
+          exeInfo.ldsBytesActual = static_cast<uint32_t>(ldsMaxBytes);
+        } else {
+          exeInfo.ldsBytesActual = cfg.tdm.ldsBytes;
+        }
+      }
     }
 
-    // Prepare for GPU GFX executor
-    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
+    // Prepare for GPU GFX / TDM executor (both consume SubExecParam from GPU memory)
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
+        exeDevice.exeRank == localRank) {
       // Allocate one contiguous chunk of GPU memory for threadblock parameters
       // This allows support for executing one transfer per stream, or all transfers in a single stream
 #if !defined(__NVCC__)
@@ -4393,7 +4510,7 @@ namespace {
                                       exeDevice.exeIndex));
 #endif
       int transferOffset = 0;
-      if (cfg.gfx.useMultiStream || cfg.gfx.blockOrder == 0) {
+      if (cfg.general.useMultiStream || cfg.gfx.blockOrder == 0) {
         // Threadblocks are ordered sequentially one transfer at a time
         for (auto& rss : exeInfo.resources) {
           rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
@@ -4465,8 +4582,9 @@ namespace {
       }
     }
 
-    // Check that GPU wallclock rate is non-zero
-    if (exeDevice.exeType == EXE_GPU_GFX && exeInfo.wallClockRate == 0 && exeDevice.exeRank == localRank) {
+    // Check that GPU wallclock rate is non-zero (GFX and TDM both use it for in-kernel cycle timing)
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
+        exeInfo.wallClockRate == 0 && exeDevice.exeRank == localRank) {
       if (getenv("TB_WALLCLOCK_RATE")) {
         exeInfo.wallClockRate = atoi(getenv("TB_WALLCLOCK_RATE"));
         return {ERR_WARN,
@@ -4474,9 +4592,11 @@ namespace {
           exeDevice.exeIndex, exeInfo.wallClockRate};
       } else {
         exeInfo.wallClockRate = 100000;
+        /*
         return {ERR_WARN,
           "GPU %d wallclock rate query returned 0 unexpectedly.  Setting to %d instead.  Use TB_WALLCLOCK_RATE to customize",
           exeDevice.exeIndex, exeInfo.wallClockRate};
+        */
       }
     }
 
@@ -4565,19 +4685,17 @@ namespace {
     }
 
     // Teardown additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
-        && exeDevice.exeRank == localRank) {
+    if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
-        for (auto event : exeInfo.startEvents)
-          ERR_CHECK(hipEventDestroy(event));
-        for (auto event : exeInfo.stopEvents)
-          ERR_CHECK(hipEventDestroy(event));
-      }
+      for (auto event : exeInfo.startEvents)
+        ERR_CHECK(hipEventDestroy(event));
+      for (auto event : exeInfo.stopEvents)
+        ERR_CHECK(hipEventDestroy(event));
     }
 
-    if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
+        exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
       MemType memType = MEM_GPU;
 #else
@@ -5357,32 +5475,32 @@ namespace {
 #endif
 
     // Compute kernel launch parameters
-    int  const numSubExecs = cfg.gfx.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
+    int  const numSubExecs = cfg.general.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
     int  const gridY = CalculateGridY(cfg.gfx.seType, cfg.gfx.blockSize, numSubExecs);
     dim3 const gridSize(xccDim, gridY, 1);
     dim3 const blockSize(cfg.gfx.blockSize);
 
     auto cpuStart = std::chrono::high_resolution_clock::now();
 
-    SubExecParam* params = cfg.gfx.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
+    SubExecParam* params = cfg.general.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
 
 #if defined(__NVCC__)
-    if (cfg.gfx.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
     gpuKernel<<<gridSize, blockSize, 0 , stream>>>(params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
-    if (cfg.gfx.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
     hipExtLaunchKernelGGL(gpuKernel, gridSize, blockSize, 0, stream,
-                          cfg.gfx.useHipEvents ? startEvent : NULL,
-                          cfg.gfx.useHipEvents ? stopEvent  : NULL, 0,
+                          cfg.general.useHipEvents ? startEvent : NULL,
+                          cfg.general.useHipEvents ? stopEvent  : NULL, 0,
                           params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
     ERR_CHECK(hipStreamSynchronize(stream));
 
     // Record this timing if this Transfer is being run in multistream mode
-    if (cfg.gfx.useMultiStream) {
+    if (cfg.general.useMultiStream) {
       if (iteration >= 0) {
         auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
         double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
@@ -5428,7 +5546,7 @@ namespace {
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
-    if (cfg.gfx.useMultiStream) {
+    if (cfg.general.useMultiStream) {
       // Launch one thread per Transfer in separate streams
       vector<std::future<ErrResult>> asyncTransfers;
       for (int i = 0; i < exeInfo.streams.size(); i++) {
@@ -5438,8 +5556,8 @@ namespace {
                                                exeInfo.totalSubExecs,
                                                exeInfo.subExecParamGpu,
                                                exeInfo.streams[i],
-                                               cfg.gfx.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                               cfg.gfx.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                               cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                               cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
                                                xccDim,
                                                std::cref(cfg),
                                                exeInfo.gfxKernelToUse,
@@ -5451,8 +5569,8 @@ namespace {
     } else {
       // Launch all Transfers in one kernel launch (avoid extra thread creation)
       ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
-                         cfg.gfx.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                         cfg.gfx.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                         cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                         cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
                          xccDim, cfg, exeInfo.gfxKernelToUse,
                          exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
     }
@@ -5463,7 +5581,7 @@ namespace {
       // Determine executor timing
       // - Use HIP event timing if enabled and not using multi-stream
       // - Otherwise, Use CPU timing
-      if (cfg.gfx.useHipEvents && !cfg.gfx.useMultiStream) {
+      if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
         gpuDeltaMsec /= cfg.general.numSubIterations;
@@ -5476,7 +5594,7 @@ namespace {
 
       // If Transfers were combined into a single launch, figure out per-Transfer timing
       // Determine timing for each of the individual transfers that were part of this launch
-      if (!cfg.gfx.useMultiStream) {
+      if (!cfg.general.useMultiStream) {
         std::vector<SubExecParam> subExecParamHost;
         SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
         if (!exeInfo.subExecParamHostAccessible) {
@@ -5537,7 +5655,7 @@ namespace {
     size_t const initOffset = cfg.data.byteOffset / sizeof(float);
     float* const src = resources.srcMem[0] + initOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
-      if (cfg.dma.useHipEvents)
+      if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
 
       // Force the use of SDMA engine if possible
@@ -5561,7 +5679,7 @@ namespace {
         }
       } while (++subIterations != cfg.general.numSubIterations);
 
-      if (cfg.dma.useHipEvents)
+      if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(stopEvent, stream));
       ERR_CHECK(hipStreamSynchronize(stream));
     } else {
@@ -5598,7 +5716,7 @@ namespace {
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
-      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.dma.useHipEvents) {
+      if (!useSubIndices && !cfg.dma.useHsaCopy && cfg.general.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
         deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
@@ -5627,8 +5745,8 @@ namespace {
                                              exeInfo.useSubIndices,
                                              exeIndex,
                                              exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                             cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                             cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
                                              std::cref(cfg),
                                              std::ref(exeInfo.resources[i])));
     }
@@ -5660,7 +5778,7 @@ namespace {
     ERR_CHECK(hipSetDevice(exeIndex));
 
     int subIterations = 0;
-    if (cfg.dma.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(startEvent, stream));
 
     [[maybe_unused]] size_t failIdx = 0;
@@ -5677,7 +5795,7 @@ namespace {
                                     stream));
     } while (++subIterations != cfg.general.numSubIterations);
 
-    if (cfg.dma.useHipEvents)
+    if (cfg.general.useHipEvents)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
     ERR_CHECK(hipStreamSynchronize(stream));
 
@@ -5686,7 +5804,7 @@ namespace {
 
     if (iteration >= 0) {
       double deltaMsec = cpuDeltaMsec;
-      if (cfg.dma.useHipEvents) {
+      if (cfg.general.useHipEvents) {
         float gpuDeltaMsec;
         ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
         deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
@@ -5713,8 +5831,8 @@ namespace {
                                              iteration,
                                              exeIndex,
                                              exeInfo.streams[i],
-                                             cfg.dma.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                             cfg.dma.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
+                                             cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                             cfg.general.useHipEvents ? exeInfo.stopEvents[i]  : NULL,
                                              std::cref(cfg),
                                              std::ref(exeInfo.resources[i])));
     }
@@ -5730,6 +5848,212 @@ namespace {
   }
 #endif // BMA_EXEC_ENABLED
 
+// TDM Executor-related functions
+//========================================================================================
+#if TDM_SUPPORTED
+  __global__ void  GpuTdmKernel(SubExecParam* params,
+                                uint32_t      ldsBytes,
+                                int           numSubIterations)
+  {
+    int64_t startCycle;
+    bool const shouldRecordTiming = (threadIdx.x == 0);
+    if (shouldRecordTiming) startCycle = GetTimestamp();
+
+    extern __shared__ __align__(128) float shmem[];
+
+    // Each threadblock is a subexecutor (mirrors GpuCopyKernel).
+    SubExecParam& p = params[blockIdx.x];
+    if (p.N == 0) return;
+
+    float const* __restrict__ src = (float const*)p.src[0];
+    float*       __restrict__ dst = (float*)p.dst[0];
+    size_t const sizeBytes        = p.N * sizeof(float);
+
+    int subIterations = 0;
+    while (1) {
+      tdm::tdmCopy(dst, src, sizeBytes, shmem, ldsBytes);
+      __syncthreads(); // Wait for all warps to finish
+      if (++subIterations == numSubIterations) break;
+    }
+
+    if (shouldRecordTiming) {
+      __threadfence_system();
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+      GetHwId(p.hwId);
+      GetXccId(p.xccId);
+    }
+  }
+#else
+  // gfx1250 tensor TDM builtins unavailable for this translation: emit empty kernel stubs with
+  // the exact launch signatures so the host-side launch path still links. They are never
+  // dispatched on non-gfx1250 or nvidia hardware (see TransfersHaveErrors).
+  __global__ void GpuTdmKernel(SubExecParam*, uint32_t, int) {}
+#endif // TDM_SUPPORTED
+
+  static ErrResult ExecuteTdmTransfer(int           const  iteration,
+                                      int           const  exeTotalSubExecs,
+                                      SubExecParam*        exeSubExecParam,
+                                      hipStream_t   const  stream,
+                                      hipEvent_t    const  startEvent,
+                                      hipEvent_t    const  stopEvent,
+                                      ConfigOptions const& cfg,
+                                      bool          const  subExecParamHostAccessible,
+                                      uint32_t      const  ldsBytes,
+                                      TransferResources&   rss)
+  {
+    // Compute kernel launch parameters
+    int  const numSubExecs = cfg.general.useMultiStream ? rss.subExecParamCpu.size() : exeTotalSubExecs;
+    dim3 const gridSize(numSubExecs);
+    dim3 const blockSize(cfg.tdm.blockSize);
+    SubExecParam* params = cfg.general.useMultiStream ? rss.subExecParamGpuPtr : exeSubExecParam;
+
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+#if defined(__NVCC__)
+    if (cfg.general.useHipEvents)
+      ERR_CHECK(hipEventRecord(startEvent, stream));
+    GpuTdmKernel<<<gridSize, blockSize, ldsBytes, stream>>>(params,
+                                                            ldsBytes,
+                                                            cfg.general.numSubIterations);
+    if (cfg.general.useHipEvents)
+      ERR_CHECK(hipEventRecord(stopEvent, stream));
+#else
+    hipExtLaunchKernelGGL(GpuTdmKernel, gridSize, blockSize, (int)ldsBytes, stream,
+                          startEvent, stopEvent, 0,
+                          params, ldsBytes, cfg.general.numSubIterations);
+#endif
+    ERR_CHECK(hipStreamSynchronize(stream));
+
+    // Record this timing if this Transfer is being run in multistream mode
+    if (cfg.general.useMultiStream) {
+      if (iteration >= 0) {
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0 / cfg.general.numSubIterations;
+
+        double deltaMsec = cpuDeltaMsec;
+        if (startEvent != NULL) {
+          float gpuDeltaMsec;
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, startEvent, stopEvent));
+          deltaMsec = gpuDeltaMsec / cfg.general.numSubIterations;
+        }
+
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration) {
+          rss.perIterMsec.push_back(deltaMsec);
+          std::set<std::pair<int,int>> CUs;
+          std::vector<SubExecParam> subExecParamHost;
+          SubExecParam const* subExecParam = rss.subExecParamGpuPtr;
+          if (!subExecParamHostAccessible) {
+            subExecParamHost.resize(numSubExecs);
+            ERR_CHECK(hipMemcpy(subExecParamHost.data(), rss.subExecParamGpuPtr,
+                                numSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+            subExecParam = subExecParamHost.data();
+          }
+          for (int i = 0; i < numSubExecs; i++) {
+            CUs.insert(std::make_pair(subExecParam[i].xccId,
+                                      GetId(subExecParam[i].hwId)));
+          }
+          rss.perIterCUs.push_back(CUs);
+        }
+      }
+    }
+    return ERR_NONE;
+  }
+
+  static ErrResult RunTdmExecutor(int           const  iteration,
+                                  ConfigOptions const& cfg,
+                                  int           const  exeIndex,
+                                  ExeInfo&             exeInfo)
+  {
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    ERR_CHECK(hipSetDevice(exeIndex));
+
+    if (cfg.general.useMultiStream && exeInfo.streams.size() > 1 ) {
+      // Launch one thread per Transfer in separate streams
+      vector<std::future<ErrResult>> asyncTransfers;
+      for (int i = 0; i < exeInfo.streams.size(); i++) {
+        asyncTransfers.emplace_back(std::async(std::launch::async,
+                                               ExecuteTdmTransfer,
+                                               iteration,
+                                               exeInfo.totalSubExecs,
+                                               exeInfo.subExecParamGpu,
+                                               exeInfo.streams[i],
+                                               cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                               cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                               std::cref(cfg),
+                                               exeInfo.subExecParamHostAccessible,
+                                               exeInfo.ldsBytesActual,
+                                               std::ref(exeInfo.resources[i])));
+      }
+      for (auto& asyncTransfer : asyncTransfers)
+        ERR_CHECK(asyncTransfer.get());
+    } else {
+      // Launch all Transfers in one kernel launch (avoid extra thread creation)
+      ExecuteTdmTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
+                         cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                         cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                         cfg, exeInfo.subExecParamHostAccessible, exeInfo.ldsBytesActual, exeInfo.resources[0]);
+    }
+
+    if (iteration >= 0) {
+      // Determine executor timing
+      // - Use HIP event timing if enabled and not using multi-stream
+      // - Otherwise, Use CPU timing
+      if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
+        float gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        gpuDeltaMsec /= cfg.general.numSubIterations;
+        exeInfo.totalDurationMsec += gpuDeltaMsec;
+      } else {
+        auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
+          / cfg.general.numSubIterations;
+        exeInfo.totalDurationMsec += cpuDeltaMsec;
+      }
+
+      // If Transfers were combined into a single launch, figure out per-Transfer timing
+      // Determine timing for each of the individual transfers that were part of this launch
+      if (!cfg.general.useMultiStream) {
+        std::vector<SubExecParam> subExecParamHost;
+        SubExecParam const* subExecParam = exeInfo.subExecParamGpu;
+        if (!exeInfo.subExecParamHostAccessible) {
+          subExecParamHost.resize(exeInfo.totalSubExecs);
+          ERR_CHECK(hipMemcpy(subExecParamHost.data(), exeInfo.subExecParamGpu,
+                              exeInfo.totalSubExecs * sizeof(SubExecParam), hipMemcpyDefault));
+          subExecParam = subExecParamHost.data();
+        }
+
+        for (int i = 0; i < exeInfo.resources.size(); i++) {
+          TransferResources& rss = exeInfo.resources[i];
+          int64_t minStartCycle = std::numeric_limits<int64_t>::max();
+          int64_t maxStopCycle  = std::numeric_limits<int64_t>::min();
+          std::set<std::pair<int, int>> CUs;
+
+          for (auto subExecIdx : rss.subExecIdx) {
+            if (exeInfo.subExecParamCpu[subExecIdx].N != 0) {
+              minStartCycle = std::min(minStartCycle, subExecParam[subExecIdx].startCycle);
+              maxStopCycle  = std::max(maxStopCycle,  subExecParam[subExecIdx].stopCycle);
+              if (cfg.general.recordPerIteration) {
+                CUs.insert(std::make_pair(subExecParam[subExecIdx].xccId,
+                                          GetId(subExecParam[subExecIdx].hwId)));
+              }
+            }
+          }
+
+          double deltaMsec = (maxStopCycle - minStartCycle) / (double)(exeInfo.wallClockRate);
+          deltaMsec /= cfg.general.numSubIterations;
+          rss.totalDurationMsec += deltaMsec;
+          if (cfg.general.recordPerIteration) {
+            rss.perIterMsec.push_back(deltaMsec);
+            rss.perIterCUs.push_back(CUs);
+          }
+        }
+      }
+    }
+    return ERR_NONE;
+  }
+
 // Executor-related functions
 //========================================================================================
   static ErrResult RunExecutor(int           const  iteration,
@@ -5739,8 +6063,9 @@ namespace {
   {
     switch (exeDevice.exeType) {
     case EXE_CPU:           return RunCpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
-    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_GPU_DMA:       return RunDmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_GFX:       return RunGpuExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+    case EXE_GPU_TDM:       return RunTdmExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
     case EXE_NIC:           return RunNicExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
@@ -6458,7 +6783,8 @@ namespace {
       return result;
     } else if (wc.exe.exeSubIndices[0] == -2) {
       switch (wc.exe.exeType) {
-      case EXE_CPU:
+      case EXE_CPU: case EXE_GPU_TDM:
+        // These Executors do no support subindices
         wc.exe.exeSubIndices[0] = -1;
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
@@ -6681,6 +7007,9 @@ namespace {
 
     // Collect topology and distribute across all ranks
     CollectTopology();
+    if (verbose) {
+      Log("[INFO] Finished topology exchange\n");
+    }
   }
 
   System::~System()
@@ -6929,6 +7258,7 @@ namespace {
         }
         sockets[clientRank] = clientSocket;
       }
+      Log("[INFO] %d other rank(s) have connected\n", numRanks);
     } else {
       // All other ranks connect to rank 0
       int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -7347,9 +7677,10 @@ namespace {
     int numGpus = 0;
     hipError_t status = hipGetDeviceCount(&numGpus);
     if (status != hipSuccess) numGpus = 0;
-    topo.numExecutors[EXE_GPU_GFX] = numGpus;
-    topo.numExecutors[EXE_GPU_DMA] = numGpus;
+    topo.numExecutors[EXE_GPU_GFX]  = numGpus;
+    topo.numExecutors[EXE_GPU_DMA]  = numGpus;
     topo.numExecutors[EXE_GPU_BDMA] = numGpus;
+    topo.numExecutors[EXE_GPU_TDM]  = numGpus;
 
     std::vector<std::string> gpuArchNames(numGpus);
 
@@ -7370,9 +7701,10 @@ namespace {
         std::string fullName = props.gcnArchName;
         gpuArchNames[exeIndex] = fullName.substr(0, fullName.find(':'));
       }
-      topo.executorName[{EXE_GPU_GFX, exeIndex}] = gpuName;
-      topo.executorName[{EXE_GPU_DMA, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_GFX,  exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_DMA,  exeIndex}] = gpuName;
       topo.executorName[{EXE_GPU_BDMA, exeIndex}] = gpuName;
+      topo.executorName[{EXE_GPU_TDM,  exeIndex}] = gpuName;
 
 #if !defined(__NVCC__)
       hsa_agent_t gpuAgent = gpuAgents[exeIndex];
@@ -7399,15 +7731,18 @@ namespace {
         }
       }
 #endif
-      topo.numExecutorSubIndices[{EXE_GPU_GFX, exeIndex}] = numXccs;
-      topo.numExecutorSubIndices[{EXE_GPU_DMA, exeIndex}] = numDmaEngines;
+      topo.numExecutorSubIndices[{EXE_GPU_GFX,  exeIndex}] = numXccs;
+      topo.numExecutorSubIndices[{EXE_GPU_DMA,  exeIndex}] = numDmaEngines;
       topo.numExecutorSubIndices[{EXE_GPU_BDMA, exeIndex}] = 0;
-      topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}] = numDeviceCUs;
-      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}] = 1;
+      topo.numExecutorSubIndices[{EXE_GPU_TDM,  exeIndex}] = 0;
+
+      topo.numSubExecutors[{EXE_GPU_GFX, exeIndex}]  = numDeviceCUs;
+      topo.numSubExecutors[{EXE_GPU_DMA, exeIndex}]  = 1;
       topo.numSubExecutors[{EXE_GPU_BDMA, exeIndex}] = numDmaEngines;
+      topo.numSubExecutors[{EXE_GPU_TDM, exeIndex}]  = numDeviceCUs;
+
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
-
     }
 
     // NIC Executor
@@ -7824,7 +8159,7 @@ namespace {
         return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
       agent = cpuAgents[exeDevice.exeIndex];
       break;
-    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
+    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_TDM:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
@@ -8200,6 +8535,7 @@ namespace {
 // Enumerations
 #undef hipDeviceAttributeClockRate
 #undef hipDeviceAttributeMultiprocessorCount
+#undef hipDeviceAttributeMaxSharedMemoryPerBlock
 #undef hipDeviceAttributeWarpSize
 #undef hipErrorPeerAccessAlreadyEnabled
 #undef hipFuncCachePreferShared
@@ -8230,6 +8566,7 @@ namespace {
 #undef hipGetDeviceCount
 #undef hipGetDeviceProperties
 #undef hipGetErrorString
+#undef hipGetLastError
 #undef hipHostFree
 #undef hipHostMalloc
 #undef hipMalloc

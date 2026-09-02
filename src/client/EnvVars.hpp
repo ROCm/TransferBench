@@ -126,6 +126,11 @@ public:
   int nicTrafficClass;               // DSCP/traffic class byte for RoCE GRH
   int roceVersion;                   // RoCE version number
 
+  // TDM options
+  int tdmBlockOrder;                 // How threadblocks for multiple Transfers are ordered 0=sequential 1=interleaved
+  int tdmBlockSize;                  // Size of each threadblock for TDM kernels (must be multiple of 32)
+  int tdmLdsBytes;                   // Size of LDS (shared memory) bytes per threadblock for TDM kernels (0 = use device max)
+
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
 
@@ -177,6 +182,9 @@ public:
     showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
     sweepMaxPow2      = GetEnvVar("SWEEP_MAX_POW2"      , 29);
     sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
+    tdmBlockOrder     = GetEnvVar("TDM_BLOCK_ORDER"     , 0);
+    tdmBlockSize      = GetEnvVar("TDM_BLOCK_SIZE"      , 256);
+    tdmLdsBytes       = GetEnvVar("TDM_LDS_BYTES"       , 0);
     useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
     useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
     useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
@@ -396,7 +404,11 @@ public:
     printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
     printf(" SWEEP_MAX_POW2      - When 0 is specified for data size, this is the ending power of two exponent\n");
     printf(" SWEEP_MIN_POW2      - When 0 is specified for data size, this is the starting power of two exponent\n");
+    printf(" TDM_BLOCK_ORDER     - How blocks for TDM transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" TDM_BLOCK_SIZE      - # of threads per threadblock for TDM (async tensor) kernels (Must be multiple of 32)\n");
+    printf(" TDM_LDS_BYTES       - Amount of LDS bytes to allocate per workgroup for TDM kernels (0 = device max; K/M/G suffixes accepted)\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
+    printf(" USE_HIP_EVENTS      - Use HIP events for GFX/DMA/TDM executor timing (0=CPU wall-clock)\n");
     printf(" USE_HSA_DMA         - Use hsa_amd_async_copy instead of hipMemcpy for non-targeted DMA execution\n");
     printf(" USE_INTERACTIVE     - Pause for user-input before starting transfer loop\n");
     printf(" USE_SINGLE_STREAM   - Use a single stream per GPU GFX executor instead of stream per Transfer\n");
@@ -539,8 +551,14 @@ public:
           "%s per-iteration timing", showIterations ? "Showing" : "Hiding");
     Print("SHOW_PERCENTILES", showPercentiles.empty() ? 0 : 1, "%s",
           showPercentiles.empty() ? "Disabled" : GetStr(showPercentiles).c_str());
+    Print("TDM_BLOCK_ORDER", tdmBlockOrder,
+          "TDM Thread block ordering: %s", tdmBlockOrder == 0 ? "Sequential" : "Interleaved");
+    Print("TDM_BLOCK_SIZE", tdmBlockSize, "TDM threadblock size of %d", tdmBlockSize);
+    Print("TDM_LDS_BYTES", tdmLdsBytes, "%s",
+          tdmLdsBytes == 0 ? "Using device max LDS bytes per workgroup"
+          : (std::string("Setting LDS to ") + std::to_string(tdmLdsBytes) + " bytes per workgroup").c_str());
     Print("USE_HIP_EVENTS", useHipEvents,
-          "Using %s for GFX/DMA Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
+          "Using %s for GFX/DMA/TDM Executor timing", useHipEvents ? "HIP events" : "CPU wall time");
     Print("USE_HSA_DMA", useHsaDma,
           "Using %s for DMA execution", useHsaDma ? "hsa_amd_async_copy" : "hipMemcpyAsync");
     Print("USE_INTERACTIVE", useInteractive,
@@ -710,7 +728,9 @@ public:
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
     cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
+    cfg.general.useHipEvents       = useHipEvents;
     cfg.general.useInteractive     = useInteractive;
+    cfg.general.useMultiStream     = !useSingleStream;
 
     cfg.data.alwaysValidate        = alwaysValidate;
     cfg.data.blockBytes            = blockBytes;
@@ -720,7 +740,6 @@ public:
     cfg.data.validateDirect        = validateDirect;
     cfg.data.validateSource        = validateSource;
 
-    cfg.dma.useHipEvents           = useHipEvents;
     cfg.dma.useHsaCopy             = useHsaDma;
 
     cfg.gfx.blockOrder             = gfxBlockOrder;
@@ -731,8 +750,6 @@ public:
     cfg.gfx.seType                 = gfxSeType;
     cfg.gfx.unrollFactor           = gfxUnroll;
     cfg.gfx.temporalMode           = gfxTemporal;
-    cfg.gfx.useHipEvents           = useHipEvents;
-    cfg.gfx.useMultiStream         = !useSingleStream;
     cfg.gfx.useSingleTeam          = gfxSingleTeam;
     cfg.gfx.waveOrder              = gfxWaveOrder;
     cfg.gfx.wordSize               = gfxWordSize;
@@ -746,6 +763,10 @@ public:
     cfg.nic.serviceLevel           = nicServiceLevel;
     cfg.nic.trafficClass           = nicTrafficClass;
     cfg.nic.roceVersion            = roceVersion;
+
+    cfg.tdm.blockOrder             = tdmBlockOrder;
+    cfg.tdm.blockSize              = tdmBlockSize;
+    cfg.tdm.ldsBytes               = tdmLdsBytes;
 
     return cfg;
   }

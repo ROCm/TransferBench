@@ -6,6 +6,8 @@ Documentation for TransferBench is available at
 ## v1.70.00
 ## Added
 - Added support for SWEEP_MIN_POW2 and SWEEP_MAX_POW2 to set sweep bounds when bytes to transfer is 0
+- Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware.  This provides
+  an alternative data movement mechanism which utilizes async loads to shared memory / from shared memory
 
 ## v1.69.00
 ### Added

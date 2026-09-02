@@ -50,6 +50,7 @@ THE SOFTWARE.
 #include "Schmoo.hpp"
 #include "SmokeTest.hpp"
 #include "Sweep.hpp"
+#include "TdmSweep.hpp"
 #include "WallClock.hpp"
 
 typedef int (*PresetFunc)(EnvVars&          ev,
@@ -88,6 +89,7 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"schmoo",      {SchmooPreset,        "Scaling tests for local/remote read/write/copy"}},
   {"smoketest",   {SmokeTestPreset,     "Simple correctness smoke-test"}},
   {"sweep",       {SweepPreset,         "Ordered sweep through sets of Transfers"}},
+  {"tdmsweep",    {TdmSweepPreset,      "Sweep over TDM executor options (block size / LDS / order / subExecs) for a given TDM Transfer"}},
   {"wallclock",   {WallClockPreset,     "Tests wallclock consistency across XCCs within a GPU"}},
 };
 
