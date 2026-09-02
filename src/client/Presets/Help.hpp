@@ -44,7 +44,7 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#   3) DMA                 N/A.                                 (Must have single SRC, at least one DST)\n");
   printf("#   4) NIC                 Queue Pair\n");
   printf("#   5) Batched-DMA         Batch item                           (Must have single SRC, at least one DST)\n");
-  printf("#   6) TDM                 GPU threadblock/Compute Unit (CU)    (Requires hardware support for Tensor Data Mover\n");
+  printf("#   6) TDM                 GPU threadblock/Compute Unit (CU)    (Requires hardware support: AMD gfx1250 or NVIDIA sm_90+)\n");
 
   printf("\n");
   printf("# Each single line in the configuration file defines a set of Transfers (a Test) to run in parallel\n");

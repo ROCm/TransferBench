@@ -2292,7 +2292,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           }
         } else {
           errors.push_back({ERR_FATAL,
-              "Unable to query max amount of shared memory per block on GPU %%d\n", i});
+              "Unable to query max amount of shared memory per block on GPU %d\n", i});
         }
       }
     }
@@ -4809,7 +4809,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
       }
 
-      // Determine how much shared memory to use for TDS
+      // Determine how much shared memory to use for TDM
       if (exeDevice.exeType == EXE_GPU_TDM) {
         if (cfg.tdm.ldsBytes == 0) {
           int ldsMaxBytes;
@@ -7214,7 +7214,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     } else if (wc.exe.exeSubIndices[0] == -2) {
       switch (wc.exe.exeType) {
       case EXE_CPU: case EXE_GPU_TDM:
-        // These Executors do no support subindices
+        // These Executors do not support subindices
         wc.exe.exeSubIndices[0] = -1;
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
@@ -7708,7 +7708,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
         sockets[clientRank] = clientSocket;
       }
-      Log("[INFO] %d other rank(s) have connected\n", numRanks);
+      Log("[INFO] %d other rank(s) have connected\n", numRanks - 1);
     } else {
       // All other ranks connect to rank 0
       int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

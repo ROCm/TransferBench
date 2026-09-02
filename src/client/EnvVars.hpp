@@ -44,7 +44,7 @@ THE SOFTWARE.
 #include <random>
 #include <time.h>
 
-#define CLIENT_VERSION "00"
+#define CLIENT_VERSION "01"
 
 #include "TransferBench.hpp"
 using namespace TransferBench;
@@ -84,7 +84,7 @@ public:
   int byteOffset;                    // Byte-offset for memory allocations
   vector<float> fillPattern;         // Pattern of floats used to fill source data
   vector<int> fillCompress;          // Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0
-  int sweepMaxPow2;                  // Maximum power of two to sweep up to when whnumber of bytes to transfer is set to 0
+  int sweepMaxPow2;                  // Maximum power of two to sweep up to when number of bytes to transfer is set to 0
   int sweepMinPow2;                  // Minimum power of two to sweep up from when number of bytes to transfer is set to 0
   int validateDirect;                // Validate GPU destination memory directly instead of staging GPU memory on host
   int validateOnDevice;              // Validate GPU dst/src memory via an on-device kernel instead of host memcmp
@@ -184,6 +184,9 @@ public:
     showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
     sweepMaxPow2      = GetEnvVar("SWEEP_MAX_POW2"      , 29);
     sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
+    sweepMinPow2      = std::clamp(sweepMinPow2, 0, 62);
+    sweepMaxPow2      = std::clamp(sweepMaxPow2, 0, 62);
+    if (sweepMinPow2 > sweepMaxPow2) std::swap(sweepMinPow2, sweepMaxPow2);
     tdmBlockOrder     = GetEnvVar("TDM_BLOCK_ORDER"     , 0);
     tdmBlockSize      = GetEnvVar("TDM_BLOCK_SIZE"      , 256);
     tdmLdsBytes       = GetEnvVar("TDM_LDS_BYTES"       , 0);
