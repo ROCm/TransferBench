@@ -4836,6 +4836,7 @@ namespace {
   // Pingpong post-prep: cross-link flag slots, then propagate into PingpongParam.
   static ErrResult PingpongPostPrep(ConfigOptions const& cfg,
                                     int const localRank,
+                                    vector<Transfer> const& transfers,
                                     vector<TransferResources*> const& transferResources,
                                     std::map<ExeDevice, ExeInfo>& executorMap)
   {
@@ -4861,6 +4862,23 @@ namespace {
         pp.localFlagMem   = partnerFlag;
         pp.flagStride     = stride;
         pp.flagAllocBytes = allocBytes;
+
+        // Each half polls the partner half's flag buffer, which PrepareExecutor did not
+        // cover since the partner's memory belongs to the other half's src/dst list
+        Transfer  const& t          = transfers[rss->transferIdx];
+        bool      const  isPong     = (rss->numLaps < 0);
+        MemDevice const& partnerMem = t.dsts[isPong ? 0 : 1];
+        ExeDevice exeDevice;
+        ERR_CHECK(GetActualExecutor(isPong ? t.exeDevicePong : t.exeDevice, exeDevice));
+        if (IsGpuExeType(exeDevice.exeType)  && IsGpuMemType(partnerMem.memType) &&
+            exeDevice.exeRank == localRank   && partnerMem.memRank == localRank  &&
+            partnerMem.memIndex != exeDevice.exeIndex) {
+          if (System::Get().IsVerbose()) {
+            System::Get().Log("[INFO]   Enabling pingpong peer access: GPU %d -> GPU %d\n",
+                              exeDevice.exeIndex, partnerMem.memIndex);
+          }
+          ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, partnerMem.memIndex));
+        }
       }
     }
 
@@ -5874,6 +5892,7 @@ namespace {
                           params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
+    ERR_CHECK(hipGetLastError());
     ERR_CHECK(hipStreamSynchronize(stream));
 
     // Record this timing if this Transfer is being run in multistream mode
@@ -5940,6 +5959,7 @@ namespace {
                           params);
 #endif
 
+    ERR_CHECK(hipGetLastError());
     ERR_CHECK(hipStreamSynchronize(stream));
     return ERR_NONE;
   }
@@ -6484,7 +6504,7 @@ namespace {
     }
 
     // After all Executors are prepared and subExecParam is set up, we need to link ping and pong flag memory.
-    ERR_APPEND(PingpongPostPrep(cfg, localRank, transferResources, executorMap), errResults);
+    ERR_APPEND(PingpongPostPrep(cfg, localRank, transfers, transferResources, executorMap), errResults);
 
     // Prepare reference src/dst arrays - only once for largest size.
     // dstReference (expected results) is only needed when validation is enabled.
