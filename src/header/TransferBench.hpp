@@ -4122,16 +4122,13 @@ namespace {
     for (auto rss : transferResources) {
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
-      vector<MemDevice> srcs, dsts;
-      if (t.numLaps > 0) {
-        bool const isPong = (rss->numLaps < 0);
-        int const h = isPong ? 1 : 0;
-        if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
-        dsts.push_back(t.dsts[h]);
-      } else {
-        srcs = t.srcs;
-        dsts = t.dsts;
-      }
+
+      // Pingpong halves exchange handshake flags instead of data, so their destinations
+      // hold lap flags that no dstReference entry describes
+      if (t.numLaps != 0) continue;
+
+      vector<MemDevice> const& srcs = t.srcs;
+      vector<MemDevice> const& dsts = t.dsts;
       size_t N = t.numBytes / sizeof(float);
 
       float const* expected = dstReference[srcs.size()].data();
@@ -6085,6 +6082,31 @@ namespace {
           }
         }
       }
+
+      // Pingpong timing is reported per lap, from the in-kernel timestamps that the
+      // ping half wrote into its PingpongParam (pingpong always uses its own stream)
+      if (exeInfo.totalPingpong > 0) {
+        std::vector<PingpongParam> pingpongParamHost;
+        PingpongParam const* pingpongParam = exeInfo.pingpongParamGpu;
+        if (!exeInfo.pingpongParamHostAccessible) {
+          pingpongParamHost.resize(exeInfo.totalPingpong);
+          ERR_CHECK(hipMemcpy(pingpongParamHost.data(), exeInfo.pingpongParamGpu,
+                              exeInfo.totalPingpong * sizeof(PingpongParam), hipMemcpyDefault));
+          pingpongParam = pingpongParamHost.data();
+        }
+
+        for (TransferResources& rss : exeInfo.resources) {
+          // Only the ping half timestamps the exchange, and it owns the reported row
+          if (rss.numLaps <= 0 || rss.pingpongParamIdx < 0) continue;
+
+          PingpongParam const& p = pingpongParam[rss.pingpongParamIdx];
+          double deltaMsec = (p.stopCycle - p.startCycle) / (double)(exeInfo.wallClockRate);
+          deltaMsec /= rss.numLaps;
+          rss.totalDurationMsec += deltaMsec;
+          if (cfg.general.recordPerIteration)
+            rss.perIterMsec.push_back(deltaMsec);
+        }
+      }
     }
     return ERR_NONE;
   }
@@ -6565,37 +6587,50 @@ namespace {
         System::Get().Log("Memory prepared:\n");
 
         for (int i = 0; i < transfers.size(); i++) {
-          Transfer const& t     = transfers[i];
-          ExeDevice const& exe  = t.exeDevice;
+          Transfer const& t = transfers[i];
 
-          // Executor info
-          std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
-          int exeNuma = IsGpuExeType(exe.exeType)
-                        ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
-                        : IsNicExeType(exe.exeType)
-                          ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
-                          : exe.exeIndex;
-          System::Get().Log("Transfer %03d: EXE=R%d%c%d NUMA=%d%s%s  %zu bytes\n",
-                            i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex, exeNuma,
-                            exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
+          // A pingpong Transfer owns two resources (one per half), each holding only its own
+          // half's src/dst, so walk the resources and resolve the matching mem lists
+          for (auto rss : transferResources) {
+            if (rss->transferIdx != i) continue;
 
-          for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-            MemDevice const& md = t.srcs[iSrc];
-            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
-            System::Get().Log("  SRC[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
-                              iSrc, transferResources[i]->srcMem[iSrc],
-                              GetMemTypeName(md.memType), md.memIndex,
-                              GetMemDeviceNuma(md).c_str(), md.memRank,
-                              bdf.empty() ? "" : " BDF=", bdf.c_str());
-          }
-          for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-            MemDevice const& md = t.dsts[iDst];
-            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
-            System::Get().Log("  DST[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
-                              iDst, transferResources[i]->dstMem[iDst],
-                              GetMemTypeName(md.memType), md.memIndex,
-                              GetMemDeviceNuma(md).c_str(), md.memRank,
-                              bdf.empty() ? "" : " BDF=", bdf.c_str());
+            bool const isPong = (rss->numLaps < 0);
+            vector<MemDevice> srcs, dsts;
+            int32_t subIndex;
+            ResolveTransferResourceMem(t, *rss, srcs, dsts, subIndex);
+
+            ExeDevice const& exe = isPong ? t.exeDevicePong : t.exeDevice;
+            char const* halfStr  = rss->numLaps == 0 ? "" : isPong ? " (pong)" : " (ping)";
+
+            // Executor info
+            std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
+            int exeNuma = IsGpuExeType(exe.exeType)
+                          ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
+                          : IsNicExeType(exe.exeType)
+                            ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
+                            : exe.exeIndex;
+            System::Get().Log("Transfer %03d%s: EXE=R%d%c%d NUMA=%d%s%s  %zu bytes\n",
+                              i, halfStr, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
+                              exeNuma, exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
+
+            for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
+              MemDevice const& md = srcs[iSrc];
+              std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+              System::Get().Log("  SRC[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
+                                iSrc, rss->srcMem[iSrc],
+                                GetMemTypeName(md.memType), md.memIndex,
+                                GetMemDeviceNuma(md).c_str(), md.memRank,
+                                bdf.empty() ? "" : " BDF=", bdf.c_str());
+            }
+            for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
+              MemDevice const& md = dsts[iDst];
+              std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+              System::Get().Log("  DST[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
+                                iDst, rss->dstMem[iDst],
+                                GetMemTypeName(md.memType), md.memIndex,
+                                GetMemDeviceNuma(md).c_str(), md.memRank,
+                                bdf.empty() ? "" : " BDF=", bdf.c_str());
+            }
           }
         }
         System::Get().Log("Hit <Enter> to continue: ");
@@ -6720,6 +6755,14 @@ namespace {
         for (auto rss : transferResources) {
           int transferIdx = rss->transferIdx;
           Transfer const& t = transfers[transferIdx];
+
+          // Pingpong halves carry lap flags rather than data (report once, from the ping half)
+          if (t.numLaps != 0) {
+            if (rss->numLaps > 0)
+              System::Get().Log("  Transfer %03d:  SKIP(pingpong)\n", transferIdx);
+            continue;
+          }
+
           size_t N = t.numBytes / sizeof(float);
           float const* expected = dstReference[t.srcs.size()].data();
           bool transferOk = true;
