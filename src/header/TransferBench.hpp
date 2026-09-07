@@ -39,6 +39,7 @@ THE SOFTWARE.
 #include <netinet/in.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
+#include <numeric>
 #include <random>
 #include <regex>
 #include <set>
@@ -231,7 +232,8 @@ namespace TransferBench
     int numWarmups         = 3;                 ///< Number of un-timed warmup iterations to perform
     int recordPerIteration = 0;                 ///< Record per-iteration timing information
     int useInteractive     = 0;                 ///< Pause for user-input before starting transfer loop
-    int pingpongStride     = 8;                 ///< Stride in bytes between flag slots for pingpong laps (must be multiple of 8)
+    int pingpongStride     = 1;                 ///< Stride in bytes between flag slots for pingpong laps (positive, or 0 when pingpongFlagBuffer is 1)
+    int pingpongFlagBuffer = 1;                 ///< Size of the pingpong flag buffer in bytes (must be positive)
   };
 
   /**
@@ -1966,6 +1968,7 @@ namespace {
       if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
       if (general.pingpongStride     != cfg.general.pingpongStride)     ADD_ERROR("cfg.general.pingpongStride");
+      if (general.pingpongFlagBuffer != cfg.general.pingpongFlagBuffer) ADD_ERROR("cfg.general.pingpongFlagBuffer");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
     }
@@ -2070,7 +2073,7 @@ namespace {
     #undef ADD_ERROR
   }
 
-  // Forward declaration
+  // Forward declarations
   int GetGpuKernelUnrollIdx(int unroll);
 
   // Validate configuration options - return trues if and only if an fatal error is detected
@@ -2080,6 +2083,14 @@ namespace {
     // Check general options
     if (cfg.general.numWarmups < 0)
       errors.push_back({ERR_FATAL, "[general.numWarmups] must be a non-negative number"});
+    if (cfg.general.pingpongFlagBuffer < 1)
+      errors.push_back({ERR_FATAL, "[general.pingpongFlagBuffer] must be a positive number of bytes"});
+    // A 0 stride keeps every lap on the same flag slot, which only alternates safely when the
+    // buffer is a single byte and there is no other slot to rotate through
+    if (cfg.general.pingpongStride < 0 ||
+        (cfg.general.pingpongStride == 0 && cfg.general.pingpongFlagBuffer != 1))
+      errors.push_back({ERR_FATAL, "[general.pingpongStride] must be a positive number of bytes "
+                                   "(0 is only allowed when [general.pingpongFlagBuffer] is 1)"});
 
     // Check that config options are consistent (where necessary) across all ranks
     CheckMultiNodeConfigConsistency(cfg, errors);
@@ -2958,6 +2969,7 @@ namespace {
     int                        numLaps;           ///< 0 = normal, >0 = ping, <0 = pong
     int                        flagStride;        ///< Stride in bytes between flag slots per lap
     int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
+    int                        hopPeriod;         ///< Laps between extra stride hops (0 = never hop)
     int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
 
     // Outputs (ping half only)
@@ -4357,9 +4369,19 @@ namespace {
     return ERR_NONE;
   }
 
+  // Returns how many distinct flag slots the lap offsets cycle through, which is also the lap
+  // distance between successive reuses of any one slot, since
+  //   offset(lap) = (lap * stride) % allocBytes
+  // repeats with period allocBytes / gcd(stride, allocBytes).
+  static int PingpongFlagBufferPeriod(int stride, int allocBytes)
+  {
+    if (allocBytes <= 0) return 1;
+    return allocBytes / (int)std::gcd(std::max(0, stride), allocBytes);
+  }
+
   // Prepares pingpong parameters for a ping or pong resource half.
   // Assumes PrepareExecutor has already allocated rss.srcMem / rss.dstMem for this half.
-  // Flag cross-linking (localFlagMem, flagStride, flagAllocBytes) is deferred to PingpongPostPrep.
+  // Flag cross-linking (localFlagMem) is deferred to PingpongPostPrep.
   static ErrResult PreparePingpongParam(ConfigOptions const& cfg,
                                         Transfer      const& transfer,
                                         TransferResources&   rss)
@@ -4378,8 +4400,10 @@ namespace {
     p.localFlagMem   = nullptr;
     p.flagMem        = static_cast<volatile uint8_t*>(static_cast<void*>(rss.dstMem[0]));
     p.numLaps        = rss.numLaps;
-    p.flagStride     = 0;
-    p.flagAllocBytes = 0;
+    p.flagStride     = cfg.general.pingpongStride;
+    p.flagAllocBytes = cfg.general.pingpongFlagBuffer;
+    int flagPeriod   = PingpongFlagBufferPeriod(p.flagStride, p.flagAllocBytes);
+    p.hopPeriod      = (flagPeriod % 2 == 0) ? flagPeriod : 0;
     p.preferredXccId = subIndex;
     p.startCycle     = 0;
     p.stopCycle      = 0;
@@ -4404,6 +4428,13 @@ namespace {
       if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(exeDevice)) {
         return {ERR_FATAL, "[gfx.xccPrefTable] defines out-of-bound XCC index %d", p.preferredXccId};
       }
+    }
+
+    if (System::Get().IsVerbose()) {
+      System::Get().Log("[INFO]   Pingpong flags (%s): %d laps  stride %d B  buffer %d B  "
+                        "%d slot(s)  hop %s\n",
+                        isPong ? "pong" : "ping", abs(rss.numLaps), p.flagStride, p.flagAllocBytes,
+                        flagPeriod, p.hopPeriod ? "on" : "off");
     }
 
     rss.totalDurationMsec = 0.0;
@@ -4600,7 +4631,7 @@ namespace {
         // For pingpong transfers, allocate a larger buffer to hold multiple flag slots for UALoE station rotation
         size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
         if (rss.numLaps != 0)
-          dstAllocBytes = std::max(dstAllocBytes, std::min((size_t)1024, (size_t)8 * t.numLaps));
+          dstAllocBytes = std::max(dstAllocBytes, (size_t)cfg.general.pingpongFlagBuffer);
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           if (verbose) {
@@ -4849,16 +4880,12 @@ namespace {
       if (it == pongByTransferIdx.end()) continue;
       TransferResources* pongRss = it->second;
 
-      int stride              = cfg.general.pingpongStride;
-      int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->numLaps);
       for (auto* rss : {pingRss, pongRss}) {
         TransferResources* partnerRss = (rss == pingRss ? pongRss : pingRss);
         volatile uint8_t* partnerFlag = static_cast<volatile uint8_t*>(static_cast<void*>(
           partnerRss->dstMem[0]));
         PingpongParam& pp = rss->pingpongParamCpu;
         pp.localFlagMem   = partnerFlag;
-        pp.flagStride     = stride;
-        pp.flagAllocBytes = allocBytes;
 
         // Each half polls the partner half's flag buffer, which PrepareExecutor did not
         // cover since the partner's memory belongs to the other half's src/dst list
@@ -5041,14 +5068,6 @@ namespace {
     while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != val)
       ;
 #endif
-  }
-
-  // Returns a pointer to the flag slot for the given lap, using strided wrap-around.
-  __host__ __device__
-  static volatile uint8_t* FlagSlot(volatile uint8_t* base, int lap, int stride, int allocBytes)
-  {
-    int offset = (lap * stride) % allocBytes;
-    return base + offset;
   }
 
 // CPU Executor-related functions
@@ -5809,14 +5828,30 @@ namespace {
     bool const isPing = p.numLaps > 0;
     int  const laps   = isPing ? p.numLaps : -p.numLaps;
 
+    // Hoist all parameters into registers so that the lap loop only touches the flag slots
+    int const y  = p.flagAllocBytes;
+    int const sx = y > 0 ? p.flagStride % y : 0;
+    // hopPeriod 0 disables hopping; a period past the last lap keeps the loop body branch-identical
+    int const hp = p.hopPeriod > 0 ? p.hopPeriod : laps + 1;
+
+    volatile uint8_t* const localBase  = p.localFlagMem;
+    volatile uint8_t* const remoteBase = p.flagMem;
+    // Kept as scalars rather than an array so that the lap-parity select stays in registers
+    uint8_t*          const srcVal0    = const_cast<uint8_t*>(p.srcMem[0]);
+    uint8_t*          const srcVal1    = const_cast<uint8_t*>(p.srcMem[1]);
+    bool const useSrcMem = (srcVal0 != nullptr);
+
+    int     off    = 0;
+    int     hopCnt = hp;
+    uint8_t val    = 0;
+
     int64_t startCycle = GetTimestamp();
 
     for (int lap = 0; lap < laps; lap++) {
-      volatile uint8_t* localFlag  = FlagSlot(p.localFlagMem, lap, p.flagStride, p.flagAllocBytes);
-      volatile uint8_t* remoteFlag = FlagSlot(p.flagMem,      lap, p.flagStride, p.flagAllocBytes);
-      uint8_t const     val        = (uint8_t)(lap & 1);
+      volatile uint8_t* localFlag  = localBase  + off;
+      volatile uint8_t* remoteFlag = remoteBase + off;
       // TODO: replace with hip_atomic_store
-      if (!p.srcMem[0]) {
+      if (!useSrcMem) {
         if (isPing) {
           __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
           GpuWait(localFlag, val);
@@ -5825,15 +5860,25 @@ namespace {
           __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
         }
       } else{
+        uint8_t* const srcPtr = val ? srcVal1 : srcVal0;
         if (isPing) {
-          __atomic_store((uint8_t*)remoteFlag, const_cast<uint8_t*>(p.srcMem[val]), __ATOMIC_RELEASE);
+          __atomic_store((uint8_t*)remoteFlag, srcPtr, __ATOMIC_RELEASE);
           GpuWait(localFlag, val);
         } else {
           GpuWait(localFlag, val);
-          __atomic_store((uint8_t*)remoteFlag, const_cast<uint8_t*>(p.srcMem[val]), __ATOMIC_RELEASE);
+          __atomic_store((uint8_t*)remoteFlag, srcPtr, __ATOMIC_RELEASE);
         }
 
       }
+
+      // Advance one stride, plus an extra stride every hp laps so that a slot is never
+      // revisited an even number of laps later (which would leave a stale matching value)
+      off += sx; if (off >= y) off -= y;
+      if (--hopCnt == 0) {
+        hopCnt = hp;
+        off += sx; if (off >= y) off -= y;
+      }
+      val ^= 1;
     }
 
     if (isPing) {
@@ -6678,7 +6723,7 @@ namespace {
           exit(1);
         }
 
-        size_t allocBytes = std::min((size_t)1024, (size_t)8 * abs(rss->numLaps));
+        size_t allocBytes = (size_t)cfg.general.pingpongFlagBuffer;
         if (IsCpuMemType(dstMem.memType)) {
           memset(dst, -1, allocBytes);
         } else if (IsGpuMemType(dstMem.memType)) {

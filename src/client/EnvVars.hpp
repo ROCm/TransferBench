@@ -74,7 +74,8 @@ public:
   int numIterations;                 // Number of timed iterations to perform.  If negative, run for -numIterations seconds instead
   int numSubIterations;              // Number of subiterations to perform
   int numWarmups;                    // Number of un-timed warmup iterations to perform
-  int pingpongStride;                // Stride in bytes between flag slots for pingpong laps
+  int pingpongFlagBuffer;            // Size in bytes of the pingpong flag buffer (must be positive)
+  int pingpongStride;                // Stride in bytes between flag slots for pingpong laps (wraps within the flag buffer)
   int showBorders;                   // Show ASCII box-drawing characaters in tables
   int showIterations;                // Show per-iteration timing info
   int useInteractive;                // Pause for user-input before starting transfer loop
@@ -152,39 +153,40 @@ public:
     else if (archName == "gfx942") defaultGfxUnroll = 4;
     else if (archName == "gfx950") defaultGfxUnroll = 4;
 
-    alwaysValidate    = GetEnvVar("ALWAYS_VALIDATE", 0);
-    blockBytes        = GetEnvVar("BLOCK_BYTES"         , 256);
-    byteOffset        = GetEnvVar("BYTE_OFFSET"         , 0);
-    fillCompress      = GetEnvVarArray("FILL_COMPRESS"  , {});
-    gfxBlockOrder     = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
-    gfxBlockSize      = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
-    gfxKernel         = GetEnvVar("GFX_KERNEL"          , 0);
-    gfxSeType         = GetEnvVar("GFX_SE_TYPE"         , 0);
-    gfxSingleTeam     = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
-    gfxTemporal       = GetEnvVar("GFX_TEMPORAL"        , 0);
-    gfxUnroll         = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
-    gfxWaveOrder      = GetEnvVar("GFX_WAVE_ORDER"      , 0);
-    gfxWordSize       = GetEnvVar("GFX_WORD_SIZE"       , 4);
-    hideEnv           = GetEnvVar("HIDE_ENV"            , 0);
-    minNumVarSubExec  = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
-    maxNumVarSubExec  = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
-    numIterations     = GetEnvVar("NUM_ITERATIONS"      , 10);
-    numSubIterations  = GetEnvVar("NUM_SUBITERATIONS"   , 1);
-    numWarmups        = GetEnvVar("NUM_WARMUPS"         , 3);
-    pingpongStride    = GetEnvVar("PINGPONG_STRIDE"     , 8);
-    outputToCsv       = GetEnvVar("OUTPUT_TO_CSV"       , 0);
-    samplingFactor    = GetEnvVar("SAMPLING_FACTOR"     , 1);
-    showBorders       = GetEnvVar("SHOW_BORDERS"        , 1);
-    showIterations    = GetEnvVar("SHOW_ITERATIONS"     , 0);
-    showPercentiles   = GetEnvVarArray("SHOW_PERCENTILES", {});
-    sweepMaxPow2      = GetEnvVar("SWEEP_MAX_POW2"      , 29);
-    sweepMinPow2      = GetEnvVar("SWEEP_MIN_POW2"      , 10);
-    useHipEvents      = GetEnvVar("USE_HIP_EVENTS"      , 1);
-    useHsaDma         = GetEnvVar("USE_HSA_DMA"         , 0);
-    useInteractive    = GetEnvVar("USE_INTERACTIVE"     , 0);
-    useSingleStream   = GetEnvVar("USE_SINGLE_STREAM"   , 1);
-    validateDirect    = GetEnvVar("VALIDATE_DIRECT"     , 0);
-    validateSource    = GetEnvVar("VALIDATE_SOURCE"     , 0);
+    alwaysValidate      = GetEnvVar("ALWAYS_VALIDATE", 0);
+    blockBytes          = GetEnvVar("BLOCK_BYTES"         , 256);
+    byteOffset          = GetEnvVar("BYTE_OFFSET"         , 0);
+    fillCompress        = GetEnvVarArray("FILL_COMPRESS"  , {});
+    gfxBlockOrder       = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
+    gfxBlockSize        = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
+    gfxKernel           = GetEnvVar("GFX_KERNEL"          , 0);
+    gfxSeType           = GetEnvVar("GFX_SE_TYPE"         , 0);
+    gfxSingleTeam       = GetEnvVar("GFX_SINGLE_TEAM"     , 0);
+    gfxTemporal         = GetEnvVar("GFX_TEMPORAL"        , 0);
+    gfxUnroll           = GetEnvVar("GFX_UNROLL"          , defaultGfxUnroll);
+    gfxWaveOrder        = GetEnvVar("GFX_WAVE_ORDER"      , 0);
+    gfxWordSize         = GetEnvVar("GFX_WORD_SIZE"       , 4);
+    hideEnv             = GetEnvVar("HIDE_ENV"            , 0);
+    minNumVarSubExec    = GetEnvVar("MIN_VAR_SUBEXEC"     , 1);
+    maxNumVarSubExec    = GetEnvVar("MAX_VAR_SUBEXEC"     , 0);
+    numIterations       = GetEnvVar("NUM_ITERATIONS"      , 10);
+    numSubIterations    = GetEnvVar("NUM_SUBITERATIONS"   , 1);
+    numWarmups          = GetEnvVar("NUM_WARMUPS"         , 3);
+    pingpongFlagBuffer  = GetEnvVar("PINGPONG_FLAG_BUFFER", 1);
+    pingpongStride      = GetEnvVar("PINGPONG_STRIDE"     , 1);
+    outputToCsv         = GetEnvVar("OUTPUT_TO_CSV"       , 0);
+    samplingFactor      = GetEnvVar("SAMPLING_FACTOR"     , 1);
+    showBorders         = GetEnvVar("SHOW_BORDERS"        , 1);
+    showIterations      = GetEnvVar("SHOW_ITERATIONS"     , 0);
+    showPercentiles     = GetEnvVarArray("SHOW_PERCENTILES", {});
+    sweepMaxPow2        = GetEnvVar("SWEEP_MAX_POW2"      , 29);
+    sweepMinPow2        = GetEnvVar("SWEEP_MIN_POW2"      , 10);
+    useHipEvents        = GetEnvVar("USE_HIP_EVENTS"      , 1);
+    useHsaDma           = GetEnvVar("USE_HSA_DMA"         , 0);
+    useInteractive      = GetEnvVar("USE_INTERACTIVE"     , 0);
+    useSingleStream     = GetEnvVar("USE_SINGLE_STREAM"   , 1);
+    validateDirect      = GetEnvVar("VALIDATE_DIRECT"     , 0);
+    validateSource      = GetEnvVar("VALIDATE_SOURCE"     , 0);
 
     ibGidIndex        = GetEnvVar("IB_GID_INDEX"        ,-1);
     ibPort            = GetEnvVar("IB_PORT_NUMBER"      , 1);
@@ -392,7 +394,8 @@ public:
     printf(" NUM_SUBITERATIONS   - # of sub-iterations to run per iteration. Must be non-negative\n");
     printf(" NUM_WARMUPS         - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV       - Outputs to CSV format if set\n");
-    printf(" PINGPONG_STRIDE   - Stride in bytes between flag slots for pingpong laps (default 8, must be multiple of 8)\n");
+    printf(" PINGPONG_FLAG_BUFFER - Size in bytes of the pingpong flag buffer (default 1, must be positive). Each flag slot is 1 byte\n");
+    printf(" PINGPONG_STRIDE     - Stride in bytes between flag slots for pingpong laps (default 1, must be positive unless the flag buffer is 1 byte, wraps within the flag buffer)\n");
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
     printf(" SHOW_ITERATIONS     - Show per-iteration timing info\n");
@@ -537,6 +540,8 @@ public:
           "Running %s subiterations", (numSubIterations == 0 ? "infinite" : std::to_string(numSubIterations)).c_str());
     Print("NUM_WARMUPS", numWarmups,
           "Running %d warmup iteration(s) per Test", numWarmups);
+    Print("PINGPONG_FLAG_BUFFER", pingpongFlagBuffer,
+          "Pingpong flag buffer of %d bytes", pingpongFlagBuffer);
     Print("PINGPONG_STRIDE", pingpongStride,
           "Pingpong flag stride %d bytes per lap", pingpongStride);
     Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
@@ -714,6 +719,7 @@ public:
     cfg.general.numIterations      = numIterations;
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
+    cfg.general.pingpongFlagBuffer = pingpongFlagBuffer;
     cfg.general.pingpongStride     = pingpongStride;
     cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
     cfg.general.useInteractive     = useInteractive;
