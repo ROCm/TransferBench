@@ -2952,9 +2952,9 @@ namespace {
   // Pingpong parameters (parallel to SubExecParam; one entry per Ping/Pong)
   struct PingpongParam
   {
-    volatile int64_t*          srcMem[2];         ///< Device pointers to int64_t values {0, 1} (even/odd laps)
-    volatile int64_t*          localFlagMem;      ///< Partner half's dst; poll here for signal arrival
-    volatile int64_t*          flagMem;           ///< Own dst; write here to signal partner
+    volatile uint8_t*          srcMem[2];         ///< Device pointers to uint8_t values {0, 1} (even/odd laps)
+    volatile uint8_t*          localFlagMem;      ///< Partner half's dst; poll here for signal arrival
+    volatile uint8_t*          flagMem;           ///< Own dst; write here to signal partner
     int                        numLaps;           ///< 0 = normal, >0 = ping, <0 = pong
     int                        flagStride;        ///< Stride in bytes between flag slots per lap
     int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
@@ -4376,7 +4376,7 @@ namespace {
     p.srcMem[0]      = nullptr;
     p.srcMem[1]      = nullptr;
     p.localFlagMem   = nullptr;
-    p.flagMem        = static_cast<volatile int64_t*>(static_cast<void*>(rss.dstMem[0]));
+    p.flagMem        = static_cast<volatile uint8_t*>(static_cast<void*>(rss.dstMem[0]));
     p.numLaps        = rss.numLaps;
     p.flagStride     = 0;
     p.flagAllocBytes = 0;
@@ -4384,9 +4384,9 @@ namespace {
     p.startCycle     = 0;
     p.stopCycle      = 0;
 
-    // Device-resident int64_t values {0, 1} at rss.srcMem[0] + byteOffset (even/odd lap signaling)
+    // Device-resident uint8_t values {0, 1} at rss.srcMem[0] + byteOffset (even/odd lap signaling)
     if (exeDevice.exeType == EXE_GPU_GFX && !rss.srcMem.empty()) {
-      volatile int64_t* base = static_cast<volatile int64_t*>(
+      volatile uint8_t* base = static_cast<volatile uint8_t*>(
         static_cast<void*>(rss.srcMem[0] + initOffset));
       p.srcMem[0] = base;
       p.srcMem[1] = base + 1;
@@ -4526,8 +4526,8 @@ namespace {
       for (int iSrc = 0; iSrc < srcs.size(); ++iSrc) {
         MemDevice const& srcMemDevice = srcs[iSrc];
         size_t srcAllocBytes = t.numBytes + cfg.data.byteOffset;
-        if (rss.numLaps != 0)
-          srcAllocBytes = std::max(srcAllocBytes, cfg.data.byteOffset + 2 * sizeof(int64_t));
+        if (rss.numLaps != 0)  // room for the two 1-byte flag values {0, 1}, rounded up to a float
+          srcAllocBytes = std::max(srcAllocBytes, cfg.data.byteOffset + sizeof(float));
 
         // Ensure executing GPU can access source memory
         // This only applies to memory being accessed by a local GPU executor
@@ -4566,13 +4566,13 @@ namespace {
         ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, &rss.srcActualBytes[iSrc],
                                  &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
 
-        // Pingpong: seed int64_t lap values {0, 1} into an existing src buffer
+        // Pingpong: seed uint8_t lap values {0, 1} into an existing src buffer
         if (rss.numLaps != 0 && rss.srcMem[iSrc] &&
             srcMemDevice.memRank == localRank && IsGpuMemType(srcMemDevice.memType)) {
           int const initOffset = cfg.data.byteOffset / sizeof(float);
-          int64_t const vals[2] = {0, 1};
+          uint8_t const vals[2] = {0, 1};
           ERR_CHECK(hipSetDevice(srcMemDevice.memIndex));
-          ERR_CHECK(hipMemcpy(rss.srcMem[iSrc] + initOffset, vals, 2 * sizeof(int64_t), hipMemcpyHostToDevice));
+          ERR_CHECK(hipMemcpy(rss.srcMem[iSrc] + initOffset, vals, sizeof(vals), hipMemcpyHostToDevice));
         }
       }
 
@@ -4853,7 +4853,7 @@ namespace {
       int allocBytes          = (int)std::min((size_t)1024, (size_t)8 * pingRss->numLaps);
       for (auto* rss : {pingRss, pongRss}) {
         TransferResources* partnerRss = (rss == pingRss ? pongRss : pingRss);
-        volatile int64_t* partnerFlag = static_cast<volatile int64_t*>(static_cast<void*>(
+        volatile uint8_t* partnerFlag = static_cast<volatile uint8_t*>(static_cast<void*>(
           partnerRss->dstMem[0]));
         PingpongParam& pp = rss->pingpongParamCpu;
         pp.localFlagMem   = partnerFlag;
@@ -5030,12 +5030,13 @@ namespace {
 
   // GPU-side spin wait: polls a flag until it equals the expected value.
   // Used by GPU-GFX executors (called inline from the transfer kernel).
-  __device__ void GpuWait(volatile int64_t* flag, int64_t val)
+  __device__ void GpuWait(volatile uint8_t* flag, uint8_t val)
   {
 #if defined(__NVCC__)
-    while (static_cast<int64_t>(atomicAdd(
-             reinterpret_cast<unsigned long long*>(const_cast<int64_t*>(flag)), 0ULL)) != val)
+    // CUDA has no 1-byte atomic, so poll through volatile and fence to order subsequent loads
+    while (*flag != val)
       ;
+    __threadfence_system();
 #else
     while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != val)
       ;
@@ -5044,10 +5045,10 @@ namespace {
 
   // Returns a pointer to the flag slot for the given lap, using strided wrap-around.
   __host__ __device__
-  static volatile int64_t* FlagSlot(volatile int64_t* base, int lap, int stride, int allocBytes)
+  static volatile uint8_t* FlagSlot(volatile uint8_t* base, int lap, int stride, int allocBytes)
   {
     int offset = (lap * stride) % allocBytes;
-    return (volatile int64_t*)((volatile char*)base + offset);
+    return base + offset;
   }
 
 // CPU Executor-related functions
@@ -5811,24 +5812,25 @@ namespace {
     int64_t startCycle = GetTimestamp();
 
     for (int lap = 0; lap < laps; lap++) {
-      volatile int64_t* localFlag  = FlagSlot(p.localFlagMem, lap, p.flagStride, p.flagAllocBytes);
-      volatile int64_t* remoteFlag = FlagSlot(p.flagMem,      lap, p.flagStride, p.flagAllocBytes);
+      volatile uint8_t* localFlag  = FlagSlot(p.localFlagMem, lap, p.flagStride, p.flagAllocBytes);
+      volatile uint8_t* remoteFlag = FlagSlot(p.flagMem,      lap, p.flagStride, p.flagAllocBytes);
+      uint8_t const     val        = (uint8_t)(lap & 1);
       // TODO: replace with hip_atomic_store
       if (!p.srcMem[0]) {
         if (isPing) {
-          __atomic_store_n((int64_t*)remoteFlag, lap & 1, __ATOMIC_RELEASE);
-          GpuWait(localFlag, lap & 1);
+          __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
+          GpuWait(localFlag, val);
         } else {
-          GpuWait(localFlag, lap & 1);
-          __atomic_store_n((int64_t*)remoteFlag, lap & 1, __ATOMIC_RELEASE);
+          GpuWait(localFlag, val);
+          __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
         }
       } else{
         if (isPing) {
-          __atomic_store((int64_t*)remoteFlag, const_cast<int64_t*>(p.srcMem[lap & 1]), __ATOMIC_RELEASE);
-          GpuWait(localFlag, lap & 1);
+          __atomic_store((uint8_t*)remoteFlag, const_cast<uint8_t*>(p.srcMem[val]), __ATOMIC_RELEASE);
+          GpuWait(localFlag, val);
         } else {
-          GpuWait(localFlag, lap & 1);
-          __atomic_store((int64_t*)remoteFlag, const_cast<int64_t*>(p.srcMem[lap & 1]), __ATOMIC_RELEASE);
+          GpuWait(localFlag, val);
+          __atomic_store((uint8_t*)remoteFlag, const_cast<uint8_t*>(p.srcMem[val]), __ATOMIC_RELEASE);
         }
 
       }
