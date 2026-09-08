@@ -6658,15 +6658,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     if (iteration >= 0) {
       // Determine executor timing
-      // - Use HIP event timing if enabled and not using multi-stream
-      // - Otherwise, Use CPU timing
-      if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
+      // - HIP events cover only the combined copy launch on stream 0, so they miss a
+      //   later pingpong stream. If this GPU has pingpong (alone or mixed with copies),
+      //   use the CPU clock around this function, same as multi-stream.
+      // - Otherwise HIP events when enabled and not multi-stream.
+      if (cfg.general.useHipEvents && !cfg.general.useMultiStream && exeInfo.totalPingpong == 0) {
         float gpuDeltaMsec;
         if (exeInfo.totalSubExecs > 0) {
           ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
-        } else if (exeInfo.totalPingpong > 0) {
-          int const ppIdx = exeInfo.streams.size() - 1;
-          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[ppIdx], exeInfo.stopEvents[ppIdx]));
         } else {
           gpuDeltaMsec = 0.0f;
         }
