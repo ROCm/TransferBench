@@ -607,16 +607,13 @@ namespace TransferBench::Utils
 
     bool isMultiRank = TransferBench::GetNumRanks() > 1;
 
-    // The pong half owns no result row, so its executor shows up with no transfers beneath it
-    std::set<ExeDevice> pongExeDevices;
-    for (auto const& t : transfers)
-      if (t.numLaps > 0) pongExeDevices.insert(t.exeDevicePong);
-
     // Figure out table dimensions
     int numCols = 5, numRows = 1;
     size_t numTimedIterations = results.numTimedIterations;
     for (auto const& exeInfoPair : results.exeResults) {
       ExeResult const& exeResult = exeInfoPair.second;
+      // Pong-only executors own no result rows (ping reports the pingpong)
+      if (exeResult.transferIdx.empty()) continue;
       int displayCount = 0;
       for (int idx : exeResult.transferIdx)
         if (transfers[idx].numLaps >= 0) displayCount++;
@@ -654,6 +651,8 @@ namespace TransferBench::Utils
       ExeType   const  exeType   = exeDevice.exeType;
       int32_t   const  exeIndex  = exeDevice.exeIndex;
 
+      if (exeResult.transferIdx.empty()) continue;  // pong-only executor: ping owns the report
+
       // Executors running only pingpong halves move no payload, so bytes/bandwidth are meaningless
       bool const isPingpongExe = (exeResult.numBytes == 0);
 
@@ -666,8 +665,7 @@ namespace TransferBench::Utils
 
       std::string exeSummary;
       if (isPingpongExe) {
-        exeSummary = pongExeDevices.count(exeDevice) && exeResult.transferIdx.empty()
-                   ? " pingpong (pong half)" : " pingpong";
+        exeSummary = " pingpong";
         table.Set(rowIdx, 1, " ");
         table.Set(rowIdx, 3, " ");
       } else {
@@ -695,7 +693,7 @@ namespace TransferBench::Utils
           double latencyUs = r.avgDurationMsec * 1000.0;
           table.Set(rowIdx, 0, "PingPong %-4d ", idx);
           table.Set(rowIdx, 1, "%8.3f us "     , latencyUs);
-          table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
+          table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec * t.numLaps);
           table.Set(rowIdx, 3, "%8d laps "     , t.numLaps);
 
           if (isMultiRank) {
@@ -732,13 +730,13 @@ namespace TransferBench::Utils
               double iterUs = time.first * 1000.0;
               table.Set(rowIdx, 0, "Iter %03d    ", time.second);
               table.Set(rowIdx, 1, "%8.3f us ", iterUs);
-              table.Set(rowIdx, 2, "%8.3f ms ", time.first);
+              table.Set(rowIdx, 2, "%8.3f ms ", time.first * t.numLaps);
               rowIdx++;
             }
 
             table.Set(rowIdx, 0, "StandardDev ");
             table.Set(rowIdx, 1, "%8.3f us ", stdDevTime * 1000.0);
-            table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
+            table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime * t.numLaps);
             rowIdx++;
             table.DrawRowBorder(rowIdx);
           }
@@ -833,11 +831,12 @@ namespace TransferBench::Utils
             table.Set(rowIdx, 0, "p%d ", pct);
             if (t.numLaps > 0) {
               table.Set(rowIdx, 1, "%8.3f us ", dur * 1000.0);
+              table.Set(rowIdx, 2, "%8.3f ms ", dur * t.numLaps);
             } else {
               double bwGbs = dur > 0.0 ? (t.numBytes / 1.0E9) / dur * 1000.0 : 0.0;
               table.Set(rowIdx, 1, "%8.3f GB/s ", bwGbs);
+              table.Set(rowIdx, 2, "%8.3f ms ", dur);
             }
-            table.Set(rowIdx, 2, "%8.3f ms ", dur);
             table.Set(rowIdx, 3, " ");
             table.Set(rowIdx, 4, " ");
             table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
