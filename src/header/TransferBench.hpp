@@ -45,6 +45,7 @@ THE SOFTWARE.
 #include <netinet/tcp.h>
 #include <numa.h> // If not found, try installing libnuma-dev (e.g apt-get install libnuma-dev)
 #include <numaif.h>
+#include <numeric>
 #include <random>
 #include <regex>
 #include <set>
@@ -198,16 +199,39 @@ namespace TransferBench
 
   /**
    * A Transfer adds together data from zero or more sources then writes the sum to zero or more desintations
+   *
+   * Normal transfer (numLaps == 0):
+   *   srcs/dsts are variable-length lists as today.
+   *
+   * Pingpong transfer (numLaps > 0):
+   *   srcs and dsts are each exactly 2 entries:
+   *     [0] = ping half, [1] = pong half
+   *   dsts[0] and dsts[1] are required (non-NULL); srcs[0] and srcs[1] are optional (MEM_NULL if absent)
+   *   Ping/pong MemDevices are not restricted — any supported MemType is allowed per slot.
+   *   exeDevice / exeSubIndex / exeSubSlot             = ping executor (any ExeType)
+   *   exeDevicePong / exeSubIndexPong / exeSubSlotPong = pong executor (any ExeType)
+   *   numLaps = number of pingpong laps (must be > 0); specify as "+N" after ping half ("+" alone defaults to 1)
+   *
+   * Ping/pong executors may differ in type (e.g. ping on GFX, pong on DMA). The struct is
+   * executor-agnostic; additional executor types are enabled by implementing their dispatch
+   * paths. As of now, pingpong execution is implemented for EXE_GPU_GFX only.
+   *
+   * On a GFX executor, all ping/pong halves assigned to that executor are launched on one
+   * dedicated HIP stream, with one threadblock per half (transfer.numSubExecs is ignored).
    */
   struct Transfer
   {
     size_t            numBytes    = 0;          ///< Number of bytes to Transfer
-    vector<MemDevice> srcs        = {};         ///< List of source memory devices
-    vector<MemDevice> dsts        = {};         ///< List of destination memory devices
-    ExeDevice         exeDevice   = {};         ///< Executor to use
-    int32_t           exeSubIndex = -1;         ///< Executor subindex
-    int32_t           exeSubSlot  = 0;          ///< Executor subslot
+    vector<MemDevice> srcs        = {};         ///< Source memory (pingpong: [ping, pong])
+    vector<MemDevice> dsts        = {};         ///< Destination memory (pingpong: [ping, pong])
+    ExeDevice         exeDevice   = {};         ///< (Transfer or Ping) Executor to use
+    int32_t           exeSubIndex = -1;         ///< (Transfer or Ping) Executor subindex
+    int32_t           exeSubSlot  = 0;          ///< (Transfer or Ping) Executor subslot
     int               numSubExecs = 0;          ///< Number of subExecutors to use for this Transfer
+    int               numLaps     = 0;          ///< 0 = normal transfer; >0 = pingpong lap count
+    ExeDevice         exeDevicePong   = {};     ///< Pong executor (pingpong only)
+    int32_t           exeSubIndexPong = -1;     ///< Pong executor subindex (pingpong only)
+    int32_t           exeSubSlotPong  = 0;      ///< Pong executor subslot (pingpong only)
   };
 
   /**
@@ -222,6 +246,8 @@ namespace TransferBench
     int useHipEvents       = 1;                 ///< Use HIP events for timing Executors that support it
     int useInteractive     = 0;                 ///< Pause for user-input before starting transfer loop
     int useMultiStream     = 0;                 ///< Split GFX/TDM Transfers into separate kernel launches in separate stream
+    int pingpongStride     = 1;                 ///< Stride in bytes between flag slots for pingpong laps (positive, or 0 when pingpongFlagBuffer is 1)
+    int pingpongFlagBuffer = 1;                 ///< Size of the pingpong flag buffer in bytes (must be positive)
   };
 
   /**
@@ -2105,6 +2131,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (general.numIterations      != cfg.general.numIterations)      ADD_ERROR("cfg.general.numIterations");
       if (general.numSubIterations   != cfg.general.numSubIterations)   ADD_ERROR("cfg.general.numSubIterations");
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
+      if (general.pingpongStride     != cfg.general.pingpongStride)     ADD_ERROR("cfg.general.pingpongStride");
+      if (general.pingpongFlagBuffer != cfg.general.pingpongFlagBuffer) ADD_ERROR("cfg.general.pingpongFlagBuffer");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
       if (general.useHipEvents       != cfg.general.useHipEvents)       ADD_ERROR("cfg.general.useHipEvents");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
@@ -2216,7 +2244,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     #undef ADD_ERROR
   }
 
-  // Forward declaration
+  // Forward declarations
   int GetGpuKernelUnrollIdx(int unroll);
 
   // Validate configuration options - return trues if and only if an fatal error is detected
@@ -2226,6 +2254,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Check general options
     if (cfg.general.numWarmups < 0)
       errors.push_back({ERR_FATAL, "[general.numWarmups] must be a non-negative number"});
+    if (cfg.general.pingpongFlagBuffer < 1)
+      errors.push_back({ERR_FATAL, "[general.pingpongFlagBuffer] must be a positive number of bytes"});
+    // A 0 stride keeps every lap on the same flag slot, which only alternates safely when the
+    // buffer is a single byte and there is no other slot to rotate through
+    if (cfg.general.pingpongStride < 0 ||
+        (cfg.general.pingpongStride == 0 && cfg.general.pingpongFlagBuffer != 1))
+      errors.push_back({ERR_FATAL, "[general.pingpongStride] must be a positive number of bytes "
+                                   "(0 is only allowed when [general.pingpongFlagBuffer] is 1)"});
 
     // Check that config options are consistent (where necessary) across all ranks
     CheckMultiNodeConfigConsistency(cfg, errors);
@@ -2412,6 +2448,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       System::Get().Broadcast(root, sizeof(t.exeSubIndex), &t.exeSubIndex);
       System::Get().Broadcast(root, sizeof(t.exeSubSlot),  &t.exeSubSlot);
       System::Get().Broadcast(root, sizeof(t.numSubExecs), &t.numSubExecs);
+      System::Get().Broadcast(root, sizeof(t.numLaps), &t.numLaps);
+      System::Get().Broadcast(root, sizeof(t.exeDevicePong),   &t.exeDevicePong);
+      System::Get().Broadcast(root, sizeof(t.exeSubIndexPong), &t.exeSubIndexPong);
+      System::Get().Broadcast(root, sizeof(t.exeSubSlotPong),  &t.exeSubSlotPong);
 
       if (t.numBytes    != transfers[i].numBytes)    ADD_ERROR("numBytes");
       if (t.srcs        != transfers[i].srcs)        ADD_ERROR("Source memory locations");
@@ -2421,6 +2461,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (t.exeSubIndex != transfers[i].exeSubIndex) ADD_ERROR("Executor subindex");
       if (t.exeSubSlot  != transfers[i].exeSubSlot)  ADD_ERROR("Executor dst slot");
       if (t.numSubExecs != transfers[i].numSubExecs) ADD_ERROR("Num SubExecutors");
+      if (t.numLaps        != transfers[i].numLaps)        ADD_ERROR("numLaps");
+      if (t.exeDevicePong < transfers[i].exeDevicePong ||
+          transfers[i].exeDevicePong < t.exeDevicePong) ADD_ERROR("Pong executor device");
+      if (t.exeSubIndexPong != transfers[i].exeSubIndexPong) ADD_ERROR("Pong executor subindex");
+      if (t.exeSubSlotPong  != transfers[i].exeSubSlotPong)  ADD_ERROR("Pong executor subslot");
     }
 
     if (isInconsistent && !System::Get().IsVerbose()) {
@@ -2433,6 +2478,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   // Returns true if the given Transfer requires pod communication
   static bool IsPodTransfer(Transfer const& t)
   {
+    if (t.numLaps > 0) {
+      for (int half = 0; half < 2; half++) {
+        ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+        if (t.srcs[half].memType != MEM_NULL && t.srcs[half].memRank != exe.exeRank) return true;
+        if (t.dsts[half].memType != MEM_NULL && t.dsts[half].memRank != exe.exeRank) return true;
+      }
+      return false;
+    }
+
     if (IsCpuExeType(t.exeDevice.exeType) || IsGpuExeType(t.exeDevice.exeType)) {
       for (auto const& src : t.srcs)
         if (src.memRank != t.exeDevice.exeRank) return true;
@@ -2451,6 +2505,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     std::map<ExeDevice, int> transferCount;
     std::map<ExeDevice, int> useSubIndexCount;
     std::map<ExeDevice, int> totalSubExecs;
+    std::map<ExeDevice, int> totalPingpong;
 
     // Check that the set of requested transfers is consistent across all ranks
     CheckMultiNodeTransferConsistency(transfers, errors);
@@ -2486,8 +2541,29 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                             i, maxSubExecToUse, t.numSubExecs, cfg.data.blockBytes});
       }
 
+      bool const isPingpong = t.numLaps > 0;
+      if (t.numLaps < 0) {
+        errors.push_back({ERR_FATAL,
+          "Transfer %zu: numLaps must be > 0 for pingpong transfers (negative values belong on resources)", i});
+        hasFatalError = true;
+        break;
+      }
+
       // Check sources and destinations
-      if (t.srcs.empty() && t.dsts.empty()) {
+      if (isPingpong) {
+        if (t.srcs.size() != 2 || t.dsts.size() != 2) {
+          errors.push_back({ERR_FATAL,
+            "Transfer %zu: Pingpong transfer requires srcs and dsts each have exactly 2 entries ([ping, pong])", i});
+          hasFatalError = true;
+          break;
+        }
+        if (t.dsts[0].memType == MEM_NULL || t.dsts[1].memType == MEM_NULL) {
+          errors.push_back({ERR_FATAL,
+            "Transfer %zu: Pingpong transfer requires a non-NULL dst for both ping and pong halves", i});
+          hasFatalError = true;
+          break;
+        }
+      } else if (t.srcs.empty() && t.dsts.empty()) {
         errors.push_back({ERR_FATAL, "Transfer %d: Must have at least one source or destination", i});
         break;
       }
@@ -2512,6 +2588,56 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
       if (hasFatalError) break;
 
+      if (isPingpong) {
+        if (t.exeDevice.exeType != EXE_GPU_GFX || t.exeDevicePong.exeType != EXE_GPU_GFX) {
+          errors.push_back({ERR_FATAL,
+            "Transfer %zu: Pingpong is currently supported on GFX executors only (ping type %c, pong type %c)",
+            i, ExeTypeStr[t.exeDevice.exeType], ExeTypeStr[t.exeDevicePong.exeType]});
+          hasFatalError = true;
+          break;
+        }
+
+        auto validateGfxExecutor = [&](ExeDevice const& exe, int32_t subIndex, char const* role) {
+          if (exe.exeRank < 0 || exe.exeRank >= GetNumRanks()) {
+            errors.push_back({ERR_FATAL,
+              "Transfer %zu: %s executor rank must be between 0 and %d (instead of %d)",
+              i, role, GetNumRanks() - 1, exe.exeRank});
+            return true;
+          }
+          executors.insert(exe);
+          transferCount[exe]++;
+          int numExecutors = GetNumExecutors(EXE_GPU_GFX, exe.exeRank);
+          if (exe.exeIndex < 0 || exe.exeIndex >= numExecutors) {
+            errors.push_back({ERR_FATAL,
+              "Transfer %zu: %s GFX index must be between 0 and %d (instead of %d) for rank %d",
+              i, role, numExecutors - 1, exe.exeIndex, exe.exeRank});
+            return true;
+          }
+          if (subIndex != -1) {
+#if defined(__NVCC__)
+            errors.push_back({ERR_FATAL,
+              "Transfer %zu: %s GFX executor subindex not supported on NVIDIA hardware", i, role});
+            return true;
+#else
+            useSubIndexCount[exe]++;
+            int numSubIndices = GetNumExecutorSubIndices(exe);
+            if (subIndex >= numSubIndices) {
+              errors.push_back({ERR_FATAL,
+                "Transfer %zu: %s GFX subIndex (XCC) must be between 0 and %d for rank %d",
+                i, role, numSubIndices - 1, exe.exeRank});
+              return true;
+            }
+#endif
+          }
+          return false;
+        };
+
+        if (validateGfxExecutor(t.exeDevice, t.exeSubIndex, "Ping") ||
+            validateGfxExecutor(t.exeDevicePong, t.exeSubIndexPong, "Pong")) {
+          hasFatalError = true;
+          break;
+        }
+      } else {
       // Check executor rank
       if (t.exeDevice.exeRank < 0 || t.exeDevice.exeRank >= GetNumRanks()) {
         errors.push_back({ERR_FATAL,
@@ -2842,6 +2968,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       break;
       }
 
+      } // !isPingpong
+
       // Skip further tests if fatal error detected
       if (hasFatalError) break;
 
@@ -2854,17 +2982,30 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         break;
 #endif
         // In order to support pod communication, the participanting ranks need to be members of the same pod
-        int exeRank = t.exeDevice.exeRank;
         bool samePod = true;
 
-        for (auto const& src : t.srcs) {
-          if (!(samePod = IsSamePod(src.memRank, exeRank)))
-            break;
-        }
-        if (samePod) {
-          for (auto const& dst : t.dsts) {
-            if (!(samePod = IsSamePod(dst.memRank, exeRank)))
+        if (isPingpong) {
+          for (int half = 0; half < 2 && samePod; half++) {
+            ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+            int const exeRank = exe.exeRank;
+            if (t.srcs[half].memType != MEM_NULL &&
+                !(samePod = IsSamePod(t.srcs[half].memRank, exeRank)))
               break;
+            if (t.dsts[half].memType != MEM_NULL &&
+                !(samePod = IsSamePod(t.dsts[half].memRank, exeRank)))
+              break;
+          }
+        } else {
+          int exeRank = t.exeDevice.exeRank;
+          for (auto const& src : t.srcs) {
+            if (!(samePod = IsSamePod(src.memRank, exeRank)))
+              break;
+          }
+          if (samePod) {
+            for (auto const& dst : t.dsts) {
+              if (!(samePod = IsSamePod(dst.memRank, exeRank)))
+                break;
+            }
           }
         }
 
@@ -2877,7 +3018,35 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Pod (cross-rank) transfers with a GPU executor are exchanged via CUDA/HIP fabric handles,
         // which, for current version, only support device backed allocations.
         // Reject host memory allocations up front.
-        if (IsGpuExeType(t.exeDevice.exeType)) {
+        if (isPingpong) {
+          for (int half = 0; half < 2 && !hasFatalError; half++) {
+            ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+            if (!IsGpuExeType(exe.exeType)) continue;
+            if (t.srcs[half].memType != MEM_NULL &&
+                t.srcs[half].memRank != exe.exeRank && IsCpuMemType(t.srcs[half].memType)) {
+              errors.push_back({ERR_FATAL,
+                  "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                  "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                  "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
+                  i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
+                  "SRC", t.srcs[half].memRank, GetMemTypeName(t.srcs[half].memType), exe.exeRank});
+              hasFatalError = true;
+              break;
+            }
+            if (t.dsts[half].memType != MEM_NULL &&
+                t.dsts[half].memRank != exe.exeRank && IsCpuMemType(t.dsts[half].memType)) {
+              errors.push_back({ERR_FATAL,
+                  "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                  "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                  "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
+                  i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
+                  "DST", t.dsts[half].memRank, GetMemTypeName(t.dsts[half].memType), exe.exeRank});
+              hasFatalError = true;
+              break;
+            }
+          }
+          if (hasFatalError) break;
+        } else if (IsGpuExeType(t.exeDevice.exeType)) {
           bool hasRemoteCpuMem = false;
           MemDevice offender = {};
           char const* role = nullptr;
@@ -2909,8 +3078,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Check subexecutors
       if (t.numSubExecs <= 0)
         errors.push_back({ERR_FATAL, "Transfer %d: # of subexecutors must be positive", i});
-      else
+      else if (isPingpong) {
+        if (t.numSubExecs != 1)
+          errors.push_back({ERR_WARN,
+                            "Transfer %d: pingpong uses one threadblock per half; numSubExecs (%d) is ignored",
+                            i, t.numSubExecs});
+        totalPingpong[t.exeDevice]++;
+        totalPingpong[t.exeDevicePong]++;
+      } else {
         totalSubExecs[t.exeDevice] += t.numSubExecs;
+      }
 
     }
 
@@ -2941,11 +3118,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           int warpsPerBlock = cfg.gfx.blockSize / GetWarpSize(&errors);
           numGpuSubExec *= warpsPerBlock;
         }
-        if (totalSubExecs[exeDevice] > numGpuSubExec)
+        int totalTotalSubExecs = totalSubExecs[exeDevice] + totalPingpong[exeDevice];
+        if (totalTotalSubExecs > numGpuSubExec)
           errors.push_back({ERR_WARN,
                             "GPU %d requests %d total %s however only %d available. "
                             "Serialization will occur",
-                            exeDevice.exeIndex, totalSubExecs[exeDevice],
+                            exeDevice.exeIndex, totalTotalSubExecs,
                             cfg.gfx.seType == 0 ? "CUs" : "warps", numGpuSubExec});
         // Check that if executor subindices are used, all Transfers specify executor subindices
         if (useSubIndexCount[exeDevice] > 0 && useSubIndexCount[exeDevice] != transferCount[exeDevice]) {
@@ -2956,10 +3134,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           break;
         }
 
-        if (cfg.general.useMultiStream && transferCount[exeDevice] > gpuMaxHwQueues) {
-          errors.push_back({ERR_WARN,
-                            "GPU %d attempting %d parallel transfers, however GPU_MAX_HW_QUEUES only set to %d",
-                            exeDevice.exeIndex, transferCount[exeDevice], gpuMaxHwQueues});
+        // Parallel HIP stream count: one stream per normal transfer in multistream mode
+        // (or one shared stream for all normal transfers otherwise), plus one shared
+        // pingpong stream when this executor has any ping/pong halves.
+        {
+          int const normalTransferCount = transferCount[exeDevice] - totalPingpong[exeDevice];
+          int streamCount = cfg.general.useMultiStream ? normalTransferCount
+                                                  : (normalTransferCount > 0 ? 1 : 0);
+          if (totalPingpong[exeDevice] > 0)
+            streamCount++;
+          if (streamCount > gpuMaxHwQueues) {
+            errors.push_back({ERR_WARN,
+                              "GPU %d attempting %d parallel streams (%d normal transfer stream(s)"
+                              " + %d pingpong stream), however GPU_MAX_HW_QUEUES only set to %d",
+                              exeDevice.exeIndex, streamCount, normalTransferCount,
+                              totalPingpong[exeDevice] > 0 ? 1 : 0, gpuMaxHwQueues});
+          }
         }
         break;
       }
@@ -3047,6 +3237,23 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     uint32_t                   xccId;             ///< XCC ID
   };
 
+  // Pingpong parameters (parallel to SubExecParam; one entry per Ping/Pong)
+  struct PingpongParam
+  {
+    volatile uint8_t*          srcMem[2];         ///< Device pointers to uint8_t values {0, 1} (even/odd laps)
+    volatile uint8_t*          localFlagMem;      ///< Partner half's dst; poll here for signal arrival
+    volatile uint8_t*          flagMem;           ///< Own dst; write here to signal partner
+    int                        numLaps;           ///< 0 = normal, >0 = ping, <0 = pong
+    int                        flagStride;        ///< Stride in bytes between flag slots per lap
+    int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
+    int                        hopPeriod;         ///< Laps between extra stride hops (0 = never hop)
+    int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
+
+    // Outputs (ping half only)
+    int64_t                    startCycle;        ///< Start timestamp for in-kernel timing
+    int64_t                    stopCycle;         ///< Stop  timestamp for in-kernel timing
+  };
+
   // Internal resources allocated per Transfer
   typedef hipMemGenericAllocationHandle_t memHandle_t;
   struct TransferResources
@@ -3060,11 +3267,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     vector<memHandle_t>        srcMemHandle;      ///< Memory handles for source memory
     vector<memHandle_t>        dstMemHandle;      ///< Memory handles for destination memory
     vector<SubExecParam>       subExecParamCpu;   ///< Defines subarrays for each subexecutor
+    PingpongParam              pingpongParamCpu;  ///< Pingpong parameter
     vector<int>                subExecIdx;        ///< Indices into subExecParamGpu
+    int                        pingpongParamIdx = -1; ///< Index into exeInfo.pingpongParamCpu/Gpu
     int                        numaNode;          ///< NUMA node to use for this Transfer
 
     // For GFX executor
     SubExecParam*              subExecParamGpuPtr;
+    PingpongParam*             pingpongParamGpuPtr;
 
     // For on-device validation (VALIDATE_ON_DEVICE)
     vector<float*>             dstExpectedMem;      ///< Per-dst device copy of expected values
@@ -3114,6 +3324,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     vector<void*>              batchSrcs;         ///< Source pointers (per batch item)
     vector<size_t>             batchBytes;        ///< Bytes to copy (per batch item)
 #endif
+
+    // Pingpong role/lap count on this resource half (0 = normal, >0 = ping, <0 = pong)
+    int                        numLaps = 0;
 
     // Counters
     double                     totalDurationMsec; ///< Total duration for all iterations for this Transfer
@@ -3223,22 +3436,26 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   // Internal resources allocated per Executor
   struct ExeInfo
   {
-    size_t                     totalBytes;           ///< Total bytes this executor transfers
-    double                     totalDurationMsec;    ///< Total duration for all iterations for this Executor
-    int                        totalSubExecs;        ///< Total number of subExecutors to use
-    bool                       useSubIndices;        ///< Use subexecutor indicies
-    int                        numSubIndices;        ///< Number of subindices this ExeDevice has
-    vector<SubExecParam>       subExecParamCpu;      ///< Subexecutor parameters for this executor
-    vector<TransferResources>  resources;            ///< Per-Transfer resources
+    size_t                     totalBytes;        ///< Total bytes this executor transfers
+    double                     totalDurationMsec; ///< Total duration for all iterations for this Executor
+    int                        totalSubExecs;     ///< Total normal-transfer threadblocks across this executor
+    int                        totalPingpong;     ///< Total pingpong threadblocks (one per ping/pong resource half)
+    bool                       useSubIndices;     ///< Use subexecutor indicies
+    int                        numSubIndices;     ///< Number of subindices this ExeDevice has
+    vector<SubExecParam>       subExecParamCpu;   ///< Subexecutor parameters for this executor
+    vector<PingpongParam>      pingpongParamCpu;  ///< Pingpong parameters for this executor
+    vector<TransferResources>  resources;         ///< Per-transfer resources (normal and ping/pong halves)
 
     // For GPU-Executors
-    SubExecParam*              subExecParamGpu;      ///< GPU copy of subExecutor parameters
+    SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
+    PingpongParam*             pingpongParamGpu;  ///< GPU copy of pingpong parameters
     bool                       subExecParamHostAccessible; ///< Host can directly read subExecParamGpu
-    vector<hipStream_t>        streams;              ///< HIP streams to launch on
-    vector<hipEvent_t>         startEvents;          ///< HIP start timing event
-    vector<hipEvent_t>         stopEvents;           ///< HIP stop timing event
-    int                        wallClockRate;        ///< (GFX-only) Device wall clock rate
-    int                        gfxKernelToUse;       ///< (GFX-only) Which GFX kernel to use
+    bool                       pingpongParamHostAccessible; ///< Host can directly read pingpongParamGpu
+    vector<hipStream_t>        streams;           ///< HIP streams (normal transfers, then pingpong)
+    vector<hipEvent_t>         startEvents;       ///< HIP start timing event
+    vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
+    int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
+    int                        gfxKernelToUse;    ///< (GFX-only) Which GFX kernel to use
 
     // For TDM-Executors
     uint32_t                   ldsBytesActual;       ///< Actual number of LDS bytes to use as buffer
@@ -4458,6 +4675,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       int transferIdx = rss->transferIdx;
       Transfer const& t = transfers[transferIdx];
 
+      // Pingpong halves exchange handshake flags instead of data, so their destinations
+      // hold lap flags that no dstReference entry describes
+      if (t.numLaps != 0) continue;
+
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
@@ -4542,7 +4763,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (exeInfo.resources.empty()) return false;
       for (auto const& rss : exeInfo.resources) {
         Transfer const& t = transfers[rss.transferIdx];
-        if (t.srcs.size() > 1 || t.dsts.size() > 1) return false;
+        vector<MemDevice> srcs, dsts;
+        if (t.numLaps > 0) {
+          bool const isPong = (rss.numLaps < 0);
+          int const h = isPong ? 1 : 0;
+          if (t.srcs[h].memType != MEM_NULL) srcs.push_back(t.srcs[h]);
+          dsts.push_back(t.dsts[h]);
+        } else {
+          srcs = t.srcs;
+          dsts = t.dsts;
+        }
+        if (srcs.size() > 1 || dsts.size() > 1) return false;
         if (cfg.gfx.useSingleTeam && t.numSubExecs > 1) return false;
       }
       return true;
@@ -4571,6 +4802,28 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
 // Preparation-related functions
 //========================================================================================
+
+  // Resolve src/dst MemDevices and subIndex for a TransferResources entry (normal or ping/pong half).
+  static void ResolveTransferResourceMem(Transfer const& transfer,
+                                         TransferResources const& rss,
+                                         vector<MemDevice>& srcs,
+                                         vector<MemDevice>& dsts,
+                                         int32_t& subIndex)
+  {
+    srcs.clear();
+    dsts.clear();
+    if (transfer.numLaps > 0) {
+      bool const isPong  = (rss.numLaps < 0);
+      int const  halfIdx = isPong ? 1 : 0;
+      if (transfer.srcs[halfIdx].memType != MEM_NULL) srcs.push_back(transfer.srcs[halfIdx]);
+      dsts.push_back(transfer.dsts[halfIdx]);
+      subIndex = isPong ? transfer.exeSubIndexPong : transfer.exeSubIndex;
+    } else {
+      srcs = transfer.srcs;
+      dsts = transfer.dsts;
+      subIndex = transfer.exeSubIndex;
+    }
+  }
 
   // Prepares input parameters for each subexecutor
   // Determines how sub-executors will split up the work
@@ -4661,6 +4914,78 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Clear counters
     rss.totalDurationMsec = 0.0;
 
+    return ERR_NONE;
+  }
+
+  // Returns how many distinct flag slots the lap offsets cycle through, which is also the lap
+  // distance between successive reuses of any one slot, since
+  //   offset(lap) = (lap * stride) % allocBytes
+  // repeats with period allocBytes / gcd(stride, allocBytes).
+  static int PingpongFlagBufferPeriod(int stride, int allocBytes)
+  {
+    if (allocBytes <= 0) return 1;
+    return allocBytes / (int)std::gcd(std::max(0, stride), allocBytes);
+  }
+
+  // Prepares pingpong parameters for a ping or pong resource half.
+  // Assumes PrepareExecutor has already allocated rss.srcMem / rss.dstMem for this half.
+  // Flag cross-linking (localFlagMem) is deferred to PingpongPostPrep.
+  static ErrResult PreparePingpongParam(ConfigOptions const& cfg,
+                                        Transfer      const& transfer,
+                                        TransferResources&   rss)
+  {
+    int const initOffset = cfg.data.byteOffset / sizeof(float);
+    bool const isPong    = (rss.numLaps < 0);
+    int const halfIdx    = isPong ? 1 : 0;
+
+    ExeDevice const& exeDevice      = isPong ? transfer.exeDevicePong : transfer.exeDevice;
+    int32_t const    subIndex       = isPong ? transfer.exeSubIndexPong : transfer.exeSubIndex;
+    MemDevice const& dstMemDevice   = transfer.dsts[halfIdx];
+
+    PingpongParam& p = rss.pingpongParamCpu;
+    p.srcMem[0]      = nullptr;
+    p.srcMem[1]      = nullptr;
+    p.localFlagMem   = nullptr;
+    p.flagMem        = static_cast<volatile uint8_t*>(static_cast<void*>(rss.dstMem[0]));
+    p.numLaps        = rss.numLaps;
+    p.flagStride     = cfg.general.pingpongStride;
+    p.flagAllocBytes = cfg.general.pingpongFlagBuffer;
+    int flagPeriod   = PingpongFlagBufferPeriod(p.flagStride, p.flagAllocBytes);
+    p.hopPeriod      = (flagPeriod % 2 == 0) ? flagPeriod : 0;
+    p.preferredXccId = subIndex;
+    p.startCycle     = 0;
+    p.stopCycle      = 0;
+
+    // Device-resident uint8_t values {0, 1} at rss.srcMem[0] + byteOffset (even/odd lap signaling)
+    if (exeDevice.exeType == EXE_GPU_GFX && !rss.srcMem.empty()) {
+      volatile uint8_t* base = static_cast<volatile uint8_t*>(
+        static_cast<void*>(rss.srcMem[0] + initOffset));
+      p.srcMem[0] = base;
+      p.srcMem[1] = base + 1;
+    }
+
+    // Override if XCC table has been specified
+    vector<vector<int>> const& table = cfg.gfx.prefXccTable;
+    if (exeDevice.exeType == EXE_GPU_GFX && subIndex == -1 && !table.empty() &&
+        IsGpuMemType(dstMemDevice.memType)) {
+      if (table.size() <= exeDevice.exeIndex ||
+          table[exeDevice.exeIndex].size() <= dstMemDevice.memIndex) {
+        return {ERR_FATAL, "[gfx.xccPrefTable] is too small"};
+      }
+      p.preferredXccId = table[exeDevice.exeIndex][dstMemDevice.memIndex];
+      if (p.preferredXccId < 0 || p.preferredXccId >= GetNumExecutorSubIndices(exeDevice)) {
+        return {ERR_FATAL, "[gfx.xccPrefTable] defines out-of-bound XCC index %d", p.preferredXccId};
+      }
+    }
+
+    if (System::Get().IsVerbose()) {
+      System::Get().Log("[INFO]   Pingpong flags (%s): %d laps  stride %d B  buffer %d B  "
+                        "%d slot(s)  hop %s\n",
+                        isPong ? "pong" : "ping", abs(rss.numLaps), p.flagStride, p.flagAllocBytes,
+                        flagPeriod, p.hopPeriod ? "on" : "off");
+    }
+
+    rss.totalDurationMsec = 0.0;
     return ERR_NONE;
   }
 
@@ -4759,9 +5084,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       Transfer const& t = transfers[rss.transferIdx];
       rss.numBytes = t.numBytes;
 
+      vector<MemDevice> srcs, dsts;
+      int32_t subIndex;
+      ResolveTransferResourceMem(t, rss, srcs, dsts, subIndex);
+
       if (verbose) {
         System::Get().Log("[INFO] Rank %d preparing transfer %d (%lu SRC %lu DST) %zu bytes\n",
-                          localRank, rss.transferIdx, t.srcs.size(), t.dsts.size(), t.numBytes);
+                          localRank, rss.transferIdx, srcs.size(), dsts.size(), t.numBytes);
         System::Get().Log("[INFO]   EXE: R%d%c%d NUMA %d%s%s\n",
                           exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
                           exeNuma,
@@ -4770,11 +5099,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
 
       // Allocate source memory
-      rss.srcMem.resize(t.srcs.size());
-      rss.srcActualBytes.resize(t.srcs.size());
-      rss.srcMemHandle.resize(t.srcs.size(), NULL);
-      for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        MemDevice const& srcMemDevice = t.srcs[iSrc];
+      rss.srcMem.resize(srcs.size());
+      rss.srcActualBytes.resize(srcs.size());
+      rss.srcMemHandle.resize(srcs.size(), NULL);
+      for (int iSrc = 0; iSrc < srcs.size(); ++iSrc) {
+        MemDevice const& srcMemDevice = srcs[iSrc];
+        size_t srcAllocBytes = t.numBytes + cfg.data.byteOffset;
+        if (rss.numLaps != 0)  // room for the two 1-byte flag values {0, 1}, rounded up to a float
+          srcAllocBytes = std::max(srcAllocBytes, cfg.data.byteOffset + sizeof(float));
 
         // Ensure executing GPU can access source memory
         // This only applies to memory being accessed by a local GPU executor
@@ -4799,10 +5131,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                               iSrc, GetMemTypeName(srcMemDevice.memType), srcMemDevice.memIndex,
                               GetMemDeviceNuma(srcMemDevice).c_str(),
                               bdf.empty() ? "" : " BDF ", bdf.c_str(),
-                              srcMemDevice.memRank, t.numBytes + cfg.data.byteOffset,
+                              srcMemDevice.memRank, srcAllocBytes,
                               requiresFabricHandle ? " [fabric-exportable]" : "");
           }
-          ERR_CHECK(AllocateMemory(srcMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.srcMem[iSrc],
+          ERR_CHECK(AllocateMemory(srcMemDevice, srcAllocBytes, (void**)&rss.srcMem[iSrc],
                                    &rss.srcActualBytes[iSrc], requiresFabricHandle ? &rss.srcMemHandle[iSrc] : nullptr));
           if (verbose) {
             System::Get().Log("[INFO]   SRC[%d]: allocated at %p\n", iSrc, rss.srcMem[iSrc]);
@@ -4812,14 +5144,27 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Exchange memory pointer across ranks
         ERR_CHECK(ExchangeMemory(srcMemDevice, exeDevice, &rss.srcActualBytes[iSrc],
                                  &rss.srcMem[iSrc], &rss.srcMemHandle[iSrc]));
+
+        // Pingpong: seed uint8_t lap values {0, 1} into an existing src buffer
+        // (NULL src skips this and the kernel stores the lap bit directly)
+        if (rss.numLaps != 0 && rss.srcMem[iSrc] && srcMemDevice.memRank == localRank) {
+          int const initOffset = cfg.data.byteOffset / sizeof(float);
+          uint8_t const vals[2] = {0, 1};
+          if (IsGpuMemType(srcMemDevice.memType)) {
+            ERR_CHECK(hipSetDevice(srcMemDevice.memIndex));
+            ERR_CHECK(hipMemcpy(rss.srcMem[iSrc] + initOffset, vals, sizeof(vals), hipMemcpyHostToDevice));
+          } else if (IsCpuMemType(srcMemDevice.memType)) {
+            memcpy(static_cast<void*>(rss.srcMem[iSrc] + initOffset), vals, sizeof(vals));
+          }
+        }
       }
 
       // Allocate destination memory
-      rss.dstMem.resize(t.dsts.size());
-      rss.dstActualBytes.resize(t.dsts.size());
-      rss.dstMemHandle.resize(t.dsts.size(), NULL);
-      for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        MemDevice const& dstMemDevice = t.dsts[iDst];
+      rss.dstMem.resize(dsts.size());
+      rss.dstActualBytes.resize(dsts.size());
+      rss.dstMemHandle.resize(dsts.size(), NULL);
+      for (int iDst = 0; iDst < dsts.size(); ++iDst) {
+        MemDevice const& dstMemDevice = dsts[iDst];
 
         // Ensure executing GPU can access destination memory
         if (IsGpuExeType(exeDevice.exeType)    &&
@@ -4835,6 +5180,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
 
         // Allocate destination memory (on the correct rank)
+        // For pingpong transfers, allocate a larger buffer to hold multiple flag slots for UALoE station rotation
+        size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
+        if (rss.numLaps != 0)
+          dstAllocBytes = std::max(dstAllocBytes, (size_t)cfg.general.pingpongFlagBuffer);
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (dstMemDevice.memRank == localRank) {
           if (verbose) {
@@ -4846,7 +5195,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                               dstMemDevice.memRank, t.numBytes + cfg.data.byteOffset,
                               requiresFabricHandle ? " [fabric-exportable]" : "");
           }
-          ERR_CHECK(AllocateMemory(dstMemDevice, t.numBytes + cfg.data.byteOffset, (void**)&rss.dstMem[iDst],
+          ERR_CHECK(AllocateMemory(dstMemDevice, dstAllocBytes, (void**)&rss.dstMem[iDst],
                                    &rss.dstActualBytes[iDst], requiresFabricHandle ? &rss.dstMemHandle[iDst] : NULL));
           if (verbose) {
             System::Get().Log("[INFO]   DST[%d]: allocated at %p\n", iDst, rss.dstMem[iDst]);
@@ -4859,7 +5208,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
 
       // Prepare HSA DMA copy specific resources
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
+      if (exeDevice.exeType == EXE_GPU_DMA && (subIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
         // Collect HSA agent information
         hsa_amd_pointer_info_t info;
@@ -4871,30 +5220,40 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           rss.dstAgent[dstIdx] = info.agentOwner;
         }
 
-        ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
-        rss.srcAgent = info.agentOwner;
+        if (!rss.srcMem.empty()) {
+          ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
+          rss.srcAgent = info.agentOwner;
+        }
 
         // Create HSA completion signal
         ERR_CHECK(hsa_signal_create(1, 0, NULL, &rss.signal));
 
-        if (t.exeSubIndex != -1)
-          rss.sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << t.exeSubIndex);
+        if (subIndex != -1)
+          rss.sdmaEngineId = (hsa_amd_sdma_engine_id_t)(1U << subIndex);
 #endif
       }
 
       // Prepare subexecutor parameters (on all ranks)
-      ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
+      if (rss.numLaps == 0) {
+        ERR_CHECK(PrepareSubExecParams(cfg, t, rss));
+      } else {
+        ERR_CHECK(PreparePingpongParam(cfg, t, rss));
+      }
     }
 
     // Prepare additional requirements for GPU-based executors
     if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
-      // Determine how many streams to use
-      int const numStreamsToUse = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
-                                   (cfg.general.useMultiStream && (exeDevice.exeType == EXE_GPU_GFX ||
-                                                                   exeDevice.exeType == EXE_GPU_TDM)))
-                                  ? exeInfo.resources.size() : 1;
+      // Determine how many streams to use.
+      // Pingpong halves do not get their own stream,
+      // only normal Transfers are counted here, followed by one shared pingpong stream
+      int const numTransfers = (int)exeInfo.resources.size() - exeInfo.totalPingpong;
+      bool const multistream = (exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA ||
+                                (cfg.general.useMultiStream && (exeDevice.exeType == EXE_GPU_GFX ||
+                                                                exeDevice.exeType == EXE_GPU_TDM)));
+      int numStreamsToUse = multistream ? numTransfers : (numTransfers > 0 ? 1 : 0);
+      if (exeInfo.totalPingpong) numStreamsToUse++;
       exeInfo.streams.resize(numStreamsToUse);
 
       // Create streams
@@ -4943,12 +5302,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #else
       MemType memType = MEM_MANAGED;  // NVIDIA hardware requires managed memory to access from host
 #endif
-      ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
-                               (void**)&exeInfo.subExecParamGpu));
-      ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
+      if (exeInfo.totalSubExecs > 0) {
+        ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalSubExecs * sizeof(SubExecParam),
+                                 (void**)&exeInfo.subExecParamGpu));
+        ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.subExecParamHostAccessible));
+      }
+      if (exeInfo.totalPingpong > 0) {
+        ERR_CHECK(AllocateMemory({memType, exeDevice.exeIndex}, exeInfo.totalPingpong * sizeof(PingpongParam),
+                                 (void**)&exeInfo.pingpongParamGpu));
+        ERR_CHECK(GetMemHostAccessibility({memType, exeDevice.exeIndex}, exeInfo.pingpongParamHostAccessible));
+      }
 
       // Create subexecutor parameter array for entire executor
       exeInfo.subExecParamCpu.clear();
+      exeInfo.pingpongParamCpu.clear();
       exeInfo.numSubIndices = GetNumExecutorSubIndices(exeDevice);
 #if defined(__NVCC__)
       exeInfo.wallClockRate = 1000000;
@@ -4957,9 +5324,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                       exeDevice.exeIndex));
 #endif
       int transferOffset = 0;
+      int pingpongOffset = 0;
       if (cfg.general.useMultiStream || cfg.gfx.blockOrder == 0) {
         // Threadblocks are ordered sequentially one transfer at a time
         for (auto& rss : exeInfo.resources) {
+          if (rss.numLaps != 0) continue;
           rss.subExecParamGpuPtr = exeInfo.subExecParamGpu + transferOffset;
           for (auto p : rss.subExecParamCpu) {
             rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
@@ -4971,6 +5340,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Interleave threadblocks of different Transfers
         for (int subExecIdx = 0; exeInfo.subExecParamCpu.size() < exeInfo.totalSubExecs; ++subExecIdx) {
           for (auto& rss : exeInfo.resources) {
+            if (rss.numLaps != 0) continue;
             Transfer const& t = transfers[rss.transferIdx];
             if (subExecIdx < t.numSubExecs) {
               rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
@@ -4983,6 +5353,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         std::vector<std::pair<int,int>> indices;
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           auto const& rss = exeInfo.resources[i];
+          if (rss.numLaps != 0) continue;
           Transfer const& t = transfers[rss.transferIdx];
           for (int j = 0; j < t.numSubExecs; j++)
             indices.push_back(std::make_pair(i,j));
@@ -5010,12 +5381,25 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                           exeInfo.subExecParamCpu.data(),
                           exeInfo.subExecParamGpu);
       }
-      ERR_CHECK(hipMemcpy(exeInfo.subExecParamGpu,
-                          exeInfo.subExecParamCpu.data(),
-                          exeInfo.totalSubExecs * sizeof(SubExecParam),
-                          hipMemcpyHostToDevice));
-      ERR_CHECK(hipDeviceSynchronize());
+      if (exeInfo.totalSubExecs > 0) {
+        ERR_CHECK(hipMemcpy(exeInfo.subExecParamGpu,
+                            exeInfo.subExecParamCpu.data(),
+                            exeInfo.totalSubExecs * sizeof(SubExecParam),
+                            hipMemcpyHostToDevice));
+        ERR_CHECK(hipDeviceSynchronize());
+      }
+
+      // Pingpong resources are always single stream
+      for (auto& rss : exeInfo.resources) {
+        if (rss.numLaps == 0) continue;
+        rss.pingpongParamIdx    = exeInfo.pingpongParamCpu.size();
+        rss.pingpongParamGpuPtr = exeInfo.pingpongParamGpu + pingpongOffset;
+        exeInfo.pingpongParamCpu.push_back(rss.pingpongParamCpu);
+        pingpongOffset++;
+      }
+      // PingpongParam upload deferred to PingpongPostPrep (after flag cross-linking)
     }
+    
 
     // Prepare for NIC-based executors
     if (IsNicExeType(exeDevice.exeType)) {
@@ -5069,6 +5453,82 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+  // Pingpong post-prep: cross-link flag slots, then propagate into PingpongParam.
+  static ErrResult PingpongPostPrep(ConfigOptions const& cfg,
+                                    int const localRank,
+                                    vector<Transfer> const& transfers,
+                                    vector<TransferResources*> const& transferResources,
+                                    std::map<ExeDevice, ExeInfo>& executorMap)
+  {
+    // Cross-link ping and pong flag memory to their partners
+    std::map<int, TransferResources*> pongByTransferIdx;
+    for (auto* rss : transferResources) {
+      if (rss->numLaps < 0) pongByTransferIdx[rss->transferIdx] = rss;
+    }
+    for (auto* pingRss : transferResources) {
+      if (pingRss->numLaps <= 0) continue;
+
+      auto it = pongByTransferIdx.find(pingRss->transferIdx);
+      if (it == pongByTransferIdx.end()) continue;
+      TransferResources* pongRss = it->second;
+
+      for (auto* rss : {pingRss, pongRss}) {
+        TransferResources* partnerRss = (rss == pingRss ? pongRss : pingRss);
+        volatile uint8_t* partnerFlag = static_cast<volatile uint8_t*>(static_cast<void*>(
+          partnerRss->dstMem[0]));
+        PingpongParam& pp = rss->pingpongParamCpu;
+        pp.localFlagMem   = partnerFlag;
+
+        // Each half polls the partner half's flag buffer, which PrepareExecutor did not
+        // cover since the partner's memory belongs to the other half's src/dst list
+        Transfer  const& t          = transfers[rss->transferIdx];
+        bool      const  isPong     = (rss->numLaps < 0);
+        MemDevice const& partnerMem = t.dsts[isPong ? 0 : 1];
+        ExeDevice exeDevice;
+        ERR_CHECK(GetActualExecutor(isPong ? t.exeDevicePong : t.exeDevice, exeDevice));
+        if (IsGpuExeType(exeDevice.exeType)  && IsGpuMemType(partnerMem.memType) &&
+            exeDevice.exeRank == localRank   && partnerMem.memRank == localRank  &&
+            partnerMem.memIndex != exeDevice.exeIndex) {
+          if (System::Get().IsVerbose()) {
+            System::Get().Log("[INFO]   Enabling pingpong peer access: GPU %d -> GPU %d\n",
+                              exeDevice.exeIndex, partnerMem.memIndex);
+          }
+          ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, partnerMem.memIndex));
+        }
+      }
+    }
+
+    // Upload updated PingpongParam to GPU (one bulk copy per executor)
+    bool const verbose = System::Get().IsVerbose();
+    for (auto& exeInfoPair : executorMap) {
+      ExeDevice const& exeDevice = exeInfoPair.first;
+      ExeInfo&         exeInfo   = exeInfoPair.second;
+      if (exeDevice.exeRank != localRank) continue;
+      if (!exeInfo.pingpongParamGpu || exeInfo.totalPingpong == 0) continue;
+
+      for (auto& rss : exeInfo.resources) {
+        if (rss.numLaps == 0 || rss.pingpongParamIdx < 0) continue;
+        exeInfo.pingpongParamCpu[rss.pingpongParamIdx] = rss.pingpongParamCpu;
+      }
+
+      ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+      ERR_CHECK(hipMemcpy(exeInfo.pingpongParamGpu,
+                          exeInfo.pingpongParamCpu.data(),
+                          exeInfo.totalPingpong * sizeof(PingpongParam),
+                          hipMemcpyHostToDevice));
+
+      if (verbose) {
+        System::Get().Log("[INFO] PingpongParam upload: GPU%d  %zu bytes (%zu params)  host=%p dev=%p\n",
+                          exeDevice.exeIndex,
+                          exeInfo.totalPingpong * sizeof(PingpongParam),
+                          exeInfo.totalPingpong,
+                          exeInfo.pingpongParamCpu.data(),
+                          exeInfo.pingpongParamGpu);
+      }
+    }
+    return ERR_NONE;
+  }
+
 // Teardown-related functions
 //========================================================================================
 
@@ -5087,26 +5547,31 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Loop over each transfer this executor is involved in
     for (auto& rss : exeInfo.resources) {
       Transfer const& t = transfers[rss.transferIdx];
+      vector<MemDevice> srcs, dsts;
+      int32_t subIndex;
+      ResolveTransferResourceMem(t, rss, srcs, dsts, subIndex);
 
       if (verbose) {
-        System::Get().Log("[INFO] Rank %d tearing down transfer %d\n", localRank, rss.transferIdx);
+        System::Get().Log("[INFO] Rank %d tearing down transfer %d%s\n",
+                          localRank, rss.transferIdx,
+                          rss.numLaps > 0 ? " (ping)" : rss.numLaps < 0 ? " (pong)" : "");
       }
 
       // Deallocate source memory
-      for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-        if (t.srcs[iSrc].memRank == localRank) {
+      for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
+        if (srcs[iSrc].memRank == localRank) {
           if (verbose) {
             System::Get().Log("[INFO]   Free SRC[%d]: %s idx=%d %p (%zu bytes)\n",
-                              iSrc, GetMemTypeName(t.srcs[iSrc].memType),
-                              t.srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
+                              iSrc, GetMemTypeName(srcs[iSrc].memType),
+                              srcs[iSrc].memIndex, rss.srcMem[iSrc], rss.srcActualBytes[iSrc]);
           }
-          ERR_CHECK(DeallocateMemory(t.srcs[iSrc].memType, rss.srcMem[iSrc],
+          ERR_CHECK(DeallocateMemory(srcs[iSrc].memType, rss.srcMem[iSrc],
                                      rss.srcActualBytes[iSrc],
                                      &rss.srcMemHandle[iSrc]));
         } else if (exeDevice.exeRank == localRank && rss.srcMemHandle[iSrc] != 0) {
           if (verbose) {
             System::Get().Log("[INFO]   Unmap remote SRC[%d]: %p (%zu bytes) from Rank %d\n",
-                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], t.srcs[iSrc].memRank);
+                              iSrc, rss.srcMem[iSrc], rss.srcActualBytes[iSrc], srcs[iSrc].memRank);
           }
 #ifdef POD_COMM_ENABLED
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.srcMem[iSrc], rss.srcActualBytes[iSrc]));
@@ -5117,20 +5582,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
 
       // Deallocate destination memory
-      for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-        if (t.dsts[iDst].memRank == localRank) {
+      for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
+        if (dsts[iDst].memRank == localRank) {
           if (verbose) {
             System::Get().Log("[INFO]   Free DST[%d]: %s idx=%d %p (%zu bytes)\n",
-                              iDst, GetMemTypeName(t.dsts[iDst].memType),
-                              t.dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
+                              iDst, GetMemTypeName(dsts[iDst].memType),
+                              dsts[iDst].memIndex, rss.dstMem[iDst], rss.dstActualBytes[iDst]);
           }
-          ERR_CHECK(DeallocateMemory(t.dsts[iDst].memType, rss.dstMem[iDst],
+          ERR_CHECK(DeallocateMemory(dsts[iDst].memType, rss.dstMem[iDst],
                                      rss.dstActualBytes[iDst],
                                      &rss.dstMemHandle[iDst]));
         } else if (exeDevice.exeRank == localRank && rss.dstMemHandle[iDst] != 0) {
           if (verbose) {
             System::Get().Log("[INFO]   Unmap remote DST[%d]: %p (%zu bytes) from Rank %d\n",
-                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], t.dsts[iDst].memRank);
+                              iDst, rss.dstMem[iDst], rss.dstActualBytes[iDst], dsts[iDst].memRank);
           }
 #ifdef POD_COMM_ENABLED
           ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.dstMem[iDst], rss.dstActualBytes[iDst]));
@@ -5156,7 +5621,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       // Destroy HSA signal for DMA executor
 #if !defined(__NVCC__)
-      if (exeDevice.exeType == EXE_GPU_DMA && (t.exeSubIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
+      if (exeDevice.exeType == EXE_GPU_DMA && (subIndex != -1 || cfg.dma.useHsaCopy) && exeDevice.exeRank == localRank) {
         ERR_CHECK(hsa_signal_destroy(rss.signal));
       }
 #endif
@@ -5184,10 +5649,32 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #else
       MemType memType = MEM_MANAGED;
 #endif
-      ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
+      if (exeInfo.totalSubExecs > 0)
+        ERR_CHECK(DeallocateMemory(memType, exeInfo.subExecParamGpu, exeInfo.totalSubExecs * sizeof(SubExecParam)));
+      if (exeInfo.pingpongParamGpu)
+        ERR_CHECK(DeallocateMemory(memType, exeInfo.pingpongParamGpu,
+                                   exeInfo.totalPingpong * sizeof(PingpongParam)));
     }
 
     return ERR_NONE;
+  }
+
+// PingPong Wait primitives
+//========================================================================================
+
+  // GPU-side spin wait: polls a flag until it equals the expected value.
+  // Used by GPU-GFX executors (called inline from the transfer kernel).
+  __device__ void GpuWait(volatile uint8_t* flag, uint8_t val)
+  {
+#if defined(__NVCC__)
+    // CUDA has no 1-byte atomic, so poll through volatile and fence to order subsequent loads
+    while (*flag != val)
+      ;
+    __threadfence_system();
+#else
+    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != val)
+      ;
+#endif
   }
 
 // CPU Executor-related functions
@@ -5915,6 +6402,81 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return (blocksize + 255) / 256 - 1;
   }
 
+  __global__ void GpuPingpongKernel(PingpongParam* params /*int seType*/)
+  {
+    int const pingpongIdx = blockIdx.y;
+    PingpongParam& p = params[pingpongIdx];
+
+#if !defined(__NVCC__)
+    int32_t const xccId = (int32_t)GetXccId();
+    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
+#endif
+
+    if (threadIdx.x != 0) return;
+
+    bool const isPing = p.numLaps > 0;
+    int  const laps   = isPing ? p.numLaps : -p.numLaps;
+
+    // Hoist all parameters into registers so that the lap loop only touches the flag slots
+    int const y  = p.flagAllocBytes;
+    int const sx = y > 0 ? p.flagStride % y : 0;
+    // hopPeriod 0 disables hopping; a period past the last lap keeps the loop body branch-identical
+    int const hp = p.hopPeriod > 0 ? p.hopPeriod : laps + 1;
+
+    volatile uint8_t* const localBase  = p.localFlagMem;
+    volatile uint8_t* const remoteBase = p.flagMem;
+    // Kept as scalars rather than an array so that the lap-parity select stays in registers
+    uint8_t*          const srcVal0    = const_cast<uint8_t*>(p.srcMem[0]);
+    uint8_t*          const srcVal1    = const_cast<uint8_t*>(p.srcMem[1]);
+    bool const useSrcMem = (srcVal0 != nullptr);
+
+    int     off    = 0;
+    int     hopCnt = hp;
+    uint8_t val    = 0;
+
+    int64_t startCycle = GetTimestamp();
+
+    for (int lap = 0; lap < laps; lap++) {
+      volatile uint8_t* localFlag  = localBase  + off;
+      volatile uint8_t* remoteFlag = remoteBase + off;
+      // TODO: replace with hip_atomic_store
+      if (!useSrcMem) {
+        if (isPing) {
+          __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
+          GpuWait(localFlag, val);
+        } else {
+          GpuWait(localFlag, val);
+          __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
+        }
+      } else{
+        uint8_t* const srcPtr = val ? srcVal1 : srcVal0;
+        if (isPing) {
+          __atomic_store((uint8_t*)remoteFlag, srcPtr, __ATOMIC_RELEASE);
+          GpuWait(localFlag, val);
+        } else {
+          GpuWait(localFlag, val);
+          __atomic_store((uint8_t*)remoteFlag, srcPtr, __ATOMIC_RELEASE);
+        }
+
+      }
+
+      // Advance one stride, plus an extra stride every hp laps so that a slot is never
+      // revisited an even number of laps later (which would leave a stale matching value)
+      off += sx; if (off >= y) off -= y;
+      if (--hopCnt == 0) {
+        hopCnt = hp;
+        off += sx; if (off >= y) off -= y;
+      }
+      val ^= 1;
+    }
+
+    if (isPing) {
+      __threadfence_system();
+      p.stopCycle  = GetTimestamp();
+      p.startCycle = startCycle;
+    }
+  }
+
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
   static ErrResult ExecuteGpuTransfer(int           const  iteration,
                                       int           const  exeTotalSubExecs,
@@ -5963,6 +6525,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                           params, cfg.gfx.seType, cfg.gfx.waveOrder, cfg.general.numSubIterations);
 #endif
 
+    ERR_CHECK(hipGetLastError());
     ERR_CHECK(hipStreamSynchronize(stream));
 
     // Record this timing if this Transfer is being run in multistream mode
@@ -6001,6 +6564,39 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+  // Launch all pingpong halves on the executor's shared pingpong stream (one threadblock per half).
+  static ErrResult ExecuteGpuPingpong(int           const  iteration,
+                                      int           const  numPingpong,
+                                      PingpongParam*       params,
+                                      hipStream_t   const  stream,
+                                      hipEvent_t    const  startEvent,
+                                      hipEvent_t    const  stopEvent,
+                                      int           const  xccDim,
+                                      ConfigOptions const& cfg)
+  {
+    (void)iteration;
+
+    dim3 const gridSize(xccDim, numPingpong, 1);
+    dim3 const blockSize(1);
+
+#if defined(__NVCC__)
+    if (cfg.general.useHipEvents && startEvent)
+      ERR_CHECK(hipEventRecord(startEvent, stream));
+    GpuPingpongKernel<<<gridSize, blockSize, 0, stream>>>(params);
+    if (cfg.general.useHipEvents && stopEvent)
+      ERR_CHECK(hipEventRecord(stopEvent, stream));
+#else
+    hipExtLaunchKernelGGL(GpuPingpongKernel, gridSize, blockSize, 0, stream,
+                          cfg.general.useHipEvents ? startEvent : NULL,
+                          cfg.general.useHipEvents ? stopEvent  : NULL, 0,
+                          params);
+#endif
+
+    ERR_CHECK(hipGetLastError());
+    ERR_CHECK(hipStreamSynchronize(stream));
+    return ERR_NONE;
+  }
+
   // Execute a single GPU executor
   static ErrResult RunGpuExecutor(int           const  iteration,
                                   ConfigOptions const& cfg,
@@ -6013,30 +6609,49 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
     if (cfg.general.useMultiStream) {
-      // Launch one task per Transfer in separate streams on the persistent worker pool
-      int const numStreams = (int)exeInfo.streams.size();
-      std::vector<ErrResult> tfrErr(numStreams);
-      exeInfo.pool->ParallelFor(numStreams, [&](int i) {
+      std::vector<int> normalIdx;
+      for (int r = 0; r < (int)exeInfo.resources.size(); r++)
+        if (exeInfo.resources[r].numLaps == 0)
+          normalIdx.push_back(r);
+
+      int const numNormal = (int)normalIdx.size();
+      std::vector<ErrResult> tfrErr(numNormal);
+      exeInfo.pool->ParallelFor(numNormal, [&](int i) {
         tfrErr[i] = ExecuteGpuTransfer(iteration,
-                                       exeInfo.totalSubExecs,
-                                       exeInfo.subExecParamGpu,
-                                       exeInfo.streams[i],
-                                       cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                       cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
-                                       xccDim,
-                                       cfg,
-                                       exeInfo.gfxKernelToUse,
-                                       exeInfo.subExecParamHostAccessible,
-                                       exeInfo.resources[i]);
+                                      exeInfo.totalSubExecs,
+                                      exeInfo.subExecParamGpu,
+                                      exeInfo.streams[i],
+                                      cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
+                                      cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                      xccDim,
+                                      cfg,
+                                      exeInfo.gfxKernelToUse,
+                                      exeInfo.subExecParamHostAccessible,
+                                      exeInfo.resources[normalIdx[i]]);
       });
       for (auto& e : tfrErr) ERR_CHECK(e);
-    } else {
-      // Launch all Transfers in one kernel launch (avoid extra thread creation)
-      ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
-                         cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                         cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                         xccDim, cfg, exeInfo.gfxKernelToUse,
-                         exeInfo.subExecParamHostAccessible, exeInfo.resources[0]);
+    } else if (exeInfo.totalSubExecs > 0) {
+      TransferResources* normalRss = nullptr;
+      for (auto& rss : exeInfo.resources) {
+        if (rss.numLaps == 0) { normalRss = &rss; break; }
+      }
+      ERR_CHECK(ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
+                                  cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
+                                  cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
+                                  xccDim, cfg, exeInfo.gfxKernelToUse,
+                                  exeInfo.subExecParamHostAccessible, *normalRss));
+    }
+
+    if (exeInfo.totalPingpong > 0) {
+      int const ppIdx = (int)exeInfo.streams.size() - 1;
+      ERR_CHECK(ExecuteGpuPingpong(iteration,
+                                  exeInfo.totalPingpong,
+                                  exeInfo.pingpongParamGpu,
+                                  exeInfo.streams[ppIdx],
+                                  cfg.general.useHipEvents ? exeInfo.startEvents[ppIdx] : NULL,
+                                  cfg.general.useHipEvents ? exeInfo.stopEvents[ppIdx] : NULL,
+                                  xccDim,
+                                  cfg));
     }
 
     auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
@@ -6047,7 +6662,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // - Otherwise, Use CPU timing
       if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
         float gpuDeltaMsec;
-        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        if (exeInfo.totalSubExecs > 0) {
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        } else if (exeInfo.totalPingpong > 0) {
+          int const ppIdx = exeInfo.streams.size() - 1;
+          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[ppIdx], exeInfo.stopEvents[ppIdx]));
+        } else {
+          gpuDeltaMsec = 0.0f;
+        }
         gpuDeltaMsec /= cfg.general.numSubIterations;
         exeInfo.totalDurationMsec += gpuDeltaMsec;
       } else {
@@ -6070,6 +6692,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
         for (int i = 0; i < exeInfo.resources.size(); i++) {
           TransferResources& rss = exeInfo.resources[i];
+          if (rss.numLaps != 0) continue;
           int64_t minStartCycle = std::numeric_limits<int64_t>::max();
           int64_t maxStopCycle  = std::numeric_limits<int64_t>::min();
           std::set<std::pair<int, int>> CUs;
@@ -6092,6 +6715,31 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             rss.perIterMsec.push_back(deltaMsec);
             rss.perIterCUs.push_back(CUs);
           }
+        }
+      }
+
+      // Pingpong timing is reported per lap, from the in-kernel timestamps that the
+      // ping half wrote into its PingpongParam (pingpong always uses its own stream)
+      if (exeInfo.totalPingpong > 0) {
+        std::vector<PingpongParam> pingpongParamHost;
+        PingpongParam const* pingpongParam = exeInfo.pingpongParamGpu;
+        if (!exeInfo.pingpongParamHostAccessible) {
+          pingpongParamHost.resize(exeInfo.totalPingpong);
+          ERR_CHECK(hipMemcpy(pingpongParamHost.data(), exeInfo.pingpongParamGpu,
+                              exeInfo.totalPingpong * sizeof(PingpongParam), hipMemcpyDefault));
+          pingpongParam = pingpongParamHost.data();
+        }
+
+        for (TransferResources& rss : exeInfo.resources) {
+          // Only the ping half timestamps the exchange, and it owns the reported row
+          if (rss.numLaps <= 0 || rss.pingpongParamIdx < 0) continue;
+
+          PingpongParam const& p = pingpongParam[rss.pingpongParamIdx];
+          double deltaMsec = (p.stopCycle - p.startCycle) / (double)(exeInfo.wallClockRate);
+          deltaMsec /= rss.numLaps;
+          rss.totalDurationMsec += deltaMsec;
+          if (cfg.general.recordPerIteration)
+            rss.perIterMsec.push_back(deltaMsec);
         }
       }
     }
@@ -6647,15 +7295,39 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       TransferResources resource = {};
       resource.transferIdx = i;
+      resource.numLaps = t.numLaps;
+
+      bool isPingpong = t.numLaps != 0;
 
       ExeInfo& exeInfo = executorMap[exeDevice];
-      exeInfo.totalBytes    += t.numBytes;
-      exeInfo.totalSubExecs += t.numSubExecs;
+      if (!isPingpong) {
+        // Pingpong exchanges 1-byte flags, not payload, so t.numBytes (a placeholder that
+        // only sizes the flag allocation) is left out of the reported byte totals
+        exeInfo.totalBytes += t.numBytes;
+        exeInfo.totalSubExecs += t.numSubExecs;
+      } else {
+        exeInfo.totalPingpong ++;
+      }
       exeInfo.useSubIndices |= (t.exeSubIndex != -1 || (t.exeDevice.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
       exeInfo.resources.push_back(resource);
       minNumSrcs  = std::min(minNumSrcs, (int)t.srcs.size());
       maxNumSrcs  = std::max(maxNumSrcs, (int)t.srcs.size());
       maxNumBytes = std::max(maxNumBytes, t.numBytes);
+
+      // proceed to check latter half of a Transfer (pong)
+      if (isPingpong) {
+        ExeDevice pongExe;
+        ERR_APPEND(GetActualExecutor(t.exeDevicePong, pongExe), errResults);
+
+        TransferResources pong = {};
+        pong.transferIdx = i;
+        pong.numLaps = -t.numLaps;
+
+        ExeInfo& pongInfo = executorMap[pongExe];
+        pongInfo.totalPingpong ++;
+        pongInfo.useSubIndices |= (t.exeSubIndexPong != -1 || (t.exeDevicePong.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
+        pongInfo.resources.push_back(pong);
+      }
     }
 
     // Empty transfer list leaves minNumSrcs at its sentinel (MAX_SRCS + 1);
@@ -6687,6 +7359,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
     }
 
+    // After all Executors are prepared and subExecParam is set up, we need to link ping and pong flag memory.
+    ERR_APPEND(PingpongPostPrep(cfg, localRank, transfers, transferResources, executorMap), errResults);
+
     // Prepare reference src/dst arrays - only once for largest size.
     // dstReference (expected results) is only needed when validation is enabled.
     bool const validateEnabled = (cfg.data.alwaysValidate >= 0);
@@ -6716,6 +7391,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       bool const verbose = System::Get().IsVerbose();
       for (auto resource : transferResources) {
         Transfer const& t = transfers[resource->transferIdx];
+        // Ping and Pong will start with src value of 0
+        if (t.numLaps != 0) continue;
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
             if (IsGpuMemType(t.srcs[srcIdx].memType)) {
@@ -6801,37 +7478,50 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         System::Get().Log("Memory prepared:\n");
 
         for (int i = 0; i < transfers.size(); i++) {
-          Transfer const& t     = transfers[i];
-          ExeDevice const& exe  = t.exeDevice;
+          Transfer const& t = transfers[i];
 
-          // Executor info
-          std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
-          int exeNuma = IsGpuExeType(exe.exeType)
-                        ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
-                        : IsNicExeType(exe.exeType)
-                          ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
-                          : exe.exeIndex;
-          System::Get().Log("Transfer %03d: EXE=R%d%c%d NUMA=%d%s%s  %zu bytes\n",
-                            i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex, exeNuma,
-                            exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
+          // A pingpong Transfer owns two resources (one per half), each holding only its own
+          // half's src/dst, so walk the resources and resolve the matching mem lists
+          for (auto rss : transferResources) {
+            if (rss->transferIdx != i) continue;
 
-          for (int iSrc = 0; iSrc < t.srcs.size(); ++iSrc) {
-            MemDevice const& md = t.srcs[iSrc];
-            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
-            System::Get().Log("  SRC[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
-                              iSrc, transferResources[i]->srcMem[iSrc],
-                              GetMemTypeName(md.memType), md.memIndex,
-                              GetMemDeviceNuma(md).c_str(), md.memRank,
-                              bdf.empty() ? "" : " BDF=", bdf.c_str());
-          }
-          for (int iDst = 0; iDst < t.dsts.size(); ++iDst) {
-            MemDevice const& md = t.dsts[iDst];
-            std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
-            System::Get().Log("  DST[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
-                              iDst, transferResources[i]->dstMem[iDst],
-                              GetMemTypeName(md.memType), md.memIndex,
-                              GetMemDeviceNuma(md).c_str(), md.memRank,
-                              bdf.empty() ? "" : " BDF=", bdf.c_str());
+            bool const isPong = (rss->numLaps < 0);
+            vector<MemDevice> srcs, dsts;
+            int32_t subIndex;
+            ResolveTransferResourceMem(t, *rss, srcs, dsts, subIndex);
+
+            ExeDevice const& exe = isPong ? t.exeDevicePong : t.exeDevice;
+            char const* halfStr  = rss->numLaps == 0 ? "" : isPong ? " (pong)" : " (ping)";
+
+            // Executor info
+            std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
+            int exeNuma = IsGpuExeType(exe.exeType)
+                          ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
+                          : IsNicExeType(exe.exeType)
+                            ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
+                            : exe.exeIndex;
+            System::Get().Log("Transfer %03d%s: EXE=R%d%c%d NUMA=%d%s%s  %zu bytes\n",
+                              i, halfStr, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
+                              exeNuma, exeBdf.empty() ? "" : " BDF=", exeBdf.c_str(), t.numBytes);
+
+            for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
+              MemDevice const& md = srcs[iSrc];
+              std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+              System::Get().Log("  SRC[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
+                                iSrc, rss->srcMem[iSrc],
+                                GetMemTypeName(md.memType), md.memIndex,
+                                GetMemDeviceNuma(md).c_str(), md.memRank,
+                                bdf.empty() ? "" : " BDF=", bdf.c_str());
+            }
+            for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
+              MemDevice const& md = dsts[iDst];
+              std::string bdf = IsGpuMemType(md.memType) ? GetGpuBdf(md.memIndex) : "";
+              System::Get().Log("  DST[%d]: %p  type=%-18s idx=%d NUMA=%s Rank=%d%s%s\n",
+                                iDst, rss->dstMem[iDst],
+                                GetMemTypeName(md.memType), md.memIndex,
+                                GetMemDeviceNuma(md).c_str(), md.memRank,
+                                bdf.empty() ? "" : " BDF=", bdf.c_str());
+            }
           }
         }
         System::Get().Log("Hit <Enter> to continue: ");
@@ -6868,6 +7558,35 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
       System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
       if (shouldStop) break;
+
+      // Reset pingpong flag memory to idle (-1) before each iteration
+      for (auto* rss : transferResources) {
+        if (rss->numLaps == 0) continue;
+
+        Transfer const& t = transfers[rss->transferIdx];
+        bool const isPong = (rss->numLaps < 0);
+        MemDevice const& dstMem = t.dsts[isPong ? 1 : 0];
+
+        // Flag buffers are physically allocated on the owning rank only
+        if (dstMem.memRank != localRank) continue;
+
+        void* dst = rss->dstMem[0];
+        if (!dst) {
+          // Defensive against future executors
+          // TODO: improve exit path to prevent hang
+          System::Get().Log("[ERROR] dstMem[0] is NULL for ping/pong transfer %d on rank %d\n",
+                            rss->transferIdx, localRank);
+          exit(1);
+        }
+
+        size_t allocBytes = (size_t)cfg.general.pingpongFlagBuffer;
+        if (IsCpuMemType(dstMem.memType)) {
+          memset(dst, -1, allocBytes);
+        } else if (IsGpuMemType(dstMem.memType)) {
+          ERR_APPEND(ErrResult(hipSetDevice(dstMem.memIndex)), errResults);
+          ERR_APPEND(ErrResult(hipMemset(dst, -1, allocBytes)), errResults);
+        }
+      }
 
       // Wait for all ranks before starting any timing
       System::Get().Barrier();
@@ -6951,6 +7670,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         for (auto rss : transferResources) {
           int transferIdx = rss->transferIdx;
           Transfer const& t = transfers[transferIdx];
+
+          // Pingpong halves carry lap flags rather than data (report once, from the ping half)
+          if (t.numLaps != 0) {
+            if (rss->numLaps > 0)
+              System::Get().Log("  Transfer %03d:  SKIP(pingpong)\n", transferIdx);
+            continue;
+          }
+
           float const* expected = dstReference[t.srcs.size()].data();
           bool transferOk = true;
           bool anyLocalDst = false;
@@ -7032,21 +7759,28 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Local executor collects results
         exeResult.numBytes             = exeInfo.totalBytes;
         exeResult.avgDurationMsec      = exeInfo.totalDurationMsec / numTimedIterations;
-        exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
+        exeResult.avgBandwidthGbPerSec = exeResult.numBytes ? (exeResult.numBytes / 1.0e6) / exeResult.avgDurationMsec
+                                                            : 0.0;
         exeResult.sumBandwidthGbPerSec = 0.0;
         exeResult.transferIdx.clear();
 
-        // Copy over transfer results
+        // Copy over transfer results (ping half owns pingpong latency)
         for (auto const& rss : exeInfo.resources) {
+          if (rss.numLaps < 0) continue;  // skip pong half — ping owns the result row
           int const transferIdx = rss.transferIdx;
           exeResult.transferIdx.push_back(transferIdx);
+
+          // A pingpong half moves a 1-byte flag per lap, so it reports latency only
+          bool   const isPingpong        = (rss.numLaps > 0);
+          size_t const reportedBytes     = isPingpong ? 0 : rss.numBytes;
 
           TransferResult& tfrResult      = results.tfrResults[transferIdx];
           tfrResult.exeDevice            = exeDevice;
           tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-          tfrResult.numBytes             = rss.numBytes;
+          tfrResult.numBytes             = reportedBytes;
           tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
-          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
+          tfrResult.avgBandwidthGbPerSec = reportedBytes ? (reportedBytes / 1.0e6) / tfrResult.avgDurationMsec
+                                                         : 0.0;
           if (cfg.general.recordPerIteration) {
             tfrResult.perIterMsec = rss.perIterMsec;
             tfrResult.perIterCUs  = rss.perIterCUs;
@@ -7065,7 +7799,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
                                                              exeResult.avgDurationMsec));
     }
-    results.avgTotalBandwidthGbPerSec = (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec;
+    results.avgTotalBandwidthGbPerSec = results.totalBytesTransferred
+                                        ? (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec
+                                        : 0.0;
 
     // Teardown executors
     for (auto& exeInfoPair : executorMap) {
@@ -7420,7 +8156,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   ErrResult ParseTransfers(std::string            line,
                            std::vector<Transfer>& transfers)
   {
-    // Replace any round brackets or '->' with spaces,
+    // Replace round brackets, '->', and ':' with spaces, but preserve '+'
     for (int i = 1; line[i]; i++)
       if (line[i] == '(' || line[i] == ')' || line[i] == '-'  || line[i] == ':' || line[i] == '>' ) line[i] = ' ';
 
@@ -7482,11 +8218,89 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
       ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
-      // Perform wildcard expansion
-      int numRanks = GetNumRanks();
-      for (int localRankIndex = 0; localRankIndex < numRanks; localRankIndex++) {
-        bool localRankModified = RecursiveWildcardTransferExpansion(wct, localRankIndex, numBytes, numSubExecs, transfers);
-        if (!localRankModified) break;
+      // Check for '+' to detect pingpong; optional lap count immediately follows '+'
+      //   e.g. "+500" or "+" (default numLaps)
+      std::string nextToken;
+      auto pos = iss.tellg();
+      int numLaps = 1;
+      bool isPingpong = false;
+      if (iss >> nextToken && !nextToken.empty() && nextToken[0] == '+') {
+        isPingpong = true;
+        if (nextToken.size() > 1) {
+          numLaps = atoi(nextToken.c_str() + 1);
+          if (numLaps < 1)
+            return {ERR_FATAL, "Parsing error: Pingpong %d lap count must be positive (got %d)", i+1, numLaps};
+        }
+      } else {
+        iss.clear();
+        iss.seekg(pos);
+      }
+
+      if (isPingpong) {
+        // Parse the pong triplet
+        std::string pongSrcStr, pongExeStr, pongDstStr;
+        iss >> pongSrcStr >> pongExeStr >> pongDstStr;
+        if (iss.fail())
+          return {ERR_FATAL,
+            "Parsing error: Incomplete pong triplet for Pingpong %d", i+1};
+
+        WildcardTransfer pongWct;
+        ERR_CHECK(ParseMemType(pongSrcStr, pongWct.mem[0]));
+        ERR_CHECK(ParseMemType(pongDstStr, pongWct.mem[1]));
+        ERR_CHECK(ParseExeType(pongExeStr, pongWct.exe));
+
+        // Temporary transfers to store ping and pong halves
+        // Expand ping half
+        std::vector<Transfer> pingTransfers;
+        int numRanks = GetNumRanks();
+        for (int r = 0; r < numRanks; r++) {
+          if (!RecursiveWildcardTransferExpansion(wct, r, numBytes, numSubExecs, pingTransfers))
+            break;
+        }
+
+        // Expand pong half
+        std::vector<Transfer> pongTransfers;
+        for (int r = 0; r < numRanks; r++) {
+          if (!RecursiveWildcardTransferExpansion(pongWct, r, numBytes, numSubExecs, pongTransfers))
+            break;
+        }
+
+        // Cartesian product: pair every ping with every pong into one Transfer
+        for (size_t p = 0; p < pingTransfers.size(); p++) {
+          for (size_t q = 0; q < pongTransfers.size(); q++) {
+            Transfer const& pingHalf = pingTransfers[p];
+            Transfer const& pongHalf = pongTransfers[q];
+
+            auto singleMemOrNull = [](vector<MemDevice> const& mems) {
+              if (mems.empty()) return MemDevice{MEM_NULL, 0, 0};
+              return mems[0];
+            };
+
+            Transfer t;
+            t.numLaps         = numLaps;
+            // Pingpong exchanges a 1-byte flag per lap; numBytes only has to be a non-zero
+            // multiple of 4 large enough for the two seed flag values, and is not reported as traffic
+            t.numBytes        = 8;
+            t.numSubExecs     = 1;
+            t.srcs            = {singleMemOrNull(pingHalf.srcs), singleMemOrNull(pongHalf.srcs)};
+            t.dsts            = {singleMemOrNull(pingHalf.dsts), singleMemOrNull(pongHalf.dsts)};
+            t.exeDevice       = pingHalf.exeDevice;
+            t.exeSubIndex     = pingHalf.exeSubIndex;
+            t.exeSubSlot      = pingHalf.exeSubSlot;
+            t.exeDevicePong   = pongHalf.exeDevice;
+            t.exeSubIndexPong = pongHalf.exeSubIndex;
+            t.exeSubSlotPong  = pongHalf.exeSubSlot;
+            transfers.push_back(t);
+          }
+        }
+
+      } else {
+        // Normal transfer -- expand into transfers (existing behavior)
+        int numRanks = GetNumRanks();
+        for (int localRankIndex = 0; localRankIndex < numRanks; localRankIndex++) {
+          bool localRankModified = RecursiveWildcardTransferExpansion(wct, localRankIndex, numBytes, numSubExecs, transfers);
+          if (!localRankModified) break;
+        }
       }
     }
 
@@ -7918,40 +8732,67 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   {
     if (!dumpCfgFile || !rankDoesOutput) return;
 
+    auto printMem = [&](MemDevice const& m) {
+      if (m.memType == MEM_NULL)
+        fprintf(dumpCfgFile, "N");
+      else
+        fprintf(dumpCfgFile, "R%d%c%d", m.memRank, MemTypeStr[m.memType], m.memIndex);
+    };
+
+    auto printExe = [&](ExeDevice const& exe, int32_t subIndex, int32_t subSlot) {
+      fprintf(dumpCfgFile, "R%d%c%d", exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex);
+      if (exe.exeSlot != 0)
+        fprintf(dumpCfgFile, "%c", 'A' + exe.exeSlot);
+      if (subIndex != -1)
+        fprintf(dumpCfgFile, ".%d", subIndex);
+      if (subSlot != 0)
+        fprintf(dumpCfgFile, "%c", 'A' + subSlot);
+    };
+
     fprintf(dumpCfgFile, "-%lu ", transfers.size());
     for (auto const& t : transfers) {
       fprintf(dumpCfgFile, "(");
 
-      // Print SRCs
-      for (auto const& src : t.srcs) {
-        fprintf(dumpCfgFile, "R%d%c%d", src.memRank, MemTypeStr[src.memType], src.memIndex);
+      if (t.numLaps > 0) {
+        printMem(t.srcs[0]);
+        fprintf(dumpCfgFile, "->");
+        printExe(t.exeDevice, t.exeSubIndex, t.exeSubSlot);
+        fprintf(dumpCfgFile, "->");
+        printMem(t.dsts[0]);
+        fprintf(dumpCfgFile, " +");
+        if (t.numLaps != 1)
+          fprintf(dumpCfgFile, "%d", t.numLaps);
+        fprintf(dumpCfgFile, " ");
+        printMem(t.srcs[1]);
+        fprintf(dumpCfgFile, "->");
+        printExe(t.exeDevicePong, t.exeSubIndexPong, t.exeSubSlotPong);
+        fprintf(dumpCfgFile, "->");
+        printMem(t.dsts[1]);
+        fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
+      } else {
+        // Print SRCs
+        for (auto const& src : t.srcs) {
+          fprintf(dumpCfgFile, "R%d%c%d", src.memRank, MemTypeStr[src.memType], src.memIndex);
+        }
+        if (t.srcs.empty())
+          fprintf(dumpCfgFile, "N");
+
+        fprintf(dumpCfgFile, "->");
+
+        // Print Executor
+        printExe(t.exeDevice, t.exeSubIndex, t.exeSubSlot);
+
+        fprintf(dumpCfgFile, "->");
+
+        // Print DSTs
+        for (auto const& dst : t.dsts) {
+          fprintf(dumpCfgFile, "R%d%c%d", dst.memRank, MemTypeStr[dst.memType], dst.memIndex);
+        }
+        if (t.dsts.empty())
+          fprintf(dumpCfgFile, "N");
+
+        fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
       }
-      if (t.srcs.empty())
-        fprintf(dumpCfgFile, "N");
-
-      fprintf(dumpCfgFile, "->");
-
-      // Print Executor
-      fprintf(dumpCfgFile, "R%d%c%d", t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex);
-      if (t.exeDevice.exeSlot != 0)
-        fprintf(dumpCfgFile, "%c", 'A' + t.exeDevice.exeSlot);
-      if (t.exeSubIndex != -1) {
-        fprintf(dumpCfgFile, ".%d", t.exeSubIndex);
-      }
-      if (t.exeSubSlot != 0) {
-        fprintf(dumpCfgFile, "%c", 'A' + t.exeSubSlot);
-      }
-
-      fprintf(dumpCfgFile, "->");
-
-      // Print DSTs
-      for (auto const& dst : t.dsts) {
-        fprintf(dumpCfgFile, "R%d%c%d", dst.memRank, MemTypeStr[dst.memType], dst.memIndex);
-      }
-      if (t.dsts.empty())
-        fprintf(dumpCfgFile, "N");
-
-      fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
       fflush(dumpCfgFile);
     }
     fprintf(dumpCfgFile, "\n");
@@ -9278,3 +10119,4 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #undef ERR_CHECK
 #undef ERR_APPEND
 }
+
