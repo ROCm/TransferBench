@@ -140,6 +140,12 @@ namespace TransferBench::Utils
   // Helper function that converts MemDevices to a string
   std::string MemDevicesToStr(std::vector<MemDevice> const& memDevices);
 
+  // Helper function that converts a single MemDevice to a string ("N" for MEM_NULL)
+  std::string MemDeviceToStr(MemDevice const& memDevice);
+
+  // Helper function that converts an ExeDevice (with subindex/subslot) to a string
+  std::string ExeDeviceToStr(ExeDevice const& exeDevice, int32_t subIndex = -1, int32_t subSlot = 0);
+
   // Helper function to determine if current rank does output
   bool RankDoesOutput();
 
@@ -471,6 +477,33 @@ namespace TransferBench::Utils
     return ss.str();
   }
 
+  std::string MemDeviceToStr(MemDevice const& memDevice)
+  {
+    if (memDevice.memType == TransferBench::MEM_NULL) return "N";
+    bool isMultiNode = TransferBench::GetNumRanks() > 1;
+    std::stringstream ss;
+    if (isMultiNode)
+      ss << "R" << memDevice.memRank;
+    ss << TransferBench::MemTypeStr[memDevice.memType] << memDevice.memIndex;
+    return ss.str();
+  }
+
+  std::string ExeDeviceToStr(ExeDevice const& exeDevice, int32_t subIndex, int32_t subSlot)
+  {
+    bool isMultiNode = TransferBench::GetNumRanks() > 1;
+    std::stringstream ss;
+    if (isMultiNode)
+      ss << "R" << exeDevice.exeRank;
+    ss << TransferBench::ExeTypeStr[exeDevice.exeType] << exeDevice.exeIndex;
+    if (exeDevice.exeSlot)
+      ss << char('A' + exeDevice.exeSlot);
+    if (subIndex != -1)
+      ss << "." << subIndex;
+    if (subSlot != 0)
+      ss << char('A' + subSlot);
+    return ss.str();
+  }
+
   template <typename T>
   struct is_std_vector : std::false_type {};
 
@@ -571,12 +604,20 @@ namespace TransferBench::Utils
 
     bool isMultiRank = TransferBench::GetNumRanks() > 1;
 
+    // The pong half owns no result row, so its executor shows up with no transfers beneath it
+    std::set<ExeDevice> pongExeDevices;
+    for (auto const& t : transfers)
+      if (t.numLaps > 0) pongExeDevices.insert(t.exeDevicePong);
+
     // Figure out table dimensions
     int numCols = 5, numRows = 1;
     size_t numTimedIterations = results.numTimedIterations;
     for (auto const& exeInfoPair : results.exeResults) {
       ExeResult const& exeResult = exeInfoPair.second;
-      numRows += 1 + exeResult.transferIdx.size();
+      int displayCount = 0;
+      for (int idx : exeResult.transferIdx)
+        if (transfers[idx].numLaps >= 0) displayCount++;
+      numRows += 1 + displayCount;
       if (!ev.showPercentiles.empty()) {
         numRows += static_cast<int>(ev.showPercentiles.size()) * static_cast<int>(exeResult.transferIdx.size());
       }
@@ -585,6 +626,7 @@ namespace TransferBench::Utils
       }
       if (ev.showIterations || !ev.showPercentiles.empty()) {
         for (int idx : exeResult.transferIdx) {
+          if (transfers[idx].numLaps > 0) continue; // pingpong iteration rows handled below
           TransferResult const& r = results.tfrResults[idx];
           if (r.perIterMsec.size() != numTimedIterations) {
             Print("[ERROR] Per iteration timing data unavailable: Expected %lu data points, but have %lu\n",
@@ -609,18 +651,33 @@ namespace TransferBench::Utils
       ExeType   const  exeType   = exeDevice.exeType;
       int32_t   const  exeIndex  = exeDevice.exeIndex;
 
+      // Executors running only pingpong halves move no payload, so bytes/bandwidth are meaningless
+      bool const isPingpongExe = (exeResult.numBytes == 0);
+
       // Display Executor results
       table.DrawRowBorder(rowIdx);
-      if (isMultiRank) {
+      if (isMultiRank)
         table.Set(rowIdx, 0, " Executor: Rank %d %3s %02d ", exeDevice.exeRank, ExeTypeToStr(exeType).c_str(), exeIndex);
-        table.Set(rowIdx, 4, " %7.3f GB/s (sum) [%s]", exeResult.sumBandwidthGbPerSec, GetHostname(exeDevice.exeRank).c_str());
-      } else {
+      else
         table.Set(rowIdx, 0, " Executor: %3s %02d ", ExeTypeToStr(exeType).c_str(), exeIndex);
-        table.Set(rowIdx, 4, " %7.3f GB/s (sum)", exeResult.sumBandwidthGbPerSec);
+
+      std::string exeSummary;
+      if (isPingpongExe) {
+        exeSummary = pongExeDevices.count(exeDevice) && exeResult.transferIdx.empty()
+                   ? " pingpong (pong half)" : " pingpong";
+        table.Set(rowIdx, 1, " ");
+        table.Set(rowIdx, 3, " ");
+      } else {
+        char buf[64];
+        snprintf(buf, sizeof(buf), " %7.3f GB/s (sum)", exeResult.sumBandwidthGbPerSec);
+        exeSummary = buf;
+        table.Set(rowIdx, 1, "%8.3f GB/s " , exeResult.avgBandwidthGbPerSec);
+        table.Set(rowIdx, 3, "%12lu bytes ", exeResult.numBytes);
       }
-      table.Set(rowIdx, 1, "%8.3f GB/s " , exeResult.avgBandwidthGbPerSec);
-      table.Set(rowIdx, 2, "%8.3f ms "   , exeResult.avgDurationMsec);
-      table.Set(rowIdx, 3, "%12lu bytes ", exeResult.numBytes);
+      if (isMultiRank) exeSummary += " [" + GetHostname(exeDevice.exeRank) + "]";
+
+      table.Set(rowIdx, 2, "%8.3f ms ", exeResult.avgDurationMsec);
+      table.Set(rowIdx, 4, "%s", exeSummary.c_str());
       table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
       rowIdx++;
       table.DrawRowBorder(rowIdx);
@@ -630,87 +687,138 @@ namespace TransferBench::Utils
         Transfer const& t = transfers[idx];
         TransferResult const& r = results.tfrResults[idx];
 
-        table.Set(rowIdx, 0, "Transfer %-4d ", idx);
-        table.Set(rowIdx, 1, "%8.3f GB/s "   , r.avgBandwidthGbPerSec);
-        table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
-        table.Set(rowIdx, 3, "%12lu bytes "  , r.numBytes);
+        if (t.numLaps > 0) {
+          // Pingpong row: show latency using ping's round-trip delta
+          double latencyUs = r.avgDurationMsec * 1000.0;
+          table.Set(rowIdx, 0, "PingPong %-4d ", idx);
+          table.Set(rowIdx, 1, "%8.3f us "     , latencyUs);
+          table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
+          table.Set(rowIdx, 3, "%8d laps "     , t.numLaps);
 
-        char exeSubIndexStr[32] = "";
-        if (t.exeSubIndex != -1)
-          sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
-
-        if (isMultiRank) {
-          table.Set(rowIdx, 4, " %s -> R%d%c%d%s:%d -> %s",
-                    MemDevicesToStr(t.srcs).c_str(),
-                    exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-                    exeSubIndexStr, t.numSubExecs,
-                    MemDevicesToStr(t.dsts).c_str());
-        } else {
-          table.Set(rowIdx, 4, " %s -> %c%d%s:%d -> %s",
-                    MemDevicesToStr(t.srcs).c_str(),
-                    ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
-                    exeSubIndexStr, t.numSubExecs,
-                    MemDevicesToStr(t.dsts).c_str());
-        }
-        table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
-        rowIdx++;
-
-        // Show per-iteration timing information
-        if (ev.showIterations) {
-
-          // Compute standard deviation and track iterations by speed
-          std::set<std::pair<double, int>> times;
-          double stdDevTime = 0;
-          double stdDevBw = 0;
-          for (int i = 0; i < numTimedIterations; i++) {
-            times.insert(std::make_pair(r.perIterMsec[i], i+1));
-            double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
-            stdDevTime += varTime * varTime;
-
-            double iterBandwidthGbs = (t.numBytes / 1.0E9) / r.perIterMsec[i] * 1000.0f;
-            double const varBw = fabs(iterBandwidthGbs - r.avgBandwidthGbPerSec);
-            stdDevBw += varBw * varBw;
+          if (isMultiRank) {
+            table.Set(rowIdx, 4, " %s->R%d%c%d->%s <+> %s->R%d%c%d->%s",
+                      MemDeviceToStr(t.srcs[0]).c_str(),
+                      t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      MemDeviceToStr(t.dsts[0]).c_str(),
+                      MemDeviceToStr(t.srcs[1]).c_str(),
+                      t.exeDevicePong.exeRank, ExeTypeStr[t.exeDevicePong.exeType], t.exeDevicePong.exeIndex,
+                      MemDeviceToStr(t.dsts[1]).c_str());
+          } else {
+            table.Set(rowIdx, 4, " %s->%c%d->%s <+> %s->%c%d->%s",
+                      MemDeviceToStr(t.srcs[0]).c_str(),
+                      ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      MemDeviceToStr(t.dsts[0]).c_str(),
+                      MemDeviceToStr(t.srcs[1]).c_str(),
+                      ExeTypeStr[t.exeDevicePong.exeType], t.exeDevicePong.exeIndex,
+                      MemDeviceToStr(t.dsts[1]).c_str());
           }
-          stdDevTime = sqrt(stdDevTime / numTimedIterations);
-          stdDevBw = sqrt(stdDevBw / numTimedIterations);
+          table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
+          rowIdx++;
 
-          // Loop over iterations (fastest to slowest)
-          for (auto& time : times) {
-            double iterDurationMsec = time.first;
-            double iterBandwidthGbs = (t.numBytes / 1.0E9) / iterDurationMsec * 1000.0f;
+          if (ev.showIterations) {
+            std::set<std::pair<double, int>> times;
+            double stdDevTime = 0;
+            for (size_t i = 0; i < numTimedIterations; i++) {
+              times.insert(std::make_pair(r.perIterMsec[i], i+1));
+              double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
+              stdDevTime += varTime * varTime;
+            }
+            stdDevTime = sqrt(stdDevTime / numTimedIterations);
 
-            std::set<int> usedXccs;
-            std::stringstream ss1;
-            if (exeDevice.exeType == EXE_GPU_GFX) {
-              if (time.second - 1 < r.perIterCUs.size()) {
-                ss1 << " CUs: ";
-                for (auto x : r.perIterCUs[time.second - 1]) {
-                  ss1 << x.first << ":" << std::setfill('0') << std::setw(2) << x.second << " ";
-                  usedXccs.insert(x.first);
+            for (auto& time : times) {
+              double iterUs = time.first * 1000.0;
+              table.Set(rowIdx, 0, "Iter %03d    ", time.second);
+              table.Set(rowIdx, 1, "%8.3f us ", iterUs);
+              table.Set(rowIdx, 2, "%8.3f ms ", time.first);
+              rowIdx++;
+            }
+
+            table.Set(rowIdx, 0, "StandardDev ");
+            table.Set(rowIdx, 1, "%8.3f us ", stdDevTime * 1000.0);
+            table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
+            rowIdx++;
+            table.DrawRowBorder(rowIdx);
+          }
+        } else {
+          // Regular transfer row (numLaps == 0)
+          table.Set(rowIdx, 0, "Transfer %-4d ", idx);
+          table.Set(rowIdx, 1, "%8.3f GB/s "   , r.avgBandwidthGbPerSec);
+          table.Set(rowIdx, 2, "%8.3f ms "     , r.avgDurationMsec);
+          table.Set(rowIdx, 3, "%12lu bytes "  , r.numBytes);
+
+          char exeSubIndexStr[32] = "";
+          if (t.exeSubIndex != -1)
+            sprintf(exeSubIndexStr, ".%d", t.exeSubIndex);
+
+          if (isMultiRank) {
+            table.Set(rowIdx, 4, " %s -> R%d%c%d%s:%d -> %s",
+                      MemDevicesToStr(t.srcs).c_str(),
+                      exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      exeSubIndexStr, t.numSubExecs,
+                      MemDevicesToStr(t.dsts).c_str());
+          } else {
+            table.Set(rowIdx, 4, " %s -> %c%d%s:%d -> %s",
+                      MemDevicesToStr(t.srcs).c_str(),
+                      ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                      exeSubIndexStr, t.numSubExecs,
+                      MemDevicesToStr(t.dsts).c_str());
+          }
+          table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
+          rowIdx++;
+
+          if (ev.showIterations) {
+            std::set<std::pair<double, int>> times;
+            double stdDevTime = 0;
+            double stdDevBw = 0;
+            for (size_t i = 0; i < numTimedIterations; i++) {
+              times.insert(std::make_pair(r.perIterMsec[i], i+1));
+              double const varTime = fabs(r.avgDurationMsec - r.perIterMsec[i]);
+              stdDevTime += varTime * varTime;
+
+              double iterBandwidthGbs = (t.numBytes / 1.0E9) / r.perIterMsec[i] * 1000.0f;
+              double const varBw = fabs(iterBandwidthGbs - r.avgBandwidthGbPerSec);
+              stdDevBw += varBw * varBw;
+            }
+            stdDevTime = sqrt(stdDevTime / numTimedIterations);
+            stdDevBw = sqrt(stdDevBw / numTimedIterations);
+
+            for (auto& time : times) {
+              double iterDurationMsec = time.first;
+              double iterBandwidthGbs = (t.numBytes / 1.0E9) / iterDurationMsec * 1000.0f;
+
+              std::set<int> usedXccs;
+              std::stringstream ss1;
+              if (exeDevice.exeType == EXE_GPU_GFX) {
+                if (time.second - 1 < r.perIterCUs.size()) {
+                  ss1 << " CUs: ";
+                  for (auto x : r.perIterCUs[time.second - 1]) {
+                    ss1 << x.first << ":" << std::setfill('0') << std::setw(2) << x.second << " ";
+                    usedXccs.insert(x.first);
+                  }
                 }
               }
+
+              std::stringstream ss2;
+              if (!usedXccs.empty()) {
+                ss2 << " XCCs:";
+                for (auto x : usedXccs)
+                  ss2 << " "  << x;
+              }
+
+              table.Set(rowIdx, 0, "Iter %03d    ", time.second);
+              table.Set(rowIdx, 1, "%8.3f GB/s ", iterBandwidthGbs);
+              table.Set(rowIdx, 2, "%8.3f ms ", iterDurationMsec);
+              table.Set(rowIdx, 3, ss1.str());
+              table.Set(rowIdx, 4, ss2.str());
+              rowIdx++;
             }
 
-            std::stringstream ss2;
-            if (!usedXccs.empty()) {
-              ss2 << " XCCs:";
-              for (auto x : usedXccs)
-                ss2 << " "  << x;
-            }
-
-            table.Set(rowIdx, 0, "Iter %03d    ", time.second);
-            table.Set(rowIdx, 1, "%8.3f GB/s ", iterBandwidthGbs);
-            table.Set(rowIdx, 2, "%8.3f ms ", iterDurationMsec);
-            table.Set(rowIdx, 3, ss1.str());
-            table.Set(rowIdx, 4, ss2.str());
+            table.Set(rowIdx, 0, "StandardDev ");
+            table.Set(rowIdx, 1, "%8.3f GB/s ", stdDevBw);
+            table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
             rowIdx++;
+            table.DrawRowBorder(rowIdx);
           }
-
-          table.Set(rowIdx, 0, "StandardDev ");
-          table.Set(rowIdx, 1, "%8.3f GB/s ", stdDevBw);
-          table.Set(rowIdx, 2, "%8.3f ms ", stdDevTime);
-          rowIdx++;
-          table.DrawRowBorder(rowIdx);
         }
 
         // Show percentiles
@@ -719,9 +827,13 @@ namespace TransferBench::Utils
           std::sort(sortedDur.begin(), sortedDur.end());
           for (int pct : ev.showPercentiles) {
             double dur = PercentileDurationMsecFromSorted(sortedDur, pct);
-            double bwGbs = dur > 0.0 ? (t.numBytes / 1.0E9) / dur * 1000.0 : 0.0;
             table.Set(rowIdx, 0, "p%d ", pct);
-            table.Set(rowIdx, 1, "%8.3f GB/s ", bwGbs);
+            if (t.numLaps > 0) {
+              table.Set(rowIdx, 1, "%8.3f us ", dur * 1000.0);
+            } else {
+              double bwGbs = dur > 0.0 ? (t.numBytes / 1.0E9) / dur * 1000.0 : 0.0;
+              table.Set(rowIdx, 1, "%8.3f GB/s ", bwGbs);
+            }
             table.Set(rowIdx, 2, "%8.3f ms ", dur);
             table.Set(rowIdx, 3, " ");
             table.Set(rowIdx, 4, " ");
@@ -734,9 +846,15 @@ namespace TransferBench::Utils
     }
     table.DrawRowBorder(rowIdx);
     table.Set(rowIdx, 0, "Aggregate (CPU) ");
-    table.Set(rowIdx, 1, "%8.3f GB/s "      , results.avgTotalBandwidthGbPerSec);
+    if (results.totalBytesTransferred == 0) {
+      // Pingpong-only run: no payload was moved, so leave the bandwidth/byte cells empty
+      table.Set(rowIdx, 1, " ");
+      table.Set(rowIdx, 3, " ");
+    } else {
+      table.Set(rowIdx, 1, "%8.3f GB/s "  , results.avgTotalBandwidthGbPerSec);
+      table.Set(rowIdx, 3, "%12lu bytes " , results.totalBytesTransferred);
+    }
     table.Set(rowIdx, 2, "%8.3f ms "        , results.avgTotalDurationMsec);
-    table.Set(rowIdx, 3, "%12lu bytes "     , results.totalBytesTransferred);
     table.Set(rowIdx, 4, " Overhead %.3f ms", results.overheadMsec);
     table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
     table.DrawRowBorder(rowIdx+1);
