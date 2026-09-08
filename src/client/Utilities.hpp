@@ -589,6 +589,11 @@ namespace TransferBench::Utils
 
     bool isMultiRank = TransferBench::GetNumRanks() > 1;
 
+    // The pong half owns no result row, so its executor shows up with no transfers beneath it
+    std::set<ExeDevice> pongExeDevices;
+    for (auto const& t : transfers)
+      if (t.numLaps > 0) pongExeDevices.insert(t.exeDevicePong);
+
     // Figure out table dimensions
     int numCols = 5, numRows = 1;
     size_t numTimedIterations = results.numTimedIterations;
@@ -631,18 +636,33 @@ namespace TransferBench::Utils
       ExeType   const  exeType   = exeDevice.exeType;
       int32_t   const  exeIndex  = exeDevice.exeIndex;
 
+      // Executors running only pingpong halves move no payload, so bytes/bandwidth are meaningless
+      bool const isPingpongExe = (exeResult.numBytes == 0);
+
       // Display Executor results
       table.DrawRowBorder(rowIdx);
-      if (isMultiRank) {
+      if (isMultiRank)
         table.Set(rowIdx, 0, " Executor: Rank %d %3s %02d ", exeDevice.exeRank, ExeTypeToStr(exeType).c_str(), exeIndex);
-        table.Set(rowIdx, 4, " %7.3f GB/s (sum) [%s]", exeResult.sumBandwidthGbPerSec, GetHostname(exeDevice.exeRank).c_str());
-      } else {
+      else
         table.Set(rowIdx, 0, " Executor: %3s %02d ", ExeTypeToStr(exeType).c_str(), exeIndex);
-        table.Set(rowIdx, 4, " %7.3f GB/s (sum)", exeResult.sumBandwidthGbPerSec);
+
+      std::string exeSummary;
+      if (isPingpongExe) {
+        exeSummary = pongExeDevices.count(exeDevice) && exeResult.transferIdx.empty()
+                   ? " pingpong (pong half)" : " pingpong";
+        table.Set(rowIdx, 1, " ");
+        table.Set(rowIdx, 3, " ");
+      } else {
+        char buf[64];
+        snprintf(buf, sizeof(buf), " %7.3f GB/s (sum)", exeResult.sumBandwidthGbPerSec);
+        exeSummary = buf;
+        table.Set(rowIdx, 1, "%8.3f GB/s " , exeResult.avgBandwidthGbPerSec);
+        table.Set(rowIdx, 3, "%12lu bytes ", exeResult.numBytes);
       }
-      table.Set(rowIdx, 1, "%8.3f GB/s " , exeResult.avgBandwidthGbPerSec);
-      table.Set(rowIdx, 2, "%8.3f ms "   , exeResult.avgDurationMsec);
-      table.Set(rowIdx, 3, "%12lu bytes ", exeResult.numBytes);
+      if (isMultiRank) exeSummary += " [" + GetHostname(exeDevice.exeRank) + "]";
+
+      table.Set(rowIdx, 2, "%8.3f ms ", exeResult.avgDurationMsec);
+      table.Set(rowIdx, 4, "%s", exeSummary.c_str());
       table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
       rowIdx++;
       table.DrawRowBorder(rowIdx);
@@ -792,9 +812,13 @@ namespace TransferBench::Utils
           std::sort(sortedDur.begin(), sortedDur.end());
           for (int pct : ev.showPercentiles) {
             double dur = PercentileDurationMsecFromSorted(sortedDur, pct);
-            double bwGbs = dur > 0.0 ? (t.numBytes / 1.0E9) / dur * 1000.0 : 0.0;
             table.Set(rowIdx, 0, "p%d ", pct);
-            table.Set(rowIdx, 1, "%8.3f GB/s ", bwGbs);
+            if (t.numLaps > 0) {
+              table.Set(rowIdx, 1, "%8.3f us ", dur * 1000.0);
+            } else {
+              double bwGbs = dur > 0.0 ? (t.numBytes / 1.0E9) / dur * 1000.0 : 0.0;
+              table.Set(rowIdx, 1, "%8.3f GB/s ", bwGbs);
+            }
             table.Set(rowIdx, 2, "%8.3f ms ", dur);
             table.Set(rowIdx, 3, " ");
             table.Set(rowIdx, 4, " ");
@@ -807,9 +831,15 @@ namespace TransferBench::Utils
     }
     table.DrawRowBorder(rowIdx);
     table.Set(rowIdx, 0, "Aggregate (CPU) ");
-    table.Set(rowIdx, 1, "%8.3f GB/s "      , results.avgTotalBandwidthGbPerSec);
+    if (results.totalBytesTransferred == 0) {
+      // Pingpong-only run: no payload was moved, so leave the bandwidth/byte cells empty
+      table.Set(rowIdx, 1, " ");
+      table.Set(rowIdx, 3, " ");
+    } else {
+      table.Set(rowIdx, 1, "%8.3f GB/s "  , results.avgTotalBandwidthGbPerSec);
+      table.Set(rowIdx, 3, "%12lu bytes " , results.totalBytesTransferred);
+    }
     table.Set(rowIdx, 2, "%8.3f ms "        , results.avgTotalDurationMsec);
-    table.Set(rowIdx, 3, "%12lu bytes "     , results.totalBytesTransferred);
     table.Set(rowIdx, 4, " Overhead %.3f ms", results.overheadMsec);
     table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
     table.DrawRowBorder(rowIdx+1);

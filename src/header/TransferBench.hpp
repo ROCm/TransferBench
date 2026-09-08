@@ -6514,8 +6514,10 @@ namespace {
       bool isPingpong = t.numLaps != 0;
 
       ExeInfo& exeInfo = executorMap[exeDevice];
-      exeInfo.totalBytes += t.numBytes;
       if (!isPingpong) {
+        // Pingpong exchanges 1-byte flags, not payload, so t.numBytes (a placeholder that
+        // only sizes the flag allocation) is left out of the reported byte totals
+        exeInfo.totalBytes += t.numBytes;
         exeInfo.totalSubExecs += t.numSubExecs;
       } else {
         exeInfo.totalPingpong ++;
@@ -6536,7 +6538,6 @@ namespace {
         pong.numLaps = -t.numLaps;
 
         ExeInfo& pongInfo = executorMap[pongExe];
-        pongInfo.totalBytes += t.numBytes;
         pongInfo.totalPingpong ++;
         pongInfo.useSubIndices |= (t.exeSubIndexPong != -1 || (t.exeDevicePong.exeType == EXE_GPU_GFX && !cfg.gfx.prefXccTable.empty()));
         pongInfo.resources.push_back(pong);
@@ -6886,7 +6887,8 @@ namespace {
         // Local executor collects results
         exeResult.numBytes             = exeInfo.totalBytes;
         exeResult.avgDurationMsec      = exeInfo.totalDurationMsec / numTimedIterations;
-        exeResult.avgBandwidthGbPerSec = (exeResult.numBytes / 1.0e6) /  exeResult.avgDurationMsec;
+        exeResult.avgBandwidthGbPerSec = exeResult.numBytes ? (exeResult.numBytes / 1.0e6) / exeResult.avgDurationMsec
+                                                            : 0.0;
         exeResult.sumBandwidthGbPerSec = 0.0;
         exeResult.transferIdx.clear();
 
@@ -6896,12 +6898,17 @@ namespace {
           int const transferIdx = rss.transferIdx;
           exeResult.transferIdx.push_back(transferIdx);
 
+          // A pingpong half moves a 1-byte flag per lap, so it reports latency only
+          bool   const isPingpong        = (rss.numLaps > 0);
+          size_t const reportedBytes     = isPingpong ? 0 : rss.numBytes;
+
           TransferResult& tfrResult      = results.tfrResults[transferIdx];
           tfrResult.exeDevice            = exeDevice;
           tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
-          tfrResult.numBytes             = rss.numBytes;
+          tfrResult.numBytes             = reportedBytes;
           tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
-          tfrResult.avgBandwidthGbPerSec = (rss.numBytes / 1.0e6) / tfrResult.avgDurationMsec;
+          tfrResult.avgBandwidthGbPerSec = reportedBytes ? (reportedBytes / 1.0e6) / tfrResult.avgDurationMsec
+                                                         : 0.0;
           if (cfg.general.recordPerIteration) {
             tfrResult.perIterMsec = rss.perIterMsec;
             tfrResult.perIterCUs  = rss.perIterCUs;
@@ -6920,7 +6927,9 @@ namespace {
       results.overheadMsec = std::min(results.overheadMsec, (results.avgTotalDurationMsec -
                                                              exeResult.avgDurationMsec));
     }
-    results.avgTotalBandwidthGbPerSec = (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec;
+    results.avgTotalBandwidthGbPerSec = results.totalBytesTransferred
+                                        ? (results.totalBytesTransferred / 1.0e6) / results.avgTotalDurationMsec
+                                        : 0.0;
 
     // Teardown executors
     for (auto& exeInfoPair : executorMap) {
@@ -7396,13 +7405,15 @@ namespace {
 
             Transfer t;
             t.numLaps         = numLaps;
-            t.numBytes     = 8;
-            t.numSubExecs  = 1;
-            t.srcs         = {singleMemOrNull(pingHalf.srcs), singleMemOrNull(pongHalf.srcs)};
-            t.dsts         = {singleMemOrNull(pingHalf.dsts), singleMemOrNull(pongHalf.dsts)};
-            t.exeDevice    = pingHalf.exeDevice;
-            t.exeSubIndex  = pingHalf.exeSubIndex;
-            t.exeSubSlot   = pingHalf.exeSubSlot;
+            // Pingpong exchanges a 1-byte flag per lap; numBytes only has to be a non-zero
+            // multiple of 4 large enough for the two seed flag values, and is not reported as traffic
+            t.numBytes        = 8;
+            t.numSubExecs     = 1;
+            t.srcs            = {singleMemOrNull(pingHalf.srcs), singleMemOrNull(pongHalf.srcs)};
+            t.dsts            = {singleMemOrNull(pingHalf.dsts), singleMemOrNull(pongHalf.dsts)};
+            t.exeDevice       = pingHalf.exeDevice;
+            t.exeSubIndex     = pingHalf.exeSubIndex;
+            t.exeSubSlot      = pingHalf.exeSubSlot;
             t.exeDevicePong   = pongHalf.exeDevice;
             t.exeSubIndexPong = pongHalf.exeSubIndex;
             t.exeSubSlotPong  = pongHalf.exeSubSlot;
