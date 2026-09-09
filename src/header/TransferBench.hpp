@@ -5672,8 +5672,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       ;
     __threadfence_system();
 #else
-    while (__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != val)
+    while (__hip_atomic_load(flag, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) != val)
       ;
+#endif
+  }
+
+  __device__ void GpuStore(volatile uint8_t* flag, uint8_t val)
+  {
+#if defined(__NVCC__)
+    __atomic_store_n((uint8_t*)flag, val, __ATOMIC_RELAXED);
+#else
+    __hip_atomic_store((uint8_t*)flag, val, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 #endif
   }
 
@@ -6439,25 +6448,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     for (int lap = 0; lap < laps; lap++) {
       volatile uint8_t* localFlag  = localBase  + off;
       volatile uint8_t* remoteFlag = remoteBase + off;
-      // TODO: replace with hip_atomic_store
-      if (!useSrcMem) {
-        if (isPing) {
-          __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
-          GpuWait(localFlag, val);
-        } else {
-          GpuWait(localFlag, val);
-          __atomic_store_n((uint8_t*)remoteFlag, val, __ATOMIC_RELEASE);
-        }
-      } else{
-        uint8_t* const srcPtr = val ? srcVal1 : srcVal0;
-        if (isPing) {
-          __atomic_store((uint8_t*)remoteFlag, srcPtr, __ATOMIC_RELEASE);
-          GpuWait(localFlag, val);
-        } else {
-          GpuWait(localFlag, val);
-          __atomic_store((uint8_t*)remoteFlag, srcPtr, __ATOMIC_RELEASE);
-        }
-
+      if (isPing) {
+        uint8_t const storeVal = useSrcMem ? (val ? *srcVal1 : *srcVal0) : val;
+        GpuStore(remoteFlag, storeVal);
+        GpuWait(localFlag, val);
+      } else {
+        GpuWait(localFlag, val);
+        uint8_t const storeVal = useSrcMem ? (val ? *srcVal1 : *srcVal0) : val;
+        GpuStore(remoteFlag, storeVal);
       }
 
       // Advance one stride, plus an extra stride every hp laps so that a slot is never
