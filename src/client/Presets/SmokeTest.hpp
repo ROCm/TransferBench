@@ -269,9 +269,17 @@ int SmokeTestPreset(EnvVars&          ev,
   MemType cpuMemType = Utils::GetCpuMemType(cpuMemTypeIdx);
   MemType gpuMemType = Utils::GetGpuMemType(gpuMemTypeIdx);
   std::set<int> testsToRun(testList.begin(), testList.end());
+  bool skipCollectiveByDefault = false;
   if (testList.empty()) {
     for (int testIdx = 1; testIdx <= NUM_SMOKE_TESTS; testIdx++)
       testsToRun.insert(testIdx);
+    // Multi-node default: H2D/D2H/D2D only.
+    // Broadcast, gather, and all-to-all remain available via TEST_LIST
+    if (numRanks > 1) {
+      skipCollectiveByDefault = true;
+      for (int t : {5, 6, 7, 8, 13, 14, 15, 16})
+        testsToRun.erase(t);
+    }
   }
 
   vector<size_t> sizeList;
@@ -312,8 +320,13 @@ int SmokeTestPreset(EnvVars&          ev,
       ev.Print("RUN_PARALLEL", runParallel,        "Running GPUs %s", runParallel ? "in parallel" : "serially");
       ev.Print("SIZE_LIST"   , sizeStrList.size(), "Transfer sizes tested: %s", ev.GetStr(sizeStrList).c_str());
       ev.Print("SE_MAX_BYTES", seMaxBytesStr,      "Each SubExecutor can work on at most %lu bytes", seMaxBytes);
-      ev.Print("TEST_LIST"   , testsToRun.size(),  testList.empty() ? "Running all tests (can also filter with 'dma','gfx','fast')"
-               : "Running Tests: %s", ev.GetStr(testList).c_str());
+      if (!testList.empty())
+        ev.Print("TEST_LIST", testsToRun.size(), "Running Tests: %s", ev.GetStr(testList).c_str());
+      else if (skipCollectiveByDefault)
+        ev.Print("TEST_LIST", testsToRun.size(),
+                 "Running H2D/D2H/D2D only (broadcast/gather/a2a off by default on multi-node; set TEST_LIST to enable)");
+      else
+        ev.Print("TEST_LIST", testsToRun.size(), "Running all tests (can also filter with 'dma','gfx','fast')");
       ev.Print("USE_BDMA"    , useBdma,            "Using %s dma executor", useBdma ? "batched" : "standard");
       printf("\n");
     }
@@ -416,6 +429,9 @@ int SmokeTestPreset(EnvVars&          ev,
     }
   } else {
     Utils::Print("All tests passed\n");
+  }
+  if (skipCollectiveByDefault) {
+    Utils::Print("[WARN] Broadcast / Gather / AllToAll tests are disabled by default on multi-node; set TEST_LIST to enable them\n");
   }
   if (numRanks > 1 && Utils::GetRankPerPodMap().size() != 1) {
     Utils::Print("[WARN] Copy (D2D) / Broadcast / Gather / AllToAll tests are skipped if ranks are not in same pod\n");
