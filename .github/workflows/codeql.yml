@@ -30,11 +30,8 @@ jobs:
       - name: Install OS requirements
         timeout-minutes: 10
         run: |
-          apt update
-          apt install -y software-properties-common
-          apt-add-repository -y ppa:git-core/ppa
           apt-get update
-          apt install -y git
+          DEBIAN_FRONTEND=noninteractive apt-get install -y git
 
       - name: Checkout repository
         uses: actions/checkout@v4

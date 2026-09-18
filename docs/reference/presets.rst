@@ -518,8 +518,8 @@ To modify the behavior of the rings preset, use the following environment variab
       - ``0``
 
     * - ``NUM_SUB_EXEC``
-      - SubExecutors (CUs for GFX, batch items for DMA) per transfer.
-      - ``8``
+      - SubExecutors (CUs for GFX, batch items for DMA) per transfer. ``0`` uses all available subexecutors on the Executor.
+      - ``0``
 
     * - ``RING_SIZE``
       - Number of GPUs per ring. Must evenly divide ``numRanks x NUM_GPU_DEVICES``. Default is one ring covering the whole pod.
@@ -550,7 +550,7 @@ Example output
   MEM_TYPE               =            0 : Using default GPU memory (0=default, 1=fine-grained, 2=uncached, 3=managed)
   NUM_GPU_DEVICES        =            4 : Using 4 GPUs
   NUM_QUEUE_PAIRS        =            0 : Using 0 queue pairs for NIC transfers
-  NUM_SUB_EXEC           =            8 : Using 8 subExecutors/CUs per Transfer
+  NUM_SUB_EXEC           =            0 : Using all available subexecutors/CUs per Transfer
   USE_DMA_EXEC           =            0 : Using GFX executor
   USE_REMOTE_READ        =            0 : Using SRC as executor
   STRIDE                 =            1 : Reordering devices by taking 1 steps

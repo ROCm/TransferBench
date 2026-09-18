@@ -104,7 +104,7 @@ set(ENV{ROCM_PATH} "${ROCM_PATH}")
 #==================================================================================================
 set(TRANSFERBENCH_VERSION_MAJOR 1)
 set(TRANSFERBENCH_VERSION_MINOR 70)
-set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "00")
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "02")
 
 # Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
 # Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,

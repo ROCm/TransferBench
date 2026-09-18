@@ -47,7 +47,7 @@ int RingsPreset(EnvVars&          ev,
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 0);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numQueuePairs = EnvVars::GetEnvVar("NUM_QUEUE_PAIRS", 0);
-  int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
+  int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 0);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
   int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
   int useTdmExec    = EnvVars::GetEnvVar("USE_TDM_EXEC"   , 0);
@@ -78,6 +78,10 @@ int RingsPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Num queue pairs must be non-negative\n");
     return ERR_FATAL;
   }
+  if (numSubExecs < 0) {
+    Utils::Print("[ERROR] NUM_SUB_EXEC must be non-negative (0 uses all available subexecutors)\n");
+    return ERR_FATAL;
+  }
 
   int totalGpus = numRanks * numGpus;
   if (totalGpus % ringSize) {
@@ -95,7 +99,10 @@ int RingsPreset(EnvVars&          ev,
       ev.Print("MEM_TYPE"       , memTypeIdx   , "Using %s GPU memory (%s)", devMemTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_GPU_DEVICES", numGpus      , "Using %d GPUs", numGpus);
       ev.Print("NUM_QUEUE_PAIRS", numQueuePairs, "Using %d queue pairs for NIC transfers", numQueuePairs);
-      ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
+      if (numSubExecs == 0)
+        ev.Print("NUM_SUB_EXEC" , numSubExecs, "Using all available subexecutors/CUs per Transfer");
+      else
+        ev.Print("NUM_SUB_EXEC" , numSubExecs, "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
       ev.Print("USE_TDM_EXEC"   , useTdmExec   , "Using %s executor", useTdmExec ? "TDM" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
@@ -105,16 +112,9 @@ int RingsPreset(EnvVars&          ev,
     }
   }
 
-  Utils::Print("GPU-%s Rings benchmark:\n", execName);
-  Utils::Print("==============================\n");
-  Utils::Print("[%lu bytes per Transfer] [%s:%d] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
-               numBytesPerTransfer, execName, numSubExecs,
-               devMemTypeStr.c_str(), numQueuePairs, numRanks);
-
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
 
   int numRings = totalGpus / ringSize;
-  Utils::Print("Running %d parallel ring(s) each of %d devices.  All numbers in GB/s:\n", numRings, ringSize);
 
   // Determine ordering of GPUs for the rings based on stride
   std::vector<int> indices(totalGpus);
@@ -143,7 +143,7 @@ int RingsPreset(EnvVars&          ev,
       t.srcs        = {memDevices[srcIdx]};
       t.dsts        = {memDevices[dstIdx]};
       t.exeDevice   = {exeType, memDevices[exeIdx].memIndex, memDevices[exeIdx].memRank};
-      t.numSubExecs = numSubExecs;
+      t.numSubExecs = (numSubExecs > 0) ? numSubExecs : TransferBench::GetNumSubExecutors(t.exeDevice);
       transfers.push_back(t);
 
       // Build NIC transfers between these GPUs as well if requested
@@ -156,6 +156,26 @@ int RingsPreset(EnvVars&          ev,
       }
     }
   }
+
+  // NUM_SUB_EXEC=0: each hop already took its own executor's count.
+  // Report it in the header only if every selected GPU executor agrees, otherwise "var"
+  std::string seStr = std::to_string(numSubExecs);
+  if (numSubExecs == 0) {
+    int seCount = 0;
+    for (auto const& t : transfers) {
+      if (t.exeDevice.exeType != exeType) continue; // skip NIC overlays
+      if (seCount == 0) seCount = t.numSubExecs;
+      else if (t.numSubExecs != seCount) { seCount = -1; break; }
+    }
+    seStr = (seCount < 0) ? "variable" : std::to_string(seCount);
+  }
+
+  Utils::Print("GPU-%s Rings benchmark:\n", execName);
+  Utils::Print("==============================\n");
+  Utils::Print("[%lu bytes per Transfer] [%s:%s] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
+               numBytesPerTransfer, execName, seStr.c_str(),
+               devMemTypeStr.c_str(), numQueuePairs, numRanks);
+  Utils::Print("Running %d parallel ring(s) each of %d devices.  All numbers in GB/s:\n", numRings, ringSize);
 
   TransferBench::TestResults results;
   if (!TransferBench::RunTransfers(cfg, transfers, results)) {
