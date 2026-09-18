@@ -3,6 +3,14 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.70.02
+### Modified
+- rings preset defaults `NUM_SUB_EXEC` to 0, which uses all available subexecutors per Transfer
+- smoketest disables broadcast, gather, and all-to-all by default on multi-node. Set `TEST_LIST` to enable them
+
+## v1.70.01
+Skipped due to misnaming of 1.70.00
+
 ## v1.70.00
 ### Added
 - Adding support for Tensor Data Mover (TDM)-based executor [T] on supported hardware (gfx1250, NVIDIA sm_90+ via TMA).
