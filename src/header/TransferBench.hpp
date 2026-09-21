@@ -6490,78 +6490,94 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                   int           const  exeIndex,
                                   ExeInfo&             exeInfo)
   {
-    auto cpuStart = std::chrono::high_resolution_clock::now();
+    using Clock = std::chrono::high_resolution_clock;
+
+    auto cpuStart = Clock::now();
     ERR_CHECK(hipSetDevice(exeIndex));
 
     int xccDim = exeInfo.useSubIndices ? exeInfo.numSubIndices : 1;
 
-    if (cfg.general.useMultiStream) {
-      std::vector<int> normalIdx;
-      for (int r = 0; r < (int)exeInfo.resources.size(); r++)
-        if (exeInfo.resources[r].numLaps == 0)
-          normalIdx.push_back(r);
+    std::vector<int> normalIdx;
+    for (int r = 0; r < (int)exeInfo.resources.size(); r++)
+      if (exeInfo.resources[r].numLaps == 0)
+        normalIdx.push_back(r);
 
-      int const numNormal = (int)normalIdx.size();
-      std::vector<ErrResult> tfrErr(numNormal);
-      exeInfo.pool->ParallelFor(numNormal, [&](int i) {
-        tfrErr[i] = ExecuteGpuTransfer(iteration,
+    // Normal Transfers run as one task per stream in multi-stream mode, otherwise all of
+    // them are combined into a single launch on stream 0
+    bool const hasPingpong  = (exeInfo.totalPingpong > 0);
+    int  const numCopyTasks = cfg.general.useMultiStream ? (int)normalIdx.size()
+                                                         : ((exeInfo.totalSubExecs > 0 && !normalIdx.empty()) ? 1 : 0);
+    int  const numTasks     = numCopyTasks + (hasPingpong ? 1 : 0);
+
+    // Pingpong shares the pool with the copies so that both run concurrently on their own
+    // streams (a second ParallelFor would serialize behind this one).  It is dispatched
+    // first since it is typically the longer running of the two.
+    int const ppTask       = hasPingpong ? 0 : -1;
+    int const copyTaskBase = hasPingpong ? 1 : 0;
+
+    std::vector<ErrResult>         taskErr(numTasks);
+    std::vector<Clock::time_point> copyStarts(numCopyTasks), copyStops(numCopyTasks);
+
+    exeInfo.pool->ParallelFor(numTasks, [&](int i) {
+      if (i == ppTask) {
+        int const ppIdx = (int)exeInfo.streams.size() - 1;
+        taskErr[i] = ExecuteGpuPingpong(iteration,
+                                        exeInfo.totalPingpong,
+                                        exeInfo.pingpongParamGpu,
+                                        exeInfo.streams[ppIdx],
+                                        cfg.general.useHipEvents ? exeInfo.startEvents[ppIdx] : NULL,
+                                        cfg.general.useHipEvents ? exeInfo.stopEvents[ppIdx] : NULL,
+                                        xccDim,
+                                        cfg);
+        return;
+      }
+
+      // Each copy task brackets itself so that executor timing can be derived from the
+      // copies alone, no matter how long the pingpong exchange keeps running
+      int const c        = i - copyTaskBase;
+      int const streamIdx = cfg.general.useMultiStream ? c : 0;
+      TransferResources& rss = exeInfo.resources[cfg.general.useMultiStream ? normalIdx[c] : normalIdx[0]];
+
+      copyStarts[c] = Clock::now();
+      taskErr[i] = ExecuteGpuTransfer(iteration,
                                       exeInfo.totalSubExecs,
                                       exeInfo.subExecParamGpu,
-                                      exeInfo.streams[i],
-                                      cfg.general.useHipEvents ? exeInfo.startEvents[i] : NULL,
-                                      cfg.general.useHipEvents ? exeInfo.stopEvents[i] : NULL,
+                                      exeInfo.streams[streamIdx],
+                                      cfg.general.useHipEvents ? exeInfo.startEvents[streamIdx] : NULL,
+                                      cfg.general.useHipEvents ? exeInfo.stopEvents[streamIdx] : NULL,
                                       xccDim,
                                       cfg,
                                       exeInfo.gfxKernelToUse,
                                       exeInfo.subExecParamHostAccessible,
-                                      exeInfo.resources[normalIdx[i]]);
-      });
-      for (auto& e : tfrErr) ERR_CHECK(e);
-    } else if (exeInfo.totalSubExecs > 0) {
-      TransferResources* normalRss = nullptr;
-      for (auto& rss : exeInfo.resources) {
-        if (rss.numLaps == 0) { normalRss = &rss; break; }
-      }
-      ERR_CHECK(ExecuteGpuTransfer(iteration, exeInfo.totalSubExecs, exeInfo.subExecParamGpu, exeInfo.streams[0],
-                                  cfg.general.useHipEvents ? exeInfo.startEvents[0] : NULL,
-                                  cfg.general.useHipEvents ? exeInfo.stopEvents[0] : NULL,
-                                  xccDim, cfg, exeInfo.gfxKernelToUse,
-                                  exeInfo.subExecParamHostAccessible, *normalRss));
-    }
+                                      rss);
+      copyStops[c] = Clock::now();
+    });
+    for (auto& e : taskErr) ERR_CHECK(e);
 
-    if (exeInfo.totalPingpong > 0) {
-      int const ppIdx = (int)exeInfo.streams.size() - 1;
-      ERR_CHECK(ExecuteGpuPingpong(iteration,
-                                  exeInfo.totalPingpong,
-                                  exeInfo.pingpongParamGpu,
-                                  exeInfo.streams[ppIdx],
-                                  cfg.general.useHipEvents ? exeInfo.startEvents[ppIdx] : NULL,
-                                  cfg.general.useHipEvents ? exeInfo.stopEvents[ppIdx] : NULL,
-                                  xccDim,
-                                  cfg));
-    }
-
-    auto cpuDelta = std::chrono::high_resolution_clock::now() - cpuStart;
+    auto cpuDelta = Clock::now() - cpuStart;
 
     if (iteration >= 0) {
-      // Determine executor timing
-      // - HIP events cover only the combined copy launch on stream 0, so they miss a
-      //   later pingpong stream. If this GPU has pingpong (alone or mixed with copies),
-      //   use the CPU clock around this function, same as multi-stream.
-      // - Otherwise HIP events when enabled and not multi-stream.
-      if (cfg.general.useHipEvents && !cfg.general.useMultiStream && exeInfo.totalPingpong == 0) {
+      // Determine executor timing.  Pingpong moves flags rather than payload and does not
+      // contribute to exeInfo.totalBytes, so it is kept out of the executor duration that
+      // backs the reported bandwidth - otherwise a lap count that outlasts the copies would
+      // stretch the denominator.
+      // - HIP events on stream 0 cover exactly the combined copy launch (non multi-stream)
+      // - Otherwise the span from the first copy task starting to the last one finishing
+      // - Pingpong-only executors transfer no bytes, so report the exchange's wall time
+      double const scale = 1000.0 / cfg.general.numSubIterations;
+      if (numCopyTasks == 0) {
+        exeInfo.totalDurationMsec += hasPingpong
+          ? std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * scale
+          : 0.0;
+      } else if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
         float gpuDeltaMsec;
-        if (exeInfo.totalSubExecs > 0) {
-          ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
-        } else {
-          gpuDeltaMsec = 0.0f;
-        }
-        gpuDeltaMsec /= cfg.general.numSubIterations;
-        exeInfo.totalDurationMsec += gpuDeltaMsec;
+        ERR_CHECK(hipEventElapsedTime(&gpuDeltaMsec, exeInfo.startEvents[0], exeInfo.stopEvents[0]));
+        exeInfo.totalDurationMsec += gpuDeltaMsec / cfg.general.numSubIterations;
       } else {
-        double cpuDeltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
-          / cfg.general.numSubIterations;
-        exeInfo.totalDurationMsec += cpuDeltaMsec;
+        auto const minStart = *std::min_element(copyStarts.begin(), copyStarts.end());
+        auto const maxStop  = *std::max_element(copyStops.begin(),  copyStops.end());
+        exeInfo.totalDurationMsec += std::chrono::duration_cast<std::chrono::duration<double>>(maxStop - minStart).count()
+                                     * scale;
       }
 
       // If Transfers were combined into a single launch, figure out per-Transfer timing
