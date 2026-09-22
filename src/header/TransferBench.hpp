@@ -611,6 +611,13 @@ namespace TransferBench
   int NicIsActive(int nicIndex, int targetRank = -1);
 
   /**
+   * @param[in] nicIndex        The NIC index to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @returns Smallest max_msg_sz across the NIC's active ports in bytes, or 0 if unknown
+   */
+  uint32_t GetNicMaxMsgSize(int nicIndex, int targetRank = -1);
+
+  /**
    * Helper function to parse a line containing Transfers into a vector of Transfers
    *
    * @param[in]  str       String containing description of Transfers
@@ -1110,6 +1117,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     bool IsSamePod(int targetRank, int sourceRank) const;
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
+    uint32_t GetNicMaxMsgSize(int nicIndex, int targetRank) const;
 
     // Translate a logical CPU NUMA index (as exposed to users) into the physical
     // NUMA node id used by libnuma / HSA.  Returns the index unchanged if out of range.
@@ -1183,6 +1191,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       std::map<int,                int>         closestCpuNumaToGpu;
       std::map<int,                int>         closestCpuNumaToNic;
       std::map<int,                int>         nicIsActive;
+      std::map<int,                uint32_t>    nicMaxMsgSize;
       std::map<int,                vector<int>> closestNicsToGpu;
       std::map<int,                vector<int>> closestGpusToNic;
       std::map<pair<ExeType, int>, std::string> executorName;
@@ -2757,6 +2766,41 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           hasFatalError = true;
           break;
         }
+
+        // Each posted RDMA WR is min(chunkBytes, bytes assigned to that QP).
+        // That size must not exceed the port's max_msg_sz on either NIC.
+        // Split matches PrepareSubExecParams: leftover blocks go to later QPs, so the
+        // last active QP can be the largest.
+        // This mimics PrepareSubExecParams.
+        size_t const N              = t.numBytes / sizeof(float);
+        int    const targetMultiple = cfg.data.blockBytes / sizeof(float);
+        int    const qpCount        = t.numSubExecs;
+        int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
+                                                (size_t)qpCount);
+        size_t assigned   = 0;
+        size_t maxQpBytes = 0;
+        for (int qp = 0; qp < qpCount; ++qp) {
+          int    const subExecLeft = std::max(0, maxSubExecToUse - qp);
+          size_t const leftover    = N - assigned;
+          size_t const roundedN    = (leftover + targetMultiple - 1) / targetMultiple;
+          size_t const qpN         = subExecLeft
+                                     ? std::min(leftover, (roundedN / subExecLeft) * (size_t)targetMultiple)
+                                     : 0;
+          maxQpBytes = std::max(maxQpBytes, qpN * sizeof(float));
+          assigned  += qpN;
+        }
+        size_t const maxWrBytes = maxQpBytes ? std::min(cfg.nic.chunkBytes, maxQpBytes) : 0;
+        uint32_t const maxMsgSz = std::min(GetNicMaxMsgSize(srcExeDevice.exeIndex, srcExeDevice.exeRank),
+                                           GetNicMaxMsgSize(dstExeDevice.exeIndex, dstExeDevice.exeRank));
+        if (maxMsgSz && maxWrBytes > maxMsgSz) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: NIC work request size (%lu bytes) exceeds IBV max_msg_sz (%u bytes) "
+              "with %d queue pair(s) and chunkBytes %lu. Reduce NIC_CHUNK_BYTES / transfer size, "
+              "or increase the queue pair count",
+              i, maxWrBytes, maxMsgSz, qpCount, cfg.nic.chunkBytes});
+          hasFatalError = true;
+          break;
+        }
       } else {
         errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but is not available.", i});
         hasFatalError = true;
@@ -3204,6 +3248,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int         gidIndex;
     std::string gidDescriptor;
     bool        isRoce;
+    uint32_t    maxMsgSize;   ///< Smallest max_msg_sz across active ports (largest RDMA work request)
   };
 
 // Function to collect information about IBV devices
@@ -3343,29 +3388,38 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ibvDevice.devicePtr = deviceList[i];
           ibvDevice.name = deviceList[i]->name;
           ibvDevice.hasActivePort = false;
+          ibvDevice.maxMsgSize = 0;
+          ibvDevice.isRoce = false;
+          ibvDevice.gidIndex = -1;
           {
             struct ibv_context *context = ibv_open_device(ibvDevice.devicePtr);
             if (context) {
               struct ibv_device_attr deviceAttr;
               if (!ibv_query_device(context, &deviceAttr)) {
                 int activePort;
-                ibvDevice.gidIndex = -1;
                 for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
                   struct ibv_port_attr portAttr;
                   if (ibv_query_port(context, port, &portAttr)) continue;
-                  if (portAttr.state == IBV_PORT_ACTIVE) {
-                    activePort = port;
-                    ibvDevice.hasActivePort = true;
-                    if(portAttr.link_layer == IBV_LINK_LAYER_ETHERNET) {
-                      ibvDevice.isRoce = true;
-                      std::pair<int, std::string> gidInfo (-1, "");
-                      auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidInfo);
-                      if (res.errType == ERR_NONE) {
-                        ibvDevice.gidIndex = gidInfo.first;
-                        ibvDevice.gidDescriptor = gidInfo.second;
-                      }
+                  if (portAttr.state != IBV_PORT_ACTIVE) continue;
+
+                  // Any active port may be selected for QP setup via cfg.nic.ibPort, which is
+                  // not visible here, so keep the most restrictive limit across all of them.
+                  if (portAttr.max_msg_sz &&
+                      (!ibvDevice.maxMsgSize || portAttr.max_msg_sz < ibvDevice.maxMsgSize))
+                    ibvDevice.maxMsgSize = portAttr.max_msg_sz;
+
+                  // The first active port supplies the RoCE / GID information
+                  if (ibvDevice.hasActivePort) continue;
+                  activePort = port;
+                  ibvDevice.hasActivePort = true;
+                  if (portAttr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+                    ibvDevice.isRoce = true;
+                    std::pair<int, std::string> gidInfo (-1, "");
+                    auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidInfo);
+                    if (res.errType == ERR_NONE) {
+                      ibvDevice.gidIndex = gidInfo.first;
+                      ibvDevice.gidDescriptor = gidInfo.second;
                     }
-                    break;
                   }
                 }
               }
@@ -3805,6 +3859,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     int const port = cfg.nic.ibPort;
 
+    size_t maxWrBytes = 0;
+    for (int i = 0; i < rss.qpCount; i++) {
+      size_t qpBytes = rss.subExecParamCpu[i].N * sizeof(float);
+      if (qpBytes)
+        maxWrBytes = std::max(maxWrBytes, std::min(cfg.nic.chunkBytes, qpBytes));
+    }
+
     // Prepare NIC on SRC mem rank
     int srcGidIndex = cfg.nic.ibGidIndex;
     bool srcIsRoCE = false;
@@ -3846,6 +3907,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, srcCQSize, NULL, NULL, 0);
       // Get SRC port attributes
       IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
+      if (rss.srcPortAttr.max_msg_sz && maxWrBytes > rss.srcPortAttr.max_msg_sz) {
+        return {ERR_FATAL,
+                "Transfer %d: NIC work request size (%lu bytes) exceeds SRC NIC %d IBV max_msg_sz (%u bytes) "
+                "with %u queue pair(s) and chunkBytes %lu. Reduce NIC_CHUNK_BYTES / transfer size, "
+                "or increase the queue pair count",
+                rss.transferIdx, maxWrBytes, rss.srcNicIndex, rss.srcPortAttr.max_msg_sz,
+                rss.qpCount, cfg.nic.chunkBytes};
+      }
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
       srcIsRoCE = (rss.srcPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
       if (srcIsRoCE) {
@@ -3907,6 +3976,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       IBV_PTR_CALL(rss.dstCompQueue, ibv_create_cq, rss.dstContext, dstCQSize, NULL, NULL, 0);
       // Get DST port attributes
       IBV_CALL(ibv_query_port, rss.dstContext, port, &rss.dstPortAttr);
+      if (rss.dstPortAttr.max_msg_sz && maxWrBytes > rss.dstPortAttr.max_msg_sz) {
+        return {ERR_FATAL,
+                "Transfer %d: NIC work request size (%lu bytes) exceeds DST NIC %d IBV max_msg_sz (%u bytes) "
+                "with %u queue pair(s) and chunkBytes %lu. Reduce NIC_CHUNK_BYTES / transfer size, "
+                "or increase the queue pair count",
+                rss.transferIdx, maxWrBytes, rss.dstNicIndex, rss.dstPortAttr.max_msg_sz,
+                rss.qpCount, cfg.nic.chunkBytes};
+      }
       // Check for RDMA over Converged Ethernet (RoCE) and update GID index appropriately
       dstIsRoCE = (rss.dstPortAttr.link_layer == IBV_LINK_LAYER_ETHERNET);
       if (dstIsRoCE) {
@@ -8325,13 +8402,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         topo.closestCpuNumaToNic[exeIndex] = GetClosestLogicalCpu(nicPhysNode);
         topo.executorName[{EXE_NIC, exeIndex}] = GetIbvDeviceList()[exeIndex].name;
         topo.nicIsActive[exeIndex] = GetIbvDeviceList()[exeIndex].hasActivePort;
+        topo.nicMaxMsgSize[exeIndex] = GetIbvDeviceList()[exeIndex].maxMsgSize;
         if (verbose) {
           auto const& nic = GetIbvDeviceList()[exeIndex];
-          Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s\n",
+          Log("[INFO] Rank %03d: NIC [%02d/%02d] %s BDF %s NUMA %d active=%s max_msg_sz=%u\n",
               rank, exeIndex, numNics, nic.name.c_str(),
               nic.busId.empty() ? "?" : nic.busId.c_str(),
               topo.closestCpuNumaToNic[exeIndex],
-              nic.hasActivePort ? "yes" : "no");
+              nic.hasActivePort ? "yes" : "no",
+              nic.maxMsgSize);
         }
       }
     }
@@ -8572,6 +8651,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     SendMap(peerRank, topo.closestCpuNumaToGpu);
     SendMap(peerRank, topo.closestCpuNumaToNic);
     SendMap(peerRank, topo.nicIsActive);
+    SendMap(peerRank, topo.nicMaxMsgSize);
     SendMap(peerRank, topo.closestNicsToGpu);
     SendMap(peerRank, topo.closestGpusToNic);
     SendMap(peerRank, topo.executorName);
@@ -8588,6 +8668,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     RecvMap(peerRank, topo.closestCpuNumaToGpu);
     RecvMap(peerRank, topo.closestCpuNumaToNic);
     RecvMap(peerRank, topo.nicIsActive);
+    RecvMap(peerRank, topo.nicMaxMsgSize);
     RecvMap(peerRank, topo.closestNicsToGpu);
     RecvMap(peerRank, topo.closestGpusToNic);
     RecvMap(peerRank, topo.executorName);
@@ -8957,6 +9038,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return rankInfo[targetRank].nicIsActive.at(nicIndex);
   }
 
+  uint32_t System::GetNicMaxMsgSize(int nicIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].nicMaxMsgSize.count(nicIndex) == 0) return 0;
+    return rankInfo[targetRank].nicMaxMsgSize.at(nicIndex);
+  }
+
   int GetNumExecutors(ExeType exeType, int targetRank)
   {
     return System::Get().GetNumExecutors(exeType, targetRank);
@@ -9069,6 +9157,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   int NicIsActive(int nicIndex, int targetRank)
   {
     return System::Get().NicIsActive(nicIndex, targetRank);
+  }
+
+  uint32_t GetNicMaxMsgSize(int nicIndex, int targetRank)
+  {
+    return System::Get().GetNicMaxMsgSize(nicIndex, targetRank);
   }
 
 // Undefine CUDA compatibility macros

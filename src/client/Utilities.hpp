@@ -116,7 +116,8 @@ namespace TransferBench::Utils
     std::vector<std::string>,      // NIC Names
     std::vector<int>,              // NIC Closest NUMA
     std::vector<int>,              // NIC Closest GPU
-    std::vector<int>               // NIC is active
+    std::vector<int>,              // NIC is active
+    std::vector<uint32_t>          // NIC max_msg_sz
     > GroupKey;
 
   typedef std::map<GroupKey, std::vector<int>> RankGroupMap;
@@ -393,17 +394,19 @@ namespace TransferBench::Utils
         std::vector<std::string> nicNames;
         std::vector<int> nicClosestCpu;
         std::vector<int> nicIsActive;
+        std::vector<uint32_t> nicMaxMsgSize;
         for (int exeIndex = 0; exeIndex < numNics; exeIndex++) {
           ExeDevice exeDevice = {EXE_NIC, exeIndex, rank};
           nicNames.push_back(TransferBench::GetExecutorName(exeDevice));
           nicClosestCpu.push_back(TransferBench::GetClosestCpuNumaToNic(exeIndex, rank));
           nicIsActive.push_back(TransferBench::NicIsActive(exeIndex, rank));
+          nicMaxMsgSize.push_back(TransferBench::GetNicMaxMsgSize(exeIndex, rank));
         }
 
         GroupKey key(podId,
                      cpuNames, cpuNumSubExecs,
                      gpuNames, gpuNumSubExecs, gpuClosestCpu,
-                     nicNames, nicClosestCpu, nicClosestGpu, nicIsActive);
+                     nicNames, nicClosestCpu, nicClosestGpu, nicIsActive, nicMaxMsgSize);
 
         groups[key].push_back(rank);
       }
