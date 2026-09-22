@@ -734,9 +734,17 @@ namespace TransferBench
 // Helper macro functions
 //==========================================================================================
 
-// Returns xccId and a unified cuId for the current wavefront.
-// cuId encoding is arch-specific (see comments) but is always a dense index
-// suitable for CU-set tracking.
+// Returns xccId and the logical CU_MASK slot for the current wavefront.
+//
+// Logical CU ID: KFD's mqd_symmetrically_map_cu_mask() maps mask bit to (CU, SH, SE)
+// by walking CU outermost and SE innermost, so the slot is the same mixed-radix
+// expression on every architecture, only the radices differ per arch:
+//     slot = (cuIdx * numSHs + sh) * numSEs + se
+// A wave launched under CU_MASK=N therefore reports cuId == N, on every XCC.
+//
+// Exact only while every (SE,SH) has the same number of active CUs.
+// KFD skips visits in the final, ragged CU row (e.g. 38 CUs on MI300X), 
+// which shifts the highest few slots per XCC; slots below min(cu_per_sh) * numSEs are unaffected.
 __device__ __forceinline__ void GetXccHwId(uint32_t& xccId, uint32_t& cuId)
 {
 #if defined(__gfx942__) || defined(__gfx950__)
@@ -745,10 +753,15 @@ __device__ __forceinline__ void GetXccHwId(uint32_t& xccId, uint32_t& cuId)
   uint32_t hwId = 0, xccReg = 0;
   asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)"  : "=s"(hwId));
   asm volatile("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s"(xccReg));
+  // constexpr uint32_t numSEs = 4;  // SEs per XCC
+  // constexpr uint32_t numSHs = 1;  // SHs per SE (SH_ID is therefore always 0)
+  // uint32_t const se = (hwId >> 13) & 0x3;  // SE_ID [15:13]
+  // uint32_t const sh = (hwId >> 12) & 0x1;  // SH_ID [12]
+  // uint32_t const cu = (hwId >>  8) & 0xF;  // CU_ID [11:8]
+  // cuId  = (cu * numSHs + sh) * numSEs + se;
   xccId = xccReg & 0xF;
-  cuId  = (((hwId >> 12) & 1) << 5)   // SH_ID
-        | (((hwId >>  8) & 15) << 2)  // CU_ID
-        |  ((hwId >> 13) & 3);        // SE_ID
+  cuId = (((hwId >>  8) & 15) << 2)   // CU_ID  [11:8] → bits [5:2]
+       |  ((hwId >> 13) &  3);        // SE_ID [15:13] → bits [1:0]
 
 #elif defined(__gfx1250__)
   // CDNA5: HW_ID1 (code 23) + RTN_GET_SE_HW_ID (0x87)
@@ -756,20 +769,41 @@ __device__ __forceinline__ void GetXccHwId(uint32_t& xccId, uint32_t& cuId)
   uint32_t hwId = 0, seHwId = 0;
   asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID1)"       : "=s"(hwId));
   asm volatile("s_sendmsg_rtn_b32 %0, 0x87\ns_wait_kmcnt 0"  : "=s"(seHwId));
-  xccId = (seHwId >> 16) & 0xF;        // Virtual_XCC_ID [19:16]
-  cuId  = ((seHwId & 0xF) << 4)        // SE_ID   [3:0]  (gfx1250: 2 SEs → 1 bit)
-        | (((hwId >> 16) & 0x1) << 3)  // SA_ID   [16]   (gfx1250: 2 SAs → 1 bit)
-        |  ((hwId >> 10) & 0x7);       // WGP_ID  [12:10] (gfx1250: 8 WGPs per SA → 3 bits)
+  // Masking is at WGP granularity here, so cuIdx is the WGP index and the SA
+  // takes the role of KFD's SH.  32 WGPs per XCC gives slots 0-31.
+  // constexpr uint32_t numSEs = 2;  // SEs per XCC
+  // constexpr uint32_t numSAs = 2;  // SAs per SE
+  // uint32_t const se  =  seHwId      & 0x1;  // SE_ID   [3:0]
+  // uint32_t const sa  = (hwId >> 16) & 0x1;  // SA_ID   [16]
+  // uint32_t const wgp = (hwId >> 10) & 0x7;  // WGP_ID  [12:10] (8 WGPs per SA)
+  // cuId  = (wgp * numSAs + sa) * numSEs + se;
+  xccId = (seHwId >> 16) & 0xF;             // Virtual_XCC_ID [19:16]
+  cuId = (((hwId >> 10) & 0x7) << 2)   // WGP_ID [12:10] → bits [4:2]
+       | (((hwId >> 16) & 0x1) << 1)   // SA_ID  [16]    → bit  1
+       | (seHwId & 0x1);               // SE_ID  [0]     → bit  0
 
-#elif defined(__GFX9__)
-  // Other GFX9 (gfx90a/MI200, gfx908, gfx906) — single die, no XCC
-  // CDNA2 ISA §3.12 Table 6
+#elif defined(__gfx90a__)
+  // CDNA2 / MI200 (MI210, MI250, MI250X): one XCC per HIP device (each GCD is
+  // its own GPU).  slot = CU * 8 + SE  (SH is always 0).
+  // 8 SEs, 1 SH per SE.  KFD xcc_mask = 1, so CU_MASK=N is HIP bit N.
+  // MI250X with 110 CUs over 8 SEs are susceptible to the ragged row issue as noted above.
+  // CDNA2 ISA §3.12 Table 6.
   uint32_t hwId = 0;
   asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s"(hwId));
   xccId = 0;
-  cuId  = (((hwId >> 12) & 1) << 5)
-        | (((hwId >>  8) & 15) << 2)
-        |  ((hwId >> 13) & 3);
+  cuId  = (((hwId >>  8) & 15) << 3)  // CU_ID [11:8]  → bits [6:3]
+        |  ((hwId >> 13) &  7);       // SE_ID [15:13] → bits [2:0] (3 bits)
+
+#elif defined(__GFX9__)
+  // Remaining GFX9 (gfx908/MI100, gfx906/MI50): SE counts differ, so this is a
+  // packed (SH,CU,SE) coordinate, not a CU_MASK slot.  gfx908 also has 8 SEs;
+  // its slot formula would match gfx90a but is left as a coordinate for now.
+  uint32_t hwId = 0;
+  asm volatile("s_getreg_b32 %0, hwreg(HW_REG_HW_ID)" : "=s"(hwId));
+  xccId = 0;
+  cuId  = (((hwId >> 12) & 1) << 6)   // SH_ID
+        | (((hwId >>  8) & 15) << 2)  // CU_ID
+        |  ((hwId >> 13) & 3);        // SE_ID
 
 #elif defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
   // RDNA2/3/4 (non-CDNA5) — HW_ID1 present, no XCC
