@@ -763,7 +763,7 @@ __device__ __forceinline__ void GetXccHwId(uint32_t& xccId, uint32_t& cuId)
   cuId = (((hwId >>  8) & 15) << 2)   // CU_ID  [11:8] → bits [5:2]
        |  ((hwId >> 13) &  3);        // SE_ID [15:13] → bits [1:0]
 
-#elif defined(__gfx1250__)
+#elif defined(__gfx1250__) || defined(__gfx1250_strict__)
   // CDNA5: HW_ID1 (code 23) + RTN_GET_SE_HW_ID (0x87)
   // CDNA5 ISA §3.4.9, §5.4 Table 19
   uint32_t hwId = 0, seHwId = 0;
@@ -829,7 +829,7 @@ __device__ __forceinline__ uint32_t GetXccId()
   uint32_t xccReg = 0;
   asm volatile("s_getreg_b32 %0, hwreg(HW_REG_XCC_ID)" : "=s"(xccReg));
   return xccReg & 0xF;
-#elif defined(__gfx1250__)
+#elif defined(__GFX12__)
   uint32_t seHwId = 0;
   asm volatile("s_sendmsg_rtn_b32 %0, 0x87\ns_wait_kmcnt 0" : "=s"(seHwId));
   return (seHwId >> 16) & 0xF;  // Virtual_XCC_ID [19:16]
