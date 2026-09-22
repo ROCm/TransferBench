@@ -112,7 +112,7 @@ THE SOFTWARE.
 #  else
 #    define TDM_TOOLCHAIN_AVAILABLE 0
 #  endif
-#  if defined(__gfx1250__) && \
+#  if defined(__GFX12__) && \
       __has_builtin(__builtin_amdgcn_tensor_load_to_lds) && \
       TDM_TOOLCHAIN_AVAILABLE
                                   /* extend: || (defined(__gfxNNNN__) && ...) */

@@ -220,7 +220,8 @@ set(DEFAULT_GPUS
       gfx1151
       gfx1200
       gfx1201
-      gfx1250)
+      gfx1250
+      gfx1250-strict)
 
 if(BUILD_LOCAL_GPU_TARGET_ONLY)
   message(STATUS "Building only for local GPU target")
