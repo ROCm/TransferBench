@@ -2480,10 +2480,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   {
     if (t.numLaps > 0) {
       for (int half = 0; half < 2; half++) {
-        ExeDevice const& exe = half == 0 ? t.exeDevice : t.exeDevicePong;
+        ExeDevice const& exe = !half ? t.exeDevice : t.exeDevicePong;
         if (t.srcs[half].memType != MEM_NULL && t.srcs[half].memRank != exe.exeRank) return true;
         if (t.dsts[half].memType != MEM_NULL && t.dsts[half].memRank != exe.exeRank) return true;
       }
+      // Partner flag buffers are polled by the opposite half's executor
+      if (t.dsts[0].memType != MEM_NULL && t.dsts[0].memRank != t.exeDevicePong.exeRank) return true;
+      if (t.dsts[1].memType != MEM_NULL && t.dsts[1].memRank != t.exeDevice.exeRank) return true;
       return false;
     }
 
@@ -2995,6 +2998,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                 !(samePod = IsSamePod(t.dsts[half].memRank, exeRank)))
               break;
           }
+          // Partner flag buffers must be reachable by the opposite half's executor
+          if (samePod && t.dsts[0].memType != MEM_NULL)
+            samePod = IsSamePod(t.dsts[0].memRank, t.exeDevicePong.exeRank);
+          if (samePod && t.dsts[1].memType != MEM_NULL)
+            samePod = IsSamePod(t.dsts[1].memRank, t.exeDevice.exeRank);
         } else {
           int exeRank = t.exeDevice.exeRank;
           for (auto const& src : t.srcs) {
@@ -3010,8 +3018,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
 
         if (!samePod || IsCpuExeType(t.exeDevice.exeType)) {
-          errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d can not access memory across ranks\n",
-              i, t.exeDevice.exeRank});
+          if (isPingpong) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: Ping/Pong Executor on rank %d/%d cannot access memory (src or partner flag) across ranks",
+                i, t.exeDevice.exeRank, t.exeDevicePong.exeRank});
+          } else {
+            errors.push_back({ERR_FATAL, "Transfer %d: Executor on rank %d cannot access memory across ranks\n",
+                i, t.exeDevice.exeRank});
+          }
           break;
         }
 
@@ -3044,6 +3058,24 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               hasFatalError = true;
               break;
             }
+          }
+          if (!hasFatalError && t.dsts[0].memType != MEM_NULL &&
+              t.dsts[0].memRank != t.exeDevicePong.exeRank && IsCpuMemType(t.dsts[0].memType)) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                "(ping DST on rank %d is %s) for partner flag polling.",
+                i, t.exeDevicePong.exeRank, ExeTypeStr[t.exeDevicePong.exeType], t.exeDevicePong.exeIndex,
+                t.dsts[0].memRank, GetMemTypeName(t.dsts[0].memType)});
+            hasFatalError = true;
+          }
+          if (!hasFatalError && t.dsts[1].memType != MEM_NULL &&
+              t.dsts[1].memRank != t.exeDevice.exeRank && IsCpuMemType(t.dsts[1].memType)) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
+                "(pong DST on rank %d is %s) for partner flag polling.",
+                i, t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
+                t.dsts[1].memRank, GetMemTypeName(t.dsts[1].memType)});
+            hasFatalError = true;
           }
           if (hasFatalError) break;
         } else if (IsGpuExeType(t.exeDevice.exeType)) {
@@ -3327,6 +3359,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     // Pingpong role/lap count on this resource half (0 = normal, >0 = ping, <0 = pong)
     int                        numLaps = 0;
+    float*                     partnerFlagMem = nullptr;        ///< Partner dst imported onto this executor (cross-rank/pod)
+    size_t                     partnerFlagActualBytes = 0;      ///< Size of partnerFlagMem mapping
+    memHandle_t                partnerFlagMemHandle = 0;        ///< Import handle for partnerFlagMem teardown
 
     // Counters
     double                     totalDurationMsec; ///< Total duration for all iterations for this Transfer
@@ -5193,6 +5228,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         if (rss.numLaps != 0)
           dstAllocBytes = std::max(dstAllocBytes, (size_t)cfg.general.pingpongFlagBuffer);
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
+        if (rss.numLaps != 0 && IsGpuMemType(dstMemDevice.memType)) {
+          // Partner half's executor may fabric-import this flag buffer for cross-rank pingpong
+          ExeDevice const& partnerExe = (rss.numLaps > 0) ? t.exeDevicePong : t.exeDevice;
+          if (IsGpuExeType(partnerExe.exeType) && partnerExe.exeRank != dstMemDevice.memRank)
+            requiresFabricHandle = true;
+        }
         if (dstMemDevice.memRank == localRank) {
           if (verbose) {
             std::string bdf = IsGpuMemType(dstMemDevice.memType) ? GetGpuBdf(dstMemDevice.memIndex) : "";
@@ -5494,15 +5535,33 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         MemDevice const& partnerMem = t.dsts[isPong ? 0 : 1];
         ExeDevice exeDevice;
         ERR_CHECK(GetActualExecutor(isPong ? t.exeDevicePong : t.exeDevice, exeDevice));
-        if (IsGpuExeType(exeDevice.exeType)  && IsGpuMemType(partnerMem.memType) &&
-            exeDevice.exeRank == localRank   && partnerMem.memRank == localRank  &&
-            partnerMem.memIndex != exeDevice.exeIndex) {
-          if (System::Get().IsVerbose()) {
-            System::Get().Log("[INFO]   Enabling pingpong peer access: GPU %d -> GPU %d\n",
-                              exeDevice.exeIndex, partnerMem.memIndex);
+
+        float* partnerFlagPtr = partnerRss->dstMem[0];
+        if (IsGpuExeType(exeDevice.exeType) && IsGpuMemType(partnerMem.memType)) {
+          if (partnerMem.memRank != exeDevice.exeRank) {
+            // Partner dst must be fabric-imported onto this half's executor (pingDst<->pongExe, etc.)
+            rss->partnerFlagActualBytes = partnerRss->dstActualBytes.empty() ? 0 : partnerRss->dstActualBytes[0];
+            memHandle_t* exchangeHandle = &rss->partnerFlagMemHandle;
+            if (localRank == partnerMem.memRank)
+              exchangeHandle = &partnerRss->dstMemHandle[0];
+            if (System::Get().IsVerbose()) {
+              System::Get().Log("[INFO]   Exchanging pingpong partner flag: %s rank %d -> executor R%d%c%d\n",
+                                isPong ? "ping DST" : "pong DST", partnerMem.memRank,
+                                exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex);
+            }
+            ERR_CHECK(ExchangeMemory(partnerMem, exeDevice, &rss->partnerFlagActualBytes,
+                                     &partnerFlagPtr, exchangeHandle));
+            rss->partnerFlagMem = partnerFlagPtr;
+          } else if (partnerMem.memIndex != exeDevice.exeIndex) {
+            if (System::Get().IsVerbose()) {
+              System::Get().Log("[INFO]   Enabling pingpong peer access: GPU %d -> GPU %d\n",
+                                exeDevice.exeIndex, partnerMem.memIndex);
+            }
+            ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, partnerMem.memIndex));
           }
-          ERR_CHECK(EnablePeerAccess(exeDevice.exeIndex, partnerMem.memIndex));
         }
+
+        pp.localFlagMem   = static_cast<volatile uint8_t*>(static_cast<void*>(partnerFlagPtr));
       }
     }
 
@@ -5638,6 +5697,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (IsIbvSymbolsReady() && IsNicExeType(exeDevice.exeType)) {
         ERR_CHECK(TeardownNicTransferResources(rss, t));
       }
+
+      // Unmap fabric-imported partner flag buffer (cross-rank pingpong)
+      if (rss.numLaps != 0 && exeDevice.exeRank == localRank && rss.partnerFlagMemHandle) {
+        if (verbose) {
+          System::Get().Log("[INFO]   Unmap pingpong partner flag: %p (%zu bytes)\n",
+                            rss.partnerFlagMem, rss.partnerFlagActualBytes);
+        }
+#ifdef POD_COMM_ENABLED
+        ERR_CHECK(hipMemUnmap((gpu_device_ptr)rss.partnerFlagMem, rss.partnerFlagActualBytes));
+        ERR_CHECK(hipMemRelease(rss.partnerFlagMemHandle));
+        ERR_CHECK(hipMemAddressFree((gpu_device_ptr)rss.partnerFlagMem, rss.partnerFlagActualBytes));
+#endif
+        rss.partnerFlagMem        = nullptr;
+        rss.partnerFlagMemHandle  = 0;
+        rss.partnerFlagActualBytes = 0;
+      }
     }
 
     // Teardown additional requirements for GPU-based executors
@@ -5675,10 +5750,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   __device__ void GpuWait(volatile uint8_t* flag, uint8_t val)
   {
 #if defined(__NVCC__)
-    // CUDA has no 1-byte atomic, so poll through volatile and fence to order subsequent loads
+    // ld.volatile has the same semantics as ld.relaxed.sys on sm_70+, matching the HIP path below
     while (*flag != val)
       ;
-    __threadfence_system();
 #else
     while (__hip_atomic_load(flag, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) != val)
       ;
@@ -5688,7 +5762,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   __device__ void GpuStore(volatile uint8_t* flag, uint8_t val)
   {
 #if defined(__NVCC__)
-    __atomic_store_n((uint8_t*)flag, val, __ATOMIC_RELAXED);
+    // st.volatile has the same semantics as st.relaxed.sys on sm_70+
+    *flag = val;
 #else
     __hip_atomic_store((uint8_t*)flag, val, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 #endif
@@ -7603,6 +7678,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         } else if (IsGpuMemType(dstMem.memType)) {
           ERR_APPEND(ErrResult(hipSetDevice(dstMem.memIndex)), errResults);
           ERR_APPEND(ErrResult(hipMemset(dst, -1, allocBytes)), errResults);
+          ERR_APPEND(ErrResult(hipDeviceSynchronize()), errResults);
         }
       }
 
@@ -7636,6 +7712,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         // Clear destination memory after validation so each iteration starts from a known-zero state
         size_t const initOffset = cfg.data.byteOffset / sizeof(float);
         for (auto rss : transferResources) {
+          // Pingpong flag buffers are reset at the start of every iteration instead
+          if (rss->numLaps != 0) continue;
           Transfer const& t = transfers[rss->transferIdx];
           for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
             if (t.dsts[dstIdx].memRank != localRank) continue;
