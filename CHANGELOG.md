@@ -3,6 +3,34 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.71.00
+### Added
+- Added PingPong operations to measure latency between two GPU Executors. A PingPong joins a Ping and a Pong triplet
+  with `+` and an optional lap count, e.g. `(N->G0->F1)+1000(N->G1->F0)`. Each lap, the Ping Executor writes a
+  1-byte flag to its DST and waits for the Pong Executor to write one back to the Pong DST. Results report the
+  GPU-timed round-trip latency per lap
+  - PingPongs can run in parallel with regular Transfers in the same Test, and do not count toward Executor bandwidth
+  - Each Ping and Pong uses a single threadblock; the number of SubExecutors and bytes to transfer are ignored
+  - Currently supported on GFX Executors only
+  - Ping and Pong may run on different ranks within the same pod (requires pod communication support)
+- Added `PINGPONG_FLAG_BUFFER` and `PINGPONG_STRIDE` to spread PingPong flags across a buffer, moving by the stride each lap
+- Added latency presets built on PingPong operations:
+  - "p2p_latency": latency between pairs of GPU Executors, run serially
+  - "one2all_latency": latency from one GPU Executor to all others, run in parallel
+  - "a2a_latency": latency between all pairs of GPU Executors, run in parallel
+  - Behavior can be modified with `NUM_LAPS`, `GPU_MEM_TYPE`, `USE_REMOTE_READ`, `NUM_GPU_DEVICES` and, for a2a_latency, `A2A_LOCAL`
+- Added gfx1250-strict to the default GPU targets for CMake builds
+- NIC topology output now shows each NIC's IBV max_msg_sz
+### Modified
+- When GFX Executor timing does not use HIP events (multi-stream mode or `USE_HIP_EVENTS=0`), it now spans from the first
+  Transfer launch to the last Transfer completion, excluding executor dispatch overhead
+### Fixed
+- CU IDs reported with `SHOW_ITERATIONS` now match `CU_MASK` indices on gfx90a, gfx942, gfx950 and gfx1250
+- GFX kernel launch failures are now reported instead of being ignored
+- RoCE / GID index fields are now initialized for NICs that are not RoCE or have no active port
+- NIC Transfers are now rejected during validation if a queue pair's work request (the smaller of `NIC_CHUNK_BYTES` and
+  the bytes assigned to that queue pair) exceeds the IBV max_msg_sz of either NIC
+
 ## v1.70.02
 ### Modified
 - rings preset defaults `NUM_SUB_EXEC` to 0, which uses all available subexecutors per Transfer
