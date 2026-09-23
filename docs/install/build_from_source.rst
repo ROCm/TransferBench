@@ -317,7 +317,7 @@ To modify the CMake behavior, use the following environment variables:
               <td rowspan="3"><b>CMake cache variables</b></td>
               <td><code>GPU_TARGETS</code></td>
               <td>Semicolon-separated GPU architectures. Overridden if <code>BUILD_LOCAL_GPU_TARGET_ONLY</code> is <code>ON</code></td>
-              <td><code style="word-break: break-all;">gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201;gfx1250</code></td>
+              <td><code style="word-break: break-all;">gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201;gfx1250;gfx1250-strict</code></td>
               </tr>
               <tr>
                 <td><code>AMD_SMI_EXECUTABLE</code></td>
