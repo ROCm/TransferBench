@@ -211,6 +211,7 @@ namespace TransferBench
    *   exeDevice / exeSubIndex / exeSubSlot             = ping executor (any ExeType)
    *   exeDevicePong / exeSubIndexPong / exeSubSlotPong = pong executor (any ExeType)
    *   numLaps = number of pingpong laps (must be > 0); specify as "+N" after ping half ("+" alone defaults to 1)
+   *   Both halves are plain (SRC EXE DST) triplets in simple and advanced mode alike, e.g. "(N G0 F1 +1000 N G1 F0)"
    *
    * Ping/pong executors may differ in type (e.g. ping on GFX, pong on DMA). The struct is
    * executor-agnostic; additional executor types are enabled by implementing their dispatch
@@ -3284,6 +3285,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Outputs (ping half only)
     int64_t                    startCycle;        ///< Start timestamp for in-kernel timing
     int64_t                    stopCycle;         ///< Stop  timestamp for in-kernel timing
+
+    // Outputs (both halves)
+    uint32_t                   hwId;              ///< Hardware ID of the CU that ran this half
+    uint32_t                   xccId;             ///< XCC ID that ran this half
   };
 
   // Internal resources allocated per Transfer
@@ -4991,6 +4996,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     p.preferredXccId = subIndex;
     p.startCycle     = 0;
     p.stopCycle      = 0;
+    p.hwId           = ~0u;
+    p.xccId          = ~0u;
 
     // Device-resident uint8_t values {0, 1} at rss.srcMem[0] + byteOffset (even/odd lap signaling)
     if (exeDevice.exeType == EXE_GPU_GFX && !rss.srcMem.empty()) {
@@ -6506,6 +6513,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     if (threadIdx.x != 0) return;
 
+    uint32_t hwXccId, hwCuId;
+    GetXccHwId(hwXccId, hwCuId);
+
     bool const isPing = p.numLaps > 0;
     int  const laps   = isPing ? p.numLaps : -p.numLaps;
 
@@ -6556,6 +6566,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
     }
+    p.xccId = hwXccId;
+    p.hwId  = hwCuId;
   }
 
   // Execute a single GPU Transfer (when using 1 stream per Transfer)
@@ -6821,6 +6833,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ERR_CHECK(hipMemcpy(pingpongParamHost.data(), exeInfo.pingpongParamGpu,
                               exeInfo.totalPingpong * sizeof(PingpongParam), hipMemcpyDefault));
           pingpongParam = pingpongParamHost.data();
+        }
+
+        if (iteration == 0 && System::Get().IsVerbose()) {
+          for (TransferResources const& rss : exeInfo.resources) {
+            if (rss.numLaps == 0 || rss.pingpongParamIdx < 0) continue;
+            PingpongParam const& p = pingpongParam[rss.pingpongParamIdx];
+            System::Get().Log("[INFO] Pingpong %d (%s) on GPU %d: requested XCC %d, ran on XCC %u CU %u\n",
+                              rss.transferIdx, rss.numLaps > 0 ? "ping" : "pong", exeIndex,
+                              p.preferredXccId, p.xccId, p.hwId);
+          }
         }
 
         for (TransferResources& rss : exeInfo.resources) {
@@ -8267,6 +8289,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     // If numTransfers < 0, read 5-tuple (srcMem, exeMem, dstMem, #CUs, #Bytes)
     // otherwise read triples (srcMem, exeMem, dstMem)
+    // Pingpongs are always two triples joined by "+N", as #CUs and #Bytes do not apply to them
     bool const advancedMode = (numTransfers < 0);
     numTransfers = abs(numTransfers);
 
@@ -8282,37 +8305,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     for (int i = 0; i < numTransfers; i++) {
-      size_t numBytes;
-      if (!advancedMode) {
-        iss >> srcStr >> exeStr >> dstStr;
-        if (iss.fail()) {
-          return {ERR_FATAL,
-            "Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet", i+1};
-        }
-        numBytes = 0;
-      } else {
-        iss >> srcStr >> exeStr >> dstStr >> numSubExecs >> numBytesToken;
-        if (iss.fail()) {
-          return {ERR_FATAL,
-            "Parsing error: Unable to read valid Transfer %d (SRC EXE DST $CU #Bytes) tuple", i+1};
-        }
-        if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1) {
-          return {ERR_FATAL,
-            "Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple", i+1};
-        }
-
-        char units = numBytesToken.back();
-        switch (toupper(units)) {
-        case 'G': numBytes *= 1024;
-        case 'M': numBytes *= 1024;
-        case 'K': numBytes *= 1024;
-        }
+      size_t numBytes = 0;
+      iss >> srcStr >> exeStr >> dstStr;
+      if (iss.fail()) {
+        return {ERR_FATAL,
+          "Parsing error: Unable to read valid Transfer %d (SRC EXE DST) triplet", i+1};
       }
-
-      WildcardTransfer wct;
-      ERR_CHECK(ParseMemType(srcStr, wct.mem[0]));
-      ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
-      ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
       // Check for '+' to detect pingpong; optional lap count immediately follows '+'
       //   e.g. "+500" or "+" (default numLaps)
@@ -8331,6 +8329,38 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         iss.clear();
         iss.seekg(pos);
       }
+
+      if (advancedMode && !isPingpong) {
+        iss >> numSubExecs >> numBytesToken;
+        if (iss.fail()) {
+          return {ERR_FATAL,
+            "Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple", i+1};
+        }
+        if (sscanf(numBytesToken.c_str(), "%lu", &numBytes) != 1) {
+          return {ERR_FATAL,
+            "Parsing error: Unable to read valid Transfer %d (SRC EXE DST #CU #Bytes) tuple", i+1};
+        }
+
+        char units = numBytesToken.back();
+        switch (toupper(units)) {
+        case 'G': numBytes *= 1024;
+        case 'M': numBytes *= 1024;
+        case 'K': numBytes *= 1024;
+        }
+
+        pos = iss.tellg();
+        if (iss >> nextToken && !nextToken.empty() && nextToken[0] == '+') {
+          return {ERR_FATAL,
+            "Parsing error: Pingpong %d must not specify #CU / #Bytes, use (SRC EXE DST)+N(SRC EXE DST)", i+1};
+        }
+        iss.clear();
+        iss.seekg(pos);
+      }
+
+      WildcardTransfer wct;
+      ERR_CHECK(ParseMemType(srcStr, wct.mem[0]));
+      ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
+      ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
       if (isPingpong) {
         // Parse the pong triplet
@@ -8864,7 +8894,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         printExe(t.exeDevicePong, t.exeSubIndexPong, t.exeSubSlotPong);
         fprintf(dumpCfgFile, "->");
         printMem(t.dsts[1]);
-        fprintf(dumpCfgFile, " %d %lu)", t.numSubExecs, t.numBytes);
+        fprintf(dumpCfgFile, ")");
       } else {
         // Print SRCs
         for (auto const& src : t.srcs) {
