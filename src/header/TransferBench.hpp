@@ -7379,6 +7379,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                     std::vector<Transfer> const& transfers,
                     TestResults&                 results)
   {
+    // Pingpong runs its laps once per launch rather than once per subiteration,
+    // a test made up only of pingpongs is timed with a single subiteration
+    if (cfg.general.numSubIterations != 1 && !transfers.empty() &&
+        std::all_of(transfers.begin(), transfers.end(), [](Transfer const& t) { return t.numLaps != 0; })) {
+      ConfigOptions pingpongCfg = cfg;
+      pingpongCfg.general.numSubIterations = 1;
+      bool const success = RunTransfers(pingpongCfg, transfers, results);
+      results.errResults.push_back({ERR_WARN,
+        "[general.numSubIterations] (%d) is ignored when all Transfers are pingpongs",
+        cfg.general.numSubIterations});
+      return success;
+    }
+
     // Clear all errors;
     auto& errResults = results.errResults;
     errResults.clear();
