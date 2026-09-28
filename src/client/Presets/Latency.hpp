@@ -24,6 +24,7 @@ THE SOFTWARE.
 //   p2p_latency     - Every pair runs by itself, one pair at a time
 //   one2all_latency - One PING executor runs against all PONG executors at once, one PING executor at a time
 //   a2a_latency     - Every pair runs at once
+//   ring_latency    - Each GPU pings its neighbor; every hop in the ring(s) runs at once
 int LatencyPreset(EnvVars&          ev,
                   size_t      const /*numBytesPerTransfer*/,
                   std::string const presetName,
@@ -32,6 +33,7 @@ int LatencyPreset(EnvVars&          ev,
   bool const isP2p     = (presetName == "p2p_latency");
   bool const isOne2All = (presetName == "one2all_latency");
   bool const isA2a     = (presetName == "a2a_latency");
+  bool const isRing    = (presetName == "ring_latency");
 
   if (!Utils::AllRanksHaveSameGpuCount()) {
     Utils::Print("[ERROR] %s preset requires all ranks to have the same number of GPUs\n", presetName.c_str());
@@ -48,6 +50,8 @@ int LatencyPreset(EnvVars&          ev,
   int numGpuDevices = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
   int numLaps       = EnvVars::GetEnvVar("NUM_LAPS"       , 1000);
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
+  int stride        = isRing ? EnvVars::GetEnvVar("STRIDE", 1) : 1;
+  int ringSize      = isRing ? EnvVars::GetEnvVar("RING_SIZE", numRanks * numGpuDevices) : 0;
 
   MemType     const memType    = Utils::GetGpuMemType(memTypeIdx);
   std::string const memTypeStr = Utils::GetGpuMemTypeStr(memTypeIdx);
@@ -62,6 +66,10 @@ int LatencyPreset(EnvVars&          ev,
       ev.Print("GPU_MEM_TYPE",    memTypeIdx,    "Using %s memory for flags (%s)", memTypeStr.c_str(), Utils::GetAllGpuMemTypeStr().c_str());
       ev.Print("NUM_GPU_DEVICES", numGpuDevices, "Using %d GPUs%s", numGpuDevices, numRanks > 1 ? " per rank" : "");
       ev.Print("NUM_LAPS",        numLaps,       "Timing %d round trips per iteration", numLaps);
+      if (isRing) {
+        ev.Print("RING_SIZE",     ringSize,      "Building rings of size %d", ringSize);
+        ev.Print("STRIDE",        stride,        "Reordering devices by taking %d steps", stride);
+      }
       ev.Print("USE_REMOTE_READ", useRemoteRead, "%s", useRemoteRead ? "Executors write to their own memory and poll their partner's"
                                                                      : "Executors write to their partner's memory and poll their own");
       printf("\n");
@@ -73,6 +81,10 @@ int LatencyPreset(EnvVars&          ev,
   IS_UNIFORM(memTypeIdx,    "GPU_MEM_TYPE");
   IS_UNIFORM(numGpuDevices, "NUM_GPU_DEVICES");
   IS_UNIFORM(numLaps,       "NUM_LAPS");
+  if (isRing) {
+    IS_UNIFORM(ringSize,    "RING_SIZE");
+    IS_UNIFORM(stride,      "STRIDE");
+  }
   IS_UNIFORM(useRemoteRead, "USE_REMOTE_READ");
 
   // Validate env vars
@@ -92,23 +104,64 @@ int LatencyPreset(EnvVars&          ev,
       exes.push_back({EXE_GPU_GFX, gpu, rank});
   int const numExes = (int)exes.size();
 
+  // Ring hops follow the same ordering as the rings preset: devices are listed rank-major,
+  // reordered by STRIDE, then split into rings of RING_SIZE.  GPU i pings the next GPU in its ring.
+  std::vector<int> ringOrder;
+  if (isRing) {
+    if (ringSize <= 1) {
+      if (numExes < 2)
+        Utils::Print("[ERROR] %s requires at least 2 GPUs\n", presetName.c_str());
+      else
+        Utils::Print("[ERROR] RING_SIZE must be greater than 1 (got %d)\n", ringSize);
+      return ERR_FATAL;
+    }
+    if (numExes % ringSize) {
+      Utils::Print("[ERROR] Ring size %d must evenly divide the total number of GPUs %d\n", ringSize, numExes);
+      return ERR_FATAL;
+    }
+    ringOrder.resize(numExes);
+    for (int i = 0; i < numExes; i++) ringOrder[i] = i;
+    Utils::StrideGenerate(ringOrder, stride);
+  }
+
   // Select the (PING, PONG) pairs to measure.  Cross-rank pairs exchange flags through fabric
   // handles, which requires pod support and both ranks to be in the same pod
+  auto canPair = [&](int i, int j) {
+    bool ok = (exes[i].exeRank == exes[j].exeRank);
+#ifdef POD_COMM_ENABLED
+    ok |= TransferBench::IsSamePod(exes[j].exeRank, exes[i].exeRank);
+#endif
+    return ok;
+  };
+
   std::vector<std::vector<bool>> isMeasured(numExes, std::vector<bool>(numExes, false));
   int numPairs = 0, numSkipped = 0;
-  for (int i = 0; i < numExes; i++) {
-    for (int j = 0; j < numExes; j++) {
-      if (i == j && !isP2p && !a2aLocal) continue;
-      bool canPair = (exes[i].exeRank == exes[j].exeRank);
-#ifdef POD_COMM_ENABLED
-      canPair |= TransferBench::IsSamePod(exes[j].exeRank, exes[i].exeRank);
-#endif
-      if (!canPair) {
-        numSkipped++;
-        continue;
+  if (isRing) {
+    int const numRings = numExes / ringSize;
+    for (int ringIdx = 0; ringIdx < numRings; ringIdx++) {
+      int const ringBase = ringIdx * ringSize;
+      for (int hop = 0; hop < ringSize; hop++) {
+        int const src = ringOrder[ringBase + hop];
+        int const dst = ringOrder[ringBase + (hop + 1) % ringSize];
+        if (!canPair(src, dst)) {
+          numSkipped++;
+          continue;
+        }
+        isMeasured[src][dst] = true;
+        numPairs++;
       }
-      isMeasured[i][j] = true;
-      numPairs++;
+    }
+  } else {
+    for (int i = 0; i < numExes; i++) {
+      for (int j = 0; j < numExes; j++) {
+        if (i == j && !isP2p && !a2aLocal) continue;
+        if (!canPair(i, j)) {
+          numSkipped++;
+          continue;
+        }
+        isMeasured[i][j] = true;
+        numPairs++;
+      }
     }
   }
 
@@ -147,8 +200,11 @@ int LatencyPreset(EnvVars&          ev,
       transfers.push_back(t);
     }
 
-    if (!TransferBench::RunTransfers(cfg, transfers, results))
-      Utils::PrintErrors(results.errResults);
+    if (!TransferBench::RunTransfers(cfg, transfers, results)) {
+      for (auto const& err : results.errResults)
+        Utils::Print("[%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
+      return;
+    }
 
     for (size_t k = 0; k < pairs.size(); k++)
       latencyUs[pairs[k].first][pairs[k].second] = results.tfrResults[k].avgDurationMsec * 1000.0;
@@ -163,10 +219,33 @@ int LatencyPreset(EnvVars&          ev,
     return std::string(buf);
   };
 
-  Utils::Print("Pingpong round-trip latency per lap (us), %s\n",
-               isP2p     ? "each pair run by itself" :
-               isOne2All ? "each PING executor run against all PONG executors in parallel"
-                         : "all pairs run in parallel");
+  char modeBuf[192];
+  if (isRing) {
+    int const numRings = numExes / ringSize;
+    if (stride == 1)
+      snprintf(modeBuf, sizeof(modeBuf), "%d parallel ring%s of %d, each GPU pinging its neighbor",
+               numRings, numRings == 1 ? "" : "s", ringSize);
+    else
+      snprintf(modeBuf, sizeof(modeBuf), "%d parallel ring%s of %d (stride %d), each GPU pinging its neighbor",
+               numRings, numRings == 1 ? "" : "s", ringSize, stride);
+  } else if (isP2p) {
+    snprintf(modeBuf, sizeof(modeBuf), "each pair run by itself");
+  } else if (isOne2All) {
+    snprintf(modeBuf, sizeof(modeBuf), "each PING executor run against all PONG executors in parallel");
+  } else {
+    snprintf(modeBuf, sizeof(modeBuf), "all pairs run in parallel");
+  }
+  Utils::Print("Pingpong round-trip latency per lap (us), %s\n", modeBuf);
+  if (isRing) {
+    int const numRings = numExes / ringSize;
+    for (int ringIdx = 0; ringIdx < numRings; ringIdx++) {
+      int const ringBase = ringIdx * ringSize;
+      Utils::Print("Ring %02d:", ringIdx);
+      for (int hop = 0; hop < ringSize; hop++)
+        Utils::Print(" %s ->", exeStr(exes[ringOrder[ringBase + hop]]).c_str());
+      Utils::Print(" %s\n", exeStr(exes[ringOrder[ringBase]]).c_str());
+    }
+  }
   Utils::Print("[%d laps] [%s memory flags] [%s]\n", numLaps, memTypeStr.c_str(),
                useRemoteRead ? "local write / remote poll" : "remote write / local poll");
 
@@ -176,7 +255,7 @@ int LatencyPreset(EnvVars&          ev,
     Utils::Print("%c%*s", sep, width, exeStr(exes[j]).c_str());
   Utils::Print("\n");
 
-  if (isA2a) {
+  if (isA2a || isRing) {
     std::vector<std::pair<int, int>> pairs;
     for (int i = 0; i < numExes; i++)
       for (int j = 0; j < numExes; j++)
