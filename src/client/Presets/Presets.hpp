@@ -87,6 +87,7 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"p2p_latency",     {LatencyPreset,       "Latency values between pairs of Executors, run serially"}},
   {"poda2a",          {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},
   {"podp2p",          {PodPeerToPeerPreset, "Peer-to-peer transfers test among ranks within a pod"}},
+  {"ring_latency",    {LatencyPreset,       "Each GPU pingpongs its neighbor, all hops in parallel"}},
   {"rings",           {RingsPreset,         "Ring transfers within subgroups of ranks in a pod"}},
   {"rsweep",          {SweepPreset,         "Randomly sweep through sets of Transfers"}},
   {"scaling",         {ScalingPreset,       "Run scaling test from one GPU to other devices"}},
