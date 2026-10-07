@@ -8400,6 +8400,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         ERR_CHECK(ParseMemType(pongDstStr, pongWct.mem[1]));
         ERR_CHECK(ParseExeType(pongExeStr, pongWct.exe));
 
+        // Each half exchanges one flag, so it takes at most one SRC and one DST
+        std::pair<std::vector<WildcardMemDevice> const&, char const*> const halfMems[] = {
+          {wct.mem[0], "ping SRC"}, {wct.mem[1], "ping DST"},
+          {pongWct.mem[0], "pong SRC"}, {pongWct.mem[1], "pong DST"}};
+        for (auto const& [mems, name] : halfMems) {
+          if (mems.size() > 1)
+            return {ERR_FATAL, "Parsing error: Pingpong %d %s must be a single memory device (got %zu)",
+                    i+1, name, mems.size()};
+        }
+
         // Temporary transfers to store ping and pong halves
         // Expand ping half
         std::vector<Transfer> pingTransfers;
