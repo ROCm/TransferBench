@@ -6506,9 +6506,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int const pingpongIdx = blockIdx.y;
     PingpongParam& p = params[pingpongIdx];
 
+    // An pingpong half runs in the first XCC, this also counters XccPrefTable
+    if (p.preferredXccId == -1) {
+      if (blockIdx.x != 0) return;
+    }
 #if !defined(__NVCC__)
-    int32_t const xccId = (int32_t)GetXccId();
-    if (p.preferredXccId != -1 && xccId != p.preferredXccId) return;
+    else if ((int32_t)GetXccId() != p.preferredXccId) return;
 #endif
 
     if (threadIdx.x != 0) return;
@@ -6535,6 +6538,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int     off    = 0;
     int     hopCnt = hp;
     uint8_t val    = 0;
+
+    // Pong signals that it is running before ping starts its timer, so that the partner's
+    // launch delay is never timed.  Lap 0's slot is used with a value no lap writes (laps use
+    // 0/1 and slots idle at 0xFF)
+    constexpr uint8_t readyVal = 2;
+    if (isPing)
+      GpuWait(localBase, readyVal);
+    else
+      GpuStore(remoteBase, readyVal);
 
     int64_t startCycle = GetTimestamp();
 
