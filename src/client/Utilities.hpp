@@ -846,18 +846,33 @@ namespace TransferBench::Utils
 
       }
     }
+    // The aggregate wall time of a Test mixing pingpongs with normal Transfers is not
+    // comparable to either kind of work, so it is omitted
+    bool const hasPingpong   = std::any_of(transfers.begin(), transfers.end(),
+                                           [](Transfer const& t) { return t.numLaps != 0; });
+    bool const hasNormal     = std::any_of(transfers.begin(), transfers.end(),
+                                           [](Transfer const& t) { return t.numLaps == 0; });
+    bool const omitAggregate = hasPingpong && hasNormal;
+
     table.DrawRowBorder(rowIdx);
     table.Set(rowIdx, 0, "Aggregate (CPU) ");
-    if (results.totalBytesTransferred == 0) {
-      // Pingpong-only run: no payload was moved, so leave the bandwidth/byte cells empty
-      table.Set(rowIdx, 1, " ");
-      table.Set(rowIdx, 3, " ");
+    if (omitAggregate) {
+      table.Set(rowIdx, 1, "%8s GB/s "  , "-");
+      table.Set(rowIdx, 2, "%8s ms "    , "-");
+      table.Set(rowIdx, 3, "%12s bytes ", "-");
+      table.Set(rowIdx, 4, " Overhead - ms");
     } else {
-      table.Set(rowIdx, 1, "%8.3f GB/s "  , results.avgTotalBandwidthGbPerSec);
-      table.Set(rowIdx, 3, "%12lu bytes " , results.totalBytesTransferred);
+      if (results.totalBytesTransferred == 0) {
+        // Pingpong-only run: no payload was moved, so leave the bandwidth/byte cells empty
+        table.Set(rowIdx, 1, " ");
+        table.Set(rowIdx, 3, " ");
+      } else {
+        table.Set(rowIdx, 1, "%8.3f GB/s "  , results.avgTotalBandwidthGbPerSec);
+        table.Set(rowIdx, 3, "%12lu bytes " , results.totalBytesTransferred);
+      }
+      table.Set(rowIdx, 2, "%8.3f ms "        , results.avgTotalDurationMsec);
+      table.Set(rowIdx, 4, " Overhead %.3f ms", results.overheadMsec);
     }
-    table.Set(rowIdx, 2, "%8.3f ms "        , results.avgTotalDurationMsec);
-    table.Set(rowIdx, 4, " Overhead %.3f ms", results.overheadMsec);
     table.SetCellAlignment(rowIdx, 4, TableHelper::ALIGN_LEFT);
     table.DrawRowBorder(rowIdx+1);
 
@@ -875,6 +890,9 @@ namespace TransferBench::Utils
       table.DrawRowBorder(rowIdx+1);
     }
     table.PrintTable(ev.outputToCsv, ev.showBorders);
+
+    if (omitAggregate)
+      Print("[WARN] Aggregate (CPU) results are omitted when pingpongs and normal Transfers run in the same Test\n");
   }
 
   bool HasDuplicateHostname()

@@ -6782,7 +6782,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       double const scale = 1000.0 / cfg.general.numSubIterations;
       if (numCopyTasks == 0) {
         exeInfo.totalDurationMsec += hasPingpong
-          ? std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * scale
+          ? std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0
           : 0.0;
       } else if (cfg.general.useHipEvents && !cfg.general.useMultiStream) {
         float gpuDeltaMsec;
