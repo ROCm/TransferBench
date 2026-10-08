@@ -28,7 +28,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # Required for OIDC S3 upload
 
 env:
   ROCM_VERSION: ${{ github.event.inputs.rocm_version || '' }}
@@ -42,9 +41,12 @@ jobs:
   build-ubuntu:
     name: Build (Ubuntu 22.04)
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-22.04' }}
+    permissions:
+      contents: read
+      id-token: write   # Required for OIDC S3 upload
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
           fetch-depth: 0   # for branch.commit version tags
@@ -76,7 +78,7 @@ jobs:
 
       - name: Upload artifacts
         if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ubuntu-22.04-packages
           path: |
@@ -86,7 +88,7 @@ jobs:
 
       - name: Configure AWS credentials (OIDC)
         if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
@@ -149,11 +151,14 @@ jobs:
   build-manylinux:
     name: Build (manylinux_2_28)
     runs-on: ${{ vars.RUNNER_LABEL_CONTAINER || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      id-token: write   # Required for OIDC S3 upload
     container:
-      image: quay.io/pypa/manylinux_2_28_x86_64
+      image: quay.io/pypa/manylinux_2_28_x86_64:2026.10.03-1@sha256:39df0042d5cc900b085aa25a0659368b42a0006c54c474299b785b44c1b4ff82
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
           fetch-depth: 0
@@ -186,7 +191,7 @@ jobs:
 
       - name: Upload artifacts
         if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: manylinux_2_28-packages
           path: |
@@ -202,7 +207,7 @@ jobs:
 
       - name: Configure AWS credentials (OIDC)
         if: github.repository == 'ROCm/TransferBench' && vars.AWS_S3_BUCKET != '' && github.ref_name != 'candidate' && github.base_ref != 'candidate'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
@@ -298,7 +303,7 @@ jobs:
 
       - name: Upload report
         if: github.ref_name != 'candidate' && github.base_ref != 'candidate'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: build-report
           path: report/build-report.md
