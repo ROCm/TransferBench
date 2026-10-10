@@ -103,8 +103,8 @@ set(ENV{ROCM_PATH} "${ROCM_PATH}")
 # TransferBench project definitions
 #==================================================================================================
 set(TRANSFERBENCH_VERSION_MAJOR 1)
-set(TRANSFERBENCH_VERSION_MINOR 70)
-set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "02")
+set(TRANSFERBENCH_VERSION_MINOR 71)
+set(TRANSFERBENCH_VERSION_PATCH_FALLBACK "00")
 
 # Auto-compute patch from git: count commits since the last v<MAJOR>.<MINOR>.* tag.
 # Falls back to TRANSFERBENCH_VERSION_PATCH_FALLBACK when git is unavailable,
@@ -220,7 +220,8 @@ set(DEFAULT_GPUS
       gfx1151
       gfx1200
       gfx1201
-      gfx1250)
+      gfx1250
+      gfx1250-strict)
 
 if(BUILD_LOCAL_GPU_TARGET_ONLY)
   message(STATUS "Building only for local GPU target")

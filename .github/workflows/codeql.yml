@@ -19,7 +19,7 @@ jobs:
   analyze:
     name: Analyze (C/C++)
     runs-on: ubuntu-latest
-    container: rocm/dev-ubuntu-22.04:latest
+    container: rocm/dev-ubuntu-22.04:10.1.0-full@sha256:6c11663a93966c040cd56dc73ed6d6761cdb887068f3f8940c4d3fe4e6829f10
     permissions:
       security-events: write
       packages: read
@@ -34,7 +34,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y git
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Configure Git Safe Directory
         run: |
@@ -46,7 +46,7 @@ jobs:
           apt-get install -y build-essential cmake libnuma-dev
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           languages: c-cpp
           build-mode: manual
@@ -64,6 +64,6 @@ jobs:
           make -j $(nproc)
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
         with:
           category: "/language:c-cpp"
