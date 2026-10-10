@@ -75,6 +75,7 @@ public:
   int numSubIterations;              // Number of subiterations to perform
   int numWarmups;                    // Number of un-timed warmup iterations to perform
   int pingpongFlagBuffer;            // Size in bytes of the pingpong flag buffer (must be positive)
+  int pingpongSpinLimit;             // Polls per pingpong wait before giving up on a stalled partner (0 = never)
   int pingpongStride;                // Stride in bytes between flag slots for pingpong laps (wraps within the flag buffer)
   int showBorders;                   // Show ASCII box-drawing characaters in tables
   int showIterations;                // Show per-iteration timing info
@@ -180,6 +181,7 @@ public:
     numSubIterations   = GetEnvVar("NUM_SUBITERATIONS"   , 1);
     numWarmups         = GetEnvVar("NUM_WARMUPS"         , 3);
     pingpongFlagBuffer = GetEnvVar("PINGPONG_FLAG_BUFFER", 1);
+    pingpongSpinLimit  = GetEnvVar("PINGPONG_SPIN_LIMIT" , 1 << 26);
     pingpongStride     = GetEnvVar("PINGPONG_STRIDE"     , 1);
     outputToCsv        = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor     = GetEnvVar("SAMPLING_FACTOR"     , 1);
@@ -409,6 +411,7 @@ public:
     printf(" NUM_WARMUPS         - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV       - Outputs to CSV format if set\n");
     printf(" PINGPONG_FLAG_BUFFER - Size in bytes of the pingpong flag buffer (default 1, must be positive). Each flag slot is 1 byte\n");
+    printf(" PINGPONG_SPIN_LIMIT - Polls per pingpong wait before giving up on a stalled partner (default 67108864, 0 = never)\n");
     printf(" PINGPONG_STRIDE     - Stride in bytes between flag slots for pingpong laps (default 1, must be positive unless the flag buffer is 1 byte, wraps within the flag buffer)\n");
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");
@@ -563,6 +566,9 @@ public:
           "Running %d warmup iteration(s) per Test", numWarmups);
     Print("PINGPONG_FLAG_BUFFER", pingpongFlagBuffer,
           "Pingpong flag buffer of %d bytes", pingpongFlagBuffer);
+    Print("PINGPONG_SPIN_LIMIT", pingpongSpinLimit,
+          pingpongSpinLimit ? "Pingpong waits give up after %d polls without progress" : "Pingpong waits never give up",
+          pingpongSpinLimit);
     Print("PINGPONG_STRIDE", pingpongStride,
           "Pingpong flag stride %d bytes per lap", pingpongStride);
     Print("SHOW_BORDERS", showBorders, "%s ASCII box-drawing characaters in tables", showBorders ? "Showing" : "Hiding");
@@ -749,6 +755,7 @@ public:
     cfg.general.numSubIterations   = numSubIterations;
     cfg.general.numWarmups         = numWarmups;
     cfg.general.pingpongFlagBuffer = pingpongFlagBuffer;
+    cfg.general.pingpongSpinLimit  = pingpongSpinLimit;
     cfg.general.pingpongStride     = pingpongStride;
     cfg.general.recordPerIteration = ((showIterations != 0) || !showPercentiles.empty()) ? 1 : 0;
     cfg.general.useHipEvents       = useHipEvents;

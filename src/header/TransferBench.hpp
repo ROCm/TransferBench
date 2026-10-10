@@ -249,6 +249,7 @@ namespace TransferBench
     int useMultiStream     = 0;                 ///< Split GFX/TDM Transfers into separate kernel launches in separate stream
     int pingpongStride     = 1;                 ///< Stride in bytes between flag slots for pingpong laps (positive, or 0 when pingpongFlagBuffer is 1)
     int pingpongFlagBuffer = 1;                 ///< Size of the pingpong flag buffer in bytes (must be positive)
+    int pingpongSpinLimit  = 1 << 26;           ///< Polls per pingpong wait before giving up on a stalled partner (0 = never)
   };
 
   /**
@@ -2134,6 +2135,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (general.numWarmups         != cfg.general.numWarmups)         ADD_ERROR("cfg.general.numWarmups");
       if (general.pingpongStride     != cfg.general.pingpongStride)     ADD_ERROR("cfg.general.pingpongStride");
       if (general.pingpongFlagBuffer != cfg.general.pingpongFlagBuffer) ADD_ERROR("cfg.general.pingpongFlagBuffer");
+      if (general.pingpongSpinLimit  != cfg.general.pingpongSpinLimit)  ADD_ERROR("cfg.general.pingpongSpinLimit");
       if (general.recordPerIteration != cfg.general.recordPerIteration) ADD_ERROR("cfg.general.recordPerIteration");
       if (general.useHipEvents       != cfg.general.useHipEvents)       ADD_ERROR("cfg.general.useHipEvents");
       if (general.useInteractive     != cfg.general.useInteractive)     ADD_ERROR("cfg.general.useInteractive");
@@ -2263,6 +2265,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         (cfg.general.pingpongStride == 0 && cfg.general.pingpongFlagBuffer != 1))
       errors.push_back({ERR_FATAL, "[general.pingpongStride] must be a positive number of bytes "
                                    "(0 is only allowed when [general.pingpongFlagBuffer] is 1)"});
+    if (cfg.general.pingpongSpinLimit < 0)
+      errors.push_back({ERR_FATAL, "[general.pingpongSpinLimit] must be non-negative (0 = never give up)"});
 
     // Check that config options are consistent (where necessary) across all ranks
     CheckMultiNodeConfigConsistency(cfg, errors);
@@ -3281,6 +3285,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int                        flagAllocBytes;    ///< Total flag allocation size in bytes (for wrap-around)
     int                        hopPeriod;         ///< Laps between extra stride hops (0 = never hop)
     int32_t                    preferredXccId;    ///< XCC ID to execute on (GFX only)
+    uint32_t                   spinLimit;         ///< Polls per wait before giving up (UINT32_MAX = never)
 
     // Outputs (ping half only)
     int64_t                    startCycle;        ///< Start timestamp for in-kernel timing
@@ -3289,6 +3294,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Outputs (both halves)
     uint32_t                   hwId;              ///< Hardware ID of the CU that ran this half
     uint32_t                   xccId;             ///< XCC ID that ran this half
+    int32_t                    failedLap;         ///< INT_MIN = ok, -1 = ready handshake, else lap that gave up
   };
 
   // Internal resources allocated per Transfer
@@ -4998,6 +5004,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     p.stopCycle      = 0;
     p.hwId           = ~0u;
     p.xccId          = ~0u;
+    // UINT32_MAX never fires, since the limit is only compared on multiples of 1024
+    p.spinLimit      = cfg.general.pingpongSpinLimit > 0 ? (uint32_t)cfg.general.pingpongSpinLimit
+                                                         : UINT32_MAX;
+    p.failedLap      = INT_MIN;
 
     // Device-resident uint8_t values {0, 1} at rss.srcMem[0] + byteOffset (even/odd lap signaling)
     if (exeDevice.exeType == EXE_GPU_GFX && !rss.srcMem.empty()) {
@@ -5752,17 +5762,25 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 // PingPong Wait primitives
 //========================================================================================
 
-  // GPU-side spin wait: polls a flag until it equals the expected value.
-  // Used by GPU-GFX executors (called inline from the transfer kernel).
-  __device__ void GpuWait(volatile uint8_t* flag, uint8_t val)
+  // System-scope relaxed load, so every call reaches memory instead of hitting in the CU's caches
+  __device__ __forceinline__ uint8_t GpuLoad(volatile uint8_t* ptr)
   {
 #if defined(__NVCC__)
     // ld.volatile has the same semantics as ld.relaxed.sys on sm_70+, matching the HIP path below
-    while (*flag != val)
-      ;
+    return *ptr;
 #else
-    while (__hip_atomic_load(flag, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) != val)
-      ;
+    return __hip_atomic_load(ptr, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+#endif
+  }
+
+  // Flag poll for the pingpong wait loop.  Only valid with a single active lane: keeping the
+  // value in a scalar register lets the wait and lap loops stay uniform (no exec-mask updates)
+  __device__ __forceinline__ uint8_t GpuPoll(volatile uint8_t* flag)
+  {
+#if defined(__NVCC__)
+    return GpuLoad(flag);
+#else
+    return (uint8_t)__builtin_amdgcn_readfirstlane(GpuLoad(flag));
 #endif
   }
 
@@ -5774,6 +5792,32 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #else
     __hip_atomic_store((uint8_t*)flag, val, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
 #endif
+  }
+
+  // Flag slot values besides the 0/1 lap parity (slots idle at 0xFF after the host reset)
+  constexpr uint8_t PINGPONG_READY = 2;
+  constexpr uint8_t PINGPONG_ABORT = 0xFE;
+
+  // Pingpong spin wait: polls a flag until it equals the expected value.  Gives up if the
+  // partner wrote PINGPONG_ABORT or this wait polled spinLimit times without progress, both
+  // checked only once per 1024 misses.  On give-up it records the lap, cuts lapLimit so the lap
+  // loop ends after this lap, and writes val into its own poll slot so the loop still exits
+  // through the normal compare; leaving the loop any other way adds instructions to every hit
+  __device__ __forceinline__ void PingpongWait(volatile uint8_t* flag, uint8_t val,
+                                               int lap, int off, uint32_t spinLimit,
+                                               int& lapLimit, int& failedLap, int& failedOff)
+  {
+    uint32_t spins = 0;
+    uint8_t  cur;
+    while ((cur = GpuPoll(flag)) != val) {
+      if (__builtin_expect((++spins & 1023u) == 0, 0) &&
+          (cur == PINGPONG_ABORT || spins >= spinLimit)) {
+        failedLap = lap;
+        failedOff = off;
+        lapLimit  = lap + 1;
+        GpuStore(flag, val);
+      }
+    }
   }
 
 // CPU Executor-related functions
@@ -6530,36 +6574,41 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     volatile uint8_t* const localBase  = p.localFlagMem;
     volatile uint8_t* const remoteBase = p.flagMem;
-    // Kept as scalars rather than an array so that the lap-parity select stays in registers
-    uint8_t*          const srcVal0    = const_cast<uint8_t*>(p.srcMem[0]);
-    uint8_t*          const srcVal1    = const_cast<uint8_t*>(p.srcMem[1]);
+    // Kept as scalars rather than an array so that the lap-parity select stays in registers.
+    // The optional SRC is read at system scope so that every lap pays a real SRC access, not
+    // a cache hit after the first lap
+    volatile uint8_t* const srcVal0    = p.srcMem[0];
+    volatile uint8_t* const srcVal1    = p.srcMem[1];
     bool const useSrcMem = (srcVal0 != nullptr);
+
+    uint32_t const spinLimit = p.spinLimit;
+    int            lapLimit  = laps;
+    int            failedLap = INT_MIN;  // INT_MIN = ok, -1 = ready handshake, else lap index
+    int            failedOff = 0;
 
     int     off    = 0;
     int     hopCnt = hp;
     uint8_t val    = 0;
 
     // Pong signals that it is running before ping starts its timer, so that the partner's
-    // launch delay is never timed.  Lap 0's slot is used with a value no lap writes (laps use
-    // 0/1 and slots idle at 0xFF)
-    constexpr uint8_t readyVal = 2;
+    // launch delay is never timed.  Lap 0's slot is used with a value no lap writes
     if (isPing)
-      GpuWait(localBase, readyVal);
+      PingpongWait(localBase, PINGPONG_READY, -1, 0, spinLimit, lapLimit, failedLap, failedOff);
     else
-      GpuStore(remoteBase, readyVal);
+      GpuStore(remoteBase, PINGPONG_READY);
 
     int64_t startCycle = GetTimestamp();
 
-    for (int lap = 0; lap < laps; lap++) {
+    for (int lap = 0; lap < lapLimit; lap++) {
       volatile uint8_t* localFlag  = localBase  + off;
       volatile uint8_t* remoteFlag = remoteBase + off;
       if (isPing) {
-        uint8_t const storeVal = useSrcMem ? (val ? *srcVal1 : *srcVal0) : val;
+        uint8_t const storeVal = useSrcMem ? GpuLoad(val ? srcVal1 : srcVal0) : val;
         GpuStore(remoteFlag, storeVal);
-        GpuWait(localFlag, val);
+        PingpongWait(localFlag, val, lap, off, spinLimit, lapLimit, failedLap, failedOff);
       } else {
-        GpuWait(localFlag, val);
-        uint8_t const storeVal = useSrcMem ? (val ? *srcVal1 : *srcVal0) : val;
+        PingpongWait(localFlag, val, lap, off, spinLimit, lapLimit, failedLap, failedOff);
+        uint8_t const storeVal = useSrcMem ? GpuLoad(val ? srcVal1 : srcVal0) : val;
         GpuStore(remoteFlag, storeVal);
       }
 
@@ -6578,6 +6627,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       p.stopCycle  = GetTimestamp();
       p.startCycle = startCycle;
     }
+    // Outside the timed region: release the partner instead of making it spend its own budget
+    if (failedLap != INT_MIN) GpuStore(remoteBase + failedOff, PINGPONG_ABORT);
+    p.failedLap = failedLap;
     p.xccId = hwXccId;
     p.hwId  = hwCuId;
   }
@@ -6769,6 +6821,30 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     });
     for (auto& e : taskErr) ERR_CHECK(e);
 
+    // Pingpong halves give up on a partner that stops making progress (see PingpongWait), so
+    // check every launch, warmups included
+    std::vector<PingpongParam> pingpongParamHost;
+    PingpongParam const* pingpongParam = exeInfo.pingpongParamGpu;
+    if (hasPingpong) {
+      if (!exeInfo.pingpongParamHostAccessible) {
+        pingpongParamHost.resize(exeInfo.totalPingpong);
+        ERR_CHECK(hipMemcpy(pingpongParamHost.data(), exeInfo.pingpongParamGpu,
+                            exeInfo.totalPingpong * sizeof(PingpongParam), hipMemcpyDefault));
+        pingpongParam = pingpongParamHost.data();
+      }
+      for (TransferResources const& rss : exeInfo.resources) {
+        if (rss.numLaps == 0 || rss.pingpongParamIdx < 0) continue;
+        int32_t const failedLap = pingpongParam[rss.pingpongParamIdx].failedLap;
+        if (failedLap == INT_MIN) continue;
+        std::string const where = failedLap < 0 ? "the ready handshake" : "lap " + std::to_string(failedLap);
+        return {ERR_FATAL,
+                "Pingpong %d: %s half on GPU %d stopped waiting at %s, after [general.pingpongSpinLimit] (%d) "
+                "polls without progress or because its partner stopped first. Check that both halves launched",
+                rss.transferIdx, rss.numLaps > 0 ? "ping" : "pong", exeIndex, where.c_str(),
+                cfg.general.pingpongSpinLimit};
+      }
+    }
+
     auto cpuDelta = Clock::now() - cpuStart;
 
     if (iteration >= 0) {
@@ -6837,16 +6913,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       // Pingpong timing is reported per lap, from the in-kernel timestamps that the
       // ping half wrote into its PingpongParam (pingpong always uses its own stream)
-      if (exeInfo.totalPingpong > 0) {
-        std::vector<PingpongParam> pingpongParamHost;
-        PingpongParam const* pingpongParam = exeInfo.pingpongParamGpu;
-        if (!exeInfo.pingpongParamHostAccessible) {
-          pingpongParamHost.resize(exeInfo.totalPingpong);
-          ERR_CHECK(hipMemcpy(pingpongParamHost.data(), exeInfo.pingpongParamGpu,
-                              exeInfo.totalPingpong * sizeof(PingpongParam), hipMemcpyDefault));
-          pingpongParam = pingpongParamHost.data();
-        }
-
+      if (hasPingpong) {
         if (iteration == 0 && System::Get().IsVerbose()) {
           for (TransferResources const& rss : exeInfo.resources) {
             if (rss.numLaps == 0 || rss.pingpongParamIdx < 0) continue;
