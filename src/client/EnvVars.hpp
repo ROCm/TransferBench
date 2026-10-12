@@ -411,7 +411,7 @@ public:
     printf(" NUM_WARMUPS         - # of untimed warmup iterations per test\n");
     printf(" OUTPUT_TO_CSV       - Outputs to CSV format if set\n");
     printf(" PINGPONG_FLAG_BUFFER - Size in bytes of the pingpong flag buffer (default 1, must be positive). Each flag slot is 1 byte\n");
-    printf(" PINGPONG_SPIN_LIMIT - Polls per pingpong wait before giving up on a stalled partner (default 67108864, 0 = never)\n");
+    printf(" PINGPONG_SPIN_LIMIT - Polls per pingpong wait before giving up on a stalled partner (default 67108864). 0 disables the watchdog: waits never give up and skip its checks\n");
     printf(" PINGPONG_STRIDE     - Stride in bytes between flag slots for pingpong laps (default 1, must be positive unless the flag buffer is 1 byte, wraps within the flag buffer)\n");
     printf(" SAMPLING_FACTOR     - Add this many samples (when possible) between powers of 2 when auto-generating data sizes\n");
     printf(" SHOW_BORDERS        - Show ASCII box-drawing characters in tables\n");

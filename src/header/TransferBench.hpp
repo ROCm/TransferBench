@@ -5795,23 +5795,29 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   constexpr uint8_t PINGPONG_ABORT = 0xFE;
 
   // Pingpong spin wait: polls a flag until it equals the expected value.
-  // Gives up if the partner wrote PINGPONG_ABORT or this wait polled spinLimit times without progress.
+  // With ENABLE_WATCHDOG, gives up if the partner wrote PINGPONG_ABORT or this wait polled spinLimit times without progress.
   // On give-up it records the lap, cuts lapLimit so the lap loop ends after this lap, 
   // and writes val into its own poll slot so the loop still exits through the normal compare
+  template <int ENABLE_WATCHDOG>
   __device__ __forceinline__ void GpuWait(volatile uint8_t* flag, uint8_t val,
                                           int lap, int off, uint32_t spinLimit,
                                           int& lapLimit, int& failedLap, int& failedOff)
   {
-    uint32_t spins = 0;
-    uint8_t  cur;
-    while ((cur = GpuPoll(flag)) != val) {
-      if (__builtin_expect((++spins & 1023u) == 0, 0) &&
-          (cur == PINGPONG_ABORT || spins >= spinLimit)) {
-        failedLap = lap;
-        failedOff = off;
-        lapLimit  = lap + 1;
-        GpuStore(flag, val);
+    if constexpr (ENABLE_WATCHDOG) {
+      uint32_t spins = 0;
+      uint8_t  cur;
+      while ((cur = GpuPoll(flag)) != val) {
+        if (__builtin_expect((++spins & 1023u) == 0, 0) &&
+            (cur == PINGPONG_ABORT || spins >= spinLimit)) {
+          failedLap = lap;
+          failedOff = off;
+          lapLimit  = lap + 1;
+          GpuStore(flag, val);
+        }
       }
+    } else {
+      while (GpuPoll(flag) != val)
+        ;
     }
   }
 
@@ -6540,7 +6546,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return (blocksize + 255) / 256 - 1;
   }
 
-  __global__ void GpuPingpongKernel(PingpongParam* params /*int seType*/)
+  template <int ENABLE_WATCHDOG>
+  __global__ void GpuPingpongKernel(PingpongParam* params)
   {
     int const pingpongIdx = blockIdx.y;
     PingpongParam& p = params[pingpongIdx];
@@ -6587,7 +6594,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Pong signals that it is running before ping starts its timer, so that the partner's
     // launch delay is never timed.  Lap 0's slot is used with a value no lap writes
     if (isPing)
-      GpuWait(localBase, PINGPONG_READY, -1, 0, spinLimit, lapLimit, failedLap, failedOff);
+      GpuWait<ENABLE_WATCHDOG>(localBase, PINGPONG_READY, -1, 0, spinLimit, lapLimit, failedLap, failedOff);
     else
       GpuStore(remoteBase, PINGPONG_READY);
 
@@ -6599,9 +6606,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (isPing) {
         uint8_t const storeVal = useSrcMem ? GpuLoad(val ? srcVal1 : srcVal0) : val;
         GpuStore(remoteFlag, storeVal);
-        GpuWait(localFlag, val, lap, off, spinLimit, lapLimit, failedLap, failedOff);
+        GpuWait<ENABLE_WATCHDOG>(localFlag, val, lap, off, spinLimit, lapLimit, failedLap, failedOff);
       } else {
-        GpuWait(localFlag, val, lap, off, spinLimit, lapLimit, failedLap, failedOff);
+        GpuWait<ENABLE_WATCHDOG>(localFlag, val, lap, off, spinLimit, lapLimit, failedLap, failedOff);
         uint8_t const storeVal = useSrcMem ? GpuLoad(val ? srcVal1 : srcVal0) : val;
         GpuStore(remoteFlag, storeVal);
       }
@@ -6730,14 +6737,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     dim3 const gridSize(xccDim, numPingpong, 1);
     dim3 const blockSize(1);
 
+    // A spin limit of 0 never gives up, so launch the kernel compiled without the watchdog checks
+    auto const pingpongKernel = cfg.general.pingpongSpinLimit > 0 ? GpuPingpongKernel<1>
+                                                                  : GpuPingpongKernel<0>;
+
 #if defined(__NVCC__)
     if (cfg.general.useHipEvents && startEvent)
       ERR_CHECK(hipEventRecord(startEvent, stream));
-    GpuPingpongKernel<<<gridSize, blockSize, 0, stream>>>(params);
+    pingpongKernel<<<gridSize, blockSize, 0, stream>>>(params);
     if (cfg.general.useHipEvents && stopEvent)
       ERR_CHECK(hipEventRecord(stopEvent, stream));
 #else
-    hipExtLaunchKernelGGL(GpuPingpongKernel, gridSize, blockSize, 0, stream,
+    hipExtLaunchKernelGGL(pingpongKernel, gridSize, blockSize, 0, stream,
                           cfg.general.useHipEvents ? startEvent : NULL,
                           cfg.general.useHipEvents ? stopEvent  : NULL, 0,
                           params);
