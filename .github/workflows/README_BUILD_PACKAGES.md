@@ -70,9 +70,9 @@ sudo -E BUILD_TYPE=Debug ./build_packages_local.sh
 After the script completes, packages live under `build/`:
 
 ```
-build/amdrocm7-transferbench_1.66.02-<release>_amd64.deb
-build/amdrocm7-transferbench-1.66.02-<release>.x86_64.rpm
-build/amdrocm7-transferbench-1.66.02-Linux.tar.gz
+build/amdrocm7-transferbench_1.71.00-<release>_amd64.deb
+build/amdrocm7-transferbench-1.71.00-<release>.x86_64.rpm
+build/amdrocm7-transferbench-1.71.00-Linux.tar.gz
 ```
 
 ## Installing built packages

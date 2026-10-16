@@ -102,7 +102,7 @@ namespace TransferBench
   using std::set;
   using std::vector;
 
-  constexpr char VERSION[] = "1.70";
+  constexpr char VERSION[] = "1.71";
 
   /**
    * Enumeration of supported Executor types
