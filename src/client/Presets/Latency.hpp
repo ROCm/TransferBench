@@ -177,8 +177,11 @@ int LatencyPreset(EnvVars&          ev,
   TransferBench::ConfigOptions cfg = ev.ToConfigOptions();
   TransferBench::TestResults results;
 
-  // Round-trip latency per lap in microseconds, negative when not measured
+  // Round-trip latency per lap in microseconds.
+  // -1.0 = not measured, kFailedUs = the run failed.
   std::vector<std::vector<double>> latencyUs(numExes, std::vector<double>(numExes, -1.0));
+  constexpr double kFailedUs = -2.0;
+  int numFailedRuns = 0;
 
   // Runs the given (PING, PONG) pairs in parallel
   auto runPairs = [&](std::vector<std::pair<int, int>> const& pairs) {
@@ -203,6 +206,8 @@ int LatencyPreset(EnvVars&          ev,
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
       for (auto const& err : results.errResults)
         Utils::Print("[%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
+      numFailedRuns++;
+      for (auto const& [i, j] : pairs) latencyUs[i][j] = kFailedUs;
       return;
     }
 
@@ -276,7 +281,9 @@ int LatencyPreset(EnvVars&          ev,
 
     Utils::Print("%*s", width, exeStr(exes[i]).c_str());
     for (int j = 0; j < numExes; j++) {
-      if (latencyUs[i][j] < 0)
+      if (latencyUs[i][j] == kFailedUs)
+        Utils::Print("%c%*s", sep, width, "FAIL");
+      else if (latencyUs[i][j] < 0)
         Utils::Print("%c%*s", sep, width, "N/A");
       else
         Utils::Print("%c%*.3f", sep, width, latencyUs[i][j]);
@@ -308,6 +315,10 @@ int LatencyPreset(EnvVars&          ev,
 
   if (numRanks > 1 && Utils::HasDuplicateHostname()) {
     Utils::Print("[WARN] It is recommended to run TransferBench with one rank per host to avoid potential aliasing of executors\n");
+  }
+  if (numFailedRuns > 0) {
+    Utils::Print("[ERROR] %d run(s) failed; affected pairs are shown as FAIL\n", numFailedRuns);
+    return ERR_FATAL;
   }
   return ERR_NONE;
 }

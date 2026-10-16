@@ -2552,7 +2552,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       bool const isPingpong = t.numLaps > 0;
       if (t.numLaps < 0) {
         errors.push_back({ERR_FATAL,
-          "Transfer %zu: numLaps must be > 0 for pingpong transfers (negative values belong on resources)", i});
+          "Transfer %zu: numLaps must be > 0 for pingpong transfers", i});
         hasFatalError = true;
         break;
       }
@@ -3045,7 +3045,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                 t.srcs[half].memRank != exe.exeRank && IsCpuMemType(t.srcs[half].memType)) {
               errors.push_back({ERR_FATAL,
                   "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
-                  "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                  "(%s on rank %d is %s).  Fabric-handle sharing currently only supports GPU memory; use a NIC "
                   "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
                   i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
                   "SRC", t.srcs[half].memRank, GetMemTypeName(t.srcs[half].memType), exe.exeRank});
@@ -3056,7 +3056,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                 t.dsts[half].memRank != exe.exeRank && IsCpuMemType(t.dsts[half].memType)) {
               errors.push_back({ERR_FATAL,
                   "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
-                  "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                  "(%s on rank %d is %s).  Fabric-handle sharing currently only supports GPU memory; use a NIC "
                   "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
                   i, exe.exeRank, ExeTypeStr[exe.exeType], exe.exeIndex,
                   "DST", t.dsts[half].memRank, GetMemTypeName(t.dsts[half].memType), exe.exeRank});
@@ -3102,7 +3102,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           if (hasRemoteCpuMem) {
             errors.push_back({ERR_FATAL,
                 "Transfer %d: Cross-rank GPU executor (R%d%c%d) cannot access remote host memory "
-                "(%s on rank %d is %s).  Fabric-handle sharing only supports GPU memory for 1.67; use a NIC "
+                "(%s on rank %d is %s).  Fabric-handle sharing currently only supports GPU memory; use a NIC "
                 "executor (e.g. R%dN..) for cross-rank transfers involving host memory.",
                 i, t.exeDevice.exeRank, ExeTypeStr[t.exeDevice.exeType], t.exeDevice.exeIndex,
                 role, offender.memRank, GetMemTypeName(offender.memType), t.exeDevice.exeRank});
@@ -6552,7 +6552,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int const pingpongIdx = blockIdx.y;
     PingpongParam& p = params[pingpongIdx];
 
-    // An pingpong half runs in the first XCC, this also counters XccPrefTable
+    // An pingpong half runs in the first block, this disregards XccPrefTable
     if (p.preferredXccId == -1) {
       if (blockIdx.x != 0) return;
     }
@@ -8417,9 +8417,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (iss >> nextToken && !nextToken.empty() && nextToken[0] == '+') {
         isPingpong = true;
         if (nextToken.size() > 1) {
-          numLaps = atoi(nextToken.c_str() + 1);
-          if (numLaps < 1)
-            return {ERR_FATAL, "Parsing error: Pingpong %d lap count must be positive (got %d)", i+1, numLaps};
+          char* end = nullptr;
+          long const n = strtol(nextToken.c_str() + 1, &end, 10);
+          if (end == nullptr || *end != '\0' || n < 1 || n > INT_MAX)
+            return {ERR_FATAL, "Parsing error: Pingpong %d lap count must be a positive integer (got \"%s\")",
+                    i + 1, nextToken.c_str() + 1};
+          numLaps = (int)n;
         }
       } else {
         iss.clear();

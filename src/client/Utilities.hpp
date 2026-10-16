@@ -614,10 +614,7 @@ namespace TransferBench::Utils
       ExeResult const& exeResult = exeInfoPair.second;
       // Pong-only executors own no result rows (ping reports the pingpong)
       if (exeResult.transferIdx.empty()) continue;
-      int displayCount = 0;
-      for (int idx : exeResult.transferIdx)
-        if (transfers[idx].numLaps >= 0) displayCount++;
-      numRows += 1 + displayCount;
+      numRows += 1 + exeResult.transferIdx.size();
       if (!ev.showPercentiles.empty()) {
         numRows += static_cast<int>(ev.showPercentiles.size()) * static_cast<int>(exeResult.transferIdx.size());
       }
@@ -891,7 +888,7 @@ namespace TransferBench::Utils
     }
     table.PrintTable(ev.outputToCsv, ev.showBorders);
 
-    if (omitAggregate)
+    if (omitAggregate && !ev.outputToCsv)
       Print("[WARN] Aggregate (CPU) results are omitted when pingpongs and normal Transfers run in the same Test\n");
   }
 
