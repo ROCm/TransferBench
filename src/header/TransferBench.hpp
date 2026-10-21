@@ -58,6 +58,7 @@ THE SOFTWARE.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <thread>
 #include <type_traits>
 #include <unistd.h>
@@ -3659,6 +3660,107 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+  // Plain-old-data summary of the per-device probe below, sized so it can be
+  // shipped across a pipe to/from a forked child with a single read/write.
+  struct IbvProbeResult
+  {
+    bool     hasActivePort = false;
+    bool     isRoce        = false;
+    int      gidIndex      = -1;
+    uint32_t maxMsgSize    = 0;
+    char     gidDescriptor[64] = {};
+  };
+
+  // Opens/queries a single IBV device and fills in `result`. Runs inside the
+  // forked child spawned by ProbeIbvDeviceSafe() below.
+  static void RunIbvDeviceProbe(ibv_device* devicePtr, IbvProbeResult& result)
+  {
+    struct ibv_context *context = ibv_open_device(devicePtr);
+    if (context) {
+      struct ibv_device_attr deviceAttr;
+      if (!ibv_query_device(context, &deviceAttr)) {
+        int activePort = 0;
+        for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
+          struct ibv_port_attr portAttr;
+          if (ibv_query_port(context, port, &portAttr)) continue;
+          if (portAttr.state != IBV_PORT_ACTIVE) continue;
+
+          // Any active port may be selected for QP setup via cfg.nic.ibPort, which is
+          // not visible here, so keep the most restrictive limit across all of them.
+          if (portAttr.max_msg_sz &&
+              (!result.maxMsgSize || portAttr.max_msg_sz < result.maxMsgSize))
+            result.maxMsgSize = portAttr.max_msg_sz;
+
+          // The first active port supplies the RoCE / GID information
+          if (result.hasActivePort) continue;
+          activePort = port;
+          result.hasActivePort = true;
+          if (portAttr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+            result.isRoce = true;
+            std::pair<int, std::string> gidInfo (-1, "");
+            auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidInfo);
+            if (res.errType == ERR_NONE) {
+              result.gidIndex = gidInfo.first;
+              strncpy(result.gidDescriptor, gidInfo.second.c_str(), sizeof(result.gidDescriptor) - 1);
+            }
+          }
+        }
+      }
+      ibv_close_device(context);
+    }
+  }
+
+  // Probes a single IBV device (ibv_open_device/query_device/query_port) in a
+  // forked child process. Third-party ibverbs provider plugins (e.g. vendor
+  // RoCE drivers) have been observed to crash inside ibv_open_device() for
+  // devices that are listed but whose kernel/userspace driver pairing is
+  // broken; isolating the probe in a child means that crash only costs us
+  // this one device instead of taking down the whole benchmark.
+  static bool ProbeIbvDeviceSafe(ibv_device* devicePtr, IbvProbeResult& result)
+  {
+    result = IbvProbeResult{};
+
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+      close(fds[0]);
+      close(fds[1]);
+      return false;
+    }
+
+    if (pid == 0) {
+      // Child: probe the device and report back over the pipe, then exit
+      // without running parent-side atexit/destructor state.
+      close(fds[0]);
+      IbvProbeResult childResult{};
+      RunIbvDeviceProbe(devicePtr, childResult);
+      ssize_t written = write(fds[1], &childResult, sizeof(childResult));
+      (void)written;
+      close(fds[1]);
+      _exit(0);
+    }
+
+    // Parent
+    close(fds[1]);
+    size_t total = 0;
+    char* buf = reinterpret_cast<char*>(&result);
+    while (total < sizeof(result)) {
+      ssize_t n = read(fds[0], buf + total, sizeof(result) - total);
+      if (n <= 0) break;
+      total += (size_t)n;
+    }
+    close(fds[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    bool ok = (total == sizeof(result)) && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok) result = IbvProbeResult{};
+    return ok;
+  }
+
   static vector<IbvDevice>& GetIbvDeviceList()
   {
     static bool isInitialized = false;
@@ -3690,39 +3792,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           ibvDevice.isRoce = false;
           ibvDevice.gidIndex = -1;
           {
-            struct ibv_context *context = ibv_open_device(ibvDevice.devicePtr);
-            if (context) {
-              struct ibv_device_attr deviceAttr;
-              if (!ibv_query_device(context, &deviceAttr)) {
-                int activePort;
-                for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
-                  struct ibv_port_attr portAttr;
-                  if (ibv_query_port(context, port, &portAttr)) continue;
-                  if (portAttr.state != IBV_PORT_ACTIVE) continue;
-
-                  // Any active port may be selected for QP setup via cfg.nic.ibPort, which is
-                  // not visible here, so keep the most restrictive limit across all of them.
-                  if (portAttr.max_msg_sz &&
-                      (!ibvDevice.maxMsgSize || portAttr.max_msg_sz < ibvDevice.maxMsgSize))
-                    ibvDevice.maxMsgSize = portAttr.max_msg_sz;
-
-                  // The first active port supplies the RoCE / GID information
-                  if (ibvDevice.hasActivePort) continue;
-                  activePort = port;
-                  ibvDevice.hasActivePort = true;
-                  if (portAttr.link_layer == IBV_LINK_LAYER_ETHERNET) {
-                    ibvDevice.isRoce = true;
-                    std::pair<int, std::string> gidInfo (-1, "");
-                    auto res = GetGidIndex(context, portAttr.gid_tbl_len, activePort, gidInfo);
-                    if (res.errType == ERR_NONE) {
-                      ibvDevice.gidIndex = gidInfo.first;
-                      ibvDevice.gidDescriptor = gidInfo.second;
-                    }
-                  }
-                }
-              }
-              ibv_close_device(context);
+            IbvProbeResult probeResult;
+            if (!ProbeIbvDeviceSafe(ibvDevice.devicePtr, probeResult)) {
+              fprintf(stderr, "[TransferBench] Warning: probing NIC device '%s' crashed or failed; "
+                      "treating it as inactive. Use TB_NIC_FILTER to exclude it from future runs.\n",
+                      ibvDevice.name.c_str());
             }
+            ibvDevice.hasActivePort = probeResult.hasActivePort;
+            ibvDevice.isRoce        = probeResult.isRoce;
+            ibvDevice.gidIndex      = probeResult.gidIndex;
+            ibvDevice.maxMsgSize    = probeResult.maxMsgSize;
+            ibvDevice.gidDescriptor = probeResult.gidDescriptor;
           }
           ibvDevice.busId = "";
           {
