@@ -347,6 +347,8 @@ To modify the CMake behavior, use the following environment variables:
   cmake .. -DENABLE_NIC_EXEC=ON -DENABLE_MPI_COMM=ON
   make
 
+.. _build-troubleshooting:
+
 Troubleshooting common build errors
 ====================================
 

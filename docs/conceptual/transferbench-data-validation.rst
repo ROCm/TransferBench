@@ -85,8 +85,9 @@ How validation is timed
 
 The timing of validation is controlled by the ``alwaysValidate`` option. By default
 (``alwaysValidate = 0``), validation runs once after all timed iterations complete,
-minimizing overhead during benchmarking. When ``alwaysValidate = 1``, validation is
-performed after every iteration; any detected error immediately stops the run.
+minimizing overhead during benchmarking. When ``alwaysValidate > 0``, validation is
+performed after every iteration; any detected error immediately stops the run. Setting
+``alwaysValidate`` to a negative value disables validation entirely.
 
 .. list-table::
     :header-rows: 1
@@ -95,11 +96,15 @@ performed after every iteration; any detected error immediately stops the run.
       - When
       - Behavior
 
+    * - ``alwaysValidate < 0``
+      - Never
+      - Validation is disabled entirely; ``ValidateAllTransfers`` is never called.
+
     * - ``alwaysValidate = 0`` (default)
       - Once at the end of all iterations
       - ``ValidateAllTransfers`` called after the iteration loop.
 
-    * - ``alwaysValidate = 1``
+    * - ``alwaysValidate > 0``
       - After every timed iteration
       - ``ValidateAllTransfers`` called inside the loop; any error stops the run.
 
@@ -112,8 +117,9 @@ For each transfer and each DST, the following steps are performed:
 
 2. **Get the actual output:**
 
+   - **GPU destination** and ``validateOnDevice = 1``: Compare on the device using a validation kernel; no host copy is made.
    - **CPU destination** or ``validateDirect = 1``: Point directly at the destination memory.
-   - **GPU destination** and ``validateDirect = 0``: Copy destination to a host ``outputBuffer``
+   - **GPU destination**, ``validateOnDevice = 0``, and ``validateDirect = 0``: Copy destination to a host ``outputBuffer``
      via ``hipMemcpy``, then compare against ``outputBuffer``.
 
 3. **Comparison:** Performed using ``memcmp(output, expected, numBytes)``. On mismatch, the code finds the first differing index and returns an error with the index, expected value, and actual value.
@@ -135,7 +141,7 @@ environment variables or in a configuration file.
 
     * - ``alwaysValidate``
       - ``ALWAYS_VALIDATE``
-      - To validate after each iteration, set to ``1``. To validate once at the end, set to ``0``.
+      - To validate after each iteration, set to a value greater than ``0``. To validate once at the end (default), set to ``0``. To disable validation entirely, set to a negative value.
 
     * - ``validateDirect``
       - ``VALIDATE_DIRECT``
