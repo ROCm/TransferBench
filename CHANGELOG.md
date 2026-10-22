@@ -4,6 +4,9 @@ Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
 ## v1.71.01
+### Modified
+- `a2a` and `a2asweep` presets now default `A2A_DIRECT=0` on MI4XX (gfx1250) hardware, allowing DPX to route
+  transfers more intuitively across the full all-to-all. Other hardware keeps the previous `A2A_DIRECT=1` default
 ### Fixed
 - NIC topology detection now probes each IBV device (`ibv_open_device` / `ibv_query_device` / `ibv_query_port`) in a
   forked child process, so a crash inside a third-party ibverbs provider plugin (observed with a vendor RoCE driver)
