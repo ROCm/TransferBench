@@ -44,7 +44,7 @@ THE SOFTWARE.
 #include <random>
 #include <time.h>
 
-#define CLIENT_VERSION "00"
+#define CLIENT_VERSION "01"
 
 #include "TransferBench.hpp"
 using namespace TransferBench;
@@ -138,28 +138,34 @@ public:
   // Developer features
   int gpuMaxHwQueues;                // Tracks GPU_MAX_HW_QUEUES environment variable
 
+  // Detected hardware
+  std::string gpuArchName;           // GCN arch name of GPU 0 (e.g. "gfx942"), empty if no GPU detected
+  int defaultA2aDirect;              // Per-arch default for A2A_DIRECT (0 on MI4XX so DPX can route transfers)
+
   // Constructor that collects values
   EnvVars()
   {
     // Try to detect the GPU
     hipDeviceProp_t prop;
     std::string fullName = "";
-    std::string archName = "";
     int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
     if (numDetectedGpus > 0) {
       HIP_CALL(hipGetDeviceProperties(&prop, 0));
       fullName = prop.gcnArchName;
-      archName = fullName.substr(0, fullName.find(':'));
+      gpuArchName = fullName.substr(0, fullName.find(':'));
     }
 
     // Different hardware pick different GPU kernels
     // This performance difference is generally only noticable when executing fewer CUs
     int defaultGfxUnroll = 4;
-    if      (archName == "gfx906")  defaultGfxUnroll = 8;
-    else if (archName == "gfx90a")  defaultGfxUnroll = 8;
-    else if (archName == "gfx942")  defaultGfxUnroll = 4;
-    else if (archName == "gfx950")  defaultGfxUnroll = 4;
-    else if (archName == "gfx1250") defaultGfxUnroll = 32;
+    if      (gpuArchName == "gfx906")  defaultGfxUnroll = 8;
+    else if (gpuArchName == "gfx90a")  defaultGfxUnroll = 8;
+    else if (gpuArchName == "gfx942")  defaultGfxUnroll = 4;
+    else if (gpuArchName == "gfx950")  defaultGfxUnroll = 4;
+    else if (gpuArchName == "gfx1250") defaultGfxUnroll = 32;
+
+    // On MI4XX (gfx1250), default to full all-to-all so DPX can route transfers more intuitively
+    defaultA2aDirect = (gpuArchName == "gfx1250") ? 0 : 1;
 
     alwaysValidate     = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes         = GetEnvVar("BLOCK_BYTES"         , 256);

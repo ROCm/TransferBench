@@ -46,7 +46,7 @@ int AllToAllPreset(EnvVars&          ev,
   int numDetectedGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
 
   // Collect env vars for this preset
-  int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , 1);
+  int a2aDirect     = EnvVars::GetEnvVar("A2A_DIRECT"     , ev.defaultA2aDirect);
   int a2aLocal      = EnvVars::GetEnvVar("A2A_LOCAL"      , 0);
   int memTypeIdx    = EnvVars::GetEnvVar("MEM_TYPE"       , 2);
   int numGpus       = EnvVars::GetEnvVar("NUM_GPU_DEVICES", numDetectedGpus);
