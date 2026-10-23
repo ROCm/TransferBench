@@ -63,6 +63,7 @@ THE SOFTWARE.
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
+#include <array>
 #include <vector>
 
 #include "IbvDynLoad.hpp"
@@ -266,6 +267,14 @@ namespace TransferBench
     int           validateDirect   = 0;         ///< Validate GPU results directly instead of copying to host
     int           validateOnDevice = 0;         ///< Validate GPU dst/src memory via an on-device kernel instead of host memcmp
     int           validateSource   = 0;         ///< Validate src GPU memory immediately after preparation
+    size_t        srcRotateBytes   = (size_t)256 * 1024 * 1024;
+                                                ///< Minimum source working-set size, in bytes. GPU source buffers are
+                                                ///< replicated into ceil(srcRotateBytes / numBytes) identical slices and
+                                                ///< successive iterations read a different slice, so repeat iterations
+                                                ///< cannot be served from cache. Without this, a source buffer is written
+                                                ///< once and then re-read unchanged every iteration, which inflates
+                                                ///< *remote read* bandwidth by up to 4.4x (writes cannot benefit the same
+                                                ///< way, so the bias is one-sided). 0 disables replication.
   };
 
   /**
@@ -3310,6 +3319,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     vector<size_t>             dstActualBytes;    ///< Actual amount of dst memory allocated (after padding)
     vector<memHandle_t>        srcMemHandle;      ///< Memory handles for source memory
     vector<memHandle_t>        dstMemHandle;      ///< Memory handles for destination memory
+    int                        numSrcSlices = 1;  ///< Number of identical source replicas (see DataOptions::srcRotateBytes)
+    size_t                     srcSliceFloats = 0;///< Stride in floats between consecutive source replicas
     vector<SubExecParam>       subExecParamCpu;   ///< Defines subarrays for each subexecutor
     PingpongParam              pingpongParamCpu;  ///< Pingpong parameter
     vector<int>                subExecIdx;        ///< Indices into subExecParamGpu
@@ -3493,6 +3504,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     vector<PingpongParam>      pingpongParamCpu;  ///< Pingpong parameters for this executor
     vector<TransferResources>  resources;         ///< Per-transfer resources (normal and ping/pong halves)
     vector<int>                transferRssIdx;    ///< Indices into resources of the normal Transfers
+
+    // Source-slice rotation (see DataOptions::srcRotateBytes), parallel to subExecParamCpu
+    vector<std::array<float*, MAX_SRCS>> subExecSrcBase;   ///< Un-rotated src pointers, snapshot after assembly
+    vector<size_t>             subExecSliceFloats;         ///< Per-entry stride between source slices
+    vector<int>                subExecNumSlices;           ///< Per-entry slice count (1 = rotation disabled)
+    bool                       rotatesSrcSlices = false;   ///< True if any entry has >1 slice
 
     // For GPU-Executors
     SubExecParam*              subExecParamGpu;   ///< GPU copy of subExecutor parameters
@@ -5241,9 +5258,29 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       rss.srcMem.resize(srcs.size());
       rss.srcActualBytes.resize(srcs.size());
       rss.srcMemHandle.resize(srcs.size(), NULL);
+      // Replicate the source into N identical slices so that successive iterations read
+      // different addresses. The source is written once during prep and never modified, so
+      // without this every iteration after the first can be served from cache -- which
+      // inflates remote-read bandwidth only (remote writes must be published regardless).
+      // Decided once per Transfer, since every source shares one allocation shape.
+      // Scoped to GPU-resident sources driven by a GFX/DMA executor: the NIC executor
+      // registers memory regions against a fixed vaddr and must not be rotated.
+      rss.numSrcSlices   = 1;
+      rss.srcSliceFloats = t.numBytes / sizeof(float);
+      {
+        bool allSrcsOnGpu = !srcs.empty();
+        for (auto const& s : srcs)
+          if (!IsGpuMemType(s.memType)) allSrcsOnGpu = false;
+        if (cfg.data.srcRotateBytes > 0 && t.numBytes > 0 && rss.numLaps == 0 && allSrcsOnGpu &&
+            (exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA)) {
+          size_t const slices = (cfg.data.srcRotateBytes + t.numBytes - 1) / t.numBytes;
+          rss.numSrcSlices = (int)std::max((size_t)1, slices);
+        }
+      }
+
       for (int iSrc = 0; iSrc < srcs.size(); ++iSrc) {
         MemDevice const& srcMemDevice = srcs[iSrc];
-        size_t srcAllocBytes = t.numBytes + cfg.data.byteOffset;
+        size_t srcAllocBytes = (size_t)rss.numSrcSlices * t.numBytes + cfg.data.byteOffset;
         if (rss.numLaps != 0)  // room for the two 1-byte flag values {0, 1}, rounded up to a float
           srcAllocBytes = std::max(srcAllocBytes, cfg.data.byteOffset + sizeof(float));
 
@@ -5513,6 +5550,29 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           auto& rss = exeInfo.resources[p.first];
           rss.subExecIdx.push_back(exeInfo.subExecParamCpu.size());
           exeInfo.subExecParamCpu.push_back(rss.subExecParamCpu[p.second]);
+        }
+      }
+
+      // Snapshot un-rotated source pointers so RotateSourceSlices() can recompute from a fixed
+      // base. Driven off rss.subExecIdx rather than assembly order, so it is correct for every
+      // GFX_BLOCK_ORDER (sequential, interleaved and randomized).
+      {
+        size_t const numEntries = exeInfo.subExecParamCpu.size();
+        exeInfo.subExecSrcBase.assign(numEntries, {});
+        exeInfo.subExecSliceFloats.assign(numEntries, 0);
+        exeInfo.subExecNumSlices.assign(numEntries, 1);
+        exeInfo.rotatesSrcSlices = false;
+        for (auto& rss : exeInfo.resources) {
+          if (rss.numLaps != 0) continue;
+          for (int k = 0; k < (int)rss.subExecIdx.size(); ++k) {
+            int const idx = rss.subExecIdx[k];
+            if (idx < 0 || idx >= (int)numEntries) continue;
+            for (int s = 0; s < MAX_SRCS; ++s)
+              exeInfo.subExecSrcBase[idx][s] = exeInfo.subExecParamCpu[idx].src[s];
+            exeInfo.subExecSliceFloats[idx] = rss.srcSliceFloats;
+            exeInfo.subExecNumSlices[idx]   = rss.numSrcSlices;
+            if (rss.numSrcSlices > 1) exeInfo.rotatesSrcSlices = true;
+          }
         }
       }
 
@@ -7043,7 +7103,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
     size_t const initOffset = cfg.data.byteOffset / sizeof(float);
-    float* const src = resources.srcMem[0] + initOffset;
+    // Select this iteration's source slice (see DataOptions::srcRotateBytes). The DMA executor
+    // reads srcMem directly rather than through SubExecParam, so it rotates here.
+    int    const numSrcSlices = std::max(1, resources.numSrcSlices);
+    size_t const sliceOffset  = (numSrcSlices > 1)
+                              ? (size_t)(((iteration % numSrcSlices) + numSrcSlices) % numSrcSlices)
+                                * resources.srcSliceFloats
+                              : 0;
+    float* const src = resources.srcMem[0] + initOffset + sliceOffset;
     if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.general.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
@@ -7538,6 +7605,39 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     va_end(args);
   }
 
+  /**
+   * Point each subexecutor at the source slice for this iteration and re-upload the
+   * parameter array. Called outside the timed region, so the H2D copy (a few KB) is
+   * not attributed to transfer bandwidth. No-op unless some Transfer was replicated.
+   */
+  static ErrResult RotateSourceSlices(int                iteration,
+                                      ExeDevice   const& exeDevice,
+                                      ExeInfo&           exeInfo)
+  {
+    if (!exeInfo.rotatesSrcSlices || exeInfo.totalSubExecs == 0) return ERR_NONE;
+
+    for (size_t i = 0; i < exeInfo.subExecParamCpu.size(); ++i) {
+      int const numSlices = exeInfo.subExecNumSlices[i];
+      if (numSlices <= 1) continue;
+      // iteration is negative during warmup, so fold into [0, numSlices)
+      int const slice = ((iteration % numSlices) + numSlices) % numSlices;
+      size_t const offset = (size_t)slice * exeInfo.subExecSliceFloats[i];
+      SubExecParam& p = exeInfo.subExecParamCpu[i];
+      for (int s = 0; s < p.numSrcs; ++s)
+        p.src[s] = exeInfo.subExecSrcBase[i][s] + offset;
+    }
+
+    size_t const numToUpload = std::min((size_t)exeInfo.totalSubExecs,
+                                        exeInfo.subExecParamCpu.size());
+    if (numToUpload == 0) return ERR_NONE;
+    ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+    ERR_CHECK(hipMemcpy(exeInfo.subExecParamGpu,
+                        exeInfo.subExecParamCpu.data(),
+                        numToUpload * sizeof(SubExecParam),
+                        hipMemcpyHostToDevice));
+    return ERR_NONE;
+  }
+
   bool RunTransfers(ConfigOptions         const& cfg,
                     std::vector<Transfer> const& transfers,
                     TestResults&                 results)
@@ -7701,6 +7801,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset, srcReference[srcIdx].data(), resource->numBytes,
                                  hipMemcpyDefault), errResults);
             ERR_APPEND(hipDeviceSynchronize(), errResults);
+
+            // Fill the remaining source slices with the same reference data. Copying
+            // device-to-device from slice 0 keeps prep cost off the host interconnect.
+            // All slices are identical, so validation is unaffected by which slice is read.
+            for (int slice = 1; slice < resource->numSrcSlices; ++slice) {
+              ERR_APPEND(hipMemcpy(resource->srcMem[srcIdx] + initOffset + (size_t)slice * resource->srcSliceFloats,
+                                   resource->srcMem[srcIdx] + initOffset,
+                                   resource->numBytes, hipMemcpyDeviceToDevice), errResults);
+            }
+            if (resource->numSrcSlices > 1)
+              ERR_APPEND(hipDeviceSynchronize(), errResults);
 
             // Optionally validate source memory right after preparation
             if (cfg.data.validateSource) {
@@ -7881,6 +7992,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
 
       // Wait for all ranks before starting any timing
+      // Advance to this iteration's source slice before timing starts, so repeat iterations
+      // read different addresses and cannot be served from cache.
+      for (size_t i = 0; i < localExecutors.size(); ++i)
+        ERR_APPEND(RotateSourceSlices(iteration, localExecutors[i], *localExeInfos[i]), errResults);
+
       System::Get().Barrier();
 
       // Start CPU timing for this iteration
