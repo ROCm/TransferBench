@@ -85,6 +85,7 @@ public:
   int alwaysValidate;                // <0 = disable validation, 0 = validate once after all iterations, >0 = validate after each iteration
   int blockBytes;                    // Each subexecutor, except the last, gets a multiple of this many bytes to copy
   int byteOffset;                    // Byte-offset for memory allocations
+  size_t srcRotateBytes;             // Min source working-set bytes; replicate+rotate source slices to defeat cache reuse
   vector<float> fillPattern;         // Pattern of floats used to fill source data
   vector<int> fillCompress;          // Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0
   int sweepMaxPow2;                  // Maximum power of two to sweep up to when number of bytes to transfer is set to 0
@@ -170,6 +171,7 @@ public:
     alwaysValidate     = GetEnvVar("ALWAYS_VALIDATE", 0);
     blockBytes         = GetEnvVar("BLOCK_BYTES"         , 256);
     byteOffset         = GetEnvVar("BYTE_OFFSET"         , 0);
+    srcRotateBytes     = (size_t)GetEnvVar("SRC_ROTATE_BYTES", 256 * 1024 * 1024);
     fillCompress       = GetEnvVarArray("FILL_COMPRESS"  , {});
     gfxBlockOrder      = GetEnvVar("GFX_BLOCK_ORDER"     , 0);
     gfxBlockSize       = GetEnvVar("GFX_BLOCK_SIZE"      , 256);
@@ -393,6 +395,10 @@ public:
     printf(" GFX_KERNEL          - -1=auto, 0=force GpuReduceKernel, 1=force GpuCopyKernel (may error if ineligible)\n");
     printf(" GFX_SE_TYPE         - SubExecutor granularity type (0=threadblock, 1=warp)\n");
     printf(" GFX_TEMPORAL        - Use of non-temporal loads or stores (0=none 1=loads 2=stores 3=both)\n");
+    printf(" SRC_ROTATE_BYTES    - Min source working-set bytes. GPU sources are replicated into\n");
+    printf("                       ceil(SRC_ROTATE_BYTES/N) identical slices and each iteration reads a\n");
+    printf("                       different slice, so repeat iterations cannot hit cache. Defeats the\n");
+    printf("                       one-sided inflation of remote-read bandwidth. 0 disables. (default 256MB)\n");
     printf(" GFX_UNROLL          - Unroll factor for GFX kernel\n");
     printf(" GFX_SINGLE_TEAM     - Have subexecutors work together on full array instead of working on disjoint subarrays\n");
     printf(" GFX_WAVE_ORDER      - Stride pattern for GFX kernel (0=UWC,1=UCW,2=WUC,3=WCU,4=CUW,5=CWU)\n");
@@ -498,6 +504,10 @@ public:
           "Each CU gets a mulitple of %d bytes to copy", blockBytes);
     Print("BYTE_OFFSET", byteOffset,
           "Using byte offset of %d", byteOffset);
+    Print("SRC_ROTATE_BYTES", (int32_t)srcRotateBytes,
+          "%s", srcRotateBytes == 0
+                ? "Source slice rotation OFF (remote-read bandwidth may be cache-inflated)"
+                : "Replicating GPU sources to >= this many bytes and rotating slices per iteration");
     Print("CU_MASK", getenv("CU_MASK") ? 1 : 0,
           "%s", (cuMask.size() ? GetCuMaskDesc().c_str() : "All"));
     Print("FILL_COMPRESS", getenv("FILL_COMPRESS") ? 1 : 0,
@@ -771,6 +781,7 @@ public:
     cfg.data.alwaysValidate        = alwaysValidate;
     cfg.data.blockBytes            = blockBytes;
     cfg.data.byteOffset            = byteOffset;
+    cfg.data.srcRotateBytes        = srcRotateBytes;
     cfg.data.fillCompress          = fillCompress;
     cfg.data.fillPattern           = fillPattern;
     cfg.data.validateDirect        = validateDirect;
