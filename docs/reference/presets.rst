@@ -75,6 +75,10 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Stress tests by running through combinations of transfers.
       - ❌
 
+    * - :ref:`TDM sweep preset (tdmsweep) <tdmsweep>`
+      - Sweeps Tensor Data Mover (TDM) executor options (block size, LDS, order, SubExecutors) for a given TDM transfer.
+      - ✅
+
 .. note::
 
     You can modify a preset using environment variables, which are detailed when running the preset.
@@ -2615,3 +2619,131 @@ Example output
   -------------------┼--------------┼------------┼-------------------┼--------------------
      Aggregate (CPU) │ 295.108 GB/s │  12.735 ms │  3758096384 bytes │ Overhead 0.372 ms
   -------------------┴--------------┴------------┴-------------------┴--------------------
+
+.. _tdmsweep:
+
+TDM sweep preset (tdmsweep)
+=============================
+
+The tdmsweep preset sweeps every parameter that affects Tensor Data Mover (TDM) copy performance for a single user-specified Transfer, and reports the best-performing combination. It mirrors the structure of the ``gfxsweep`` preset.
+
+The TDM executor (``EXE_GPU_TDM``, the ``T`` executor in a Transfer expression) stages HBM -> LDS -> HBM without touching cache. Its throughput is governed by four parameters, and this preset sweeps their full cartesian product:
+
+- **Threadblock size:** ``TDM_BLOCK_SIZE``, threads per block (multiple of 32).
+
+- **LDS staging window:** ``TDM_LDS_BYTES``, bytes per block (``0`` = device max).
+
+- **Threadblock order:** ``TDM_BLOCK_ORDER`` (0=sequential, 1=interleaved, 2=random).
+
+- **Sub-executor count:** number of threadblocks/WGPs engaged.
+
+**Key features:**
+
+- Verifies that a TDM executor exists and that TDM copies are supported on device 0.
+
+- Parses ``TDM_TRANSFER`` into ``NUM_TRANSFERS`` Transfer(s). Every Transfer must use the ``T`` executor.
+
+- Iterates over ``BLOCK_ORDERS`` x ``BLOCKSIZES`` x ``LDS_BYTES``, and for each combination over every value in ``NUM_SUB_EXECS``.
+
+- Prints a matrix of bandwidths: one row per (order, block size, LDS bytes) triple and one column per sub-executor count.
+
+- Reports the best bandwidth per sub-executor count, the overall best combination, and a ready-to-paste command that reproduces it.
+
+- **Automatic timing mode** (``TIMING_MODE=-1``): a single Transfer uses GPU-wallclock timing; multiple Transfers sharing one executor use HIP-event timing; otherwise aggregate CPU timing is used.
+
+**Restrictions:**
+
+- **Requires TDM-capable hardware:** AMD gfx1250 or NVIDIA sm_90+.
+
+- **Hardware gate:** If no TDM executor is present, or ``IsTdmCopySupported(0)`` is false, the preset prints ``[WARN] TDM executor is not supported on this device`` and returns a fatal error.
+
+- **Executor check:** Every parsed Transfer must use the ``T`` executor. Anything else fails with ``[ERROR] tdmsweep preset only works on Transfers that are using the TDM executor``.
+
+- **Rejected combinations are skipped, not fatal:** A combination the library refuses (for example, an LDS window larger than the device maximum) prints ``N/A`` in that cell, and the sweep continues.
+
+- **No successful run:** If every combination fails, the preset reports ``[WARN] No transfers executed successfully`` and returns a fatal error.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench tdmsweep [numBytes]
+
+Sweep the default parameter space for a local GPU 0 TDM copy:
+
+.. code-block:: shell
+
+    ./TransferBench tdmsweep
+
+Sweep a GPU0->GPU1 TDM copy of 256 MB over a reduced search space:
+
+.. code-block:: shell
+
+    TDM_TRANSFER="G0->T0->G1" BLOCKSIZES=256,512 LDS_BYTES=32768,0 ./TransferBench tdmsweep 268435456
+
+Environment variables
+-----------------------
+
+To modify the behavior of the tdmsweep preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``BLOCKSIZES``
+      - Threadblock sizes to sweep. Each value must be a positive multiple of 32.
+      - ``64,128,256,512,1024``
+
+    * - ``BLOCK_ORDERS``
+      - Threadblock orderings to sweep: 0=sequential, 1=interleaved, 2=random. Values outside 0-2 are rejected.
+      - ``0``
+
+    * - ``LDS_BYTES``
+      - LDS staging window sizes (bytes per threadblock) to sweep. ``0`` means the device maximum. Must be >= 0.
+      - ``8192,16384,32768,65536,0``
+
+    * - ``NUM_SUB_EXECS``
+      - Sub-executor counts to sweep; these form the columns of the output matrix. Must not be empty.
+      - ``2,4,8,16,32,64``
+
+    * - ``NUM_TRANSFERS``
+      - Number of Transfers described by ``TDM_TRANSFER``.
+      - ``1``
+
+    * - ``TIMING_MODE``
+      - ``-1``\=auto, ``0``\=aggregate CPU time, ``1``\=executor time (HIP event), ``2``\=transfer time (GPU wallclock).
+      - ``-1``
+
+    * - ``TDM_TRANSFER``
+      - The TDM Transfer to sweep, using :ref:`Transfer definition syntax <transfer-definition-syntax>`. Must use the ``T`` (TDM) executor.
+      - ``G0->T0->G0``
+
+.. note::
+
+    The sweep sets the global ``TDM_BLOCK_ORDER``, ``TDM_BLOCK_SIZE``, and ``TDM_LDS_BYTES`` options on each iteration, so setting those directly has no effect when running the tdmsweep preset — use ``BLOCK_ORDERS``, ``BLOCKSIZES``, and ``LDS_BYTES`` instead.
+
+Example output
+----------------
+
+The sweep prints one row per (BlkO, BlkS, LDSBytes) combination and one column per sub-executor count, followed by a summary row of the best value in each column:
+
+.. code-block:: shell
+
+  BlkO    BlkS    LDSBytes  SE 002  SE 004  SE 008  SE 016  SE 032  SE 064
+   ...     ...     ...       ...     ...     ...     ...     ...     ...
+  BlkO    BlkS    LDSBytes  <best>  <best>  <best>  <best>  <best>  <best>
+  =======================================================================================
+  Highest bandwidth found:  <value> GB/s (GPU wallclock-timed)
+            BlockOrder   :      <n>  [TDM_BLOCK_ORDER=<n>]
+            BlockSize    :      <n>  [TDM_BLOCK_SIZE=<n>]
+            LDS Bytes    :      <n>  [TDM_LDS_BYTES=<n>]
+            NumSubExec   :      <n>
+  Command to run best result:
+  TDM_BLOCK_ORDER=<n> TDM_BLOCK_SIZE=<n> TDM_LDS_BYTES=<n> ./TransferBench cmdline <bytes> "<n> <n> G0->T0->G0"
+
+.. note::
+
+    A capture from real TDM-capable hardware has not been added yet.

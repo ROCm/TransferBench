@@ -8,6 +8,10 @@
 Building TransferBench from source
 ===================================
 
+.. note::
+
+   TransferBench is part of the `ROCmValidationSuite (RVS) <https://rocm.docs.amd.com/projects/ROCmValidationSuite/en/latest/index.html>`_ and is installed with it.
+
 To build TransferBench from source, install the following required dependencies first:
 
 Required dependencies
@@ -346,6 +350,8 @@ To modify the CMake behavior, use the following environment variables:
   mkdir build && cd build
   cmake .. -DENABLE_NIC_EXEC=ON -DENABLE_MPI_COMM=ON
   make
+
+.. _build-troubleshooting:
 
 Troubleshooting common build errors
 ====================================
