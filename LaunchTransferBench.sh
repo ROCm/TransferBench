@@ -296,17 +296,32 @@ transferbench_path="$script_dir/TransferBench"
 
 echo
 
-# Build properly escaped environment variable string
-env_string=""
-for env_var in "${env_vars[@]}"; do
-    # Split into key and value (validation already done during parsing)
-    key="${env_var%%=*}"
-    value="${env_var#*=}"
+# Quote one word for the remote login shell. Single quotes are literal in
+# bash, sh, and csh/tcsh, and the '\'' sequence is a quote in all three.
+shell_quote() {
+    printf "'%s'" "${1//\'/\'\\\'\'}"
+}
 
-    # Escape the value and rebuild the env var
-    escaped_value=$(printf '%q' "$value")
-    env_string="$env_string $key=$escaped_value"
-done
+# The login shell that ssh starts may be csh/tcsh, which rejects a VAR=value
+# prefix. Hand the real command to bash. The outer word is single-quoted so
+# either login shell passes it through unchanged.
+build_remote_cmd() {
+    local rank="$1"
+    local cmd key value arg
+
+    cmd="TB_NUM_RANKS=$num_ranks TB_RANK=$rank TB_SINGLE_LOG=1"
+    cmd+=" TB_MASTER_ADDR=$(shell_quote "$master_addr")"
+    for env_var in "${env_vars[@]}"; do
+        key="${env_var%%=*}"
+        value="${env_var#*=}"
+        cmd+=" $key=$(shell_quote "$value")"
+    done
+    cmd+=" $(shell_quote "$transferbench_path")"
+    for arg in "${tb_args[@]}"; do
+        cmd+=" $(shell_quote "$arg")"
+    done
+    printf '%s' "/bin/bash --noprofile --norc -c $(shell_quote "$cmd")"
+}
 
 # Cleanup function for interruption
 cleanup() {
@@ -342,7 +357,7 @@ cleanup() {
     # Final cleanup: kill any remaining TransferBench processes on all hosts
     if [[ ${#worker_hosts[@]} -gt 0 ]]; then
         for host in "${worker_hosts[@]}"; do
-            ssh -q -o LogLevel=ERROR -o ConnectTimeout=1 "$host" "pkill -u \$(whoami) -f TransferBench 2>/dev/null || true" 2>/dev/null || true &
+            ssh -q -o LogLevel=ERROR -o ConnectTimeout=1 "$host" "pkill -u \`whoami\` -f TransferBench >/dev/null 2>&1 || true" 2>/dev/null || true &
         done
         # Don't wait for these - let them complete in background
     fi
@@ -384,22 +399,16 @@ fi
 worker_pids=()
 worker_hosts=()
 
-# Build properly escaped arguments string
-tb_args_escaped=""
-for arg in "${tb_args[@]}"; do
-    tb_args_escaped+=" $(printf '%q' "$arg")"
-done
-
 for ((rank=1; rank<num_ranks; rank++)); do
     worker_host="${hosts[$rank]}"
-    worker_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=$rank TB_SINGLE_LOG=1 TB_MASTER_ADDR='$master_addr' $env_string '$transferbench_path'$tb_args_escaped"
+    worker_cmd=$(build_remote_cmd "$rank")
     ssh -q -o LogLevel=ERROR "$worker_host" "$worker_cmd" >/dev/null 2>&1 &
     worker_pids+=($!)
     worker_hosts+=("$worker_host")
 done
 
 # Start master rank (TransferBench will wait for all workers to connect)
-master_cmd="TB_NUM_RANKS=$num_ranks TB_RANK=0 TB_SINGLE_LOG=1 TB_MASTER_ADDR='$master_addr' $env_string '$transferbench_path'$tb_args_escaped"
+master_cmd=$(build_remote_cmd 0)
 if ! ssh -q -o LogLevel=ERROR "$master_host" "$master_cmd"; then
     echo "ERROR: Master rank failed on $master_host" >&2
     # Clean up worker processes before exiting
