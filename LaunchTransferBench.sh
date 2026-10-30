@@ -18,7 +18,8 @@
 #   transferbench_args: Arguments to pass to TransferBench (after --)
 #
 # Examples:
-#   ./LaunchTransferBench.sh node1,node2,node3,node4 NUM_ITERATIONS=10 NUM_SUBITERATIONS=100 -- a2a
+#   ./LaunchTransferBench.sh 'node[1..4]' NUM_ITERATIONS=10 NUM_SUBITERATIONS=100 -- a2a
+#   ./LaunchTransferBench.sh 'rack[01..02]-node[01..04]' -- a2a
 #   ./LaunchTransferBench.sh host1,host2 -- cmdline 1G "1 1 R0G0 R0D0 R1G0"
 #   ./LaunchTransferBench.sh server1,server2,server3 TB_MASTER_PORT=30000 -- example.cfg
 #
@@ -31,7 +32,12 @@ show_usage() {
 Usage: $0 <hosts> [env_vars...] [-- <transferbench_args>]
 
 Arguments:
-  hosts                Comma-separated list of hostnames/IPs to run on
+  hosts                Comma-separated list of hostnames/IPs to run on.
+                       A bracketed range wildcard expands in place:
+                         [1..4]    -> 1, 2, 3, 4
+                         [01..04]  -> 01, 02, 03, 04
+                         [1,5..7]  -> 1, 5, 6, 7
+                       Several ranges in one name are combined left to right.
   env_vars             Optional environment variables (KEY=VALUE format)
   transferbench_args   Arguments to pass to TransferBench (after --)
 
@@ -43,15 +49,182 @@ Environment Variables for TransferBench:
   ... and many others (see TransferBench documentation)
 
 Examples:
-  $0 node1,node2,node3,node4 NUM_ITERATIONS=10 NUM_SUBITERATIONS=100 -- a2a
+  $0 'node[1..4]' NUM_ITERATIONS=10 NUM_SUBITERATIONS=100 -- a2a
+  $0 'rack[01..02]-node[01..04]' -- a2a
   $0 host1,host2 -- cmdline 1G "1 1 R0G0 R0D0 R1G0"
   $0 server1,server2,server3 TB_MASTER_PORT=30000 -- example.cfg
 
 Notes:
-  - The first host in the list becomes rank 0 (master)
+  - Quote a host list that contains [] so the shell does not expand it as a glob
+  - The first host after expansion becomes rank 0 (master)
   - TransferBench must be built in the same directory as this script on all hosts
   - SSH access must be configured for all hosts
 EOF
+}
+
+# Expand host-list range wildcards into the global hosts array.
+# Commas inside [] belong to the range; commas outside [] separate hosts.
+# A bound written with a leading zero sets the printed width of that range.
+# Several ranges in one name combine left to right; the rightmost varies fastest.
+HOST_EXPAND_LIMIT=4096
+
+expand_range_spec() {
+    local spec="$1"
+    local context="$2"
+    local token start_str end_str start end width i
+
+    _range_values=()
+    spec="${spec},"
+    while [[ "$spec" == *,* ]]; do
+        token="${spec%%,*}"
+        spec="${spec#*,}"
+        token="${token#"${token%%[![:space:]]*}"}"
+        token="${token%"${token##*[![:space:]]}"}"
+        if [[ -z "$token" ]]; then
+            echo "ERROR: empty entry in host range '$context'" >&2
+            return 1
+        fi
+        if [[ "$token" =~ ^([0-9]+)[[:space:]]*\.\.[[:space:]]*([0-9]+)$ ]]; then
+            start_str="${BASH_REMATCH[1]}"
+            end_str="${BASH_REMATCH[2]}"
+            if (( ${#start_str} > 9 || ${#end_str} > 9 )); then
+                echo "ERROR: host range '$token' in '$context' is too large" >&2
+                return 1
+            fi
+            start=$((10#$start_str))
+            end=$((10#$end_str))
+            if (( end < start )); then
+                echo "ERROR: host range '$token' in '$context' is descending" >&2
+                return 1
+            fi
+            if (( end - start + 1 > HOST_EXPAND_LIMIT )); then
+                echo "ERROR: host range '$token' in '$context' expands past $HOST_EXPAND_LIMIT hosts" >&2
+                return 1
+            fi
+            width=0
+            if [[ "$start_str" =~ ^0[0-9] || "$end_str" =~ ^0[0-9] ]]; then
+                width=${#start_str}
+                if (( ${#end_str} > width )); then
+                    width=${#end_str}
+                fi
+            fi
+            for ((i = start; i <= end; i++)); do
+                if (( width > 0 )); then
+                    printf -v token '%0*d' "$width" "$i"
+                else
+                    printf -v token '%d' "$i"
+                fi
+                _range_values+=("$token")
+            done
+        elif [[ "$token" =~ ^[0-9]+$ ]]; then
+            if (( ${#token} > 9 )); then
+                echo "ERROR: host range entry '$token' in '$context' is too large" >&2
+                return 1
+            fi
+            # Keep the written form, including a leading zero on a single index.
+            _range_values+=("$token")
+        else
+            echo "ERROR: invalid host range entry '$token' in '$context'" >&2
+            echo "       expected a number or start..end (example: [1,5..7])" >&2
+            return 1
+        fi
+    done
+    if [[ ${#_range_values[@]} -eq 0 ]]; then
+        echo "ERROR: empty host range in '$context'" >&2
+        return 1
+    fi
+}
+
+expand_host_pattern() {
+    local pat="$1"
+    local prefix rest spec suffix
+    local -a values=()
+    local v
+
+    if [[ "$pat" != *'['* && "$pat" != *']'* ]]; then
+        hosts+=("$pat")
+        return 0
+    fi
+    if [[ "$pat" != *'['* || "$pat" != *']'* ]]; then
+        echo "ERROR: unmatched bracket in host pattern '$pat'" >&2
+        return 1
+    fi
+
+    prefix="${pat%%\[*}"
+    if [[ "$prefix" == *']'* ]]; then
+        echo "ERROR: unmatched ']' in host pattern '$pat'" >&2
+        return 1
+    fi
+    rest="${pat#*\[}"
+    spec="${rest%%\]*}"
+    suffix="${rest#*\]}"
+
+    expand_range_spec "$spec" "$pat" || return 1
+    values=("${_range_values[@]}")
+    for v in "${values[@]}"; do
+        expand_host_pattern "${prefix}${v}${suffix}" || return 1
+    done
+}
+
+expand_host_list() {
+    local input="$1"
+    local current="" depth=0 i c pat stripped rest
+    local -a patterns=()
+
+    hosts=()
+    for ((i = 0; i < ${#input}; i++)); do
+        c="${input:i:1}"
+        if [[ "$c" == '[' ]]; then
+            depth=$((depth + 1))
+            current+="$c"
+        elif [[ "$c" == ']' ]]; then
+            if (( depth == 0 )); then
+                echo "ERROR: unmatched ']' in host list" >&2
+                return 1
+            fi
+            depth=$((depth - 1))
+            current+="$c"
+        elif [[ "$c" == ',' && depth -eq 0 ]]; then
+            patterns+=("$current")
+            current=""
+        else
+            current+="$c"
+        fi
+    done
+    if (( depth != 0 )); then
+        echo "ERROR: unmatched '[' in host list" >&2
+        return 1
+    fi
+    patterns+=("$current")
+
+    for pat in "${patterns[@]}"; do
+        pat="${pat#"${pat%%[![:space:]]*}"}"
+        pat="${pat%"${pat##*[![:space:]]}"}"
+        if [[ -z "$pat" ]]; then
+            echo "ERROR: Empty hostname found in host list" >&2
+            return 1
+        fi
+        # Whitespace is allowed inside [] and is trimmed per entry. Outside [],
+        # it is still a bad hostname (leading/trailing space was already removed).
+        stripped="$pat"
+        while [[ "$stripped" == *'['* && "$stripped" == *']'* ]]; do
+            rest="${stripped#*\[}"
+            if [[ "$rest" != *']'* ]]; then
+                break
+            fi
+            stripped="${stripped%%\[*}${rest#*\]}"
+        done
+        if [[ "$stripped" =~ [[:space:]] ]]; then
+            echo "ERROR: Hostname '$pat' contains whitespace" >&2
+            return 1
+        fi
+        expand_host_pattern "$pat" || return 1
+    done
+
+    if (( ${#hosts[@]} > HOST_EXPAND_LIMIT )); then
+        echo "ERROR: host list expands to ${#hosts[@]} hosts (limit $HOST_EXPAND_LIMIT)" >&2
+        return 1
+    fi
 }
 
 
@@ -71,23 +244,10 @@ if [[ -z "$hosts_input" ]]; then
     exit 1
 fi
 
-# Convert comma-separated hosts to array and trim whitespace
-IFS=',' read -ra hosts_raw <<< "$hosts_input"
-hosts=()
-for host in "${hosts_raw[@]}"; do
-    # Trim leading and trailing whitespace
-    host=$(echo "$host" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    if [[ -z "$host" ]]; then
-        echo "ERROR: Empty hostname found in host list" >&2
-        exit 1
-    fi
-    # Check for remaining whitespace in hostname
-    if [[ "$host" =~ [[:space:]] ]]; then
-        echo "ERROR: Hostname '$host' contains whitespace" >&2
-        exit 1
-    fi
-    hosts+=("$host")
-done
+# Convert comma-separated hosts to an array, expanding range wildcards.
+if ! expand_host_list "$hosts_input"; then
+    exit 1
+fi
 num_ranks=${#hosts[@]}
 
 if [[ $num_ranks -lt 2 ]]; then
