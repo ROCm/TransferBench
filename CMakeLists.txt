@@ -479,12 +479,21 @@ target_compile_definitions(TransferBench PRIVATE
   TB_GIT_COMMIT="${TB_GIT_COMMIT}"
 )
 
-check_cxx_compiler_flag(-parallel-jobs=12 HAVE_PARALLEL_JOBS)
-if(HAVE_PARALLEL_JOBS)
-  message(STATUS "Enabling parallel compile jobs: -parallel-jobs=12")
-  target_compile_options(TransferBench PRIVATE -parallel-jobs=12)
+# LLVM 21 renamed the downstream -parallel-jobs= option to --offload-jobs=.
+check_cxx_compiler_flag("--offload-jobs=12" HAVE_OFFLOAD_JOBS)
+if(HAVE_OFFLOAD_JOBS)
+  set(TB_OFFLOAD_JOBS_FLAG "--offload-jobs=12")
 else()
-  message(STATUS "Compiler does not support -parallel-jobs=12 (or the check failed); skipping -parallel-jobs optimisation")
+  check_cxx_compiler_flag("-parallel-jobs=12" HAVE_PARALLEL_JOBS)
+  if(HAVE_PARALLEL_JOBS)
+    set(TB_OFFLOAD_JOBS_FLAG "-parallel-jobs=12")
+  endif()
+endif()
+if(TB_OFFLOAD_JOBS_FLAG)
+  message(STATUS "Enabling parallel compile jobs: ${TB_OFFLOAD_JOBS_FLAG}")
+  target_compile_options(TransferBench PRIVATE ${TB_OFFLOAD_JOBS_FLAG})
+else()
+  message(STATUS "Compiler does not support parallel offload jobs; skipping the optimisation")
 endif()
 
 target_link_options(TransferBench PRIVATE -fgpu-rdc)
