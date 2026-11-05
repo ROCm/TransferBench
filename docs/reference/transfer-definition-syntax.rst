@@ -163,6 +163,16 @@ The following table lists the supported Executor type letters:
       - Queue pair
       - GPU. Uses the closest NIC for SRC and DST. SubIndex is optional.
 
+    * - ``B``
+      - Batched DMA
+      - Batch item
+      - GPU (0 to #GPUs - 1). Requires a single SRC and at least one DST.
+
+    * - ``T``
+      - TDM
+      - Threadblock/CU
+      - GPU (0 to #GPUs - 1). Requires AMD gfx1250 or NVIDIA sm_90+.
+
 The optional Executor fields have the following meanings:
 
 - ``Slot`` (``A``, ``B``, ...): Selects which closest NIC to use, where ``A`` is the first and ``B`` is the second, and so on. Used for ``EXE_NIC_NEAREST``.

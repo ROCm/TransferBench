@@ -69,6 +69,18 @@ General options
       - Controls how many transfer sizes are sampled per power-of-2 range when ``num_bytes`` is set to ``0``. For example, ``SAMPLING_FACTOR=4`` produces four evenly spaced sizes between each power of 2.
       - ``1``
 
+    * - ``SHOW_PERCENTILES``
+      - Comma-separated percentiles of iteration duration to report. Each value must be between 1 and 99.
+      - —
+
+    * - ``SWEEP_MIN_POW2``
+      - When ``0`` is specified for data size, the starting power-of-two exponent.
+      - ``10``
+
+    * - ``SWEEP_MAX_POW2``
+      - When ``0`` is specified for data size, the ending power-of-two exponent.
+      - ``29``
+
 .. _data-validation-var:
 
 Data and validation options
@@ -225,6 +237,10 @@ GFX and kernel options
       - Preferred XCC per source-by-destination GPU pair, specified as a comma-separated list. Supported on AMD hardware only.
       - —
 
+    * - ``GFX_KERNEL``
+      - Selects the GFX kernel. ``-1`` = auto, ``0`` = force ``GpuReduceKernel``, ``1`` = force ``GpuCopyKernel`` (might error if the transfer is ineligible for this kernel).
+      - ``0``
+
 DMA options
 -----------
 
@@ -237,6 +253,28 @@ DMA options
 
     * - ``USE_HSA_DMA``
       - DMA implementation. ``1`` = use ``hsa_amd_async_copy`` for direct HSA control, ``0`` = use ``hipMemcpy`` for the standard HIP path.
+      - ``0``
+
+TDM options
+-----------
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``TDM_BLOCK_ORDER``
+      - How blocks for TDM transfers are ordered. ``0`` = sequential, ``1`` = interleaved.
+      - ``0``
+
+    * - ``TDM_BLOCK_SIZE``
+      - Threads per threadblock for TDM (async tensor) kernels. Must be a multiple of 32.
+      - ``256``
+
+    * - ``TDM_LDS_BYTES``
+      - LDS bytes per workgroup for TDM kernels. ``0`` = device max. Accepts ``K``, ``M``, and ``G`` suffixes.
       - ``0``
 
 Variable SubExecutor options
@@ -293,6 +331,18 @@ The following environment variables apply only when NIC support is enabled. To e
       - RoCE version.
       - ``2``
 
+    * - ``NIC_CQ_POLL_BATCH``
+      - Number of completion queue entries to poll per ``ibv_poll_cq`` call.
+      - ``4``
+
+    * - ``NIC_SERVICE_LEVEL``
+      - InfiniBand service level (``sl``) for IB queue pairs. Must be between 0 and 15.
+      - ``0``
+
+    * - ``NIC_TRAFFIC_CLASS``
+      - DSCP / traffic-class byte for the RoCE GRH. Must be between 0 and 255.
+      - ``0``
+
 HIP runtime variables (client-read)
 -------------------------------------
 
@@ -337,6 +387,12 @@ Socket-related variables
 
     * - ``TB_SINGLE_LOG``
       - When set, only rank 0 produces output. Useful for multinode socket mode.
+
+    * - ``TB_MASTER_IFACE``
+      - When ``TB_MASTER_ADDR`` is unset on rank 0, the optional network interface used for IPv4 address detection (for example, ``eth0``).
+
+    * - ``TB_SEND_USLEEP``
+      - Microseconds to sleep after each socket ``SendData`` call. Default: ``0``. Useful for diagnosing socket stability.
 
 Backend variables
 -----------------
@@ -406,6 +462,12 @@ Backend variables
 
     * - ``TB_FORCE_SINGLE_POD``
       - Forces single pod mode, skipping AMD-SMI and NVML pod queries. This assumes that all GPUs are in the same pod and skips cluster membership API calls.
+
+    * - ``TB_SHOW_ALL_NUMA``
+      - Shows all CPU NUMA nodes, including those with no cores. By default, coreless nodes are hidden, which changes the reported CPU indices.
+
+    * - ``TB_WALLCLOCK_RATE``
+      - Overrides the queried GPU wallclock rate when the query returns ``0``.
 
 HSA runtime variables
 ---------------------
