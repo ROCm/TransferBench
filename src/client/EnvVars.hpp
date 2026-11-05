@@ -60,6 +60,7 @@ using namespace TransferBench;
   #define hipSuccess                                         cudaSuccess
   #define gcnArchName                                        name
   #define hipGetDeviceCount                                  cudaGetDeviceCount
+  #define hipDeviceCanAccessPeer                             cudaDeviceCanAccessPeer
 #endif
 
 // This class manages environment variable that affect TransferBench

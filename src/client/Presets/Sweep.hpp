@@ -332,12 +332,13 @@ int SweepPreset(EnvVars&          ev,
   }
 
   int numTestsRun = 0;
+  int numTestsFailed = 0;
   int M = sweepMin;
   std::uniform_int_distribution<int> randSize(1, numBytesPerTransfer / sizeof(float));
   std::uniform_int_distribution<int> distribution(sweepMin, maxParallelTransfers);
 
   // Log sweep to configuration file
-  char absPath[1024];
+  char absPath[PATH_MAX];
   auto const res = realpath(sweepFile.c_str(), absPath);
 
   FILE *fp = fopen(sweepFile.c_str(), "w");
@@ -383,8 +384,15 @@ int SweepPreset(EnvVars&          ev,
     LogTransfers(fp, ++numTestsRun, transfers);
 
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-      Utils::PrintErrors(results.errResults);
-      if (!continueOnErr) return ERR_FATAL;
+      if (!continueOnErr) {
+        Utils::PrintErrors(results.errResults);
+        if (fp) fclose(fp);
+        return ERR_FATAL;
+      }
+      printf("Test %d: skipped (rejected by TransferBench)\n", numTestsRun);
+      for (auto const& err : results.errResults)
+        printf("  [%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
+      numTestsFailed++;
     } else {
       Utils::PrintResults(ev, numTestsRun, transfers, results);
     }
@@ -418,5 +426,9 @@ int SweepPreset(EnvVars&          ev,
     }
   }
   if (fp) fclose(fp);
+  if (numTestsFailed > 0) {
+    printf("[WARN] %d of %d test(s) were skipped due to errors (CONTINUE_ON_ERROR=%d)\n",
+           numTestsFailed, numTestsRun, continueOnErr);
+  }
   return ERR_NONE;
 }
