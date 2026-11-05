@@ -3,6 +3,23 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.71.02
+### Added
+- LaunchTransferBench.sh now supports bracketed range wildcards in the host list, e.g. `node[1..4]` or
+  `rack[01..02]-node[01..04]`. Several ranges in one name combine left to right
+- LaunchTransferBench.sh now supports `-h`/`--help` and `-n`/`--dry-run`. `--dry-run` shows the expanded host list
+  and the exact command that would be run on each rank, without actually running them
+### Fixed
+- LaunchTransferBench.sh now hands the remote command to bash explicitly, so launching on hosts whose login shell
+  is csh/tcsh no longer fails on the `VAR=value` environment prefix
+- Negative `NUM_ITERATIONS` (time-based run duration) no longer runs `NUM_SUBITERATIONS` times longer than
+  requested. The per-iteration time accumulated toward the time limit was being divided by `NUM_SUBITERATIONS`
+  before being compared against the requested duration
+- sweep preset no longer generates CPU-executed Transfers to/from GPU memory that isn't host-accessible (Large BAR
+  disabled) or GPU-executed Transfers to another GPU's memory without peer access; such Transfers are now skipped
+  with a warning instead of failing. Manually configured Transfers that hit the same cases are now rejected during
+  validation with a clear fatal error instead of behaving incorrectly
+
 ## v1.71.01
 ### Modified
 - `a2a` and `a2asweep` presets now default `A2A_DIRECT=0` on MI4XX (gfx1250) hardware, allowing DPX to route

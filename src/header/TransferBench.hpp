@@ -7861,8 +7861,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Stop if number of iterations/seconds has reached limit
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
 
-      // NOTE: Time-based limit is based on first rank to avoid any skew issues
-      bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
+      // NOTE: Time-based limit is based on first rank to avoid any skew issues.
+      // totalCpuTimeSec accumulates per-sub-iteration time (deltaSec is divided by
+      // numSubIterations below), so it must be scaled back up by numSubIterations
+      // here to compare against real elapsed wall-clock seconds.
+      bool shouldStop = (cfg.general.numIterations < 0 &&
+                          totalCpuTimeSec * cfg.general.numSubIterations > -cfg.general.numIterations);
       System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
       if (shouldStop) break;
 

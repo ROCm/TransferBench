@@ -10,9 +10,11 @@
 # the appropriate environment variables.
 #
 # Usage:
-#   ./LaunchTransferBench.sh <hosts> [env_vars...] [-- <transferbench_args>]
+#   ./LaunchTransferBench.sh [-h|--help] [-n|--dry-run] <hosts> [env_vars...] [-- <transferbench_args>]
 #
 # Arguments:
+#   -h, --help: Show usage information and exit
+#   -n, --dry-run: Show the expanded hosts and the commands that would be run, without running them
 #   hosts: Comma-separated list of hostnames/IPs to run on
 #   env_vars: Optional environment variables (e.g., NUM_ITERATIONS=10 NUM_SUBITERATIONS=100)
 #   transferbench_args: Arguments to pass to TransferBench (after --)
@@ -22,6 +24,7 @@
 #   ./LaunchTransferBench.sh 'rack[01..02]-node[01..04]' -- a2a
 #   ./LaunchTransferBench.sh host1,host2 -- cmdline 1G "1 1 R0G0 R0D0 R1G0"
 #   ./LaunchTransferBench.sh server1,server2,server3 TB_MASTER_PORT=30000 -- example.cfg
+#   ./LaunchTransferBench.sh --dry-run 'node[1..4]' -- a2a
 #
 
 set -e
@@ -29,9 +32,12 @@ set -e
 # Function to display usage information
 show_usage() {
     cat << EOF
-Usage: $0 <hosts> [env_vars...] [-- <transferbench_args>]
+Usage: $0 [-h|--help] [-n|--dry-run] <hosts> [env_vars...] [-- <transferbench_args>]
 
 Arguments:
+  -h, --help           Show this usage information and exit
+  -n, --dry-run        Show the expanded hosts and the commands that would be
+                       run on each host, without actually running them
   hosts                Comma-separated list of hostnames/IPs to run on.
                        A bracketed range wildcard expands in place:
                          [1..4]    -> 1, 2, 3, 4
@@ -53,12 +59,15 @@ Examples:
   $0 'rack[01..02]-node[01..04]' -- a2a
   $0 host1,host2 -- cmdline 1G "1 1 R0G0 R0D0 R1G0"
   $0 server1,server2,server3 TB_MASTER_PORT=30000 -- example.cfg
+  $0 --dry-run 'node[1..4]' -- a2a
 
 Notes:
   - Quote a host list that contains [] so the shell does not expand it as a glob
   - The first host after expansion becomes rank 0 (master)
   - TransferBench must be built in the same directory as this script on all hosts
   - SSH access must be configured for all hosts
+  - -h/--help and -n/--dry-run may appear before or after <hosts>, as long as they
+    come before --; anything after -- is passed through to TransferBench unchanged
 EOF
 }
 
@@ -228,7 +237,34 @@ expand_host_list() {
 }
 
 
-# Parse command line arguments
+# Parse command line arguments. -h/--help and -n/--dry-run may appear anywhere
+# before a literal "--" (before or after the host list), since anything after
+# "--" is a TransferBench argument and must be passed through unchanged.
+dry_run=false
+args=()
+parsing_tb_args=false
+for arg in "$@"; do
+    if [[ "$parsing_tb_args" == false && "$arg" == "--" ]]; then
+        parsing_tb_args=true
+        args+=("$arg")
+        continue
+    fi
+    if [[ "$parsing_tb_args" == false ]]; then
+        case "$arg" in
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            -n|--dry-run)
+                dry_run=true
+                continue
+                ;;
+        esac
+    fi
+    args+=("$arg")
+done
+set -- "${args[@]}"
+
 if [[ $# -lt 1 ]]; then
     show_usage
     exit 1
@@ -256,6 +292,9 @@ if [[ $num_ranks -lt 2 ]]; then
     exit 1
 fi
 
+if [[ "$dry_run" == true ]]; then
+    echo "Mode      : DRY RUN (no commands will be executed)"
+fi
 echo "Hosts     : ${hosts[*]}"
 echo "Ranks     : $num_ranks"
 
@@ -402,6 +441,11 @@ worker_hosts=()
 for ((rank=1; rank<num_ranks; rank++)); do
     worker_host="${hosts[$rank]}"
     worker_cmd=$(build_remote_cmd "$rank")
+    if [[ "$dry_run" == true ]]; then
+        echo "Rank $rank (worker) on $worker_host:"
+        echo "  ssh $worker_host $worker_cmd"
+        continue
+    fi
     ssh -q -o LogLevel=ERROR "$worker_host" "$worker_cmd" >/dev/null 2>&1 &
     worker_pids+=($!)
     worker_hosts+=("$worker_host")
@@ -409,6 +453,11 @@ done
 
 # Start master rank (TransferBench will wait for all workers to connect)
 master_cmd=$(build_remote_cmd 0)
+if [[ "$dry_run" == true ]]; then
+    echo "Rank 0 (master) on $master_host:"
+    echo "  ssh $master_host $master_cmd"
+    exit 0
+fi
 if ! ssh -q -o LogLevel=ERROR "$master_host" "$master_cmd"; then
     echo "ERROR: Master rank failed on $master_host" >&2
     # Clean up worker processes before exiting

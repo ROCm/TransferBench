@@ -44,7 +44,6 @@ THE SOFTWARE.
 #include "NicPeerToPeer.hpp"
 #include "OneToAll.hpp"
 #include "PeerToPeer.hpp"
-#include "PerfReport.hpp"
 #include "PodAllToAll.hpp"
 #include "PodPeerToPeer.hpp"
 #include "Rings.hpp"
@@ -86,7 +85,6 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"one2all_latency", {LatencyPreset,       "Latency values from one Executor to many, run in parallel"}},
   {"p2p",             {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},
   {"p2p_latency",     {LatencyPreset,       "Latency values between pairs of Executors, run serially"}},
-  {"perfreport",      {PerfReportPreset,    "Runs the sweeps in PERFREPORT_INI (or default tests) and saves JSON results for PerfReport.html"}},
   {"poda2a",          {PodAllToAllPreset,   "All-to-all transfers between subgroups of ranks within a pod"}},
   {"podp2p",          {PodPeerToPeerPreset, "Peer-to-peer transfers test among ranks within a pod"}},
   {"ring_latency",    {LatencyPreset,       "Each GPU pingpongs its neighbor, all hops in parallel"}},
