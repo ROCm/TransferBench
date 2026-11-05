@@ -1668,6 +1668,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (hostAccessible || !IsGpuMemType(memDevice.memType)) return ERR_NONE;
 
 #if defined(__NVCC__)
+    hostAccessible = false;
     return ERR_NONE;
 #else
     int isLargeBar = 0;
@@ -2665,6 +2666,21 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                             "Transfer %d: CPU index must be between 0 and %d (instead of %d) for rank %d",
                             i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
           hasFatalError = true;
+        }
+        // CPU executors directly load/store GPU memory, which requires host access (e.g. Large BAR)
+        for (auto const* memList : {&t.srcs, &t.dsts}) {
+          for (auto const& mem : *memList) {
+            if (!IsGpuMemType(mem.memType) || mem.memRank != GetRank()) continue;
+            bool hostAccessible = false;
+            ErrResult err = GetMemHostAccessibility(mem, hostAccessible);
+            if (err.errType != ERR_NONE || !hostAccessible) {
+              errors.push_back({ERR_FATAL,
+                                "Transfer %d: CPU executor cannot directly access GPU memory %c%d "
+                                "(Large BAR is not enabled for GPU %d)",
+                                i, MemTypeStr[mem.memType], mem.memIndex, mem.memIndex});
+              hasFatalError = true;
+            }
+          }
         }
         break;
       case EXE_GPU_TDM:
@@ -7845,8 +7861,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Stop if number of iterations/seconds has reached limit
       if (cfg.general.numIterations > 0 && iteration >= cfg.general.numIterations) break;
 
-      // NOTE: Time-based limit is based on first rank to avoid any skew issues
-      bool shouldStop = (cfg.general.numIterations < 0 && totalCpuTimeSec > -cfg.general.numIterations);
+      // NOTE: Time-based limit is based on first rank to avoid any skew issues.
+      // totalCpuTimeSec accumulates per-sub-iteration time (deltaSec is divided by
+      // numSubIterations below), so it must be scaled back up by numSubIterations
+      // here to compare against real elapsed wall-clock seconds.
+      bool shouldStop = (cfg.general.numIterations < 0 &&
+                          totalCpuTimeSec * cfg.general.numSubIterations > -cfg.general.numIterations);
       System::Get().Broadcast(0, sizeof(shouldStop), &shouldStop);
       if (shouldStop) break;
 
