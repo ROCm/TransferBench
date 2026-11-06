@@ -10,7 +10,7 @@ TransferBench presets
 
 Presets are a predefined series of transfers that can be used instead of manually configuring the transfers.
 
-The following table lists the presets available on TransferBench 1.67.0:
+The following table lists the presets available on TransferBench 1.71.0:
 
 .. list-table::
     :header-rows: 1
@@ -23,6 +23,10 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Tests parallel transfers between all pairs of GPU devices within a single node.
       - ✅
 
+    * - ``a2a_latency``
+      - Latency between all pairs of GPU executors, run in parallel. Cross-rank pairs require pod communication support.
+      - ✅
+
     * - :ref:`All-to-all via nearest NIC preset (a2a_n) <a2a_n>`
       - Tests parallel transfers between all pairs of GPU devices using nearest NIC RDMA.
       - ❌
@@ -30,6 +34,34 @@ The following table lists the presets available on TransferBench 1.67.0:
     * - :ref:`All-to-all sweep preset (a2asweep) <a2asweep>`
       - Performs a parameter sweep of GFX-based all-to-all transfers across different SubExecutor counts, unroll factors, and thread block sizes.
       - ❌
+
+    * - ``bmasweep``
+      - Tests and compares the batched DMA executor for multi-destination copies.
+      - ❌
+
+    * - ``empty``
+      - Measures empty GFX kernel launch latency.
+      - ✅
+
+    * - ``envvars``
+      - Shows the list of environment variables that can be used to modify behavior.
+      - ✅
+
+    * - ``gfxsweep``
+      - Sweeps various GFX kernel options for a given GFX transfer.
+      - ✅
+
+    * - ``hbm``
+      - Tests HBM bandwidth.
+      - ✅
+
+    * - ``healthcheck``
+      - Simple bandwidth health check (AMD Instinct™ MI300X series only).
+      - ❌
+
+    * - ``help``
+      - Shows example usage details.
+      - ✅
 
     * - :ref:`NIC all-to-all preset (nica2a) <nica2a>`
       - NIC-executor all-to-all with plane/group partitioning via closest memory endpoint.
@@ -47,9 +79,17 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Tests all subsets of parallel transfers from one GPU to the others.
       - ❌
 
+    * - ``one2all_latency``
+      - Latency from one GPU executor to all others, run in parallel. Cross-rank pairs require pod communication support.
+      - ✅
+
     * - :ref:`Peer-to-peer preset (p2p) <p2p>`
       - Tests unidirectional and bidirectional transfers for CPU-to-CPU, CPU-to-GPU, and GPU-to-GPU combinations.
       - ❌
+
+    * - ``p2p_latency``
+      - Latency between pairs of GPU executors, run serially. Cross-rank pairs require pod communication support.
+      - ✅
 
     * - :ref:`Pod all-to-all preset (poda2a) <poda2a>`
       - Pod-aware all-to-all across GPUs within a single pod via UALoE path, with optional concurrent NIC ring.
@@ -57,6 +97,10 @@ The following table lists the presets available on TransferBench 1.67.0:
 
     * - :ref:`Pod peer-to-peer preset (podp2p) <podp2p>`
       - Pod-aware peer-to-peer bandwidth between every GPU pair in a pod (unidirectional and bidirectional).
+      - ✅
+
+    * - ``ring_latency``
+      - Each GPU executor pingpongs with its ring neighbor, with all hops run in parallel. Cross-rank pairs require pod communication support.
       - ✅
 
     * - :ref:`Intra-pod ring preset (rings) <rings>`
@@ -71,12 +115,20 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Runs scaling tests for local and remote read, write, and copy operations between two GPUs.
       - ❌
 
+    * - ``smoketest``
+      - Simple correctness smoke-test.
+      - ✅
+
     * - :ref:`Sweep or random sweep preset (sweep/rsweep) <sweep>`
       - Stress tests by running through combinations of transfers.
       - ❌
 
     * - :ref:`TDM sweep preset (tdmsweep) <tdmsweep>`
       - Sweeps Tensor Data Mover (TDM) executor options (block size, LDS, order, SubExecutors) for a given TDM transfer.
+      - ✅
+
+    * - ``wallclock``
+      - Tests wallclock consistency across XCCs within a GPU.
       - ✅
 
 .. note::
