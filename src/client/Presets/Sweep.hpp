@@ -190,6 +190,35 @@ int SweepPreset(EnvVars&          ev,
   // If either XGMI minimum is non-zero, or XGMI maximum is specified and non-zero then both links must be XGMI
   bool const useXgmiOnly = (sweepXgmiMin > 0 || sweepXgmiMax > 0);
 
+  // CPU executors can only directly access GPU memory that is host-accessible (e.g. Large BAR enabled)
+  std::vector<bool> gpuHostAccessible(numGpuDevices, false);
+#if !defined(__NVCC__)
+  for (int gpuIndex = 0; gpuIndex < numGpuDevices; ++gpuIndex) {
+    int isLargeBar = 0;
+    if (hipDeviceGetAttribute(&isLargeBar, hipDeviceAttributeIsLargeBar, gpuIndex) == hipSuccess)
+      gpuHostAccessible[gpuIndex] = (isLargeBar != 0);
+  }
+#endif
+  auto cpuCanAccess = [&](MemDevice const& mem) {
+    return !IsGpuMemType(mem.memType) || mem.memType == MEM_MANAGED || gpuHostAccessible[mem.memIndex];
+  };
+  int numSkippedCpuGpu = 0;
+
+  // GPU executors can only access another GPU's memory if peer access is available
+  std::vector<std::vector<bool>> gpuPeerAccessible(numGpuDevices, std::vector<bool>(numGpuDevices, false));
+  for (int exeIndex = 0; exeIndex < numGpuDevices; ++exeIndex) {
+    for (int memIndex = 0; memIndex < numGpuDevices; ++memIndex) {
+      int canAccess = (exeIndex == memIndex);
+      if (!canAccess && hipDeviceCanAccessPeer(&canAccess, exeIndex, memIndex) != hipSuccess)
+        canAccess = 0;
+      gpuPeerAccessible[exeIndex][memIndex] = (canAccess != 0);
+    }
+  }
+  auto gpuCanAccess = [&](ExeDevice const& exe, MemDevice const& mem) {
+    return !IsGpuMemType(mem.memType) || gpuPeerAccessible[exe.exeIndex][mem.memIndex];
+  };
+  int numSkippedPeer = 0;
+
   std::vector<TransferInfo> possibleTransfers;
   TransferInfo tinfo;
   for (int i = 0; i < numExes; ++i) {
@@ -258,11 +287,17 @@ int SweepPreset(EnvVars&          ev,
         // Skip this DST if total XGMI distance (SRC + DST) is greater than max limit
         if (sweepXgmiMax >= 0 && (numHopsSrc + numHopsDst) > sweepXgmiMax) continue;
 
-#if defined(__NVCC__)
-        // Skip CPU executors on GPU memory on NVIDIA platform
-        if (IsCpuExeType(exeList[i].exeType) && (IsGpuMemType(dstList[j].memType) || IsGpuMemType(dstList[k].memType)))
+        // Skip CPU executors on GPU memory that is not host-accessible
+        if (IsCpuExeType(exeList[i].exeType) && (!cpuCanAccess(srcList[j]) || !cpuCanAccess(dstList[k]))) {
+          numSkippedCpuGpu++;
           continue;
-#endif
+        }
+
+        // Skip GPU executors on another GPU's memory without peer access
+        if (IsGpuExeType(exeList[i].exeType) && (!gpuCanAccess(exeList[i], srcList[j]) || !gpuCanAccess(exeList[i], dstList[k]))) {
+          numSkippedPeer++;
+          continue;
+        }
 
         tinfo.dstMem = dstList[k];
 
@@ -272,6 +307,15 @@ int SweepPreset(EnvVars&          ev,
         possibleTransfers.push_back(tinfo);
       }
     }
+  }
+
+  if (numSkippedCpuGpu > 0) {
+    printf("[WARN] Skipping %d CPU-executed Transfer(s) that access GPU memory not directly accessible by host "
+           "(Large BAR not enabled)\n", numSkippedCpuGpu);
+  }
+  if (numSkippedPeer > 0) {
+    printf("[WARN] Skipping %d GPU-executed Transfer(s) that access another GPU's memory without peer access\n",
+           numSkippedPeer);
   }
 
   int const numPossible = (int)possibleTransfers.size();
@@ -288,12 +332,13 @@ int SweepPreset(EnvVars&          ev,
   }
 
   int numTestsRun = 0;
+  int numTestsFailed = 0;
   int M = sweepMin;
   std::uniform_int_distribution<int> randSize(1, numBytesPerTransfer / sizeof(float));
   std::uniform_int_distribution<int> distribution(sweepMin, maxParallelTransfers);
 
   // Log sweep to configuration file
-  char absPath[1024];
+  char absPath[PATH_MAX];
   auto const res = realpath(sweepFile.c_str(), absPath);
 
   FILE *fp = fopen(sweepFile.c_str(), "w");
@@ -339,8 +384,15 @@ int SweepPreset(EnvVars&          ev,
     LogTransfers(fp, ++numTestsRun, transfers);
 
     if (!TransferBench::RunTransfers(cfg, transfers, results)) {
-      Utils::PrintErrors(results.errResults);
-      if (!continueOnErr) return ERR_FATAL;
+      if (!continueOnErr) {
+        Utils::PrintErrors(results.errResults);
+        if (fp) fclose(fp);
+        return ERR_FATAL;
+      }
+      printf("Test %d: skipped (rejected by TransferBench)\n", numTestsRun);
+      for (auto const& err : results.errResults)
+        printf("  [%s] %s\n", err.errType == ERR_FATAL ? "ERROR" : "WARN", err.errMsg.c_str());
+      numTestsFailed++;
     } else {
       Utils::PrintResults(ev, numTestsRun, transfers, results);
     }
@@ -374,5 +426,9 @@ int SweepPreset(EnvVars&          ev,
     }
   }
   if (fp) fclose(fp);
+  if (numTestsFailed > 0) {
+    printf("[WARN] %d of %d test(s) were skipped due to errors (CONTINUE_ON_ERROR=%d)\n",
+           numTestsFailed, numTestsRun, continueOnErr);
+  }
   return ERR_NONE;
 }

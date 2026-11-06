@@ -35,9 +35,9 @@ static int RemappedCpuIndex(int origIdx)
 static void PrintNicToGPUTopo(bool outputToCsv)
 {
   if (!IsIbvSymbolsReady()) return;
-  printf(" NIC | Device Name | Active | PCIe Bus ID  | NUMA | Closest GPU(s) | GID Index | GID Descriptor\n");
+  printf(" NIC | Device Name | Active | PCIe Bus ID  | NUMA | Closest GPU(s) | MaxMsgSz   | GID Index | GID Descriptor\n");
   if(!outputToCsv)
-    printf("-----+-------------+--------+--------------+------+----------------+-----------+-------------------\n");
+    printf("-----+-------------+--------+--------------+------+----------------+------------+-----------+-------------------\n");
 
   int numGpus = TransferBench::GetNumExecutors(EXE_GPU_GFX);
   auto const& ibvDeviceList = GetIbvDeviceList();
@@ -56,12 +56,13 @@ static void PrintNicToGPUTopo(bool outputToCsv)
 
   for (int i = 0; i < ibvDeviceList.size(); i++) {
     std::string closestGpusStr = closestGpusForNic[i];
-    printf(" %-3d | %-11s | %-6s | %-12s | %-4d | %-14s | %-9s | %-20s\n",
+    printf(" %-3d | %-11s | %-6s | %-12s | %-4d | %-14s | %-10s | %-9s | %-20s\n",
            i, ibvDeviceList[i].name.c_str(),
            ibvDeviceList[i].hasActivePort ? "Yes" : "No",
            ibvDeviceList[i].busId.c_str(),
            ibvDeviceList[i].numaNode,
            closestGpusStr.c_str(),
+           ibvDeviceList[i].maxMsgSize ? std::to_string(ibvDeviceList[i].maxMsgSize).c_str() : "-",
            ibvDeviceList[i].isRoce && ibvDeviceList[i].hasActivePort ? std::to_string(ibvDeviceList[i].gidIndex).c_str() : "N/A",
            ibvDeviceList[i].isRoce && ibvDeviceList[i].hasActivePort ? ibvDeviceList[i].gidDescriptor.c_str() : "N/A"
           );
@@ -239,6 +240,7 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     std::vector<int>         nicClosestCpu = std::get<7>(key);
     std::vector<int>         nicClosestGpu = std::get<8>(key);
     std::vector<int>         nicIsActive   = std::get<9>(key);
+    std::vector<uint32_t>    nicMaxMsgSize = std::get<10>(key);
 
     int numRanks = hosts.size();
     int numCpus  = cpuNames.size();
@@ -253,7 +255,7 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
            groupNum++, numRanks, numCpus, numGpus, numNics, numActiveNics);
 
     // Determine size of table
-    int numCols = 6;
+    int numCols = 7;
     int numRows = 1 + std::max(numRanks, numExecutors);
     TransferBench::Utils::TableHelper table(numRows, numCols);
 
@@ -273,6 +275,7 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
     table.Set(0, 3, " Executor ");
     table.Set(0, 4, " Executor Name ");
     table.Set(0, 5, " #SE ");
+    table.Set(0, 6, " MaxMsgSz ");
 
     // Fill in ranks / hosts
     for (int i = 0; i < numRanks; i++) {
@@ -306,6 +309,10 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
           table.Set(rowIdx, 3, "   - NIC %02d ", nicIndex);
           table.Set(rowIdx, 4, "   - %s", nicNames[nicIndex].c_str());
           table.Set(rowIdx, 5, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
+          if (nicMaxMsgSize[nicIndex])
+            table.Set(rowIdx, 6, " %u ", nicMaxMsgSize[nicIndex]);
+          else
+            table.Set(rowIdx, 6, " - ");
           rowIdx++;
         }
       }
@@ -316,6 +323,10 @@ void DisplayMultiRankTopology(bool outputToCsv, bool showBorders)
         table.Set(rowIdx, 3, " - NIC %02d ", nicIndex);
         table.Set(rowIdx, 4, " - %s ", nicNames[nicIndex].c_str());
         table.Set(rowIdx, 5, " %s ", nicIsActive[nicIndex] ? "ON" : "OFF");
+        if (nicMaxMsgSize[nicIndex])
+          table.Set(rowIdx, 6, " %u ", nicMaxMsgSize[nicIndex]);
+        else
+          table.Set(rowIdx, 6, " - ");
         rowIdx++;
       }
     }
