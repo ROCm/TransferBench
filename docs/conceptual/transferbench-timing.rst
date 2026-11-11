@@ -46,8 +46,8 @@ The following table provides a quick summary of the three timing levels:
 Timing methods
 ==============
 
-The timing method used for each Executor and transfer depends on the Executor type and the value of
-``USE_HIP_EVENTS``.
+The timing method used for each Executor and transfer depends on the Executor type and the values of
+``USE_HIP_EVENTS``, ``USE_SINGLE_STREAM``, and (for the DMA Executor) ``USE_HSA_DMA``.
 
 Executor timing
 ---------------
@@ -61,10 +61,20 @@ Executor timing
     * - CPU
       - CPU wall-clock (``std::chrono::high_resolution_clock``)
 
-    * - GFX / DMA
-      - For ``USE_HIP_EVENTS=1`` (default): HIP events (``hipEventElapsedTime``)
+    * - GFX
+      - For ``USE_HIP_EVENTS=1`` and ``USE_SINGLE_STREAM=1`` (both defaults): HIP events (``hipEventElapsedTime``) around the single combined kernel launch.
 
-        For ``USE_HIP_EVENTS=0``: CPU wall-clock (``std::chrono::high_resolution_clock``)
+        Otherwise (``USE_HIP_EVENTS=0`` or ``USE_SINGLE_STREAM=0``): CPU wall-clock (``std::chrono::high_resolution_clock``), spanning from the first transfer's kernel launch to the last transfer's completion. Executor dispatch overhead (device selection, threadpool dispatch) is excluded.
+
+        .. note::
+
+          When the Executor runs only PingPongs (no copy transfers), it instead reports CPU wall-clock over the whole executor call, regardless of ``USE_HIP_EVENTS``/``USE_SINGLE_STREAM``.
+
+    * - TDM
+      - Same as GFX: for ``USE_HIP_EVENTS=1`` and ``USE_SINGLE_STREAM=1``, HIP events around the combined kernel launch; otherwise, CPU wall-clock over the whole executor call.
+
+    * - DMA / BMA
+      - Always CPU wall-clock (``std::chrono::high_resolution_clock``) over the whole executor call. ``USE_HIP_EVENTS`` doesn't affect Executor-level timing for these Executor types.
 
     * - NIC
       - CPU wall-clock (``std::chrono::high_resolution_clock``)
@@ -81,12 +91,17 @@ Transfer timing
     * - CPU
       - CPU wall-clock (``std::chrono::high_resolution_clock``)
 
-    * - GFX
-      - For ``USE_HIP_EVENTS=1`` (default): GPU wall-clock timestamp (``wall_clock64()``)
+    * - GFX / TDM
+      - For ``USE_SINGLE_STREAM=1`` (default): GPU wall-clock timestamps recorded inside the kernel (``wall_clock64()`` on AMD, the ``%globaltimer`` PTX register on NVIDIA), spanning from the earliest SubExecutor start to the latest SubExecutor stop of that transfer. Independent of ``USE_HIP_EVENTS``.
 
-        For ``USE_HIP_EVENTS=0``: CPU wall-clock (``std::chrono::high_resolution_clock``)
+        For ``USE_SINGLE_STREAM=0`` (each transfer on its own stream): with ``USE_HIP_EVENTS=1``, HIP events (``hipEventElapsedTime``); with ``USE_HIP_EVENTS=0``, CPU wall-clock around the launch and stream synchronize.
 
     * - DMA
+      - For ``USE_HIP_EVENTS=1``, ``USE_HSA_DMA=0``, and no sub-index specified: HIP events (``hipEventElapsedTime``).
+
+        Otherwise: CPU wall-clock (``std::chrono::high_resolution_clock``).
+
+    * - BMA
       - For ``USE_HIP_EVENTS=1`` (default): HIP events (``hipEventElapsedTime``)
 
         For ``USE_HIP_EVENTS=0``: CPU wall-clock (``std::chrono::high_resolution_clock``)

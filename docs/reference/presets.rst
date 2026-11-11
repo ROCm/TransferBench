@@ -10,7 +10,7 @@ TransferBench presets
 
 Presets are a predefined series of transfers that can be used instead of manually configuring the transfers.
 
-The following table lists the presets available on TransferBench 1.67.0:
+The following table lists the presets available on TransferBench 1.71.0:
 
 .. list-table::
     :header-rows: 1
@@ -23,6 +23,10 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Tests parallel transfers between all pairs of GPU devices within a single node.
       - ✅
 
+    * - :ref:`All-to-all latency preset (a2a_latency) <latency-presets>`
+      - Latency between all pairs of GPU executors, run in parallel. Cross-rank pairs require pod communication support.
+      - ✅
+
     * - :ref:`All-to-all via nearest NIC preset (a2a_n) <a2a_n>`
       - Tests parallel transfers between all pairs of GPU devices using nearest NIC RDMA.
       - ❌
@@ -30,6 +34,34 @@ The following table lists the presets available on TransferBench 1.67.0:
     * - :ref:`All-to-all sweep preset (a2asweep) <a2asweep>`
       - Performs a parameter sweep of GFX-based all-to-all transfers across different SubExecutor counts, unroll factors, and thread block sizes.
       - ❌
+
+    * - :ref:`Batched-DMA sweep preset (bmasweep) <bmasweep>`
+      - Tests and compares the batched DMA executor for multi-destination copies.
+      - ❌
+
+    * - :ref:`Empty kernel launch latency preset (empty) <empty>`
+      - Measures empty GFX kernel launch latency.
+      - ✅
+
+    * - :ref:`envvars <envvars>`
+      - Shows the list of environment variables that can be used to modify behavior.
+      - ✅
+
+    * - :ref:`GFX sweep preset (gfxsweep) <gfxsweep>`
+      - Sweeps various GFX kernel options for a given GFX transfer.
+      - ✅
+
+    * - :ref:`HBM bandwidth preset (hbm) <hbm>`
+      - Tests HBM bandwidth.
+      - ✅
+
+    * - :ref:`Health check preset (healthcheck) <healthcheck>`
+      - Simple bandwidth health check (AMD Instinct™ MI300X series only).
+      - ❌
+
+    * - :ref:`help <help>`
+      - Shows example usage details.
+      - ✅
 
     * - :ref:`NIC all-to-all preset (nica2a) <nica2a>`
       - NIC-executor all-to-all with plane/group partitioning via closest memory endpoint.
@@ -47,9 +79,17 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Tests all subsets of parallel transfers from one GPU to the others.
       - ❌
 
+    * - :ref:`One-to-all latency preset (one2all_latency) <latency-presets>`
+      - Latency from one GPU executor to all others, run in parallel. Cross-rank pairs require pod communication support.
+      - ✅
+
     * - :ref:`Peer-to-peer preset (p2p) <p2p>`
       - Tests unidirectional and bidirectional transfers for CPU-to-CPU, CPU-to-GPU, and GPU-to-GPU combinations.
       - ❌
+
+    * - :ref:`Peer-to-peer latency preset (p2p_latency) <latency-presets>`
+      - Latency between pairs of GPU executors, run serially. Cross-rank pairs require pod communication support.
+      - ✅
 
     * - :ref:`Pod all-to-all preset (poda2a) <poda2a>`
       - Pod-aware all-to-all across GPUs within a single pod via UALoE path, with optional concurrent NIC ring.
@@ -57,6 +97,10 @@ The following table lists the presets available on TransferBench 1.67.0:
 
     * - :ref:`Pod peer-to-peer preset (podp2p) <podp2p>`
       - Pod-aware peer-to-peer bandwidth between every GPU pair in a pod (unidirectional and bidirectional).
+      - ✅
+
+    * - :ref:`Ring latency preset (ring_latency) <latency-presets>`
+      - Each GPU executor pingpongs with its ring neighbor, with all hops run in parallel. Cross-rank pairs require pod communication support.
       - ✅
 
     * - :ref:`Intra-pod ring preset (rings) <rings>`
@@ -71,9 +115,21 @@ The following table lists the presets available on TransferBench 1.67.0:
       - Runs scaling tests for local and remote read, write, and copy operations between two GPUs.
       - ❌
 
+    * - :ref:`Smoke test preset (smoketest) <smoketest>`
+      - Simple correctness smoke-test.
+      - ✅
+
     * - :ref:`Sweep or random sweep preset (sweep/rsweep) <sweep>`
       - Stress tests by running through combinations of transfers.
       - ❌
+
+    * - :ref:`TDM sweep preset (tdmsweep) <tdmsweep>`
+      - Sweeps Tensor Data Mover (TDM) executor options (block size, LDS, order, SubExecutors) for a given TDM transfer.
+      - ✅
+
+    * - :ref:`Wallclock consistency preset (wallclock) <wallclock>`
+      - Tests wallclock consistency across XCCs within a GPU.
+      - ✅
 
 .. note::
 
@@ -441,6 +497,222 @@ Example output
                  16   386.55  377.12  385.07  390.31  384.06  367.46
                  24   404.03  395.28  398.00  391.28  376.55  370.55
                  32   393.80  403.51  395.81  382.75  350.72  366.56
+
+.. _bmasweep:
+
+Batched-DMA sweep preset (bmasweep)
+=====================================
+
+The bmasweep preset compares the Batched-DMA (BMA) executor against the single-engine DMA executor and, optionally, the GFX executor, for simultaneous copies from one GPU to all the others. It sweeps message size and reports a bandwidth table.
+
+.. note::
+
+    Requires ROCm 7.1.0 or newer (the BMA executor is compiled in only when ``BMA_EXEC_ENABLED`` is defined) and is single-node only.
+
+**Key features:**
+
+- Builds a single Transfer whose source is GPU ``EXE_INDEX`` and whose destinations are every other GPU (plus GPU ``EXE_INDEX`` itself when ``LOCAL_COPY=1``).
+
+- Sweeps message size from 4 KB (2:sup:`12`) to 1 GB (2:sup:`30`) in powers of two. If a byte count is given on the command line, only that one size is run.
+
+- At each size, runs the DMA executor with 1 sub-executor, then the BMA executor once per value in ``NUM_SUB_EXECS``, then the GFX executor once per value in ``GFX_SUB_EXECS``.
+
+- Prints a table with one row per message size and one column per executor configuration.
+
+- **One Transfer, many destinations:** All executors move the same single multi-destination Transfer, so the comparison is like-for-like across DMA, BMA, and GFX.
+
+- **GFX columns are opt-in:** ``GFX_SUB_EXECS`` is empty by default, so a plain run compares only DMA against BMA.
+
+**Restrictions:**
+
+- **Single-node only:** Running with more than one rank fails with ``[ERROR] BMA sweep preset currently not supported for multi-node``.
+
+- **ROCm 7.1.0+ required:** Builds without ``BMA_EXEC_ENABLED`` fail with ``[ERROR] BMA executor requires ROCm 7.1 or newer``.
+
+- **Any failed run aborts the sweep:** Errors are printed, and the preset returns a fatal error rather than continuing to the next size.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench bmasweep [numBytes]
+
+Full power-of-two sweep using the default BMA batch-item counts:
+
+.. code-block:: shell
+
+    ./TransferBench bmasweep
+
+Compare BMA against GFX at a single 256 MB message size, including the local copy:
+
+.. code-block:: shell
+
+    LOCAL_COPY=1 GFX_SUB_EXECS=8,16 ./TransferBench bmasweep 268435456
+
+Environment variables
+-----------------------
+
+To modify the behavior of the bmasweep preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``EXE_INDEX``
+      - GPU that executes the Transfer and sources the data. Must be between 0 and ``NUM_GPU_DEVICES-1``.
+      - ``0``
+
+    * - ``GFX_SUB_EXECS``
+      - CU counts to also test with the GFX executor, one column each. Empty by default, so no GFX columns appear.
+      - (empty)
+
+    * - ``GPU_MEM_TYPE``
+      - GPU memory type: 0=global, 1=fine-grained, 2=uncached, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``LOCAL_COPY``
+      - ``1`` also copies to GPU ``EXE_INDEX`` itself, adding a local-copy destination. ``0`` excludes it.
+      - ``0``
+
+    * - ``NUM_GPU_DEVICES``
+      - Number of GPUs to use as destinations.
+      - (detected)
+
+    * - ``NUM_SUB_EXECS``
+      - Batch-item counts to test with the BMA executor, one column each.
+      - ``1,2,4,8``
+
+Example output
+----------------
+
+One row per message size: a ``DMA`` column, one ``BMA(nn)`` column per value in ``NUM_SUB_EXECS``, and one ``GFX(nn)`` column per value in ``GFX_SUB_EXECS``:
+
+.. code-block:: shell
+
+  Performing <n> simultaneous DMA Transfers from GPU 0 to other GPUs
+  Executing: ...................
+    Bytes      |   DMA  | BMA(01) | BMA(02) | BMA(04) | BMA(08) |
+    4096       |   ...  |   ...   |   ...   |   ...   |   ...   |
+    8192       |   ...  |   ...   |   ...   |   ...   |   ...   |
+    ...
+    1073741824 |   ...  |   ...   |   ...   |   ...   |   ...   |
+  Reported numbers are all GB/s, normalized for per Transfer for <n> Transfers
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _empty:
+
+Empty kernel launch latency preset (empty)
+=============================================
+
+The empty preset measures GPU kernel launch latency by repeatedly launching a kernel that does no work, and reporting microseconds per launch. It transfers no data. The command-line byte count is ignored.
+
+Each cell is measured two ways so launch overhead can be separated from measurement overhead: ``Evt`` (hipEvent-measured) and ``Cpu`` (CPU wall-clock).
+
+**Key features:**
+
+- Sweeps the cartesian product of ``BATCHSIZES`` x ``GRIDSIZES`` x ``BLOCKSIZES``, for every GPU on every rank.
+
+- For each cell, launches the empty kernel the requested number of times per batch before calling ``hipStreamSynchronize``, repeated for ``NUM_ITERATIONS`` timed passes.
+
+- Reports Min/Avg/Max for both the hipEvent and CPU wall-clock measurements, in microseconds per launch.
+
+- Optionally adds per-iteration columns (``SHOW_ITERATIONS``) and percentile columns (``SHOW_PERCENTILES``).
+
+**Restrictions:**
+
+- **Requires uniform ranks:** Every rank must report the same number of GPUs, otherwise the preset fails with ``[ERROR] empty preset requires all ranks to have the same number of GPUs``. Cross-rank uniformity is also enforced for the sweep parameters, so all ranks must be given the same lists.
+
+- **``USE_EXT_LAUNCH`` is AMD-only:** Setting it on NVIDIA fails with ``[ERROR] USE_EXT_LAUNCH is not supported on NVIDIA hardware``.
+
+- **No data is transferred.** Any byte count given on the command line is ignored.
+
+- **Batch size 0 is accepted** and measures the launch path with no kernels in the batch, which is useful as a floor for the measurement overhead itself.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench empty
+
+Sweep only a single configuration across all GPUs:
+
+.. code-block:: shell
+
+    BATCHSIZES=256 GRIDSIZES=1 BLOCKSIZES=256 ./TransferBench empty
+
+Show every timed pass plus p50/p99 for one GPU:
+
+.. code-block:: shell
+
+    NUM_GPU_DEVICES=1 SHOW_ITERATIONS=1 SHOW_PERCENTILES=50,99 ./TransferBench empty
+
+Environment variables
+-----------------------
+
+To modify the behavior of the empty preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``BATCHSIZES``
+      - Kernels launched per batch before ``hipStreamSynchronize``. Entries must be >= 0; the list may not be empty.
+      - ``0,1,16,256``
+
+    * - ``BLOCKSIZES``
+      - Thread-block width (``blockDim.x``). Each entry must be positive and <= 1024; the list may not be empty.
+      - ``256``
+
+    * - ``GRIDSIZES``
+      - Grid X dimension (threadblocks per launch). Each entry must be in ``[1, 65535]``. Set to ``,`` to sweep all.
+      - (GPU 0 CU count)
+
+    * - ``NUM_GPU_DEVICES``
+      - GPUs per rank to benchmark. Must be between 1 and the detected count.
+      - (detected)
+
+    * - ``NUM_ITERATIONS``
+      - Timed passes per cell; hipEvent and CPU times are measured separately each pass. Must be > 0.
+      - ``5``
+
+    * - ``USE_EXT_LAUNCH``
+      - Use ``hipExtLaunchKernelGGL`` so hipEvents are recorded as part of the launch. Not supported on NVIDIA hardware.
+      - ``1`` on AMD, ``0`` on NVIDIA
+
+.. note::
+
+    The global ``NUM_WARMUPS``, ``SHOW_ITERATIONS``, ``SHOW_PERCENTILES``, and ``OUTPUT_TO_CSV`` options also affect this preset.
+
+Example output
+----------------
+
+With ``SHOW_ITERATIONS=1`` the per-pass ``Evt0..EvtN`` / ``Cpu0..CpuN`` columns appear before Min/Avg/Max; with ``SHOW_PERCENTILES`` set, ``Evtp<n>`` / ``Cpup<n>`` columns are inserted as well.
+
+.. code-block:: shell
+
+  EmptyKernel preset: times in microseconds per kernel launch (averaged across batch size).
+
+  Evt = hipEvent measured time
+  Cpu = CPU wallclock measured time
+
+  BatS     GrdS BlkS Rank GPU EvtMin EvtAvg EvtMax CpuMin CpuAvg CpuMax
+     0      ...  256    0   0    ...    ...    ...    ...    ...    ...
+     1      ...  256    0   0    ...    ...    ...    ...    ...    ...
+    16      ...  256    0   0    ...    ...    ...    ...    ...    ...
+   256      ...  256    0   0    ...    ...    ...    ...    ...    ...
+
+.. note::
+
+    A capture from real hardware has not been added yet.
 
 .. _rings:
 
@@ -1712,7 +1984,7 @@ Example output
 Pod all-to-all preset (poda2a)
 ===============================
 
-The poda2a preset is the pod-aware sibling of :ref:`a2a`. It creates groups within a virtual pod, then conducts all-to-all among devices within a group through the UALoE path. It expands the all-to-all matrix beyond a single node so GFX and DMA Executors can reach SRC and DST memory on remote-rank GPUs that share the pod. It supports GFX or DMA as the Executor and an optional concurrent NIC ring, and is available since v1.67.
+The poda2a preset is the pod-aware sibling of :ref:`a2a`. It creates groups within a virtual pod, then conducts all-to-all among devices within a group through the UALoE path. It expands the all-to-all matrix beyond a single node so GFX and DMA Executors can reach SRC and DST memory on remote-rank GPUs that share the pod. It supports GFX or DMA as the Executor and an optional concurrent NIC ring, and is available since v1.67.0.
 
 **Key features:**
 
@@ -2615,3 +2887,1024 @@ Example output
   -------------------┼--------------┼------------┼-------------------┼--------------------
      Aggregate (CPU) │ 295.108 GB/s │  12.735 ms │  3758096384 bytes │ Overhead 0.372 ms
   -------------------┴--------------┴------------┴-------------------┴--------------------
+
+.. _gfxsweep:
+
+GFX sweep preset (gfxsweep)
+=============================
+
+The gfxsweep preset sweeps every GFX-kernel tuning option for a single user-specified Transfer, and reports the combination that produced the highest bandwidth, along with a ready-to-paste command that reproduces it. :ref:`tdmsweep <tdmsweep>` is its direct counterpart for the TDM executor.
+
+The sweep covers the cartesian product of six parameters, and for each combination runs every sub-executor count in ``NUM_SUB_EXECS``:
+
+- **Wave order:** sets ``GFX_WAVE_ORDER``.
+
+- **Word size:** sets ``GFX_WORD_SIZE`` (4=dwordx4, 2=dwordx2, 1=dwordx1).
+
+- **Temporal mode:** sets ``GFX_TEMPORAL`` (0=none, 1=load, 2=store, 3=both).
+
+- **Threadblock size:** sets ``GFX_BLOCK_SIZE``.
+
+- **Unroll factor:** sets ``GFX_UNROLL``.
+
+- **Kernel selector:** sets ``GFX_KERNEL`` (-1=auto, 0=reduce, 1=copy-only).
+
+**Key features:**
+
+- Parses ``GFX_TRANSFER`` into ``NUM_TRANSFERS`` Transfer(s). Every Transfer must use the ``G`` (GFX) executor.
+
+- Iterates ``WAVE_ORDERS`` x ``WORDSIZES`` x ``TEMPORAL_MODES`` x ``BLOCKSIZES`` x ``UNROLLS`` x ``KERNELS``.
+
+- For each combination, runs every value in ``NUM_SUB_EXECS``, which form the columns of the output matrix.
+
+- Prints the best bandwidth per sub-executor count, then the overall best combination with each corresponding ``GFX_*`` assignment and a command line that reproduces it.
+
+- **Automatic timing mode** (``TIMING_MODE=-1``): a single Transfer uses GPU-wallclock timing; multiple Transfers sharing one executor use HIP-event timing; otherwise aggregate CPU timing is used.
+
+- **Multi-node:** The default ``GFX_TRANSFER`` is rank-qualified (``R0G0->R0G0->R0G0``), and transfer strings are printed with their rank, so remote ranks may be swept.
+
+**Restrictions:**
+
+- **Executor check:** Every parsed Transfer must use the ``G`` executor. Anything else fails with ``[ERROR] gfxsweep preset only works on Transfers that are using GFX executor``.
+
+- **A failed combination is fatal:** If any combination fails to run, gfxsweep prints the errors and aborts the whole sweep. This differs from :ref:`tdmsweep <tdmsweep>`, which marks a rejected combination ``N/A`` and keeps going.
+
+- **Empty parameter lists:** If no combination ran, the preset reports ``[WARN] No transfers executed - make sure sweep parameters lists are not empty`` and returns a fatal error.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench gfxsweep [numBytes]
+
+Sweep the default parameter space for a local GPU 0 copy:
+
+.. code-block:: shell
+
+    ./TransferBench gfxsweep
+
+Sweep a GPU0->GPU1 copy of 256 MB over a reduced search space:
+
+.. code-block:: shell
+
+    GFX_TRANSFER="G0->G0->G1" BLOCKSIZES=256,512 UNROLLS=4,8 ./TransferBench gfxsweep 268435456
+
+Environment variables
+-----------------------
+
+To modify the behavior of the gfxsweep preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``BLOCKSIZES``
+      - Threadblock sizes to sweep (sets ``GFX_BLOCK_SIZE``).
+      - ``256,512,768,1024``
+
+    * - ``GFX_TRANSFER``
+      - The Transfer to sweep, using :ref:`Transfer definition syntax <transfer-definition-syntax>`. Must use the ``G`` (GFX) executor.
+      - ``R0G0->R0G0->R0G0``
+
+    * - ``KERNELS``
+      - Kernel selectors to sweep (sets ``GFX_KERNEL``): -1=auto, 0=reduce, 1=copy-only.
+      - ``0``
+
+    * - ``NUM_SUB_EXECS``
+      - Sub-executor (CU) counts to sweep; these form the columns of the output matrix. Must not be empty.
+      - ``4,8,16,32,64``
+
+    * - ``NUM_TRANSFERS``
+      - Number of Transfers described by ``GFX_TRANSFER``.
+      - ``1``
+
+    * - ``TEMPORAL_MODES``
+      - Non-temporal load and store modes to sweep (sets ``GFX_TEMPORAL``): 0=none, 1=load, 2=store, 3=both.
+      - ``0``
+
+    * - ``TIMING_MODE``
+      - ``-1``\=auto, ``0``\=aggregate CPU time, ``1``\=executor time (HIP event), ``2``\=transfer time (GPU wallclock).
+      - ``-1``
+
+    * - ``UNROLLS``
+      - Unroll factors to sweep (sets ``GFX_UNROLL``). See :ref:`gfx-unroll`.
+      - ``1,2,4,8,16``
+
+    * - ``WAVE_ORDERS``
+      - Wavefront orderings to sweep (sets ``GFX_WAVE_ORDER``).
+      - ``0``
+
+    * - ``WORDSIZES``
+      - Packed data sizes to sweep (sets ``GFX_WORD_SIZE``): 4=dwordx4, 2=dwordx2, 1=dwordx1.
+      - ``4``
+
+.. note::
+
+    The sweep drives the global ``GFX_WAVE_ORDER``, ``GFX_WORD_SIZE``, ``GFX_TEMPORAL``, ``GFX_BLOCK_SIZE``, ``GFX_UNROLL``, and ``GFX_KERNEL`` options on each iteration, so setting those directly has no effect when running the gfxsweep preset. Use ``WAVE_ORDERS``, ``WORDSIZES``, ``TEMPORAL_MODES``, ``BLOCKSIZES``, ``UNROLLS``, and ``KERNELS`` instead.
+
+Example output
+----------------
+
+One row per parameter combination, one column per sub-executor count, then a summary row holding the best value in each column:
+
+.. code-block:: shell
+
+  WvO  WSz  TpM  BlkS  UnR  KrN  SE 004  SE 008  SE 016  SE 032  SE 064
+   ...  ...  ...  ...   ...  ...   ...     ...     ...     ...     ...
+  WvO  WSz  TpM  BlkS  UnR  KrN  <best>  <best>  <best>  <best>  <best>
+  =======================================================================================
+  Highest bandwidth found:  <value> GB/s (GPU wallclock-timed)
+            WaveOrder    :      <n>  [GFX_WAVE_ORDER=<n>]
+            WordSize     :      <n>  [GFX_WORD_SIZE=<n>]
+            Temporal Mode:      <n>  [GFX_TEMPORAL=<n>]
+            BlockSize    :      <n>  [GFX_BLOCK_SIZE=<n>]
+            Unroll       :      <n>  [GFX_UNROLL=<n>]
+            Kernel       :      <n>  [GFX_KERNEL=<n>]
+            NumSubExec   :      <n>
+  Command to run best result:
+  GFX_WAVE_ORDER=<n> GFX_WORD_SIZE=<n> GFX_TEMPORAL=<n> GFX_BLOCK_SIZE=<n> GFX_UNROLL=<n> GFX_KERNEL=<n> ./TransferBench cmdline <bytes> "<n> <n> R0G0->R0G0->R0G0"
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _tdmsweep:
+
+TDM sweep preset (tdmsweep)
+=============================
+
+The tdmsweep preset sweeps every parameter that affects Tensor Data Mover (TDM) copy performance for a single user-specified Transfer, and reports the best-performing combination. It mirrors the structure of the :ref:`gfxsweep <gfxsweep>` preset.
+
+The TDM executor (``EXE_GPU_TDM``, the ``T`` executor in a Transfer expression) stages HBM -> LDS -> HBM without touching cache. Its throughput is governed by four parameters, and this preset sweeps their full cartesian product:
+
+- **Threadblock size:** ``TDM_BLOCK_SIZE``, threads per block (multiple of 32).
+
+- **LDS staging window:** ``TDM_LDS_BYTES``, bytes per block (``0`` = device max).
+
+- **Threadblock order:** ``TDM_BLOCK_ORDER`` (0=sequential, 1=interleaved, 2=random).
+
+- **Sub-executor count:** number of threadblocks/WGPs engaged.
+
+**Key features:**
+
+- Verifies that a TDM executor exists and that TDM copies are supported on device 0.
+
+- Parses ``TDM_TRANSFER`` into ``NUM_TRANSFERS``. Every Transfer must use the ``T`` executor.
+
+- Iterates over ``BLOCK_ORDERS`` x ``BLOCKSIZES`` x ``LDS_BYTES``, and for each combination over every value in ``NUM_SUB_EXECS``.
+
+- Prints a matrix of bandwidths: one row per (order, block size, LDS bytes) triple and one column per sub-executor count.
+
+- Reports the best bandwidth per sub-executor count, the overall best combination, and a ready-to-paste command that reproduces it.
+
+- **Automatic timing mode** (``TIMING_MODE=-1``): a single Transfer uses GPU-wallclock timing; multiple Transfers sharing one executor use HIP-event timing; otherwise aggregate CPU timing is used.
+
+**Restrictions:**
+
+- **Requires TDM-capable hardware:** AMD gfx1250 or NVIDIA sm_90+.
+
+- **Hardware gate:** If no TDM executor is present, or ``IsTdmCopySupported(0)`` is false, the preset prints ``[WARN] TDM executor is not supported on this device`` and returns a fatal error.
+
+- **Executor check:** Every parsed Transfer must use the ``T`` executor. Anything else fails with ``[ERROR] tdmsweep preset only works on Transfers that are using the TDM executor``.
+
+- **Rejected combinations are skipped, not fatal:** A combination the library refuses (for example, an LDS window larger than the device maximum) prints ``N/A`` in that cell, and the sweep continues.
+
+- **No successful run:** If every combination fails, the preset reports ``[WARN] No transfers executed successfully`` and returns a fatal error.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench tdmsweep [numBytes]
+
+Sweep the default parameter space for a local GPU 0 TDM copy:
+
+.. code-block:: shell
+
+    ./TransferBench tdmsweep
+
+Sweep a GPU0->GPU1 TDM copy of 256 MB over a reduced search space:
+
+.. code-block:: shell
+
+    TDM_TRANSFER="G0->T0->G1" BLOCKSIZES=256,512 LDS_BYTES=32768,0 ./TransferBench tdmsweep 268435456
+
+Environment variables
+-----------------------
+
+To modify the behavior of the tdmsweep preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``BLOCKSIZES``
+      - Threadblock sizes to sweep. Each value must be a positive multiple of 32.
+      - ``64,128,256,512,1024``
+
+    * - ``BLOCK_ORDERS``
+      - Threadblock orderings to sweep: 0=sequential, 1=interleaved, 2=random. Values outside 0-2 are rejected.
+      - ``0``
+
+    * - ``LDS_BYTES``
+      - LDS staging window sizes (bytes per threadblock) to sweep. ``0`` means the device maximum. Must be >= 0.
+      - ``8192,16384,32768,65536,0``
+
+    * - ``NUM_SUB_EXECS``
+      - Sub-executor counts to sweep; these form the columns of the output matrix. Must not be empty.
+      - ``2,4,8,16,32,64``
+
+    * - ``NUM_TRANSFERS``
+      - Number of Transfers described by ``TDM_TRANSFER``.
+      - ``1``
+
+    * - ``TIMING_MODE``
+      - ``-1``\=auto, ``0``\=aggregate CPU time, ``1``\=executor time (HIP event), ``2``\=transfer time (GPU wallclock).
+      - ``-1``
+
+    * - ``TDM_TRANSFER``
+      - The TDM Transfer to sweep, using :ref:`Transfer definition syntax <transfer-definition-syntax>`. Must use the ``T`` (TDM) executor.
+      - ``G0->T0->G0``
+
+.. note::
+
+    The sweep sets the global ``TDM_BLOCK_ORDER``, ``TDM_BLOCK_SIZE``, and ``TDM_LDS_BYTES`` options on each iteration, so setting those directly has no effect when running the tdmsweep preset. Use ``BLOCK_ORDERS``, ``BLOCKSIZES``, and ``LDS_BYTES`` instead.
+
+Example output
+----------------
+
+The sweep prints one row per (BlkO, BlkS, LDSBytes) combination and one column per sub-executor count, followed by a summary row of the best value in each column:
+
+.. code-block:: shell
+
+  BlkO    BlkS    LDSBytes  SE 002  SE 004  SE 008  SE 016  SE 032  SE 064
+   ...     ...     ...       ...     ...     ...     ...     ...     ...
+  BlkO    BlkS    LDSBytes  <best>  <best>  <best>  <best>  <best>  <best>
+  =======================================================================================
+  Highest bandwidth found:  <value> GB/s (GPU wallclock-timed)
+            BlockOrder   :      <n>  [TDM_BLOCK_ORDER=<n>]
+            BlockSize    :      <n>  [TDM_BLOCK_SIZE=<n>]
+            LDS Bytes    :      <n>  [TDM_LDS_BYTES=<n>]
+            NumSubExec   :      <n>
+  Command to run best result:
+  TDM_BLOCK_ORDER=<n> TDM_BLOCK_SIZE=<n> TDM_LDS_BYTES=<n> ./TransferBench cmdline <bytes> "<n> <n> G0->T0->G0"
+
+.. note::
+
+    A capture from real TDM-capable hardware has not been added yet.
+
+.. _latency-presets:
+
+Latency presets (p2p_latency, one2all_latency, a2a_latency, ring_latency)
+============================================================================
+
+The four latency presets measure GPU-to-GPU round-trip latency using PingPong operations (added in v1.71.0). In a PingPong, a PING GPU executor writes a 1-byte flag to its partner and waits for the PONG executor to write one back. The result is the GPU-timed round-trip time per lap, in microseconds. No payload data is transferred, and the command-line byte count is ignored.
+
+All four presets share one implementation (``src/client/Presets/Latency.hpp``). They differ only in which (PING, PONG) pairs are measured together:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Preset
+      - Pairs measured
+      - How they run
+
+    * - ``p2p_latency``
+      - Every ordered pair, including a GPU paired with itself.
+      - One pair at a time (serially), so each latency is measured with the rest of the system idle.
+
+    * - ``one2all_latency``
+      - Every ordered pair of distinct GPUs.
+      - One PING GPU at a time, against all PONG GPUs in parallel.
+
+    * - ``a2a_latency``
+      - Every ordered pair of distinct GPUs (plus self-pairs with ``A2A_LOCAL=1``).
+      - All pairs in parallel, in a single run.
+
+    * - ``ring_latency``
+      - Each GPU and the next GPU in its ring.
+      - Every hop of every ring in parallel, in a single run.
+
+**Key features:**
+
+- Lists GPU executors rank-major (all of rank 0's GPUs, then rank 1's, and so on), limited to ``NUM_GPU_DEVICES`` per rank.
+
+- Builds one PingPong per selected pair. Each one exchanges flags through the DST buffers, which are allocated in ``GPU_MEM_TYPE`` memory on the PING and PONG GPUs. Each half runs as a single threadblock.
+
+- Before the timer starts, the PONG half signals that it's running, so the partner kernel's launch delay isn't counted. The PING half then times ``NUM_LAPS`` round trips with in-kernel GPU timestamps, and that total is divided by the lap count.
+
+- Prints a PING (rows) x PONG (columns) matrix of average latency per lap, followed by the average, minimum, and maximum over all measured pairs of distinct GPUs.
+
+- For ``ring_latency``, the GPU list is reordered with ``STRIDE``, split into rings of ``RING_SIZE``, and each GPU pings the next one in its ring (wrapping around). Ring membership is printed above the matrix.
+
+**Restrictions:**
+
+- **GFX executors only:** PingPong is currently implemented only for GPU GFX executors.
+
+- **Requires uniform ranks:** Every rank must report the same number of GPUs, and all latency env vars must be the same on every rank.
+
+- **Cross-rank pairs need pod support:** Pairs on different ranks are measured only when TransferBench is built with pod communication and both ranks are in the same pod. Otherwise they print as ``N/A``, with the warning ``[WARN] N cross-rank pair(s) are shown as N/A: this requires pod communication support and ranks in the same pod``.
+
+- **Not enough GPUs:** With a single GPU, ``one2all_latency`` and ``a2a_latency`` print a warning and measure nothing (``a2a_latency`` still works with ``A2A_LOCAL=1``). ``ring_latency`` fails with ``[ERROR] ring_latency requires at least 2 GPUs``.
+
+- **Ring constraints:** ``RING_SIZE`` must be greater than 1 and must evenly divide the total GPU count, or the preset fails.
+
+- **A failed run doesn't abort the matrix:** Affected cells show ``FAIL``, the remaining pairs are still measured, and the preset exits with an error at the end. A stalled partner is detected by the ``PNP_SPIN_LIMIT`` watchdog instead of hanging.
+
+- **Self-pairs** (the matrix diagonal) are measured only by ``p2p_latency``, or by ``a2a_latency`` with ``A2A_LOCAL=1``. They're shown in the matrix but excluded from the average, minimum, and maximum summary.
+
+- **Duplicate-hostname warning:** A trailing ``[WARN]`` is emitted if two ranks share a hostname, as running multiple ranks per host can cause Executor aliasing.
+
+**Usage:**
+
+.. code-block:: shell
+
+  ./TransferBench p2p_latency
+  ./TransferBench one2all_latency
+  ./TransferBench a2a_latency
+  ./TransferBench ring_latency
+
+More laps per iteration, with fine-grained memory for the flags:
+
+.. code-block:: shell
+
+  NUM_LAPS=10000 GPU_MEM_TYPE=1 ./TransferBench a2a_latency
+
+Include self-pairs in all-to-all:
+
+.. code-block:: shell
+
+  A2A_LOCAL=1 ./TransferBench a2a_latency
+
+Two rings of 4 GPUs each, built from every other GPU:
+
+.. code-block:: shell
+
+  RING_SIZE=4 STRIDE=2 ./TransferBench ring_latency
+
+Environment variables
+-----------------------
+
+To modify the behavior of the latency presets, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``NUM_LAPS``
+      - Round trips timed per iteration; the reported latency is the total time divided by this. Must be positive.
+      - ``1000``
+
+    * - ``GPU_MEM_TYPE``
+      - GPU memory type for the flag buffers: 0=default GPU, 1=fine-grained GPU, 2=uncached GPU, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``USE_REMOTE_READ``
+      - ``0`` = each executor writes to its partner's memory and polls its own (remote write / local poll). ``1`` = each executor writes to its own memory and polls its partner's (local write / remote poll).
+      - ``0``
+
+    * - ``NUM_GPU_DEVICES``
+      - GPUs per rank to include. Must be between 1 and the detected count.
+      - (detected)
+
+    * - ``A2A_LOCAL``
+      - ``a2a_latency`` only. ``1`` = also measure pairs where PING and PONG are the same GPU (the matrix diagonal).
+      - ``0``
+
+    * - ``RING_SIZE``
+      - ``ring_latency`` only. GPUs per ring; defaults to #ranks x ``NUM_GPU_DEVICES``. Must be greater than 1 and evenly divide the total GPU count.
+      - (all GPUs)
+
+    * - ``STRIDE``
+      - ``ring_latency`` only. Reorders the rank-major GPU list by stepping through it with this stride (same ordering as the ``rings`` preset) before it's split into rings.
+      - ``1``
+
+.. note::
+
+    The global ``PNP_FLAG_BUFFER``, ``PNP_STRIDE``, and ``PNP_SPIN_LIMIT`` options control the flag buffer and the stall watchdog. ``NUM_ITERATIONS``, ``NUM_WARMUPS``, and ``OUTPUT_TO_CSV`` also apply. ``NUM_SUBITERATIONS`` is ignored (forced to ``1`` with a warning) because every transfer in these tests is a PingPong.
+
+Example output
+----------------
+
+Layout for ``a2a_latency`` on a single rank with 4 GPUs, based on the preset's output:
+
+.. code-block:: shell
+
+  Pingpong round-trip latency per lap (us), all pairs run in parallel
+  [1000 laps] [default GPU memory flags] [remote write / local poll]
+   PING\PONG    GPU 00    GPU 01    GPU 02    GPU 03
+      GPU 00       N/A       ...       ...       ...
+      GPU 01       ...       N/A       ...       ...
+      GPU 02       ...       ...       N/A       ...
+      GPU 03       ...       ...       ...       N/A
+
+  Average latency:    ... us over 12 pairs
+  Minimum latency:    ... us (PING GPU xx, PONG GPU yy)
+  Maximum latency:    ... us (PING GPU xx, PONG GPU yy)
+
+- Cells are in microseconds per round trip (3 decimals). ``N/A`` means the pair wasn't measured: the diagonal, or a cross-rank pair that can't be paired. ``FAIL`` means the run containing that pair failed.
+
+- With multiple ranks, labels become ``R<rank> GPU <nn>`` and columns widen from 10 to 12 characters.
+
+- The mode text on the first line is one of: "each pair run by itself" (p2p), "each PING executor run against all PONG executors in parallel" (one2all), "all pairs run in parallel" (a2a), or "N parallel ring(s) of M[ (stride S)], each GPU pinging its neighbor" (ring). ``ring_latency`` also prints one ``Ring NN: GPU 00 -> GPU 01 -> ... -> GPU 00`` line per ring.
+
+- The bracket line shows the lap count, the flag memory type, and the polling mode ("remote write / local poll" or "local write / remote poll").
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _wallclock:
+
+Wallclock consistency preset (wallclock)
+===========================================
+
+The wallclock preset checks whether the GPU wall-clock counter (``wall_clock64()``) is consistent across the XCCs within a GPU. TransferBench uses that counter for transfer-level GFX and TDM timing, so a skew between XCCs would distort those measurements.
+
+It transfers no data. Each XCC records timestamps, and the preset reports the spread between them in both cycles and microseconds.
+
+**Key features:**
+
+- Queries the GPU wall-clock rate and reports it in kHz along with the derived microseconds-per-cycle.
+
+- Launches a kernel per GPU that records a wall-clock timestamp from each XCC, optionally synchronizing threadblocks with a barrier first (``USE_BARRIER``).
+
+- Repeats for ``NUM_ITERATIONS`` and reports, per rank and GPU, the per-XCC timestamps relative to the earliest, plus an ``AVG`` row giving the average delta in cycles and microseconds.
+
+- Separately times a tight loop of ``NUM_TIMESTAMPS`` reads to estimate the cost of taking a timestamp.
+
+- Finishes with the minimum and maximum delta observed across the whole run.
+
+**Restrictions:**
+
+- **Requires uniform ranks:** Every rank must report the same number of GPUs.
+
+- **Uniform XCC counts required:** If any GPU reports a different XCC count from GPU 0, the preset fails (heterogeneous XCC counts aren't supported). It also fails if GPU 0 reports zero XCCs, which usually means topology data is missing.
+
+- **``NUM_ITERATIONS`` must be positive:** The seconds-based (negative) and infinite (``0``) modes supported elsewhere are rejected here.
+
+- **Multi-rank hosts are flagged:** If two ranks report the same hostname, the preset warns that TransferBench should be run with one rank per host to avoid aliasing executors.
+
+- **No data is transferred;** any byte count on the command line is ignored.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench wallclock
+
+Show per-iteration detail (set to ``2`` for raw, un-normalized wall-clock values):
+
+.. code-block:: shell
+
+    SHOW_ITERATIONS=1 ./TransferBench wallclock
+
+Check a single GPU with the barrier disabled:
+
+.. code-block:: shell
+
+    NUM_GPU_DEVICES=1 USE_BARRIER=0 ./TransferBench wallclock
+
+Environment variables
+-----------------------
+
+To modify the behavior of the wallclock preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``NUM_GPU_DEVICES``
+      - GPUs per rank to check. Must be between 1 and the detected count.
+      - (detected)
+
+    * - ``NUM_TIMESTAMPS``
+      - Timestamps read in a loop to estimate per-timestamp cost. Must be non-negative.
+      - ``10000``
+
+    * - ``USE_BARRIER``
+      - ``1`` synchronizes threadblocks before taking the timestamp. ``0`` takes it without a barrier.
+      - ``1``
+
+    * - ``USE_BLOCKCOUNT``
+      - If non-zero, launch this many threadblocks instead of the default (one per XCC).
+      - ``0``
+
+    * - ``XCC_MASK``
+      - Bit mask for disabling XCCs, to restrict the check to a subset.
+      - ``0``
+
+.. note::
+
+    The global ``NUM_ITERATIONS``, ``NUM_WARMUPS``, and ``SHOW_ITERATIONS`` options also apply. ``TB_WALLCLOCK_RATE`` can override the clock rate if the query returns ``0``.
+
+Example output
+----------------
+
+With ``SHOW_ITERATIONS=1`` each iteration gets its own row, with per-XCC timestamps normalized against the earliest; ``SHOW_ITERATIONS=2`` shows the raw wall-clock values instead. An XCC that produced no timestamp is shown as ``SKIP``.
+
+.. code-block:: shell
+
+  Running <n> iterations on <n> items.  Detected wall clock rate of <n>Khz = <n> usec per cycle
+
+   Rank | GPU | XCC | Cycles | usec | usec/timestamp |
+      0 |   0 |   0 |    ... |  ... |            ... |
+      0 |   0 |   1 |    ... |  ... |            ... |
+      0 |   0 | AVG |    ... |  ... |            ... |
+  ...
+
+  Minimum Delta detected: <n> cycles (<n> usec)
+  Maximum Delta detected: <n> cycles (<n> usec)
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _smoketest:
+
+Smoke test preset (smoketest)
+===============================
+
+The smoketest preset is a correctness check rather than a benchmark. It runs a fixed matrix of 16 transfer patterns at several sizes, validates every result, and reports a pass or fail result. The process exits with a fatal status if any test fails.
+
+Test numbering
+----------------
+
+Tests 1-8 use the DMA executor (or BMA when ``USE_BDMA=1``); tests 9-16 run the same eight patterns on the GFX executor. The following table maps each transfer pattern to its test number:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Pattern
+      - DMA / BMA
+      - GFX
+
+    * - Host to device (H2D)
+      - 1
+      - 9
+
+    * - Device to host (D2H)
+      - 2
+      - 10
+
+    * - Device to device, remote write
+      - 3
+      - 11
+
+    * - Device to device, remote read
+      - 4
+      - 12
+
+    * - Broadcast
+      - 5
+      - 13
+
+    * - Gather
+      - 6
+      - 14
+
+    * - All-to-all, remote write
+      - 7
+      - 15
+
+    * - All-to-all, remote read
+      - 8
+      - 16
+
+**Restrictions:**
+
+- **Failure details go to a log file.** As of v1.70.0, when any test fails the preset writes per-failure detail (including the transfer string and any fatal error message) to ``/tmp/transferbench_smoketest_<pid>.log`` and names that path in the warning. If the log can't be written, it says so instead.
+
+- **Single pod only:** Running across more than one pod fails with ``[ERROR] smoketest preset can only be run within a single pod``. Pod membership can be forced with ``TB_FORCE_SINGLE_POD=1``.
+
+- **Uniform sub-executor counts required:** Every GPU on every rank must report the same number of sub-executors.
+
+- **Collective tests are off by default on multi-node.** Broadcast, gather, and all-to-all are skipped unless ``TEST_LIST`` enables them explicitly, and the preset warns when it does this.
+
+- **Cross-pod ranks skip patterns that need peer access:** D2D copy, broadcast, gather, and all-to-all are skipped when ranks aren't in the same pod.
+
+- **Exit status is meaningful:** The preset returns a fatal error if any test failed, so it can gate CI.
+
+- **Multi-rank hosts are flagged** with a recommendation to run one rank per host.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench smoketest [numBytes]
+
+Run the whole matrix at the default sizes:
+
+.. code-block:: shell
+
+    ./TransferBench smoketest
+
+Run only the GFX device-to-device tests at one size:
+
+.. code-block:: shell
+
+    TEST_LIST=11,12 SIZE_LIST=16M ./TransferBench smoketest
+
+Environment variables
+-----------------------
+
+To modify the behavior of the smoketest preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``ALWAYS_VALIDATE``
+      - Defaulted to ``1`` by this preset so every iteration is validated. A negative value disables validation, which defeats the point of the preset.
+      - ``1``
+
+    * - ``CPU_MEM_TYPE``
+      - CPU memory type used for host-side buffers. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``GFX_SE_LIST``
+      - Sub-executor counts to test on the GFX executor.
+      - ``1,(GPU 0 CU count)``
+
+    * - ``GPU_MEM_TYPE``
+      - GPU memory type: 0=global, 1=fine-grained, 2=uncached, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``NUM_ITERATIONS``
+      - Timed iterations per test (lowered from the global default).
+      - ``2``
+
+    * - ``NUM_WARMUPS``
+      - Warmup iterations (lowered from the global default).
+      - ``0``
+
+    * - ``RUN_PARALLEL``
+      - ``1`` exercises GPUs in parallel, ``0`` runs them serially.
+      - ``1``
+
+    * - ``SE_MAX_BYTES``
+      - Maximum bytes a single sub-executor may work on. Accepts K/M/G suffixes.
+      - ``128M``
+
+    * - ``SIZE_LIST``
+      - Transfer sizes to test. Overridden when a byte count is given on the command line.
+      - ``1K,16M,256M``
+
+    * - ``TEST_LIST``
+      - Which test numbers to run, as a range list (for example, ``1-8``, ``11,12``). Empty means all supported tests. Also accepts ``dma``, ``gfx``, or ``fast`` as shortcuts.
+      - (all)
+
+    * - ``USE_BDMA``
+      - ``1`` runs tests 1-8 on the Batched-DMA executor instead of DMA. Requires a build with ``BMA_EXEC_ENABLED``.
+      - ``0``
+
+Example output
+----------------
+
+Each test prints a pass, fail, or skip marker per size as it runs, then a summary:
+
+.. code-block:: shell
+
+  ... per-test PASS / FAIL / SKIP markers ...
+
+  All tests passed
+
+  -- or --
+
+  [WARN] <n> Tests FAILED — details written to /tmp/transferbench_smoketest_<pid>.log
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _healthcheck:
+
+Health check preset (healthcheck)
+====================================
+
+The healthcheck preset runs a fixed set of bandwidth tests against hard-coded pass-or-fail thresholds for a known hardware configuration, to flag a machine that's underperforming. Unlike the other presets, it reports PASS or FAIL rather than raw numbers, and exits with a fatal status if anything failed.
+
+.. note::
+
+    This is an experimental feature. The preset prints its own disclaimer at startup: a failure doesn't necessarily indicate a hardware fault, since a simultaneous workload on the machine can influence results.
+
+Hardware support
+------------------
+
+The preset detects the model by GPU count, architecture, and sub-executor count, and exits if the configuration isn't one it has thresholds for. The following table lists the currently recognized configurations:
+
+.. list-table::
+    :header-rows: 1
+
+    * - GPUs
+      - Architecture
+      - Sub-executors per GPU
+
+    * - 8
+      - ``gfx942`` (MI300X series)
+      - 304
+
+    * - 8
+      - ``gfx942`` (MI300X series)
+      - 64
+
+All GPUs must be identical: mixed architectures or mixed sub-executor counts are rejected with ``[WARN] healthcheck preset is currently only supported when all GPUs are identical``, along with the two differing values detected. A uniform but otherwise unrecognized configuration prints ``[WARN] healthcheck preset is currently not supported on this hardware`` along with what it detected, and stops.
+
+**Key features:**
+
+Four groups of tests run in sequence, each compared against the model's threshold:
+
+- **HBM performance:** Several kernel configurations, each with its own block size, unroll factor, and temporal mode, run at 1000 iterations with 50 warmups.
+
+- **Unidirectional copies:** Host to device, and device to host, each GPU paired with its closest CPU NUMA node.
+
+- **Bidirectional host<->device copies.**
+
+- **All-to-all XGMI copies** between every GPU pair.
+
+**Restrictions:**
+
+- **Single-node only:** Running with more than one rank fails with ``[ERROR] Healthcheck preset currently not supported for multi-node``.
+
+- **AMD only:** On NVIDIA builds, it prints ``[WARN] healthcheck preset not supported on NVIDIA hardware`` and returns without testing.
+
+- **Unsupported hardware stops the run** rather than falling back to a generic check, because the thresholds are specific to the detected model.
+
+- **Thresholds are built in,** not configurable via environment variables.
+
+- **Exit status is meaningful:** A fatal error is returned if any test failed, so it can gate automated fleet checks.
+
+- **Needs CPU NUMA topology:** If the closest NUMA node to a GPU can't be determined, the affected copy test reports an error.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench healthcheck
+
+Show the measured value and threshold for every GPU rather than just a progress dot:
+
+.. code-block:: shell
+
+    VERBOSE=1 ./TransferBench healthcheck
+
+Environment variables
+-----------------------
+
+This preset sets its own iteration counts and kernel parameters, so the usual global tuning variables don't apply.
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``VERBOSE``
+      - ``1`` prints the measured value and limit for every GPU (and GPU pair) as each test runs, instead of a single progress line. Also prints the block size, unroll factor, and temporal mode used by each HBM test.
+      - ``0``
+
+Example output
+----------------
+
+.. code-block:: shell
+
+  Disclaimer:
+  ==================================================================
+  NOTE: This is an experimental feature and may be subject to change
+        Failures do not necessarily indicate hardware issues, as other factors
+        such as simultaneous workloads may influence results
+
+  Testing HBM performance [<name>]        ........ PASS
+  Testing unidirectional host to device copy ....... PASS
+  Testing unidirectional device to host copy ....... PASS
+  Testing bidirectional host<->device copies ....... PASS
+  Testing all-to-all XGMI copies            ........ FAIL (<n> test(s))
+   GPU 00 to GPU 01: <value> GB/s      Criteria: <limit> GB/s
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _hbm:
+
+HBM bandwidth preset (hbm)
+============================
+
+The hbm preset measures local HBM bandwidth on each GPU. Rather than reporting a single number for one kernel configuration, it sweeps threadblock size, unroll factor, element size, sub-executor count, and temporal mode, and reports the best result each GPU achieved.
+
+It uses its own kernels and doesn't move data between devices, so it measures what a GPU can sustain against its own memory.
+
+**Key features:**
+
+- Sweeps ``NUM_SUB_EXECS`` x ``BLOCKSIZES`` x ``UNROLLS`` x ``ELEM_BYTES`` x temporal modes (per ``TEMPORAL_MASK``) on every selected GPU.
+
+- Rotates through ``NUM_BUFFERS`` buffers, one per iteration, so results aren't served from cache.
+
+- Prewarms for ``PREWARM_MSEC`` before timing, then times ``NUM_ITERATIONS`` iterations.
+
+- Picks the best configuration per GPU according to ``CRITERIA`` (max, average, or min bandwidth).
+
+- Prints one row per GPU with Max/Avg/Min bandwidth, optionally including the winning configuration.
+
+**Restrictions:**
+
+- **Every rank must have at least one GPU:** A rank with none is a fatal error (``[ERROR] Each rank must have at least GPU.  Rank %d has no GPUs``).
+
+- **Cross-rank uniformity is enforced** for every sweep parameter except ``GPU_INDICES``, which may legitimately differ per rank.
+
+- **``SHOW_DETAILS`` is silently disabled on multi-rank runs**, since the per-sweep output would interleave across ranks.
+
+- **Non-temporal reads are unavailable on NVIDIA:** ``TEMPORAL_MASK`` is forced to ``1`` there regardless of what's set.
+
+- **Results are gathered across ranks** and printed as one table, so a multi-node run gives a single view of every GPU in the job.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench hbm
+
+Show which configuration won on each GPU:
+
+.. code-block:: shell
+
+    SHOW_EXTRA=1 ./TransferBench hbm
+
+Test two GPUs with a narrow sweep and temporal reads only:
+
+.. code-block:: shell
+
+    GPU_INDICES=0,1 BLOCKSIZES=256 UNROLLS=8 TEMPORAL_MASK=1 ./TransferBench hbm
+
+Environment variables
+-----------------------
+
+To modify the behavior of the hbm preset, use the following environment variables:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``BLOCKSIZES``
+      - Threadblock sizes to sweep. Must be positive multiples of 128, up to 1024; may not be empty.
+      - ``256,512``
+
+    * - ``CRITERIA``
+      - Which bandwidth decides the best configuration: 0=MAX, 1=AVG, 2=MIN.
+      - ``0``
+
+    * - ``ELEM_BYTES``
+      - Element sizes in bytes to sweep. May contain only 4, 8, or 16; may not be empty.
+      - ``16,8``
+
+    * - ``GPU_INDICES``
+      - GPU indices to test. Empty means every GPU on the rank. May differ per rank.
+      - (all)
+
+    * - ``MEM_TYPE``
+      - GPU memory type: 0=global, 1=fine-grained, 2=uncached, 3=managed. See :ref:`mem-type`.
+      - ``0``
+
+    * - ``NUM_BUFFERS``
+      - Buffers rotated through, one per iteration, to defeat caching. Must be positive. A value above ``NUM_ITERATIONS`` warns that some buffers go unused.
+      - ``2``
+
+    * - ``NUM_ITERATIONS``
+      - Timed iterations. Must be positive.
+      - ``100``
+
+    * - ``NUM_SUB_EXECS``
+      - Sub-executor counts to sweep. Each must be positive and no greater than the available CU count.
+      - (all available)
+
+    * - ``PREWARM_MSEC``
+      - Prewarm duration in milliseconds before timing starts. Must be non-negative.
+      - ``50``
+
+    * - ``SHOW_DETAILS``
+      - Show sweep details; ``2`` adds per-iteration output. Ignored on multi-rank runs.
+      - ``0``
+
+    * - ``SHOW_EXTRA``
+      - ``1`` appends the winning ``#SE``, ``Blocksize``, ``Unroll``, and ``EBytes`` columns to the result table.
+      - ``0``
+
+    * - ``TEMPORAL_MASK``
+      - Which load modes to sweep: 1=temporal, 2=non-temporal, 3=both. Forced to ``1`` on NVIDIA, which has no non-temporal reads.
+      - ``3``
+
+    * - ``UNROLLS``
+      - Unroll factors to sweep. May contain only 1, 2, 4, 8, or 16.
+      - ``16,8,4``
+
+    * - ``USE_WALLCLOCK``
+      - ``1`` times with the GPU wall-clock, ``0`` uses events.
+      - ``1``
+
+    * - ``OUTPUT_TO_CSV``
+      - CSV formatting for the result table.
+      - ``0``
+
+    * - ``SHOW_BORDERS``
+      - Draw borders on the result table.
+      - ``1``
+
+Example output
+----------------
+
+.. code-block:: shell
+
+  Rank | GPU | MaxBw (GB/s) | AvgBw (GB/s) | MinBw (GB/s) |
+     0 |   0 |           ... |           ... |           ... |
+     0 |   1 |           ... |           ... |           ... |
+  ...
+
+With ``SHOW_EXTRA=1`` the winning configuration is appended:
+
+.. code-block:: shell
+
+  Rank | GPU | MaxBw (GB/s) | AvgBw (GB/s) | MinBw (GB/s) | #SE | Blocksize | Unroll | EBytes |
+
+.. note::
+
+    A capture from real hardware has not been added yet.
+
+.. _help-envvars:
+
+Utility presets (help, envvars)
+==================================
+
+The help and envvars presets are reference commands rather than benchmarks. Each prints static documentation and exits. No transfers are run, no device is touched, and any byte count on the command line is ignored.
+
+Both are useful as the authoritative, version-matched answer to "what syntax does this build accept?" and "what environment variables does this build support?" They're generated from the binary you're actually running, so they can't drift from it the way external documentation can.
+
+**Restrictions:**
+
+- **No transfers are run** and no results are produced; both return success immediately after printing.
+
+- **Only the output rank prints.** Under multi-node, both commands check ``RankDoesOutput()`` first, so the reference text appears once rather than once per rank.
+
+- **No environment variables of their own.** Neither preset reads any configuration.
+
+.. _help:
+
+help
+------
+
+The help preset prints the configuration-file format reference:
+
+- The ``SRC -> Executor -> DST`` Transfer model.
+
+- The six executor types and what each one uses as a sub-executor (CPU, GPU/GFX, DMA, NIC, Batched-DMA, TDM).
+
+- Every executor character code (``C G D B T I N``) and the memory-location codes the output lists (``C P B D K H G F U N``), with how each is indexed.
+
+- Basic and advanced Test syntax, including how to specify bytes per Transfer and sub-executor counts per Transfer.
+
+- Worked examples, from a single GPU-executed copy through memsets, read-only Transfers, and broadcasts.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench help
+
+Because the output is a valid, commented config file, it can be redirected straight into one as a starting point:
+
+.. code-block:: shell
+
+    ./TransferBench help > example.cfg
+
+.. _envvars:
+
+envvars
+---------
+
+The envvars preset prints every environment variable this build understands, grouped by area, with a one-line description of each. This is the output of ``EnvVars::DisplayEnvVarsList()``, the same list the client uses internally, so it always matches the binary.
+
+For the documented reference with defaults and fuller descriptions, see :ref:`environment-variables`. If the two ever disagree, the command output is correct for your build.
+
+**Usage:**
+
+.. code-block:: shell
+
+    ./TransferBench envvars

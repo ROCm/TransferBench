@@ -1,6 +1,6 @@
 .. meta::
   :description: Frequently asked questions about TransferBench, covering common errors, warnings, and configuration issues including IOMMU, memory types, and XGMI.
-  :keywords: TransferBench FAQ, TransferBench errors, TransferBench warnings, IOMMU, GPU_MAX_HW_QUEUES, GFX_UNROLL, validation, XGMI, UALoE, memory types
+  :keywords: TransferBench FAQ, TransferBench errors, TransferBench warnings, IOMMU, GPU_MAX_HW_QUEUES, GFX_UNROLL, validation, XGMI, UALoE, memory types, cmath, numactl, cpuset
 
 .. _faq:
 
@@ -14,6 +14,18 @@ Error and warning messages
 ===========================
 
 This section describes common TransferBench error and warning messages and how to resolve them.
+
+Could not find standard C++ header 'cmath'
+--------------------------------------------
+
+This occurs when the standard C++ headers aren't installed. Try installing ``g++-12`` or
+``g++-14`` based on the OS version. For example:
+
+.. code-block:: shell
+
+  apt-get install g++-12
+
+For more build troubleshooting, see :ref:`build-troubleshooting`.
 
 Unexpected mismatch at index
 -----------------------------
@@ -153,6 +165,57 @@ Setting ``GPU_MAX_HW_QUEUES=8``:
   CPU wall-clock time and the ``Actual`` column, not in the per-cell numbers. In the
   ``GPU_MAX_HW_QUEUES=4`` case the CPU-timed aggregate bandwidth is roughly half the
   GPU-timed aggregate, while in the ``GPU_MAX_HW_QUEUES=8`` case the two are much closer.
+
+.. _cpuset-allocation-error:
+
+Cannot allocate memory due to process memory policy/cpuset
+-------------------------------------------------------------
+
+For example:
+
+.. code-block:: text
+
+  [ERROR] ERROR: Transfer 0: SRC 0: CPU 0 on rank 0 cannot allocate memory due to process memory policy/cpuset
+
+This indicates that the memory policy on the node doesn't allow CPU memory allocations on
+a particular NUMA node. Check the current policy:
+
+.. code-block:: shell
+
+  numactl --show
+
+.. code-block:: text
+
+  policy: default
+  preferred node: current
+  physcpubind: 0 1 2 3 4 5 6 7 8 9 10 ... 255
+  cpubind: 1       # <-- 0 is not listed
+  nodebind: 1      # <-- 0 is not listed
+  membind: 1       # <-- 0 is not listed
+  preferred:
+
+If the NUMA node that TransferBench is trying to allocate on isn't listed under
+``cpubind``, ``nodebind``, or ``membind``, the process is restricted from allocating memory
+there.
+
+This can also be caused by a hardware misconfiguration, or by a NUMA node having no RAM
+installed. Check installed memory per node with:
+
+.. code-block:: shell
+
+  numactl --hardware
+
+.. code-block:: text
+
+  available: 11 nodes (0-10)
+  node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 ... 191
+  node 0 size: 0 MB      # <-- No RAM installed on NUMA node 0
+  node 0 free: 0 MB
+  node 1 cpus: 64 65 66 67 68 69 70 71 72 73 74 ... 255
+  node 1 size: 257227 MB
+  node 1 free: 242799 MB
+
+A node with ``size: 0 MB`` has no RAM installed and can't be used for allocations.
 
 Feature questions
 ==================

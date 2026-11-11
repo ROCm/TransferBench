@@ -43,6 +43,18 @@ General options
       - Untimed warmup iterations per test.
       - ``3``
 
+    * - ``PNP_FLAG_BUFFER``
+      - Size in bytes of the PingPong flag buffer. Each flag slot is 1 byte. Must be positive.
+      - ``1``
+
+    * - ``PNP_STRIDE``
+      - Stride in bytes between flag slots on successive PingPong laps; wraps within the flag buffer. Must be positive, unless the flag buffer is 1 byte (then ``0`` is also allowed).
+      - ``1``
+
+    * - ``PNP_SPIN_LIMIT``
+      - Polls per PingPong wait before giving up on a stalled partner; the transfer then fails with an error naming the lap. ``0`` disables the watchdog (waits never give up, and the kernel is built without the checks).
+      - ``67108864``
+
     * - ``SHOW_BORDERS``
       - Shows ASCII box-drawing characters in tables. Set to ``1`` to show, ``0`` to hide.
       - ``1``
@@ -68,6 +80,18 @@ General options
     * - ``SAMPLING_FACTOR``
       - Controls how many transfer sizes are sampled per power-of-2 range when ``num_bytes`` is set to ``0``. For example, ``SAMPLING_FACTOR=4`` produces four evenly spaced sizes between each power of 2.
       - ``1``
+
+    * - ``SHOW_PERCENTILES``
+      - Comma-separated percentiles of iteration duration to report. Leave unset to skip percentile reporting. Each value must be between 1 and 99.
+      - —
+
+    * - ``SWEEP_MIN_POW2``
+      - When ``num_bytes`` is set to ``0``, the starting power-of-two exponent for the transfer size sweep. Unrelated to ``GFX_WORD_SIZE``.
+      - ``10``
+
+    * - ``SWEEP_MAX_POW2``
+      - When ``num_bytes`` is set to ``0``, the ending power-of-two exponent for the transfer size sweep. Unrelated to ``GFX_WORD_SIZE``.
+      - ``29``
 
 .. _data-validation-var:
 
@@ -225,6 +249,10 @@ GFX and kernel options
       - Preferred XCC per source-by-destination GPU pair, specified as a comma-separated list. Supported on AMD hardware only.
       - —
 
+    * - ``GFX_KERNEL``
+      - Selects the GFX kernel. ``-1`` = auto, ``0`` = force ``GpuReduceKernel``, ``1`` = force ``GpuCopyKernel`` (might error if the transfer is ineligible for this kernel).
+      - ``0``
+
 DMA options
 -----------
 
@@ -237,6 +265,28 @@ DMA options
 
     * - ``USE_HSA_DMA``
       - DMA implementation. ``1`` = use ``hsa_amd_async_copy`` for direct HSA control, ``0`` = use ``hipMemcpy`` for the standard HIP path.
+      - ``0``
+
+TDM options
+-----------
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``TDM_BLOCK_ORDER``
+      - How blocks for TDM transfers are ordered. ``0`` = sequential, ``1`` = interleaved, ``2`` = random.
+      - ``0``
+
+    * - ``TDM_BLOCK_SIZE``
+      - Threads per threadblock for TDM (async tensor) kernels. Must be a multiple of 32.
+      - ``256``
+
+    * - ``TDM_LDS_BYTES``
+      - LDS bytes per workgroup for TDM kernels. ``0`` = device max. Accepts ``K``, ``M``, and ``G`` suffixes.
       - ``0``
 
 Variable SubExecutor options
@@ -283,6 +333,8 @@ The following environment variables apply only when NIC support is enabled. To e
 
     * - ``NIC_CHUNK_BYTES``
       - Bytes per NIC RDMA chunk.
+
+        Since v1.71.0, a NIC transfer is rejected during validation if any queue pair's work request (the smaller of ``NIC_CHUNK_BYTES`` and the bytes assigned to that queue pair) exceeds the IBV ``max_msg_sz`` of either NIC. Each NIC's value is shown in the ``MaxMsgSz`` column of the topology output. To fix this, reduce ``NIC_CHUNK_BYTES`` or the transfer size, or use more queue pairs.
       - ``1073741824``
 
     * - ``NIC_RELAX_ORDER``
@@ -292,6 +344,18 @@ The following environment variables apply only when NIC support is enabled. To e
     * - ``ROCE_VERSION``
       - RoCE version.
       - ``2``
+
+    * - ``NIC_CQ_POLL_BATCH``
+      - Number of completion queue entries to poll per ``ibv_poll_cq`` call.
+      - ``4``
+
+    * - ``NIC_SERVICE_LEVEL``
+      - InfiniBand service level (``sl``) for IB queue pairs. Must be between 0 and 15.
+      - ``0``
+
+    * - ``NIC_TRAFFIC_CLASS``
+      - DSCP / traffic-class byte for the RoCE GRH. Must be between 0 and 255.
+      - ``0``
 
 HIP runtime variables (client-read)
 -------------------------------------
@@ -337,6 +401,12 @@ Socket-related variables
 
     * - ``TB_SINGLE_LOG``
       - When set, only rank 0 produces output. Useful for multinode socket mode.
+
+    * - ``TB_MASTER_IFACE``
+      - When ``TB_MASTER_ADDR`` is unset on rank 0, the optional network interface used for IPv4 address detection (for example, ``eth0``).
+
+    * - ``TB_SEND_USLEEP``
+      - Microseconds to sleep after each socket ``SendData`` call. Default: ``0``. Useful for diagnosing socket stability.
 
 Backend variables
 -----------------
@@ -406,6 +476,12 @@ Backend variables
 
     * - ``TB_FORCE_SINGLE_POD``
       - Forces single pod mode, skipping AMD-SMI and NVML pod queries. This assumes that all GPUs are in the same pod and skips cluster membership API calls.
+
+    * - ``TB_SHOW_ALL_NUMA``
+      - Shows all CPU NUMA nodes, including those with no cores. By default, coreless nodes are hidden, which changes the reported CPU indices.
+
+    * - ``TB_WALLCLOCK_RATE``
+      - Overrides the queried GPU wallclock rate when the query returns ``0``.
 
 HSA runtime variables
 ---------------------
