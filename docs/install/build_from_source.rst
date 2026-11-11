@@ -40,7 +40,7 @@ Optional dependencies
 
 Depending on your requirement, you can install these optional dependencies:
 
-- ``libibverbs``: Required at runtime for the NIC Executor (RDMA transfers). As of v1.70, it's loaded dynamically via ``dlopen``, so it isn't needed to build TransferBench, and NIC support is always compiled in.
+- ``libibverbs``: Required at runtime for the NIC Executor (RDMA transfers). As of v1.70.0, it's loaded dynamically via ``dlopen``, so it isn't needed to build TransferBench, and NIC support is always compiled in.
 
   - For Ubuntu/Debian:
 
@@ -293,7 +293,7 @@ To modify the CMake behavior, use the following environment variables:
             </tr>
             <tr>
               <td><code>ENABLE_POD_COMM</code></td>
-              <td>Enables pod communication (HIP >= 8.0).</td>
+              <td>Enables pod communication (HIP >= 8.0.0).</td>
               <td><code>OFF</code></td>
             </tr>
             <tr>

@@ -43,6 +43,18 @@ General options
       - Untimed warmup iterations per test.
       - ``3``
 
+    * - ``PNP_FLAG_BUFFER``
+      - Size in bytes of the PingPong flag buffer. Each flag slot is 1 byte. Must be positive.
+      - ``1``
+
+    * - ``PNP_STRIDE``
+      - Stride in bytes between flag slots on successive PingPong laps; wraps within the flag buffer. Must be positive, unless the flag buffer is 1 byte (then ``0`` is also allowed).
+      - ``1``
+
+    * - ``PNP_SPIN_LIMIT``
+      - Polls per PingPong wait before giving up on a stalled partner; the transfer then fails with an error naming the lap. ``0`` disables the watchdog (waits never give up, and the kernel is built without the checks).
+      - ``67108864``
+
     * - ``SHOW_BORDERS``
       - Shows ASCII box-drawing characters in tables. Set to ``1`` to show, ``0`` to hide.
       - ``1``
@@ -70,15 +82,15 @@ General options
       - ``1``
 
     * - ``SHOW_PERCENTILES``
-      - Comma-separated percentiles of iteration duration to report. Each value must be between 1 and 99.
+      - Comma-separated percentiles of iteration duration to report. Leave unset to skip percentile reporting. Each value must be between 1 and 99.
       - —
 
     * - ``SWEEP_MIN_POW2``
-      - When ``0`` is specified for data size, the starting power-of-two exponent.
+      - When ``num_bytes`` is set to ``0``, the starting power-of-two exponent for the transfer size sweep. Unrelated to ``GFX_WORD_SIZE``.
       - ``10``
 
     * - ``SWEEP_MAX_POW2``
-      - When ``0`` is specified for data size, the ending power-of-two exponent.
+      - When ``num_bytes`` is set to ``0``, the ending power-of-two exponent for the transfer size sweep. Unrelated to ``GFX_WORD_SIZE``.
       - ``29``
 
 .. _data-validation-var:
@@ -266,7 +278,7 @@ TDM options
       - Default value
 
     * - ``TDM_BLOCK_ORDER``
-      - How blocks for TDM transfers are ordered. ``0`` = sequential, ``1`` = interleaved.
+      - How blocks for TDM transfers are ordered. ``0`` = sequential, ``1`` = interleaved, ``2`` = random.
       - ``0``
 
     * - ``TDM_BLOCK_SIZE``
@@ -321,6 +333,8 @@ The following environment variables apply only when NIC support is enabled. To e
 
     * - ``NIC_CHUNK_BYTES``
       - Bytes per NIC RDMA chunk.
+
+        Since v1.71.0, a NIC transfer is rejected during validation if any queue pair's work request (the smaller of ``NIC_CHUNK_BYTES`` and the bytes assigned to that queue pair) exceeds the IBV ``max_msg_sz`` of either NIC. Each NIC's value is shown in the ``MaxMsgSz`` column of the topology output. To fix this, reduce ``NIC_CHUNK_BYTES`` or the transfer size, or use more queue pairs.
       - ``1073741824``
 
     * - ``NIC_RELAX_ORDER``
