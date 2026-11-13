@@ -6061,6 +6061,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     auto cpuStart = std::chrono::high_resolution_clock::now();
     std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
+    // Only queue pairs with posted work requests produce a (signalled) completion.
+    // Small transfers may leave some queue pairs with no data assigned.
+    std::vector<uint32_t> activeQPs(transferCount, 0);
+    for (auto i = 0; i < transferCount; i++)
+      for (auto const& wrs : exeInfo.resources[i].sendWorkRequests)
+        if (!wrs.empty()) activeQPs[i]++;
+
     do {
       std::vector<uint32_t> receivedQPs(transferCount, 0);
       // post the sends
@@ -6075,7 +6082,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       ibv_wc* wc_array = wc.data();
       while (completedTransfers < transferCount) {
         for (auto i = 0; i < transferCount; i++) {
-          if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
+          if(receivedQPs[i] < activeQPs[i]) {
             auto& rss = exeInfo.resources[i];
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
@@ -6092,7 +6099,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
             }
-            if(receivedQPs[i] == rss.qpCount) {
+            if(receivedQPs[i] == activeQPs[i]) {
               auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
               double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
               if (iteration >= 0) {
