@@ -2278,7 +2278,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     CheckMultiNodeConfigConsistency(cfg, errors);
 
     // Check data options
-    if (cfg.data.blockBytes == 0 || cfg.data.blockBytes % 4)
+    if (cfg.data.blockBytes <= 0 || cfg.data.blockBytes % 4)
       errors.push_back({ERR_FATAL, "[data.blockBytes] must be positive multiple of %lu", sizeof(float)});
     if (cfg.data.byteOffset < 0 || cfg.data.byteOffset % sizeof(float))
       errors.push_back({ERR_FATAL, "[data.byteOffset] must be positive multiple of %lu", sizeof(float)});
@@ -2304,7 +2304,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (cfg.general.useMultiStream && cfg.gfx.blockOrder > 0)
       errors.push_back({ERR_WARN, "[gfx.blockOrder] will be ignored when running in multi-stream mode"});
 
-    if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
+    if (cfg.gfx.blockSize <= 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
       errors.push_back({ERR_FATAL,
                         "[gfx.blockSize] must be positive multiple of 64 less than or equal to %d",
                         MAX_BLOCKSIZE});
