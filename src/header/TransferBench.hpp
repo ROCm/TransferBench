@@ -4126,6 +4126,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   // Transition QueuePair to Ready to Receive State
   static ErrResult TransitionQpToRtr(ibv_qp*         qp,
                                      ConnInfo const& connInfo,
+                                     int      const  localGidIdx,
                                      uint8_t  const& port,
                                      bool     const& isRoCE,
                                      ibv_mtu  const& mtu,
@@ -4144,7 +4145,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       attr.ah_attr.grh.dgid.global.subnet_prefix = connInfo.gid.global.subnet_prefix;
       attr.ah_attr.grh.dgid.global.interface_id  = connInfo.gid.global.interface_id;
       attr.ah_attr.grh.flow_label                = 0;
-      attr.ah_attr.grh.sgid_index                = connInfo.gidIdx;
+      attr.ah_attr.grh.sgid_index                = localGidIdx;  // Must index the local port's GID table
       attr.ah_attr.grh.hop_limit                 = 255;
       attr.ah_attr.grh.traffic_class             = trafficClass;
     } else {
@@ -4444,7 +4445,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       static_assert(std::is_trivially_copyable<QpTransitionResult>::value, "QpTransitionResult must be trivially copyable for MPI broadcast");
       QpTransitionResult srcQpResult = {ERR_NONE, false};
       if (GetRank() == srcMemRank) {
-        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, port, srcIsRoCE, rss.srcPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
+        ErrResult err = TransitionQpToRtr(rss.srcQueuePairs[i], dstConnInfo, srcGidIndex, port, srcIsRoCE, rss.srcPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
         srcQpResult.rtrFailed = (err.errType != ERR_NONE);
         if (err.errType == ERR_NONE) {
           err = TransitionQpToRts(rss.srcQueuePairs[i]);
@@ -4459,7 +4460,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       QpTransitionResult dstQpResult = {ERR_NONE, false};
       if (GetRank() == dstMemRank) {
-        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, port, dstIsRoCE, rss.dstPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
+        ErrResult err = TransitionQpToRtr(rss.dstQueuePairs[i], srcConnInfo, dstGidIndex, port, dstIsRoCE, rss.dstPortAttr.active_mtu, cfg.nic.trafficClass, cfg.nic.serviceLevel);
         dstQpResult.rtrFailed = (err.errType != ERR_NONE);
         if (err.errType == ERR_NONE) {
           err = TransitionQpToRts(rss.dstQueuePairs[i]);
@@ -6061,6 +6062,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     auto cpuStart = std::chrono::high_resolution_clock::now();
     std::vector<std::chrono::high_resolution_clock::time_point> transferTimers(transferCount);
 
+    // Only queue pairs with posted work requests produce a (signalled) completion.
+    // Small transfers may leave some queue pairs with no data assigned.
+    std::vector<uint32_t> activeQPs(transferCount, 0);
+    for (auto i = 0; i < transferCount; i++)
+      for (auto const& wrs : exeInfo.resources[i].sendWorkRequests)
+        if (!wrs.empty()) activeQPs[i]++;
+
     do {
       std::vector<uint32_t> receivedQPs(transferCount, 0);
       // post the sends
@@ -6075,7 +6083,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       ibv_wc* wc_array = wc.data();
       while (completedTransfers < transferCount) {
         for (auto i = 0; i < transferCount; i++) {
-          if(receivedQPs[i] < exeInfo.resources[i].qpCount) {
+          if(receivedQPs[i] < activeQPs[i]) {
             auto& rss = exeInfo.resources[i];
             // Poll the completion queue until all queue pairs are complete
             // The order of completion doesn't matter because this completion queue is dedicated to this Transfer
@@ -6092,7 +6100,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
             }
-            if(receivedQPs[i] == rss.qpCount) {
+            if(receivedQPs[i] == activeQPs[i]) {
               auto cpuDelta = std::chrono::high_resolution_clock::now() - transferTimers[i];
               double deltaMsec = std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
               if (iteration >= 0) {
