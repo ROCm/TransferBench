@@ -1295,21 +1295,25 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 //========================================================================================
   static ErrResult CharToMemType(char const c, MemType& memType)
   {
-    char const* val = strchr(MemTypeStr, toupper(c));
+    // strchr also matches the terminating NUL, so reject a missing type character explicitly
+    char const* val = c ? strchr(MemTypeStr, toupper(c)) : NULL;
     if (val) {
       memType = (MemType)(val - MemTypeStr);
       return ERR_NONE;
     }
+    if (!c) return {ERR_FATAL, "Missing memory type"};
     return {ERR_FATAL, "Unexpected memory type (%c)", c};
   }
 
   static ErrResult CharToExeType(char const c, ExeType& exeType)
   {
-    char const* val = strchr(ExeTypeStr, toupper(c));
+    // strchr also matches the terminating NUL, so reject a missing type character explicitly
+    char const* val = c ? strchr(ExeTypeStr, toupper(c)) : NULL;
     if (val) {
       exeType = (ExeType)(val - ExeTypeStr);
       return ERR_NONE;
     }
+    if (!c) return {ERR_FATAL, "Missing executor type"};
     return {ERR_FATAL, "Unexpected executor type (%c)", c};
   }
 
@@ -1501,7 +1505,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // This is optional for EXE_NIC_NEAREST as long as nothing further is specified
     char const* endPtr = ParseRange(ptr, -1, exeDevice.exeIndices);
     if (!endPtr) {
-      if (exeDevice.exeType == EXE_NIC_NEAREST && *endPtr == 0) {
+      if (exeDevice.exeType == EXE_NIC_NEAREST && *ptr == 0) {
         if (exeDevice.exeRanks.size() != 0) {
           return {ERR_FATAL, "Wildcard NIC executor may not be specified with rank in executor token %s", token.c_str()};
         }
