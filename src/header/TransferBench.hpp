@@ -2356,6 +2356,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     // Check TDM options (TDM-capable hardware: gfx1250 on AMD, sm_90+ on NVIDIA)
+    if (cfg.tdm.blockOrder < 0 || cfg.tdm.blockOrder > 2)
+      errors.push_back({ERR_FATAL,
+          "[tdm.blockOrder] must be 0 for sequential, 1 for interleaved, or 2 for random"});
+
+    if (cfg.general.useMultiStream && cfg.tdm.blockOrder > 0)
+      errors.push_back({ERR_WARN, "[tdm.blockOrder] will be ignored when running in multi-stream mode"});
+
     if (cfg.tdm.blockSize <= 0 || cfg.tdm.blockSize % 32 || cfg.tdm.blockSize > MAX_BLOCKSIZE)
       errors.push_back({ERR_FATAL,
                         "[tdm.blockSize] must be a positive multiple of 32 less than or equal to %d",
@@ -5486,7 +5493,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #endif
       int transferOffset = 0;
       int pingpongOffset = 0;
-      if (cfg.general.useMultiStream || cfg.gfx.blockOrder == 0) {
+      int const blockOrder = (exeDevice.exeType == EXE_GPU_TDM) ? cfg.tdm.blockOrder : cfg.gfx.blockOrder;
+      if (cfg.general.useMultiStream || blockOrder == 0) {
         // Threadblocks are ordered sequentially one transfer at a time
         for (auto& rss : exeInfo.resources) {
           if (rss.numLaps != 0) continue;
@@ -5497,7 +5505,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             transferOffset++;
           }
         }
-      } else if (cfg.gfx.blockOrder == 1) {
+      } else if (blockOrder == 1) {
         // Interleave threadblocks of different Transfers
         for (int subExecIdx = 0; exeInfo.subExecParamCpu.size() < exeInfo.totalSubExecs; ++subExecIdx) {
           for (auto& rss : exeInfo.resources) {
@@ -5509,7 +5517,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             }
           }
         }
-      } else if (cfg.gfx.blockOrder == 2) {
+      } else if (blockOrder == 2) {
         // Build randomized threadblock list
         std::vector<std::pair<int,int>> indices;
         for (int i = 0; i < exeInfo.resources.size(); i++) {

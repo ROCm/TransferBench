@@ -389,7 +389,7 @@ public:
     printf(" CU_MASK             - CU mask for streams. Can specify ranges e.g '5,10-12,14'\n");
     printf(" FILL_COMPRESS       - Percentages of 64B lines to be filled by random/1B0/2B0/4B0/32B0\n");
     printf(" FILL_PATTERN        - Big-endian pattern for source data, specified in hex digits. Must be even # of digits\n");
-    printf(" GFX_BLOCK_ORDER     - How blocks for transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" GFX_BLOCK_ORDER     - How blocks for transfers are ordered. 0=sequential, 1=interleaved, 2=random\n");
     printf(" GFX_BLOCK_SIZE      - # of threads per threadblock (Must be multiple of 64)\n");
     printf(" GFX_KERNEL          - -1=auto, 0=force GpuReduceKernel, 1=force GpuCopyKernel (may error if ineligible)\n");
     printf(" GFX_SE_TYPE         - SubExecutor granularity type (0=threadblock, 1=warp)\n");
@@ -426,7 +426,7 @@ public:
     printf(" SHOW_PERCENTILES    - Comma-separated percentiles iteration duration\n");
     printf(" SWEEP_MAX_POW2      - When 0 is specified for data size, this is the ending power of two exponent\n");
     printf(" SWEEP_MIN_POW2      - When 0 is specified for data size, this is the starting power of two exponent\n");
-    printf(" TDM_BLOCK_ORDER     - How blocks for TDM transfers are ordered. 0=sequential, 1=interleaved\n");
+    printf(" TDM_BLOCK_ORDER     - How blocks for TDM transfers are ordered. 0=sequential, 1=interleaved, 2=random\n");
     printf(" TDM_BLOCK_SIZE      - # of threads per threadblock for TDM (async tensor) kernels (Must be multiple of 32)\n");
     printf(" TDM_LDS_BYTES       - Amount of LDS bytes to allocate per workgroup for TDM kernels (0 = device max; K/M/G suffixes accepted)\n");
     printf(" USE_HIP_EVENTS      - Use HIP events for GFX executor timing\n");
@@ -506,7 +506,9 @@ public:
     Print("FILL_PATTERN", getenv("FILL_PATTERN") ? 1 : 0,
           "%s", (fillPattern.size() ? getenv("FILL_PATTERN") : TransferBench::GetStrAttribute(ATR_SRC_PREP_DESCRIPTION).c_str()));
     Print("GFX_BLOCK_ORDER", gfxBlockOrder,
-          "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential" : "Interleaved");
+          "Thread block ordering: %s", gfxBlockOrder == 0 ? "Sequential"  :
+                                       gfxBlockOrder == 1 ? "Interleaved" :
+                                       gfxBlockOrder == 2 ? "Random"      : "unknown");
     Print("GFX_BLOCK_SIZE", gfxBlockSize,
           "Threadblock size of %d", gfxBlockSize);
     Print("GFX_KERNEL", gfxKernel,
@@ -584,7 +586,9 @@ public:
     Print("SHOW_PERCENTILES", showPercentiles.empty() ? 0 : 1, "%s",
           showPercentiles.empty() ? "Disabled" : GetStr(showPercentiles).c_str());
     Print("TDM_BLOCK_ORDER", tdmBlockOrder,
-          "TDM Thread block ordering: %s", tdmBlockOrder == 0 ? "Sequential" : "Interleaved");
+          "TDM Thread block ordering: %s", tdmBlockOrder == 0 ? "Sequential"  :
+                                           tdmBlockOrder == 1 ? "Interleaved" :
+                                           tdmBlockOrder == 2 ? "Random"      : "unknown");
     Print("TDM_BLOCK_SIZE", tdmBlockSize, "TDM threadblock size of %d", tdmBlockSize);
     Print("TDM_LDS_BYTES", tdmLdsBytes, "%s",
           tdmLdsBytes == 0 ? "Using device max LDS bytes per workgroup"
