@@ -3,6 +3,71 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.71.02
+### Added
+- LaunchTransferBench.sh now supports bracketed range wildcards in the host list, e.g. `node[1..4]` or
+  `rack[01..02]-node[01..04]`. Several ranges in one name combine left to right
+- LaunchTransferBench.sh now supports `-h`/`--help` and `-n`/`--dry-run`. `--dry-run` shows the expanded host list
+  and the exact command that would be run on each rank, without actually running them
+### Fixed
+- LaunchTransferBench.sh now hands the remote command to bash explicitly, so launching on hosts whose login shell
+  is csh/tcsh no longer fails on the `VAR=value` environment prefix
+- Negative `NUM_ITERATIONS` (time-based run duration) no longer runs `NUM_SUBITERATIONS` times longer than
+  requested. The per-iteration time accumulated toward the time limit was being divided by `NUM_SUBITERATIONS`
+  before being compared against the requested duration
+- sweep preset no longer generates CPU-executed Transfers to/from GPU memory that isn't host-accessible (Large BAR
+  disabled) or GPU-executed Transfers to another GPU's memory without peer access; such Transfers are now skipped
+  with a warning instead of failing. Manually configured Transfers that hit the same cases are now rejected during
+  validation with a clear fatal error instead of behaving incorrectly
+
+## v1.71.01
+### Modified
+- `a2a` and `a2asweep` presets now default `A2A_DIRECT=0` on MI4XX (gfx1250) hardware, allowing DPX to route
+  transfers more intuitively across the full all-to-all. Other hardware keeps the previous `A2A_DIRECT=1` default
+### Fixed
+- NIC topology detection now probes each IBV device (`ibv_open_device` / `ibv_query_device` / `ibv_query_port`) in a
+  forked child process, so a crash inside a third-party ibverbs provider plugin (observed with a vendor RoCE driver)
+  only disables that one NIC instead of crashing TransferBench on startup. The affected device is reported as
+  inactive with a warning instead
+
+## v1.71.00
+### Added
+- Added PingPong operations to measure latency between two GPU Executors. A PingPong joins a Ping and a Pong triplet
+  with `+` and an optional lap count, e.g. `(N->G0->F1)+1000(N->G1->F0)`. Each lap, the Ping Executor writes a
+  1-byte flag to its DST and waits for the Pong Executor to write one back to the Pong DST. Results report the
+  GPU-timed round-trip latency per lap
+  - PingPongs can run in parallel with regular Transfers in the same Test, and do not count toward Executor bandwidth
+  - Each Ping and Pong uses a single threadblock; the number of SubExecutors and bytes to transfer are ignored
+  - Currently supported on GFX Executors only
+  - Ping and Pong may run on different ranks within the same pod (requires pod communication support)
+- Added `PNP_FLAG_BUFFER` and `PNP_STRIDE` to spread PingPong flags across a buffer, moving by the stride each lap
+- Added `PNP_SPIN_LIMIT` to bound how long a PingPong waits for its partner. Each wait gives up after this many
+  polls without progress (default 67108864). Set to 0 to disable the check.
+- Added latency presets built on PingPong operations:
+  - "p2p_latency": latency between pairs of GPU Executors, run serially
+  - "one2all_latency": latency from one GPU Executor to all others, run in parallel
+  - "a2a_latency": latency between all pairs of GPU Executors, run in parallel
+  - "ring_latency": each GPU Executor pingpongs its neighbor, with every hop in the ring run in parallel.
+    Devices are listed rank-major, reordered by `STRIDE` (default 1), then split into rings of `RING_SIZE`
+    (default: all GPUs)
+  - Behavior can be modified with `NUM_LAPS`, `GPU_MEM_TYPE`, `USE_REMOTE_READ`, `NUM_GPU_DEVICES` and, for a2a_latency, `A2A_LOCAL`
+- Added gfx1250-strict to the default GPU targets for CMake builds
+- NIC topology output now shows each NIC's IBV max_msg_sz
+- Added agent skills for AI coding assistants under `.claude/skills/`:
+  - "transferbench-run": writing configs, choosing presets and environment variables, and launching single- or multi-node runs
+  - "transferbench-debug": troubleshooting runs that fail, hang, fail validation or give unexpected results
+### Modified
+- When GFX Executor timing does not use HIP events (multi-stream mode or `USE_HIP_EVENTS=0`), it now spans from the first
+  Transfer launch to the last Transfer completion, excluding executor dispatch overhead
+### Fixed
+- CU IDs reported with `SHOW_ITERATIONS` now match `CU_MASK` indices on gfx90a, gfx942, gfx950 and gfx1250
+- GFX kernel launch failures are now reported instead of being ignored
+- RoCE / GID index fields are now initialized for NICs that are not RoCE or have no active port
+- NIC Transfers are now rejected during validation if a queue pair's work request (the smaller of `NIC_CHUNK_BYTES` and
+  the bytes assigned to that queue pair) exceeds the IBV max_msg_sz of either NIC
+- LaunchTransferBench.sh now resolves the rank 0 host to an IPv4 address before passing it as `TB_MASTER_ADDR`, so an
+  ssh_config alias in the host list no longer leaves rank 0 waiting for workers that cannot resolve it
+
 ## v1.70.02
 ### Modified
 - rings preset defaults `NUM_SUB_EXEC` to 0, which uses all available subexecutors per Transfer

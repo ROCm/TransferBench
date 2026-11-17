@@ -17,6 +17,7 @@ updates:
       - "ci:docs-only"
     reviewers:
       - "samjwu"
+
   # ── GitHub Actions: keep workflow action versions current ──────────────────
   - package-ecosystem: "github-actions"
     # "/" covers .github/workflows; composite actions keep their own `uses:`
@@ -27,6 +28,9 @@ updates:
     schedule:
       interval: "daily"
       # Wait a week before adopting newly released action versions.
+    commit-message:
+      prefix: "chore"
+      include: "scope"
     cooldown:
       default-days: 7
       exclude:

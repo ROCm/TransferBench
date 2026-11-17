@@ -47,7 +47,7 @@ The workflow always builds with:
 - `ENABLE_MPI_COMM=OFF` — MPI multi-node communicator disabled (would require OpenMPI at runtime; not bundled by TheRock SDK). Packages are built to run out of the box with only `numactl`/`libnuma1` from the OS.
 - `DISABLE_DMABUF=OFF` — DMA-BUF support for GPU Direct RDMA
 - `BUILD_RELOCATABLE_PACKAGE=ON` — RVS-style install prefix + package naming
-- `GPU_TARGETS` — full data-center + consumer set (gfx906, 908, 90a, 942, 950, 1030, 1100/01/02, 1150/51, 1200/01)
+- `GPU_TARGETS` — full data-center + consumer set (gfx906, 908, 90a, 942, 950, 1030, 1100/01/02, 1150/51/52/53, 1200/01)
 
 ## Local builds
 
@@ -70,9 +70,9 @@ sudo -E BUILD_TYPE=Debug ./build_packages_local.sh
 After the script completes, packages live under `build/`:
 
 ```
-build/amdrocm7-transferbench_1.66.02-<release>_amd64.deb
-build/amdrocm7-transferbench-1.66.02-<release>.x86_64.rpm
-build/amdrocm7-transferbench-1.66.02-Linux.tar.gz
+build/amdrocm7-transferbench_1.71.00-<release>_amd64.deb
+build/amdrocm7-transferbench-1.71.00-<release>.x86_64.rpm
+build/amdrocm7-transferbench-1.71.00-Linux.tar.gz
 ```
 
 ## Installing built packages

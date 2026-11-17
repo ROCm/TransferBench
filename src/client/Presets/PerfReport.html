@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TransferBench PerfReport</title>
+<script async src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" onload="window.PerfReport && PerfReport.chartLoaded()"></script>
+<style>
+  :root{ --bg:#0f1419; --panel:#151b23; --panel2:#12181f; --line:#232b36; --line2:#2f3b49;
+         --fg:#e6e6e6; --dim:#8b98a5; --acc:#60a5fa; --ok:#4ade80; --bad:#f87171; --to:#fbbf24; }
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+  header{padding:16px 34px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  header h1{margin:0;font-size:19px;white-space:nowrap}
+  header .runid{color:var(--acc);font-weight:600}
+  header .tbver{padding:4px 10px;border:1px solid var(--line2);border-radius:8px;background:var(--panel2);font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  header .meta{color:var(--dim);font-size:12.5px}
+  header .stats{margin-left:auto;display:flex;gap:10px}
+  .pill{display:flex;flex-direction:column;align-items:center;min-width:64px;padding:5px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel2)}
+  .pill .n{font-size:20px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+  .pill .l{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-top:3px}
+  .views{display:flex;gap:6px;padding:10px 34px 0;background:var(--panel);border-bottom:1px solid var(--line2);position:sticky;top:0;z-index:20}
+  .views:empty{display:none}
+  .vtab{padding:7px 18px 8px;border:1px solid var(--line);border-bottom:none;border-radius:9px 9px 0 0;background:var(--panel2);color:var(--dim);cursor:pointer;font-size:13.5px;font-weight:600;text-align:left;margin-bottom:-1px}
+  .vtab .vs{display:block;font-size:10.5px;font-weight:400;margin-top:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .vtab:hover{color:var(--fg)}
+  .vtab.active{background:var(--bg);color:var(--fg);border-color:var(--line2);box-shadow:inset 0 2px 0 var(--acc)}
+  .banner{margin:0 0 14px;padding:9px 13px;border:1px solid var(--bad);border-radius:8px;background:#2a1217;color:#fecaca;font-size:12.5px;line-height:1.5}
+  main{padding:22px 34px;max-width:1720px;margin:0 auto}
+  .controls{display:flex;gap:22px;align-items:center;flex-wrap:wrap;font-size:13px;margin-bottom:6px}
+  .controls .cg{display:inline-flex;align-items:center;gap:6px}
+  .controls label{cursor:pointer;color:var(--dim)}
+  .seg{padding:4px 11px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--dim);cursor:pointer;font-size:12.5px}
+  .seg.active{background:#1e2732;color:var(--fg);border-color:var(--line2)}
+  .seg:disabled{opacity:.35;cursor:not-allowed}
+  .explain{color:var(--dim);font-size:12px;margin:4px 0 18px;max-width:1100px;line-height:1.5}
+  h2{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin:30px 0 12px;display:flex;align-items:baseline;gap:10px}
+  #summary h2:first-child{margin-top:10px}
+  .sweep{margin:0 0 26px}
+  .sweep h2{margin-top:10px}
+  .sweep .q{font-size:14px;margin:0 0 4px}
+  .sweep .ax{color:var(--dim);font-size:12px;margin:0 0 12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:0 0 18px}
+  .card h3{margin:0 0 2px;font-size:15px}
+  .card .sub{color:var(--dim);font-size:12px;margin:0 0 6px}
+  .card .sub code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+  .card .sub.diff{color:var(--to)}
+  .glance{font-size:12px;margin:0 0 12px;line-height:1.6}
+  .glance b{font-weight:600}
+  .glance .d{color:var(--dim)}
+  .tabs{display:flex;gap:6px;margin:0 0 12px;align-items:center}
+  .tab{padding:5px 13px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--dim);cursor:pointer;font-size:13px}
+  .tab.active{background:#1e2732;color:var(--fg);border-color:var(--line2)}
+  .tabs select{margin-left:10px;background:var(--panel2);color:var(--fg);border:1px solid var(--line2);border-radius:6px;padding:3px 6px;font-size:12px}
+  .pane{display:none} .pane.active{display:block}
+  canvas{max-height:340px}
+  .charts3{display:flex;gap:14px;align-items:stretch;margin:0 0 6px}
+  .chartcell{flex:1 1 0;min-width:0}
+  .ctitle{font-size:11px;color:var(--dim);text-align:center;margin:0 0 4px;text-transform:uppercase;letter-spacing:.04em}
+  .ctitle .nt{text-transform:none}
+  .rowlbl{font-size:12px;font-weight:600;margin:12px 0 4px}
+  .rowlbl .d{color:var(--dim);font-weight:400}
+  .info{position:relative;display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;margin-left:5px;border:1px solid var(--line2);border-radius:50%;color:var(--dim);font-size:9px;font-weight:700;cursor:help;vertical-align:middle}
+  .info:hover,.info:focus{color:var(--fg);border-color:var(--fg);outline:none}
+  .infobox{display:none;position:absolute;z-index:30;left:50%;top:19px;transform:translateX(-50%);width:270px;background:var(--panel2);border:1px solid var(--line2);border-radius:8px;padding:10px 12px;text-align:left;color:var(--fg);font-size:11px;line-height:1.5;font-weight:400;text-transform:none;letter-spacing:0;box-shadow:0 8px 26px rgba(0,0,0,.55)}
+  .info:hover .infobox,.info:focus .infobox{display:block}
+  .cgroups{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin:10px 0 2px}
+  .cgrp{display:inline-flex;align-items:center;gap:5px}
+  .cglbl{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim)}
+  .cgchip{padding:2px 8px;border:1px solid var(--line2);border-radius:9px;cursor:pointer;font-size:10.5px;color:var(--fg);background:var(--panel2);user-select:none}
+  .cgchip:hover{border-color:var(--fg)} .cgchip.off{opacity:.4}
+  .encode{color:var(--dim);font-size:11px;margin:10px 0 0}
+  .clegend{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0 0}
+  .citem{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border:1px solid var(--line);border-radius:7px;cursor:pointer;font-size:10.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .citem .sw{display:inline-block;width:22px;height:3px;border-radius:1px;flex:0 0 auto}
+  .citem.off{opacity:.35} .citem:hover{border-color:var(--line2)}
+  .cbar{display:block;height:3px;border-radius:2px;margin-top:4px}
+  .tblwrap{overflow-x:auto;position:relative}
+  .dtable{border-collapse:separate;border-spacing:0;width:auto;min-width:100%;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .dtable th,.dtable td{padding:5px 10px;border-bottom:1px solid var(--line);text-align:right}
+  .dtable thead th{color:var(--dim);font-weight:600}
+  .dtable thead th .u{display:block;font-size:9px;color:var(--dim);font-weight:400}
+  .dtable thead th.leaf{min-width:64px}
+  .dtable .vg{border-left:2px solid var(--line2)} .dtable .vx{border-left:1px solid var(--line2)}
+  .dtable .vh{text-align:center;color:var(--fg)}
+  .dtable td.na{color:var(--to)}
+  .dtable td.top{font-weight:700}
+  .dtable td .who{font-size:9px;color:var(--dim);margin-left:4px}
+  .dtable th.szcol,.dtable td.szcol{position:sticky;left:0;z-index:1;background:var(--panel);text-align:left;border-right:2px solid var(--line2)}
+  .dtable thead th.szcol{z-index:3}
+  .dtable th.axname{font-weight:400;font-style:italic}
+  .dtable thead th.unit{font-size:9px;font-weight:400}
+  .dtable td.warn{position:relative}
+  .dtable td.warn::after{content:'';position:absolute;top:0;right:0;border-style:solid;border-width:0 6px 6px 0;border-color:transparent var(--to) transparent transparent}
+  .dtable td.dev1{background:rgba(251,191,36,.22)} .dtable td.dev2{background:rgba(248,113,113,.32)}
+  .dtable td.diff{color:var(--to)}
+  .badge{padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600}
+  .PASS{background:#153d2b;color:var(--ok)} .FAIL{background:#4a1620;color:var(--bad)}
+  .TIMEOUT{background:#4a3a15;color:var(--to)} .SKIP{background:#222a33;color:var(--dim)}
+  table.ptable{border-collapse:collapse;font-size:12px;background:var(--panel);border:1px solid var(--line);margin:0 0 14px}
+  .ptable th,.ptable td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  .ptable th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  .ptable td.k{color:var(--dim)}
+  .ptable td.diff{color:var(--to)}
+  .ptable td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .note{color:var(--dim);font-size:12px;margin:4px 0 12px}
+  details{margin:0 0 14px} summary{cursor:pointer;color:var(--dim);font-size:12px;margin:0 0 8px}
+  footer{color:var(--dim);font-size:11px;margin:30px 0 10px}
+  .loadbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 34px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  .loadbar .open{padding:5px 12px;border:1px solid var(--line2);border-radius:7px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:12.5px;white-space:nowrap}
+  .loadbar .open:hover{border-color:var(--fg)}
+  .loaded{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-left:10px}
+  .ltab{padding:5px 12px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--dim);cursor:pointer;font-size:12.5px;text-align:left}
+  .ltab .vs{display:block;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .ltab:hover{color:var(--fg)} .ltab.active{background:#1e2732;color:var(--fg);border-color:var(--acc)}
+  .cmp{font-size:12px;color:var(--dim);margin-left:6px}
+  .cmp select{background:var(--panel2);color:var(--fg);border:1px solid var(--line2);border-radius:6px;padding:3px 6px;font-size:12px}
+  .loadmsg{color:var(--to);font-size:12px}
+  .landing{display:none;max-width:760px;margin:70px auto;padding:26px 32px;border:2px dashed var(--line2);border-radius:12px;color:var(--dim);font-size:14px;line-height:1.6}
+  .landing h1{color:var(--fg);font-size:19px;margin:0 0 12px} .landing b{color:var(--fg)}
+  body.empty .landing{display:block}
+  body.empty header, body.empty .views, body.empty main{display:none}
+  body.dragging .landing{border-color:var(--acc)}
+</style></head><body>
+<div class="loadbar">
+  <label class="open">Open run folder…<input type="file" id="pickdir" webkitdirectory multiple hidden></label>
+  <label class="open">Open files…<input type="file" id="pickfiles" accept=".json,.jsonl" multiple hidden></label>
+  <nav class="loaded" id="loaded"></nav>
+  <span class="loadmsg" id="loadmsg"></span>
+</div>
+<div class="landing">
+  <h1>TransferBench PerfReport</h1>
+  <p><b>Open a perfreport run:</b> its folder, or the <code>run.json</code>, <code>plan.json</code>, <code>platform.json</code>
+  and <code>results.jsonl</code> in it. You can also drop folders or files onto this page.</p>
+  <p>Each run opens in its own tab. With two or more runs open, the Compare tab sets one against another.</p>
+</div>
+<header>
+  <h1>TransferBench PerfReport</h1>
+  <span class="runid" id="runid"></span>
+  <span class="tbver" id="tbver"></span>
+  <span class="meta" id="meta"></span>
+  <div class="stats" id="stats"></div>
+</header>
+<nav class="views" id="views"></nav>
+<main>
+  <div id="banner"></div>
+  <div class="controls">
+    <span class="cg"><b>Tables show</b>
+      <button class="seg" data-metric="bw">Bandwidth (GB/s)</button><button class="seg" data-metric="lat">Latency (µs)</button></span>
+    <span class="cg"><b>GPUs</b>
+      <button class="seg" data-agg="median">median</button><button class="seg" data-agg="min">slowest</button><button class="seg" data-agg="sum">node total</button></span>
+    <label><input type="checkbox" id="shade" checked> <span id="shadelbl">shade each row by its best value</span></label>
+  </div>
+  <div class="explain" id="explain"></div>
+  <div id="summary"></div>
+  <div id="sweeps"></div>
+  <h2>Problems</h2>
+  <div id="problems"></div>
+  <h2>Platform</h2>
+  <div id="platform"></div>
+  <footer id="footer"></footer>
+</main>
+<script>
+// Display settings kept while switching between runs.
+const PREFS = {metric: 'bw', agg: 'median', shade: true};
+
+// Render one run, or two runs and their comparison, and return a function that
+// removes this rendering's listeners and charts.
+function show(ALL) {
+  const X = ALL.runs.length === 2, M = ALL.match;
+  const HAS_CHART = typeof Chart !== 'undefined';
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const fmtBytes = n => {
+    n = +n;
+    for (const [u, m] of [['G', 1073741824], ['M', 1048576], ['K', 1024]]) if (n >= m && n % m === 0) return n / m + u;
+    return String(n);
+  };
+  const fmt = v => (v === null || v === undefined || !isFinite(v)) ? '—' : String(+v.toFixed(v < 1 ? 3 : 2));
+  const pct = r => (r >= 1 ? '+' : '−') + Math.abs((r - 1) * 100).toFixed(r > 0.9 && r < 1.1 ? 1 : 0) + '%';
+  const xfmt = s => isFinite(s) ? s.toFixed(s >= 9.995 ? 1 : 2) + '×' : '—';
+  const median = a => {
+    const s = a.slice().sort((x, y) => x - y), n = s.length;
+    return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : NaN;
+  };
+  const geomean = a => Math.exp(a.reduce((t, v) => t + Math.log(v), 0) / a.length);
+  const MB = 1048576;
+
+  const state = {view: X ? 'x' : 0, metric: PREFS.metric, agg: PREFS.agg, shade: PREFS.shade, tabs: {}, gpuRun: {}, off: {}, hidden: {}};
+  const unit = () => state.metric === 'bw' ? 'GB/s' : 'µs';
+  const better = (a, b) => state.metric === 'bw' ? a > b : a < b;
+  const passed = rec => !!rec && rec.status === 'PASS';
+  const perGpu = (rec, metric) => (metric || state.metric) === 'bw' ? rec.gbps : rec.ms.map(x => x * 1000);
+  // A size's value with its GPUs combined as chosen. For times, "node total" is the
+  // slowest GPU: the time until every GPU has finished.
+  function value(rec, metric) {
+    metric = metric || state.metric;
+    const vals = perGpu(rec, metric);
+    if (!vals.length) return NaN;
+    if (state.agg === 'median') return median(vals);
+    if (metric === 'bw') return state.agg === 'min' ? Math.min(...vals) : vals.reduce((a, b) => a + b, 0);
+    return Math.max(...vals);
+  }
+  const aggName = () => ({median: 'median GPU', min: 'slowest GPU', sum: 'all GPUs together'})[state.agg];
+
+  // Line styles. The setting with the most values sets the colour, the next the
+  // dash, the next the marker, and any further settings the lightness. Table
+  // column headers repeat each line's colour and dash.
+  const hue = i => (32 + 137.508 * i) % 360;
+  const DASHES = [[], [6, 4], [2, 3], [10, 3, 2, 3], [1, 3]];
+  const POINTS = [['circle', '●'], ['triangle', '▲'], ['rect', '■'], ['rectRot', '◆'], ['star', '★'], ['crossRot', '✕']];
+  const barCss = (color, dash) => {
+    if (!dash.length) return `background:${color}`;
+    let pos = 0;
+    const stops = dash.map((d, i) => { const s = `${i % 2 ? 'transparent' : color} ${pos}px ${pos + d}px`; pos += d; return s; });
+    return `background:repeating-linear-gradient(90deg,${stops.join(',')})`;
+  };
+
+  // A card is one sweep and test. Its columns and lines are that test's runs, ordered
+  // by the values of the settings that vary, as the INI file lists them.
+  function makeCard(id, m, sw, test, runs, sizes) {
+    const order = Object.keys(sw.axes).filter(k => k !== 'size');
+    const keys = order.filter(k => runs.some(r => k in r.settings));
+    const varied = keys.filter(k => new Set(runs.map(r => r.settings[k])).size > 1);
+    const fixed = keys.filter(k => !varied.includes(k));
+    const rank = (k, v) => (sw.axes[k] || []).indexOf(v);
+    runs.sort((a, b) => {
+      for (const k of varied) { const d = rank(k, a.settings[k]) - rank(k, b.settings[k]); if (d) return d; }
+      return 0;
+    });
+    const prefix = (r, n) => varied.slice(0, n).map(k => r.settings[k]).join('\u0001');
+    const edge = runs.map((r, j) => {
+      if (j === 0) return '';
+      for (let lv = 0; lv < varied.length - 1; lv++)
+        if (prefix(r, lv + 1) !== prefix(runs[j - 1], lv + 1)) return lv === 0 ? 'vg' : 'vx';
+      return '';
+    });
+    const count = k => new Set(runs.map(r => r.settings[k])).size;
+    const enc = varied.slice().sort((a, b) => count(b) - count(a));
+    const styles = runs.map(r => {
+      const ix = k => Math.max(0, rank(k, r.settings[k]));
+      const extra = enc.slice(3).reduce((a, k) => a * 4 + ix(k), 0);
+      return {color: `hsl(${hue(enc.length ? ix(enc[0]) : 0).toFixed(0)}, 68%, ${enc.length > 3 ? 70 - 10 * (extra % 4) : 56}%)`,
+              dash: enc.length > 1 ? DASHES[ix(enc[1]) % DASHES.length] : [],
+              point: enc.length > 2 ? POINTS[ix(enc[2]) % POINTS.length] : POINTS[0]};
+    });
+    return {id, m, sw, test, runs, varied, fixed, sizes, edge, enc, styles};
+  }
+  const sortedSizes = lists => [...new Set([].concat(...lists))].sort((a, b) => a - b);
+
+  // One model per run: its results by run and size, and its cards.
+  function makeModel(D, ri) {
+    const res = {};
+    D.res.forEach(r => {
+      res[r[0] + '|' + r[1]] = {run: r[0], size: r[1], status: r[2], reason: D.strings[r[3]], gbps: r[4], ms: r[5],
+        aggGbps: r[6], aggMs: r[7], warns: r[8].map(i => D.strings[i]), users: r[9].map(i => D.strings[i]), attempt: r[10]};
+    });
+    const m = {D, ri, res, cards: []};
+    D.sweeps.forEach((sw, si) => sw.tests.forEach((test, ti) => {
+      const runs = D.runs.map((r, i) => Object.assign({i}, r)).filter(r => r.sweep === sw.name && r.test === test);
+      m.cards.push(makeCard(`r${ri}c${si}_${ti}`, m, sw, test, runs, sortedSizes(runs.map(r => r.sizes))));
+    }));
+    return m;
+  }
+  const models = ALL.runs.map(makeModel);
+  const runName = m => X ? `Run ${m.ri + 1}` : 'This run';
+
+  // Compare cards: run 1's cards, keeping the runs that have a partner in run 2 (r.i2)
+  // and the sizes both runs planned.
+  const xcards = [];
+  if (X) {
+    const partner = {};
+    M.pairs.forEach(([a, b]) => { partner[a] = b; });
+    const [m1, m2] = models;
+    m1.D.sweeps.forEach((sw, si) => sw.tests.forEach((test, ti) => {
+      const runs = m1.D.runs.map((r, i) => Object.assign({i, i2: partner[i]}, r))
+        .filter(r => r.sweep === sw.name && r.test === test && r.i2 !== undefined);
+      if (!runs.length) return;
+      const sizes = sortedSizes(runs.map(r => r.sizes.filter(s => m2.D.runs[r.i2].sizes.includes(s))));
+      xcards.push(Object.assign(makeCard(`xc${si}_${ti}`, m1, sw, test, runs, sizes), {x: true}));
+    }));
+  }
+  const rec1 = (r, s) => models[0].res[r.i + '|' + s];
+  const rec2 = (r, s) => models[1].res[r.i2 + '|' + s];
+  // Run 2's speed-up over run 1: its bandwidth ÷ run 1's, or run 1's time ÷ its time.
+  function speedup(r, size, metric) {
+    metric = metric || state.metric;
+    const a = rec1(r, size), b = rec2(r, size);
+    if (!passed(a) || !passed(b)) return {a, b, s: NaN};
+    const va = value(a, metric), vb = value(b, metric);
+    return {a, b, va, vb, s: metric === 'bw' ? vb / va : va / vb};
+  }
+  const XC = {both: 0, not: 0};
+  xcards.forEach(c => c.runs.forEach(r => c.sizes.forEach(s => {
+    const a = rec1(r, s), b = rec2(r, s);
+    if (passed(a) && passed(b)) XC.both++;
+    else if (a || b) XC.not++;
+  })));
+
+  const comboText = (c, r) => c.varied.map(k => `${k}=${r.settings[k]}`).join(' · ') || 'single run';
+  const tabOf = c => state.tabs[c.id] || (HAS_CHART ? (c.x ? 'speed' : 'graph') : 'table');
+  const gpuRunOf = c => c.runs[Math.min(state.gpuRun[c.id] || 0, c.runs.length - 1)];
+  function visible(c, j) {
+    const off = state.off[c.id] || {}, hid = state.hidden[c.id] || {};
+    return !hid[j] && c.varied.every(k => !(off[k] && off[k][c.runs[j].settings[k]]));
+  }
+
+  // ----- tables -----
+  function tip(c, run, rec) {
+    const u = unit(), vals = perGpu(rec), names = c.m.D.exes[run.i] || vals.map((_, g) => 'GPU ' + g);
+    let t = `${run.id} at ${fmtBytes(rec.size)}\n${comboText(c, run)}\n`;
+    vals.forEach((v, g) => { t += `\n  ${names[g]}: ${fmt(v)} ${u}`; });
+    t += `\n  min–max ${fmt(Math.min(...vals))}–${fmt(Math.max(...vals))} ${u}`;
+    t += `\nCPU aggregate (all GPUs): ${fmt(rec.aggGbps)} GB/s, ${fmt(rec.aggMs * 1000)} µs`;
+    if (rec.attempt > 1) t += `\nPassed on attempt ${rec.attempt}`;
+    rec.warns.forEach(w => { t += `\n[WARN] ${w}`; });
+    rec.users.forEach(w => { t += `\n[other GPU user] ${w}`; });
+    return t;
+  }
+
+  function cell(c, run, rec, v, best, edge) {
+    if (!rec) return `<td class="${edge} na" title="no result">N/A</td>`;
+    if (rec.status !== 'PASS')
+      return `<td class="${edge}" title="${esc(rec.reason)}"><span class="badge ${rec.status}">${rec.status}</span></td>`;
+    if (!isFinite(v)) return `<td class="${edge} na" title="not defined for this choice">—</td>`;
+    const r = state.metric === 'bw' ? v / best : best / v;
+    const style = state.shade ? ` style="background:rgba(74,222,128,${(Math.max(0, Math.min(1, (r - 0.5) / 0.5)) * 0.42).toFixed(3)})"` : '';
+    const cls = [edge, 'num', rec.warns.length ? 'warn' : '', r >= 0.9995 ? 'top' : ''].filter(Boolean).join(' ');
+    return `<td class="${cls}"${style} title="${esc(tip(c, run, rec))}">${fmt(v)}</td>`;
+  }
+
+  function rowValues(c, sz) {
+    const recs = c.runs.map(r => c.m.res[r.i + '|' + sz]);
+    const vals = recs.map(rec => passed(rec) ? value(rec) : NaN);
+    const ok = vals.filter(v => isFinite(v));
+    const best = ok.length ? (state.metric === 'bw' ? Math.max(...ok) : Math.min(...ok)) : NaN;
+    return {recs, vals, best};
+  }
+
+  function headHtml(c, u) {
+    const L = c.varied.length;
+    const bar = j => `<span class="cbar" style="${barCss(c.styles[j].color, c.styles[j].dash)}"></span>`;
+    let h = '<thead>';
+    if (!L) h += `<tr><th class="szcol axname">run</th><th class="leaf">${esc(c.runs[0].id)}${bar(0)}</th></tr>`;
+    for (let lv = 0; lv < L; lv++) {
+      h += `<tr><th class="szcol axname">${esc(c.varied[lv])}</th>`;
+      for (let j = 0; j < c.runs.length;) {
+        const key = r => c.varied.slice(0, lv + 1).map(k => r.settings[k]).join('\u0001');
+        let k = j;
+        while (k < c.runs.length && key(c.runs[k]) === key(c.runs[j])) k++;
+        const last = lv === L - 1;
+        h += `<th class="${c.edge[j]} ${last ? 'leaf' : 'vh'}" colspan="${k - j}"` +
+             (last ? ` title="${esc(comboText(c, c.runs[j]))}"` : '') + `>${esc(c.runs[j].settings[c.varied[lv]])}` +
+             (last && k - j === 1 ? bar(j) : '') + '</th>';
+        j = k;
+      }
+      h += '</tr>';
+    }
+    h += '<tr><th class="szcol">size</th>' + c.runs.map((r, j) => `<th class="${c.edge[j]} unit">${u}</th>`).join('') + '</tr>';
+    return h + '</thead>';
+  }
+
+  function tableHtml(c) {
+    let h = '<div class="tblwrap"><table class="dtable">' + headHtml(c, unit()) + '<tbody>';
+    c.sizes.forEach(sz => {
+      const {recs, vals, best} = rowValues(c, sz);
+      h += `<tr><td class="szcol">${fmtBytes(sz)}</td>`;
+      recs.forEach((rec, j) => { h += cell(c, c.runs[j], rec, vals[j], best, c.edge[j]); });
+      h += '</tr>';
+    });
+    return h + '</tbody></table></div>';
+  }
+
+  function gpuHtml(c) {
+    const run = gpuRunOf(c);
+    const names = c.m.D.exes[run.i] || [];
+    const u = unit();
+    let h = '<div class="tblwrap"><table class="dtable"><thead><tr><th class="szcol">size</th>';
+    names.forEach((n, g) => { h += `<th class="leaf${g ? '' : ' vg'}">${esc(n)}<span class="u">${u}</span></th>`; });
+    h += '<th class="leaf vg">spread<span class="u">max ÷ min</span></th></tr></thead><tbody>';
+    c.sizes.forEach(sz => {
+      const rec = c.m.res[run.i + '|' + sz];
+      h += `<tr><td class="szcol">${fmtBytes(sz)}</td>`;
+      if (!passed(rec)) {
+        h += `<td class="vg" colspan="${names.length + 1}">${rec ? `<span class="badge ${rec.status}">${rec.status}</span> ${esc(rec.reason)}` : 'no result'}</td></tr>`;
+        return;
+      }
+      const vals = perGpu(rec), med = median(vals);
+      vals.forEach((v, g) => {
+        const d = state.metric === 'bw' ? v / med - 1 : med / v - 1;
+        const cls = [g ? '' : 'vg', 'num', d < -0.10 ? 'dev2' : d < -0.05 ? 'dev1' : ''].filter(Boolean).join(' ');
+        h += `<td class="${cls}" title="${esc(`${names[g]}: ${fmt(v)} ${u}, ${pct(state.metric === 'bw' ? v / med : med / v)} against the median GPU`)}">${fmt(v)}</td>`;
+      });
+      const spread = Math.max(...vals) / Math.min(...vals);
+      h += `<td class="vg${spread > 1.05 ? ' diff' : ''}">${pct(spread)}</td></tr>`;
+    });
+    return h + '</tbody></table></div>' +
+      '<div class="note">Amber: 5–10% below the median GPU at that size; red: more than 10% below. Spread is the fastest GPU against the slowest.</div>';
+  }
+
+  // Compare table: each cell is run 2's speed-up over run 1 at that size.
+  const xcolor = s => {
+    const t = Math.max(-1, Math.min(1, Math.log(s) / Math.log(1.5)));
+    return t >= 0 ? `rgba(74,222,128,${(t * 0.42).toFixed(3)})` : `rgba(248,113,113,${(-t * 0.42).toFixed(3)})`;
+  };
+  const how = metric => metric === 'bw' ? "run 2's bandwidth ÷ run 1's" : "run 1's time ÷ run 2's";
+  function xcell(c, r, sz, edge) {
+    const x = speedup(r, sz);
+    if (!x.a && !x.b) return `<td class="${edge} na" title="no result in either run">N/A</td>`;
+    if (!isFinite(x.s)) {
+      const why = [[x.a, 1], [x.b, 2]].filter(([rec]) => !passed(rec));
+      return `<td class="${edge}" title="${esc(why.map(([rec, n]) => `run ${n}: ${rec ? rec.status + (rec.reason ? ': ' + rec.reason : '') : 'no result'}`).join('\n'))}">` +
+        why.map(([rec, n]) => (rec ? `<span class="badge ${rec.status}">${rec.status}</span>` : 'N/A') + `<span class="who">run ${n}</span>`).join(' ') + '</td>';
+    }
+    const u = unit();
+    const t = `${r.id} at ${fmtBytes(sz)}\n${comboText(c, r)}\n\nrun 1: ${fmt(x.va)} ${u}\nrun 2: ${fmt(x.vb)} ${u}\n` +
+      `run 2 speed-up: ${xfmt(x.s)} (${how(state.metric)}, ${aggName()})`;
+    const style = state.shade ? ` style="background:${xcolor(x.s)}"` : '';
+    return `<td class="${edge} num"${style} title="${esc(t)}">${xfmt(x.s)}</td>`;
+  }
+  function xtableHtml(c) {
+    let h = '<div class="tblwrap"><table class="dtable">' + headHtml(c, '×') + '<tbody>';
+    c.sizes.forEach(sz => {
+      h += `<tr><td class="szcol">${fmtBytes(sz)}</td>` + c.runs.map((r, j) => xcell(c, r, sz, c.edge[j])).join('') + '</tr>';
+    });
+    return h + '</tbody></table></div>';
+  }
+
+  // ----- charts -----
+  const REGIONS = [
+    {key: 'lat', title: 'Small messages', metric: 'lat', lo: 0, hi: MB,
+     info: '<b>Small messages</b>, below 1&nbsp;MiB, where launch and synchronisation costs dominate. Executor time per iteration in µs, lower is better. With <i>slowest</i> or <i>node total</i> this is the slowest GPU, the time until every GPU has finished.'},
+    {key: 'mid', title: 'Middle', metric: 'bw', lo: MB, hi: 256 * MB,
+     info: '<b>Middle</b>, 1&nbsp;MiB to 256&nbsp;MiB, where bandwidth climbs towards its peak. Executor bandwidth in GB/s, combined across GPUs as chosen above.'},
+    {key: 'big', title: 'Large messages', metric: 'bw', lo: 256 * MB, hi: Infinity,
+     info: '<b>Large messages</b>, 256&nbsp;MiB and up, where each setup settles. Executor bandwidth in GB/s, higher is better, combined across GPUs as chosen above.'},
+  ];
+  const SPEEDUP_INFO = '<br><br>Here each point is <b>run 2\'s speed-up</b> over run 1 at that size: run 1\'s time ÷ run 2\'s for small messages, run 2\'s bandwidth ÷ run 1\'s above. Above 1× run 2 is faster.';
+  const inRegion = (c, rg) => c.sizes.filter(s => s >= rg.lo && s < rg.hi);
+  const regionsOf = c => REGIONS.filter(rg => inRegion(c, rg).length);
+  function chartsHtml(c, kind) {
+    if (!HAS_CHART) return '<div class="note">Charts need Chart.js, which could not be loaded; see the Table tab.</div>';
+    return '<div class="charts3">' + regionsOf(c).map(rg => {
+      const what = kind === 's' ? `speed-up, from ${rg.metric === 'bw' ? 'GB/s' : 'µs'}` : rg.metric === 'bw' ? 'GB/s' : 'µs';
+      return `<div class="chartcell"><div class="ctitle">${rg.title} · <span class="nt">${what}</span>` +
+        `<span class="info" tabindex="0">?<span class="infobox">${rg.info}${kind === 's' ? SPEEDUP_INFO : ''}</span></span></div>` +
+        `<canvas id="${c.id}-${kind}-${rg.key}"></canvas></div>`;
+    }).join('') + '</div>';
+  }
+  function chipsHtml(c) {
+    if (!c.varied.length) return '';
+    const off = state.off[c.id] || {};
+    return '<div class="cgroups">' + c.varied.map(k => {
+      const vals = (c.sw.axes[k] || []).filter(v => c.runs.some(r => r.settings[k] === v));
+      return `<span class="cgrp"><span class="cglbl">${esc(k)}</span>` + vals.map(v =>
+        `<span class="cgchip${off[k] && off[k][v] ? ' off' : ''}" data-card="${c.id}" data-chip="${esc(k)}" data-value="${esc(v)}"` +
+        ` title="show or hide every line with ${esc(k)}=${esc(v)}">${esc(v)}</span>`).join('') + '</span>';
+    }).join('') + '</div>';
+  }
+  function legendHtml(c) {
+    const words = ['colour', 'dash', 'marker'];
+    const enc = c.enc.length ? '<div class="encode">' + c.enc.slice(0, 3).map((k, i) => `${words[i]}: ${esc(k)}`).join(' · ') +
+      (c.enc.length > 3 ? ' · lightness: ' + esc(c.enc.slice(3).join(', ')) : '') + '</div>' : '';
+    return enc + '<div class="clegend">' + c.runs.map((r, j) => {
+      const s = c.styles[j];
+      return `<span class="citem${visible(c, j) ? '' : ' off'}" data-card="${c.id}" data-line="${j}" title="${esc(r.id)}">` +
+        `<span class="sw" style="${barCss(s.color, s.dash)}"></span><span style="color:${s.color}">${s.point[1]}</span>${esc(comboText(c, r))}</span>`;
+    }).join('') + '</div>';
+  }
+  function gpuLegendHtml(c) {
+    const names = c.m.D.exes[gpuRunOf(c).i] || [], hid = state.hidden[c.id + '/gpu'] || {};
+    return '<div class="clegend">' + names.map((n, g) =>
+      `<span class="citem${hid[g] ? ' off' : ''}" data-card="${c.id}" data-gline="${g}"><span class="sw" style="background:hsl(${hue(g).toFixed(0)}, 68%, 56%)"></span>${esc(n)}</span>`).join('') + '</div>';
+  }
+  function dataset(label, style, pts, hidden) {
+    return {label, data: pts, borderColor: style.color, backgroundColor: style.color, borderDash: style.dash,
+            pointStyle: style.point[0], pointRadius: style.point[0] === 'circle' ? 2.5 : 3.5, borderWidth: 2, tension: 0.2, hidden};
+  }
+  function point(rec, pick) {
+    if (!passed(rec)) return null;
+    const y = pick(rec);
+    return isFinite(y) && y > 0 ? {x: rec.size, y} : null;
+  }
+  // One line per run of the card, read from model m through the run's index field key.
+  function lineData(c, rg, m, key) {
+    return c.runs.map((r, j) => dataset(comboText(c, r), c.styles[j],
+      inRegion(c, rg).map(s => point(m.res[r[key] + '|' + s], rec => value(rec, rg.metric))).filter(Boolean), !visible(c, j)));
+  }
+  function gpuLines(c, rg) {
+    const run = gpuRunOf(c), names = c.m.D.exes[run.i] || [], hid = state.hidden[c.id + '/gpu'] || {};
+    return names.map((n, g) => dataset(n, {color: `hsl(${hue(g).toFixed(0)}, 68%, 56%)`, dash: [], point: POINTS[0]},
+      inRegion(c, rg).map(s => point(c.m.res[run.i + '|' + s], rec => rg.metric === 'bw' ? rec.gbps[g] : rec.ms[g] * 1000)).filter(Boolean),
+      !!hid[g]));
+  }
+  function speedLines(c, rg) {
+    return c.runs.map((r, j) => dataset(comboText(c, r), c.styles[j], inRegion(c, rg).map(s => {
+      const x = speedup(r, s, rg.metric);
+      return isFinite(x.s) && x.s > 0 ? {x: s, y: x.s, va: x.va, vb: x.vb} : null;
+    }).filter(Boolean), !visible(c, j)));
+  }
+  let live = [];
+  function draw(id, datasets, rg, ticks, kind, yExtra) {
+    const grid = {color: '#232b36'}, color = '#8b98a5', sp = kind === 's';
+    let lo = ticks[0], hi = ticks[ticks.length - 1];
+    if (lo === hi) { lo /= 2; hi *= 2; }
+    const u = rg.metric === 'bw' ? 'GB/s' : 'µs';
+    if (sp) datasets = datasets.concat([{label: '1×', data: [{x: lo, y: 1}, {x: hi, y: 1}], borderColor: '#5b6673',
+                                         borderDash: [4, 4], borderWidth: 1, pointRadius: 0, ref: true}]);
+    live.push(new Chart($(id), {
+      type: 'line', data: {datasets},
+      options: {responsive: true, animation: false, interaction: {mode: 'nearest', intersect: false},
+        scales: {
+          x: {type: 'logarithmic', min: lo, max: hi, grid,
+              title: {display: true, text: 'message size (bytes per transfer)', color},
+              afterBuildTicks: a => { a.ticks = ticks.map(v => ({value: v})); },
+              ticks: {color, autoSkip: false, maxRotation: 0, callback: v => fmtBytes(v)}},
+          y: Object.assign({grid, ticks: sp ? {color, callback: v => +(+v).toFixed(2) + '×'} : {color},
+              title: {display: true, color, text: sp ? 'run 2 speed-up over run 1 (×)'
+                                                     : rg.metric === 'bw' ? 'executor bandwidth (GB/s)' : 'executor time (µs)'}}, yExtra)},
+        plugins: {legend: {display: false},
+          tooltip: {filter: it => !it.dataset.ref,
+            callbacks: {title: it => it.length ? fmtBytes(it[0].parsed.x) : '',
+              label: it => sp ? `${it.dataset.label}: ${xfmt(it.parsed.y)} (run 1 ${fmt(it.raw.va)}, run 2 ${fmt(it.raw.vb)} ${u})`
+                              : `${it.dataset.label}: ${fmt(it.parsed.y)} ${u}`}}}}}));
+  }
+  // kind: g = a run's lines, p = one run's GPUs, s = speed-up, side = both runs on shared axes.
+  function drawCharts(c, kind) {
+    regionsOf(c).forEach(rg => {
+      const ticks = inRegion(c, rg);
+      if (kind === 'side') {
+        const sets = [lineData(c, rg, models[0], 'i'), lineData(c, rg, models[1], 'i2')];
+        const ys = [];
+        sets.forEach(ds => ds.forEach(d => { if (!d.hidden) d.data.forEach(p => ys.push(p.y)); }));
+        const ext = ys.length ? {suggestedMin: Math.min(...ys), suggestedMax: Math.max(...ys)} : {};
+        draw(`${c.id}-a-${rg.key}`, sets[0], rg, ticks, 'a', ext);
+        draw(`${c.id}-b-${rg.key}`, sets[1], rg, ticks, 'b', ext);
+      } else {
+        const ds = kind === 's' ? speedLines(c, rg) : kind === 'p' ? gpuLines(c, rg) : lineData(c, rg, c.m, 'i');
+        draw(`${c.id}-${kind}-${rg.key}`, ds, rg, ticks, kind, {});
+      }
+    });
+  }
+
+  // ----- cards and sections -----
+  function glance(c) {
+    if (!c.varied.length) return '';
+    const lines = [c.sizes[0], c.sizes[c.sizes.length - 1]].filter((s, i, a) => a.indexOf(s) === i).map(sz => {
+      const {vals} = rowValues(c, sz);
+      let bi = -1, wi = -1;
+      vals.forEach((v, j) => {
+        if (!isFinite(v)) return;
+        if (bi < 0 || better(v, vals[bi])) bi = j;
+        if (wi < 0 || better(vals[wi], v)) wi = j;
+      });
+      if (bi < 0) return `<div><b>${fmtBytes(sz)}</b>: no passing results</div>`;
+      const rel = state.metric === 'bw' ? vals[wi] / vals[bi] : vals[bi] / vals[wi];
+      return `<div><b>${fmtBytes(sz)}</b>: best ${esc(comboText(c, c.runs[bi]))} <span class="d">(${fmt(vals[bi])} ${unit()})</span>` +
+             (wi !== bi ? `; worst ${esc(comboText(c, c.runs[wi]))} <span class="d">(${fmt(vals[wi])} ${unit()}, ${pct(rel)})</span>` : '') + '</div>';
+    });
+    return `<div class="glance">${lines.join('')}</div>`;
+  }
+
+  function cardHtml(c) {
+    const tab = tabOf(c);
+    const fixed = c.fixed.map(k => `${k}=${c.runs[0].settings[k]}`).join(' · ');
+    const pick = Math.min(state.gpuRun[c.id] || 0, c.runs.length - 1);
+    const opts = c.runs.map((r, j) => `<option value="${j}"${pick === j ? ' selected' : ''}>${esc(comboText(c, r))}</option>`).join('');
+    const tabs = [['graph', 'Graph'], ['table', 'Table'], ['gpu', 'Per GPU']].map(([k, label]) =>
+      `<button class="tab${tab === k ? ' active' : ''}" data-card="${c.id}" data-tab="${k}">${label}</button>`).join('');
+    const body = tab === 'graph' ? chartsHtml(c, 'g') + chipsHtml(c) + legendHtml(c)
+               : tab === 'table' ? tableHtml(c)
+               : chartsHtml(c, 'p') + gpuLegendHtml(c) + gpuHtml(c);
+    return `<div class="card" id="${c.id}"><h3>${esc(c.test)}</h3>` +
+      `<div class="sub"><code>${esc(c.m.D.tests[c.test] || '')}</code></div>` +
+      `<div class="sub">${c.runs.length} run${c.runs.length === 1 ? '' : 's'} × ${c.sizes.length} sizes` +
+      (fixed ? ` · fixed: <span class="mono">${esc(fixed)}</span>` : '') + '</div>' + glance(c) +
+      `<div class="tabs">${tabs}${tab === 'gpu' ? `<select data-card="${c.id}">${opts}</select>` : ''}</div>` +
+      `<div class="pane active">${body}</div></div>`;
+  }
+
+  // Speed-up points of a compare card in one size range: [{j, s, v}], optionally visible lines only.
+  function xpoints(c, inR, metric, onlyVisible) {
+    const pts = [];
+    c.runs.forEach((r, j) => {
+      if (onlyVisible && !visible(c, j)) return;
+      c.sizes.filter(inR).forEach(s => { const x = speedup(r, s, metric); if (isFinite(x.s) && x.s > 0) pts.push({j, s, v: x.s}); });
+    });
+    return pts;
+  }
+  const XRANGES = [['Below 1 MiB', 'lat', s => s < MB], ['1 MiB and up', 'bw', s => s >= MB]];
+  const xspan = s => `<b style="color:${s >= 1.02 ? 'var(--ok)' : s <= 0.98 ? 'var(--bad)' : 'var(--fg)'}">${xfmt(s)}</b>`;
+  function xglance(c) {
+    const where = p => `${esc(comboText(c, c.runs[p.j]))} at ${fmtBytes(p.s)}`;
+    const parts = XRANGES.map(([name, metric, inR]) => {
+      const pts = xpoints(c, inR, metric, true);
+      if (!pts.length) return '';
+      const lo = pts.reduce((a, p) => p.v < a.v ? p : a), hi = pts.reduce((a, p) => p.v > a.v ? p : a);
+      return `<div><b>${name}</b>: run 2 is ${xspan(geomean(pts.map(p => p.v)))} <span class="d">(geometric mean of ${pts.length} points)</span>` +
+        (pts.length > 1 ? `, from ${xspan(lo.v)} <span class="d">(${where(lo)})</span> to ${xspan(hi.v)} <span class="d">(${where(hi)})</span>` : '') + '</div>';
+    }).filter(Boolean);
+    return `<div class="glance">${parts.length ? parts.join('') : 'No line shown has a size that passed in both runs.'}</div>`;
+  }
+
+  function xcardHtml(c) {
+    const tab = tabOf(c);
+    const fixed = c.fixed.map(k => `${k}=${c.runs[0].settings[k]}`).join(' · ');
+    const tabs = [['speed', 'Speed-up'], ['side', 'Side by side'], ['table', 'Table']].map(([k, label]) =>
+      `<button class="tab${tab === k ? ' active' : ''}" data-card="${c.id}" data-tab="${k}">${label}</button>`).join('');
+    const row = ri => `<div class="rowlbl">Run ${ri + 1} <span class="d">· ${esc(models[ri].D.platform.host || '')} · ${esc(models[ri].D.run.ts)}</span></div>`;
+    const body = tab === 'speed' ? chartsHtml(c, 's') + chipsHtml(c) + legendHtml(c)
+               : tab === 'side' ? row(0) + chartsHtml(c, 'a') + row(1) + chartsHtml(c, 'b') + chipsHtml(c) + legendHtml(c)
+               : xtableHtml(c);
+    const line1 = models[0].D.tests[c.test] || '', line2 = models[1].D.tests[c.test] || '';
+    return `<div class="card" id="${c.id}"><h3>${esc(c.test)}</h3>` +
+      `<div class="sub"><code>${esc(line1)}</code></div>` +
+      (line2 !== line1 ? `<div class="sub diff">Run 2's test line differs: <code>${esc(line2)}</code></div>` : '') +
+      `<div class="sub">${c.runs.length} matched run${c.runs.length === 1 ? '' : 's'} × ${c.sizes.length} sizes` +
+      (fixed ? ` · fixed: <span class="mono">${esc(fixed)}</span>` : '') + '</div>' + xglance(c) +
+      `<div class="tabs">${tabs}</div><div class="pane active">${body}</div></div>`;
+  }
+
+  function sweepHead(sw) {
+    const axes = Object.entries(sw.axes).filter(([k, v]) => v.length > 1 && k !== 'size')
+      .map(([k, v]) => `${k} (${v.join(', ')})`).join(' · ');
+    const sizes = sw.axes.size || [];
+    return `<h2>Sweep ${esc(sw.name)}</h2>` + (sw.note ? `<div class="q">${esc(sw.note)}</div>` : '') +
+      `<div class="ax">varies ${esc(axes || 'nothing')} · sizes ${fmtBytes(sizes[0])}–${fmtBytes(sizes[sizes.length - 1])}` +
+      ` (${sizes.length}) · timeout ${sw.timeout} s per size</div>`;
+  }
+  function sweepsHtml(m) {
+    return m.D.sweeps.map(sw => `<div class="sweep">${sweepHead(sw)}` + m.cards.filter(c => c.sw === sw).map(cardHtml).join('') + '</div>').join('');
+  }
+  function xsweepsHtml() {
+    return models[0].D.sweeps.filter(sw => xcards.some(c => c.sw === sw))
+      .map(sw => `<div class="sweep">${sweepHead(sw)}` + xcards.filter(c => c.sw === sw).map(xcardHtml).join('') + '</div>').join('');
+  }
+
+  const settingsText = r => Object.entries(r.settings).map(([k, v]) => k + '=' + v).join(' ');
+  function problemsHtml(m) {
+    const D = m.D, bad = D.res.filter(r => r[2] !== 'PASS');
+    let h = '';
+    if (!bad.length && !D.run.missing) h += `<div class="note">All ${D.run.planned} sizes passed.</div>`;
+    if (D.run.missing) h += `<div class="note">${D.run.missing} planned sizes have no result (run ${esc(D.run.status)}${D.run.stop_reason ? ': ' + esc(D.run.stop_reason) : ''}).</div>`;
+    if (bad.length) {
+      h += '<table class="ptable"><thead><tr><th>run</th><th>settings</th><th>size</th><th>result</th><th>reason</th></tr></thead><tbody>';
+      bad.forEach(r => {
+        const run = D.runs[r[0]];
+        h += `<tr><td class="mono">${esc(run.id)}</td><td class="mono">${esc(settingsText(run))}</td>` +
+             `<td>${fmtBytes(r[1])}</td><td><span class="badge ${r[2]}">${r[2]}</span></td><td>${esc(D.strings[r[3]])}</td></tr>`;
+      });
+      h += '</tbody></table>';
+    }
+    if (D.run.retries) h += `<div class="note">${D.run.retries} attempt(s) failed and were retried; the tables show each size's final attempt.</div>`;
+    if (D.warnings.length) {
+      h += '<table class="ptable"><thead><tr><th>TransferBench warning</th><th>sizes</th><th>runs</th><th>first seen</th></tr></thead><tbody>';
+      D.warnings.forEach(w => {
+        h += `<tr><td>${esc(w.example)}</td><td>${w.sizes}</td><td>${w.runs}</td><td class="mono">${esc(w.where)}</td></tr>`;
+      });
+      h += '</tbody></table>';
+    }
+    h += D.users.length
+      ? '<table class="ptable"><thead><tr><th>other process on the GPUs</th><th>sizes it overlapped</th></tr></thead><tbody>' +
+        D.users.map(u => `<tr><td>${esc(u.who)}</td><td>${u.sizes}</td></tr>`).join('') + '</tbody></table>'
+      : '<div class="note">No other process used the GPUs while sizes were measured.</div>';
+    return h;
+  }
+  function xproblemsHtml() {
+    const rows = [];
+    xcards.forEach(c => c.runs.forEach(r => c.sizes.forEach(s => {
+      const a = rec1(r, s), b = rec2(r, s);
+      if ((a || b) && !(passed(a) && passed(b))) rows.push({r, s, a, b});
+    })));
+    const res = rec => rec ? `<span class="badge ${rec.status}">${rec.status}</span>` : 'no result';
+    const why = (a, b) => [[a, 1], [b, 2]].filter(([x]) => x && !passed(x) && x.reason).map(([x, n]) => `run ${n}: ${x.reason}`).join(' · ');
+    let h = rows.length
+      ? `<div class="note">${rows.length} matched size${rows.length === 1 ? '' : 's'} did not pass in both runs, so ${rows.length === 1 ? 'it is' : 'they are'} not compared.</div>` +
+        '<table class="ptable"><thead><tr><th>run</th><th>settings</th><th>size</th><th>run 1</th><th>run 2</th><th>reason</th></tr></thead><tbody>' +
+        rows.map(({r, s, a, b}) => `<tr><td class="mono">${esc(r.id)}</td><td class="mono">${esc(settingsText(r))}</td><td>${fmtBytes(s)}</td>` +
+          `<td>${res(a)}</td><td>${res(b)}</td><td>${esc(why(a, b))}</td></tr>`).join('') + '</tbody></table>'
+      : `<div class="note">${M.pairs.length ? 'Every matched size passed in both runs.' : 'No run matches, so nothing is compared; the overview lists every run and how the two plans differ.'}</div>`;
+    h += '<div class="note">' + models.map(m => {
+      const c = m.D.run.counts;
+      return `Run ${m.ri + 1}: ${['PASS', 'FAIL', 'TIMEOUT', 'SKIP'].filter(k => c[k]).map(k => `${c[k]} ${k}`).join(', ') || 'no results'}` +
+        (m.D.run.missing ? `, ${m.D.run.missing} missing` : '') + (m.D.run.retries ? `, ${m.D.run.retries} retried` : '') +
+        (m.D.warnings.length ? `, ${m.D.warnings.length} kinds of warning` : '') + (m.D.users.length ? ', other GPU users seen' : '');
+    }).join('. ') + ". Each run's tab lists its own problems.</div>";
+    return h;
+  }
+
+  function platformRows(m) {
+    const P = m.D.platform, E = m.D.run.engine, tb = P.transferbench || {};
+    const gib = b => b ? (b / 1073741824).toFixed(0) + ' GiB' : '—';
+    return [
+      ['host', P.host], ['OS', P.os], ['kernel', P.kernel],
+      ['CPU', P.cpu ? `${P.cpu.model} · ${P.cpu.sockets} sockets × ${P.cpu.cores_per_socket} cores, ${P.cpu.threads} threads · ${P.cpu.numa_nodes} NUMA nodes` : '—'],
+      ['memory', gib(P.memory_bytes)], ['ROCm', P.rocm ? `${P.rocm.version} (${P.rocm.path})` : '—'],
+      ['amdgpu driver', P.amdgpu_driver], ['amd-smi', P.amd_smi],
+      ['TransferBench', `${tb.version} (${tb.branch}:${tb.commit})`],
+      ['TransferBench checkout', tb.path || tb.source || E.tb_path || E.tb_source || '?'],
+      ['engine', `${E.path || '?'} · sha256 ${String(E.sha256 || '').slice(0, 12)}`],
+    ];
+  }
+  function platformHtml(m) {
+    const P = m.D.platform;
+    let h = '<table class="ptable"><tbody>' + platformRows(m).map(([k, v]) => `<tr><td class="k">${esc(k)}</td><td>${esc(v == null ? '—' : v)}</td></tr>`).join('') + '</tbody></table>';
+    const gpus = P.gpus || [];
+    const cols = [['GPU', g => g.index], ['model', g => g.model], ['arch', g => g.arch], ['device', g => g.device_id],
+      ['rev', g => g.rev_id], ['CUs', g => g.cus], ['VBIOS', g => g.vbios], ['part number', g => g.vbios_part_number],
+      ['power limit', g => g.power_limit_w == null ? '—' : g.power_limit_w + ' W'],
+      ['partition', g => `${(g.partition || {}).compute} / ${(g.partition || {}).memory}`], ['PCI address', g => g.bdf]];
+    h += '<table class="ptable"><thead><tr>' + cols.map(c => `<th>${c[0]}</th>`).join('') + '</tr></thead><tbody>';
+    gpus.forEach(g => {
+      h += '<tr>' + cols.map(([name, f], ci) => {
+        const v = f(g), diff = ci > 0 && name !== 'PCI address' && gpus.length && String(v) !== String(f(gpus[0]));
+        return `<td${diff ? ' class="diff" title="differs from GPU 0"' : ''}>${esc(v == null ? '—' : v)}</td>`;
+      }).join('') + '</tr>';
+    });
+    h += '</tbody></table>';
+    const fwIds = [...new Set([].concat(...gpus.map(g => Object.keys(g.firmware || {}))))];
+    if (fwIds.length) {
+      const same = gpus.every(g => fwIds.every(id => (g.firmware || {})[id] === (gpus[0].firmware || {})[id]));
+      h += `<details><summary>Firmware versions (${fwIds.length} per GPU, ${same ? 'identical on every GPU' : 'some differ between GPUs'})</summary>` +
+        '<table class="ptable"><thead><tr><th>GPU</th>' + fwIds.map(id => `<th>${esc(id)}</th>`).join('') + '</tr></thead><tbody>' +
+        gpus.map(g => `<tr><td>${g.index}</td>` + fwIds.map(id => {
+          const v = (g.firmware || {})[id], diff = v !== (gpus[0].firmware || {})[id];
+          return `<td${diff ? ' class="diff"' : ''}>${esc(v == null ? '—' : v)}</td>`;
+        }).join('') + '</tr>').join('') + '</tbody></table></details>';
+    }
+    if ((P.links || []).length) {
+      h += '<details><summary>GPU links</summary><table class="ptable"><thead><tr><th></th>' +
+        P.links.map((_, j) => `<th>GPU ${j}</th>`).join('') + '</tr></thead><tbody>' +
+        P.links.map((row, i) => `<tr><td class="k">GPU ${i}</td>` + row.map(t => `<td>${esc(t)}</td>`).join('') + '</tr>').join('') +
+        '</tbody></table></details>';
+    }
+    return h;
+  }
+  // The platform of each run in one column, with every GPU's value folded into one cell.
+  function across(gpus, f) {
+    const vs = [...new Set(gpus.map(g => { const v = f(g); return v == null ? '—' : String(v); }))];
+    return !vs.length ? '—' : vs.length === 1 ? vs[0] : vs.join(' / ') + ' (differs between GPUs)';
+  }
+  function gpuRows(m) {
+    const P = m.D.platform, gpus = P.gpus || [], links = {};
+    (P.links || []).forEach((row, i) => row.forEach((t, j) => { if (j > i) links[t] = (links[t] || 0) + 1; }));
+    return [
+      ['GPUs', gpus.length ? `${gpus.length} × ${across(gpus, g => g.model)}` : '—'], ['architecture', across(gpus, g => g.arch)],
+      ['device / revision ID', across(gpus, g => `${g.device_id} / ${g.rev_id}`)], ['CUs per GPU', across(gpus, g => g.cus)],
+      ['VBIOS', across(gpus, g => g.vbios)], ['VBIOS part number', across(gpus, g => g.vbios_part_number)],
+      ['power limit', across(gpus, g => g.power_limit_w == null ? null : g.power_limit_w + ' W')],
+      ['partition (compute / memory)', across(gpus, g => g.partition ? `${g.partition.compute} / ${g.partition.memory}` : null)],
+      ['links between GPUs', Object.entries(links).map(([t, n]) => `${t} between ${n} pairs`).join(', ') || '—'],
+    ];
+  }
+  function fwRows(m) {
+    const gpus = m.D.platform.gpus || [];
+    return [...new Set([].concat(...gpus.map(g => Object.keys(g.firmware || {}))))].map(id => [id, across(gpus, g => (g.firmware || {})[id])]);
+  }
+  function sideTable(r1, r2) {
+    const keys = r1.map(r => r[0]).concat(r2.map(r => r[0]).filter(k => !r1.some(x => x[0] === k)));
+    const get = (rows, k) => { const r = rows.find(x => x[0] === k); return r && r[1] != null ? String(r[1]) : '—'; };
+    let diffs = 0;
+    const body = keys.map(k => {
+      const a = get(r1, k), b = get(r2, k), cls = a !== b ? ' class="diff" title="differs between the runs"' : '';
+      if (a !== b) diffs++;
+      return `<tr><td class="k">${esc(k)}</td><td${cls}>${esc(a)}</td><td${cls}>${esc(b)}</td></tr>`;
+    }).join('');
+    return {diffs, rows: keys.length,
+            html: '<table class="ptable"><thead><tr><th></th><th>run 1</th><th>run 2</th></tr></thead><tbody>' + body + '</tbody></table>'};
+  }
+  function xplatformHtml() {
+    const [m1, m2] = models;
+    const host = sideTable(platformRows(m1), platformRows(m2)), gpu = sideTable(gpuRows(m1), gpuRows(m2));
+    const fw = sideTable(fwRows(m1), fwRows(m2));
+    const n = host.diffs + gpu.diffs + fw.diffs;
+    return `<div class="note">${n ? `${n} recorded value${n === 1 ? '' : 's'} differ between the runs, in amber.` : 'Both runs recorded the same platform.'}` +
+      " Each run's tab lists its platform GPU by GPU.</div>" + host.html + gpu.html +
+      (fw.rows ? `<details><summary>Firmware versions (${fw.rows} kinds, ${fw.diffs} differ between the runs)</summary>${fw.html}</details>` : '');
+  }
+
+  // Overview of the comparison: how runs matched, and the speed-up per card.
+  function xsummaryHtml() {
+    const [m1, m2] = models, n1 = m1.D.runs.length, n2 = m2.D.runs.length;
+    let h = '<h2>Overview</h2>';
+    h += `<div class="note">${M.pairs.length} of run 1's ${n1} runs match one of run 2's ${n2}, by sweep, test and every setting.` +
+      (M.pairs.length ? ` ${XC.both} matched sizes passed in both runs and are compared` +
+        (XC.not ? `; ${XC.not} ${XC.not === 1 ? 'is' : 'are'} not (see Problems)` : '') + '.' : '') + '</div>';
+    if (xcards.length) {
+      h += '<table class="ptable"><thead><tr><th>sweep</th><th>test</th><th>matched runs</th><th>sizes compared</th>' +
+        XRANGES.map(([name]) => `<th>${name}</th>`).join('') + '</tr></thead><tbody>';
+      xcards.forEach(c => {
+        let total = 0, both = 0;
+        c.runs.forEach(r => c.sizes.forEach(s => { const a = rec1(r, s), b = rec2(r, s); if (a || b) total++; if (passed(a) && passed(b)) both++; }));
+        h += `<tr><td>${esc(c.sw.name)}</td><td><a href="#${c.id}">${esc(c.test)}</a></td><td class="num">${c.runs.length}</td>` +
+          `<td class="num">${both} of ${total}</td>` + XRANGES.map(([, metric, inR]) => {
+            const pts = xpoints(c, inR, metric, false);
+            return `<td class="num">${pts.length ? xspan(geomean(pts.map(p => p.v))) : '—'}</td>`;
+          }).join('') + '</tr>';
+      });
+      h += '</tbody></table><div class="note">Each speed-up is the geometric mean over every matched run and size in that range ' +
+        '(times below 1 MiB, bandwidths from 1 MiB, GPUs combined as chosen above); above 1× run 2 is faster.</div>';
+    }
+    const unmatched = M.only.map((list, k) => list.length
+      ? `<details><summary>${list.length} run${list.length === 1 ? '' : 's'} only in run ${k + 1}</summary>` +
+        '<table class="ptable"><thead><tr><th>run</th><th>settings</th></tr></thead><tbody>' +
+        list.map(i => models[k].D.runs[i]).map(r => `<tr><td class="mono">${esc(r.id)}</td><td class="mono">${esc(settingsText(r))}</td></tr>`).join('') +
+        '</tbody></table></details>' : '').join('');
+    h += unmatched;
+    if (M.plan_diff.length) {
+      const show = (item, v) => v == null ? '—' : Array.isArray(v) ? v.map(x => item === 'size' ? fmtBytes(x) : x).join(', ') : String(v);
+      h += `<details${M.pairs.length ? '' : ' open'}><summary>The two plans differ in ${M.plan_diff.length} place${M.plan_diff.length === 1 ? '' : 's'}</summary>` +
+        '<table class="ptable"><thead><tr><th>sweep</th><th>what</th><th>run 1</th><th>run 2</th></tr></thead><tbody>' +
+        M.plan_diff.map(([sw, item, a, b]) => `<tr><td>${esc(sw)}</td><td class="mono">${esc(item)}</td>` +
+          `<td class="mono">${esc(show(item, a))}</td><td class="mono">${esc(show(item, b))}</td></tr>`).join('') + '</tbody></table></details>';
+    }
+    return h;
+  }
+
+  const gpuText = D => { const g = (D.platform.gpus || [])[0] || {}; return `${(D.platform.gpus || []).length} × ${g.model} (${g.arch}, ${g.cus} CUs)`; };
+  const pillsHtml = pills => pills.map(p => `<div class="pill"><span class="n" style="color:${p[2]}">${p[1]}</span><span class="l">${p[0]}</span></div>`).join('');
+  function headerHtml(m) {
+    const D = m.D, E = D.run.engine;
+    document.title = `TransferBench sweep · ${D.run.label} · ${D.run.ts}`;
+    $('runid').textContent = (X ? runName(m) + ' · ' : '') + `${D.run.label} · ${D.run.ts}`;
+    $('tbver').textContent = `TransferBench ${E.tb_version} (${E.tb_branch}:${E.tb_commit})`;
+    $('meta').textContent = `${gpuText(D)} · ROCm ${(D.platform.rocm || {}).version} · ${D.platform.host} · started ${D.run.started} · ${D.run.status}`;
+    const c = D.run.counts;
+    const pills = [['Runs', D.runs.length, 'var(--fg)'], ['Sizes', D.run.planned, 'var(--fg)'], ['Pass', c.PASS, 'var(--ok)'],
+      ['Fail', c.FAIL, 'var(--bad)'], ['Timeout', c.TIMEOUT, 'var(--to)'], ['Skip', c.SKIP, 'var(--dim)']];
+    if (D.run.missing) pills.push(['Missing', D.run.missing, 'var(--to)']);
+    $('stats').innerHTML = pillsHtml(pills);
+  }
+  function xheaderHtml() {
+    const [a, b] = models.map(m => m.D);
+    document.title = `TransferBench sweep · ${a.run.label} · ${a.run.ts} vs ${b.run.label} · ${b.run.ts}`;
+    $('runid').textContent = `${a.run.label} · ${a.run.ts} vs ${b.run.label} · ${b.run.ts}`;
+    $('tbver').textContent = 'Run 2 against run 1';
+    $('meta').textContent = `Run 1: ${gpuText(a)} on ${a.platform.host} · Run 2: ${gpuText(b)} on ${b.platform.host}`;
+    $('stats').innerHTML = pillsHtml([['Matched runs', M.pairs.length, 'var(--fg)'], ['Compared', XC.both, 'var(--ok)'],
+      ['Not compared', XC.not, XC.not ? 'var(--to)' : 'var(--dim)'], ['Only run 1', M.only[0].length, M.only[0].length ? 'var(--to)' : 'var(--dim)'],
+      ['Only run 2', M.only[1].length, M.only[1].length ? 'var(--to)' : 'var(--dim)']]);
+  }
+  function viewsHtml() {
+    if (!X) return '';
+    return models.map(m => `<button class="vtab${state.view === m.ri ? ' active' : ''}" data-view="${m.ri}">${runName(m)}` +
+      `<span class="vs">${esc(m.D.run.label)} · ${esc(m.D.platform.host || '?')} · ${esc(m.D.run.ts)}</span></button>`).join('') +
+      `<button class="vtab${state.view === 'x' ? ' active' : ''}" data-view="x">Compare<span class="vs">run 2 against run 1</span></button>`;
+  }
+  function bannerHtml(m) {
+    return (m ? [m] : models).filter(x => x.D.run.synthetic).map(x =>
+      `<div class="banner"><b>${X ? runName(x) + ' is made-up' : 'Made-up'} data, not a measurement.</b> ${esc(x.D.run.synthetic)}</div>`).join('');
+  }
+
+  function explainHtml() {
+    const what = state.metric === 'bw'
+      ? "the executor's bandwidth: the bytes it moved ÷ the time until its last transfer finished, timed with HIP events"
+      : "the executor's time per iteration until its last transfer finished, timed with HIP events";
+    return `Each table cell is one run at one size: ${what}, taken from the <b>${aggName()}</b>. ` +
+      'Hover a cell for every GPU, the CPU-timed aggregate and any warnings; an amber corner marks a TransferBench warning. ' +
+      (state.shade ? 'Green shading is each cell\'s share of the best value in its row (darkest = best, none below half); the best is bold. ' : '') +
+      'Graphs show small messages as executor time (µs) and larger ones as bandwidth (GB/s), with GPUs combined the same way; ' +
+      'the chips and the legend switch lines on and off, and each table column\'s bar matches its line. ' +
+      '"Per GPU" shows one run\'s GPUs side by side.';
+  }
+  function xexplainHtml() {
+    return 'Run 2 is compared with run 1, the baseline. <b>Speed-up</b> is run 2\'s bandwidth ÷ run 1\'s, or run 1\'s time ÷ run 2\'s, ' +
+      'so above 1× run 2 is faster, in every chart and table. ' +
+      `Each run's GPUs are combined first, here by the <b>${aggName()}</b>. Graphs use times below 1&nbsp;MiB and bandwidths from 1&nbsp;MiB, ` +
+      `as on the run tabs; tables use ${state.metric === 'bw' ? 'bandwidths' : 'times'}, as chosen above. ` +
+      'Runs are matched by sweep, test and every setting, sizes by exact size, and a size is compared only if it passed in both runs. ' +
+      (state.shade ? 'Table cells are green where run 2 is faster and red where it is slower, darkest at 1.5× either way. ' : '') +
+      '"Side by side" draws each run\'s own values on shared axes. Below 1&nbsp;MiB repeat runs on one node can differ by 10% or more, ' +
+      'so small differences there may be noise.';
+  }
+
+  function render() {
+    live.forEach(ch => ch.destroy());
+    live = [];
+    document.querySelectorAll('[data-metric]').forEach(b => b.classList.toggle('active', b.dataset.metric === state.metric));
+    document.querySelectorAll('[data-agg]').forEach(b => {
+      b.classList.toggle('active', b.dataset.agg === state.agg);
+      b.disabled = b.dataset.agg === 'sum' && state.metric === 'lat';
+    });
+    const m = state.view === 'x' ? null : models[state.view];
+    $('views').innerHTML = viewsHtml();
+    if (m) headerHtml(m); else xheaderHtml();
+    $('banner').innerHTML = bannerHtml(m);
+    $('shadelbl').textContent = m ? 'shade each row by its best value' : 'shade by speed-up';
+    $('explain').innerHTML = m ? explainHtml() : xexplainHtml();
+    $('summary').innerHTML = m ? '' : xsummaryHtml();
+    $('sweeps').innerHTML = m ? sweepsHtml(m) : xsweepsHtml();
+    $('problems').innerHTML = m ? problemsHtml(m) : xproblemsHtml();
+    $('platform').innerHTML = m ? platformHtml(m) : xplatformHtml();
+    $('footer').textContent = `Shown by ${ALL.tool.name} ${ALL.tool.version} from ` +
+      (X ? models.map(x => `${x.D.run.dir} (${runName(x).toLowerCase()})`).join(' and ') : models[0].D.run.dir) + ' (results spec v1).';
+    if (HAS_CHART) (m ? m.cards : xcards).forEach(c => {
+      const tab = tabOf(c);
+      if (tab === 'graph') drawCharts(c, 'g');
+      else if (tab === 'gpu') drawCharts(c, 'p');
+      else if (tab === 'speed') drawCharts(c, 's');
+      else if (tab === 'side') drawCharts(c, 'side');
+    });
+  }
+
+  function setView(v) {
+    state.view = v === 'x' || v === undefined ? (X ? 'x' : 0) : Math.min(+v, models.length - 1);
+    render();
+    if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, 0);
+  }
+  function setMetric(m) { state.metric = m; if (m === 'lat' && state.agg === 'sum') state.agg = 'median'; PREFS.metric = state.metric; PREFS.agg = state.agg; render(); }
+  function setAgg(a) { if (!(a === 'sum' && state.metric === 'lat')) state.agg = a; PREFS.agg = state.agg; render(); }
+  function setShade(on) { state.shade = on; PREFS.shade = on; render(); }
+  const flip = (obj, key, sub) => { const o = obj[key] = obj[key] || {}; o[sub] = !o[sub]; };
+
+  const onClick = e => {
+    const sel = '[data-view],[data-metric],[data-agg],[data-tab],[data-chip],[data-line],[data-gline]';
+    const t = e.target && e.target.closest ? e.target.closest(sel) : e.target;
+    if (!t || !t.dataset) return;
+    const d = t.dataset;
+    if (d.view !== undefined) setView(d.view);
+    else if (d.metric) setMetric(d.metric);
+    else if (d.agg) setAgg(d.agg);
+    else if (d.tab) { state.tabs[d.card] = d.tab; render(); }
+    else if (d.chip !== undefined) { const off = state.off[d.card] = state.off[d.card] || {}; flip(off, d.chip, d.value); render(); }
+    else if (d.line !== undefined) { flip(state.hidden, d.card, d.line); render(); }
+    else if (d.gline !== undefined) { flip(state.hidden, d.card + '/gpu', d.gline); render(); }
+  };
+  const onChange = e => {
+    const t = e.target;
+    if (!t) return;
+    if (t.id === 'shade') setShade(t.checked);
+    else if (t.dataset && t.dataset.card) { state.gpuRun[t.dataset.card] = +t.value; render(); }
+  };
+  document.addEventListener('click', onClick);
+  document.addEventListener('change', onChange);
+
+  render();
+  globalThis.TBR = {state, models, xcards, cards: models[0].cards, render, setView, setMetric, setAgg, setShade, gpuHtml, live: () => live};
+  return () => {
+    document.removeEventListener('click', onClick);
+    document.removeEventListener('change', onChange);
+    live.forEach(ch => ch.destroy());
+    live = [];
+  };
+}
+</script>
+<script>
+(function () {
+  const TOOL = {name: 'PerfReport.html', version: '1'};
+  const NAMES = ['run.json', 'plan.json', 'platform.json', 'results.jsonl'];
+  const runs = [];
+  let view = null, cmp = [0, 1], cleanup = null;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  function parseJson(text, name) {
+    try { return JSON.parse(text.replace(/\0/g, '')); } catch (e) { throw new Error(`${name} is not valid JSON`); }
+  }
+  // Records from a JSON Lines file; a last line cut short by a crash is skipped.
+  function parseJsonl(text) {
+    const lines = text.replace(/\0/g, '').split('\n');
+    if (lines.length && lines[lines.length - 1] !== '') lines.pop();
+    const out = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line)); } catch (e) { continue; }
+    }
+    return out;
+  }
+  function stampOf(dir, run) {
+    const base = dir.split('/').filter(Boolean).pop() || '';
+    const m = base.match(/^(\d{8}-\d{6})/);
+    if (m) return m[1];
+    const s = String(run.started || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+    return s ? `${s[1]}${s[2]}${s[3]}-${s[4]}${s[5]}${s[6]}` : (base || '?');
+  }
+  const warningKind = text => text.replace(/\d+/g, 'N');
+
+  // One run's files condensed for show(): for each size its final status, its executors'
+  // values and its warnings, with repeated strings stored once.
+  function buildData(run, plan, platform, records, dir) {
+    const strings = [], index = new Map();
+    const sid = text => {
+      if (!index.has(text)) { index.set(text, strings.length); strings.push(text); }
+      return index.get(text);
+    };
+    const runIndex = new Map(plan.runs.map((r, i) => [r.id, i]));
+    const exes = plan.runs.map(() => null);
+    const finals = new Map();
+    let retries = 0;
+    for (const rec of records) {
+      if (!runIndex.has(rec.run)) continue;
+      if (rec.final) finals.set(rec.run + '\u0000' + rec.size, rec);
+      else retries++;
+    }
+    const res = [], kinds = new Map(), users = new Map();
+    for (const rec of finals.values()) {
+      const i = runIndex.get(rec.run), at = rec.run + '\u0000' + rec.size;
+      const executors = (rec.executors || []).slice()
+        .sort((a, b) => a.type < b.type ? -1 : a.type > b.type ? 1 : a.index - b.index);
+      if (executors.length && exes[i] === null) exes[i] = executors.map(e => e.exe);
+      const agg = rec.cpu_aggregate || {};
+      const warnings = rec.warnings || [];
+      const warns = [...new Set(warnings.map(sid))].sort((a, b) => a - b);
+      for (const w of warnings) {
+        const kind = warningKind(w);
+        if (!kinds.has(kind)) kinds.set(kind, {kind, sizes: new Set(), runs: new Set(), example: w, where: `${rec.run} at ${rec.size}`});
+        kinds.get(kind).sizes.add(at);
+        kinds.get(kind).runs.add(rec.run);
+      }
+      const overlap = [];
+      for (const u of rec.other_gpu_users || []) {
+        const who = `${u.user} ${u.comm}`;
+        if (!users.has(who)) users.set(who, new Set());
+        users.get(who).add(at);
+        overlap.push(sid(`${u.comm} (pid ${u.pid}, ${u.user})`));
+      }
+      res.push([i, rec.size, rec.status, sid(rec.reason || ''), executors.map(e => e.gbps), executors.map(e => e.ms),
+                agg.gbps ?? null, agg.ms ?? null, warns, overlap, rec.attempt || 1]);
+    }
+    const planned = plan.runs.reduce((n, r) => n + r.sizes.length, 0);
+    const counts = {PASS: 0, FAIL: 0, TIMEOUT: 0, SKIP: 0};
+    res.forEach(r => { if (r[2] in counts) counts[r[2]]++; });
+    return {
+      run: {label: plan.label || run.label, ts: stampOf(dir, run), dir, synthetic: run.synthetic || '',
+            status: run.status ?? null, stop_reason: run.stop_reason || '', started: run.started ?? null,
+            finished: run.finished ?? null, resumed: run.resumed || [], engine: run.engine || {}, planned, counts,
+            missing: planned - res.length, retries},
+      platform, tests: plan.tests, sweeps: plan.sweeps,
+      runs: plan.runs.map(r => ({id: r.id, sweep: r.sweep, test: r.test, settings: r.settings, line: r.line,
+                                 group: r.group ?? null, sizes: r.sizes})),
+      groups: plan.groups || [], exes, strings, res,
+      warnings: [...kinds.values()].map(k => ({kind: k.kind, sizes: k.sizes.size, runs: k.runs.size, example: k.example, where: k.where})),
+      users: [...users].map(([who, s]) => ({who, sizes: s.size})),
+    };
+  }
+
+  const runKey = r => JSON.stringify([r.sweep, r.test, Object.entries(r.settings).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)]);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  // Which runs of run 2 are run 1's runs (same sweep, test and every setting), and what
+  // differs between the two plans, which explains any run without a partner.
+  function match(d1, d2) {
+    const index2 = new Map(d2.runs.map((r, j) => [runKey(r), j]));
+    const pairs = [], only1 = [];
+    d1.runs.forEach((r, i) => {
+      const k = runKey(r);
+      if (index2.has(k)) { pairs.push([i, index2.get(k)]); index2.delete(k); }
+      else only1.push(i);
+    });
+    const s1 = new Map(d1.sweeps.map(s => [s.name, s])), s2 = new Map(d2.sweeps.map(s => [s.name, s]));
+    const planDiff = [];
+    for (const name of [...s1.keys(), ...[...s2.keys()].filter(n => !s1.has(n))]) {
+      const a = s1.get(name), b = s2.get(name);
+      if (!a || !b) { planDiff.push([name, 'sweep', a ? 'yes' : 'no', b ? 'yes' : 'no']); continue; }
+      if (!same(a.tests, b.tests)) planDiff.push([name, 'tests', a.tests.join(', '), b.tests.join(', ')]);
+      if (a.timeout !== b.timeout) planDiff.push([name, 'timeout', a.timeout ?? null, b.timeout ?? null]);
+      for (const axis of [...Object.keys(a.axes), ...Object.keys(b.axes).filter(x => !(x in a.axes))]) {
+        const v1 = a.axes[axis] ?? null, v2 = b.axes[axis] ?? null;
+        if (!same(v1, v2)) planDiff.push([name, axis, v1, v2]);
+      }
+    }
+    for (const t of [...Object.keys(d1.tests), ...Object.keys(d2.tests).filter(t => !(t in d1.tests))])
+      if (d1.tests[t] !== d2.tests[t]) planDiff.push(['tests', t, d1.tests[t] ?? null, d2.tests[t] ?? null]);
+    return {pairs, only: [only1, [...index2.values()].sort((a, b) => a - b)], plan_diff: planDiff};
+  }
+
+  // Files grouped by folder; every folder with a run.json and a plan.json is one run.
+  async function addRuns(entries) {
+    const groups = new Map();
+    for (const {path, file} of entries) {
+      const cut = path.lastIndexOf('/');
+      const dir = cut >= 0 ? path.slice(0, cut) : '', name = path.slice(cut + 1);
+      if (!NAMES.includes(name)) continue;
+      if (!groups.has(dir)) groups.set(dir, new Map());
+      groups.get(dir).set(name, file);
+    }
+    const problems = [];
+    let first = null;
+    for (const [dir, files] of groups) {
+      if (!files.has('run.json') || !files.has('plan.json')) continue;
+      try {
+        const [runT, planT, platT, resT] = await Promise.all(NAMES.map(n => files.has(n) ? files.get(n).text() : null));
+        const data = buildData(parseJson(runT, 'run.json'), parseJson(planT, 'plan.json'),
+                               platT ? parseJson(platT, 'platform.json') : {}, resT ? parseJsonl(resT) : [],
+                               dir || 'selected files');
+        const key = [data.run.label, data.run.ts, data.platform.host].join('|');
+        const at = runs.findIndex(r => r.key === key);
+        if (at >= 0) runs[at] = {key, data}; else runs.push({key, data});
+        if (first === null) first = at >= 0 ? at : runs.length - 1;
+      } catch (e) {
+        problems.push(`${dir || 'the selected files'}: ${e.message}`);
+      }
+    }
+    if (first === null && !problems.length)
+      problems.push('no run found: a run folder holds run.json and plan.json, and normally platform.json and results.jsonl');
+    $('loadmsg').textContent = problems.join(' · ');
+    if (first !== null) open(first);
+    else tabs();
+    return first;
+  }
+
+  function tabs() {
+    document.body.classList.toggle('empty', !runs.length);
+    const name = r => `${esc(r.data.run.label)} · ${esc(r.data.run.ts)}`;
+    let h = runs.map((r, i) => `<button class="ltab${view === i ? ' active' : ''}" data-open="${i}">${name(r)}` +
+      `<span class="vs">${esc(r.data.platform.host || '?')}</span></button>`).join('');
+    if (runs.length >= 2) {
+      h += `<button class="ltab${view === 'x' ? ' active' : ''}" data-open="x">Compare<span class="vs">two runs side by side</span></button>`;
+      if (view === 'x') {
+        const opts = sel => runs.map((r, i) => `<option value="${i}"${i === sel ? ' selected' : ''}>${name(r)} · ` +
+          `${esc(r.data.platform.host || '?')}</option>`).join('');
+        h += `<label class="cmp">run 1, the baseline <select data-cmp="0">${opts(cmp[0])}</select></label>` +
+             `<label class="cmp">run 2 <select data-cmp="1">${opts(cmp[1])}</select></label>`;
+      }
+    }
+    $('loaded').innerHTML = h;
+  }
+
+  function open(v) {
+    if (v === 'x') {
+      if (cmp[0] >= runs.length) cmp[0] = 0;
+      if (cmp[1] >= runs.length || cmp[1] === cmp[0]) cmp[1] = cmp[0] === runs.length - 1 ? 0 : runs.length - 1;
+    }
+    view = v;
+    tabs();
+    if (cleanup) cleanup();
+    const shown = v === 'x' ? [runs[cmp[0]].data, runs[cmp[1]].data] : [runs[v].data];
+    cleanup = show({tool: TOOL, runs: shown, match: v === 'x' ? match(shown[0], shown[1]) : null});
+  }
+
+  // Folders dropped on the page are walked for their files; webkitGetAsEntry only works
+  // while the drop event is being handled, so the entries are taken before any await.
+  async function dropped(dt) {
+    const entries = [...(dt.items || [])].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+    const files = entries.length ? [] : [...(dt.files || [])].map(f => ({path: f.name, file: f}));
+    const walk = async (entry, prefix) => {
+      if (entry.isFile) {
+        files.push({path: prefix + entry.name, file: await new Promise((ok, bad) => entry.file(ok, bad))});
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        for (let batch; (batch = await new Promise((ok, bad) => reader.readEntries(ok, bad))).length;)
+          for (const e of batch) await walk(e, prefix + entry.name + '/');
+      }
+    };
+    for (const e of entries) await walk(e, '');
+    return files;
+  }
+
+  document.addEventListener('click', e => {
+    const t = e.target && e.target.closest ? e.target.closest('[data-open]') : null;
+    if (t) open(t.dataset.open === 'x' ? 'x' : +t.dataset.open);
+  });
+  document.addEventListener('change', e => {
+    const t = e.target;
+    if (!t) return;
+    if (t.id === 'pickdir' || t.id === 'pickfiles') {
+      addRuns([...t.files].map(f => ({path: (t.id === 'pickdir' && f.webkitRelativePath) || f.name, file: f})));
+      t.value = '';
+    } else if (t.dataset && t.dataset.cmp !== undefined) {
+      const k = +t.dataset.cmp, old = cmp[k];
+      cmp[k] = +t.value;
+      if (cmp[0] === cmp[1]) cmp[1 - k] = old;
+      open('x');
+    }
+  });
+  document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    document.body.classList.remove('dragging');
+    dropped(e.dataTransfer).then(addRuns);
+  });
+
+  tabs();
+  globalThis.PerfReport = {addRuns, open, runs, buildData, match, chartLoaded: () => { if (view !== null) open(view); }};
+})();
+</script>
+</body></html>

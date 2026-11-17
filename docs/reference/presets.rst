@@ -124,7 +124,7 @@ To modify the behavior of a2a preset, use the following environment variables:
       - To use only directly connected XGMI links (hop count = 1). 0 = full all-to-all.
 
         This can be useful on older MI2XX hardware that doesn't feature full all-to-all XGMI connectivity. Running the standard all-to-all between all pairs of GPUs on that hardware ends up using XGMI links more than once.
-      - ``1``
+      - ``1`` (``0`` on MI4XX, to let DPX route transfers)
 
     * - ``A2A_LOCAL``
       - To include local transfers (i→i). 0 = exclude, 1 = include.
@@ -323,7 +323,7 @@ To modify the behavior of a2asweep preset, use the following environment variabl
 
     * - ``A2A_DIRECT``
       - To use only directly-connected GPU pairs, set to ``1``. For full all-to-all, set to ``0``.
-      - ``1``
+      - ``1`` (``0`` on MI4XX, to let DPX route transfers)
 
     * - ``A2A_LOCAL``
       - To include local transfers, set to ``1``. To exclude, set to ``0``.

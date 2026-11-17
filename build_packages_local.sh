@@ -54,7 +54,7 @@ export GIT_CONFIG_KEY_0="safe.directory"
 export GIT_CONFIG_VALUE_0="${REPO_ROOT}"
 
 # Default GPU targets baked into every package, regardless of GPU_FAMILY tarball.
-DEFAULT_GPU_TARGETS="gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+DEFAULT_GPU_TARGETS="gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
 GPU_TARGETS="${GPU_TARGETS:-$DEFAULT_GPU_TARGETS}"
 
 # -------- detect OS --------
