@@ -289,6 +289,10 @@ TDM options
       - LDS bytes per workgroup for TDM kernels. ``0`` = device max. Accepts ``K``, ``M``, and ``G`` suffixes.
       - ``0``
 
+.. note::
+
+    In this release, ``TDM_BLOCK_ORDER`` is validated and reported but doesn't change TDM execution order. A fix is planned for a future release.
+
 Variable SubExecutor options
 ------------------------------
 

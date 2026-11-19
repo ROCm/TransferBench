@@ -3072,6 +3072,8 @@ The TDM executor (``EXE_GPU_TDM``, the ``T`` executor in a Transfer expression) 
 
 - **Rejected combinations are skipped, not fatal:** A combination the library refuses (for example, an LDS window larger than the device maximum) prints ``N/A`` in that cell, and the sweep continues.
 
+- **Threadblock order sweep has no effect:** In this release, ``TDM_BLOCK_ORDER`` (and so ``BLOCK_ORDERS``) is validated but doesn't change TDM execution order, so rows that differ only by order report the same underlying ordering. A fix is planned for a future release.
+
 - **No successful run:** If every combination fails, the preset reports ``[WARN] No transfers executed successfully`` and returns a fatal error.
 
 **Usage:**
