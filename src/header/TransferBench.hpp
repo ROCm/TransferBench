@@ -1295,21 +1295,25 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 //========================================================================================
   static ErrResult CharToMemType(char const c, MemType& memType)
   {
-    char const* val = strchr(MemTypeStr, toupper(c));
+    // strchr also matches the terminating NUL, so reject a missing type character explicitly
+    char const* val = c ? strchr(MemTypeStr, toupper(c)) : NULL;
     if (val) {
       memType = (MemType)(val - MemTypeStr);
       return ERR_NONE;
     }
+    if (!c) return {ERR_FATAL, "Missing memory type"};
     return {ERR_FATAL, "Unexpected memory type (%c)", c};
   }
 
   static ErrResult CharToExeType(char const c, ExeType& exeType)
   {
-    char const* val = strchr(ExeTypeStr, toupper(c));
+    // strchr also matches the terminating NUL, so reject a missing type character explicitly
+    char const* val = c ? strchr(ExeTypeStr, toupper(c)) : NULL;
     if (val) {
       exeType = (ExeType)(val - ExeTypeStr);
       return ERR_NONE;
     }
+    if (!c) return {ERR_FATAL, "Missing executor type"};
     return {ERR_FATAL, "Unexpected executor type (%c)", c};
   }
 
@@ -1501,7 +1505,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // This is optional for EXE_NIC_NEAREST as long as nothing further is specified
     char const* endPtr = ParseRange(ptr, -1, exeDevice.exeIndices);
     if (!endPtr) {
-      if (exeDevice.exeType == EXE_NIC_NEAREST && *endPtr == 0) {
+      if (exeDevice.exeType == EXE_NIC_NEAREST && *ptr == 0) {
         if (exeDevice.exeRanks.size() != 0) {
           return {ERR_FATAL, "Wildcard NIC executor may not be specified with rank in executor token %s", token.c_str()};
         }
@@ -2274,7 +2278,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     CheckMultiNodeConfigConsistency(cfg, errors);
 
     // Check data options
-    if (cfg.data.blockBytes == 0 || cfg.data.blockBytes % 4)
+    if (cfg.data.blockBytes <= 0 || cfg.data.blockBytes % 4)
       errors.push_back({ERR_FATAL, "[data.blockBytes] must be positive multiple of %lu", sizeof(float)});
     if (cfg.data.byteOffset < 0 || cfg.data.byteOffset % sizeof(float))
       errors.push_back({ERR_FATAL, "[data.byteOffset] must be positive multiple of %lu", sizeof(float)});
@@ -2300,7 +2304,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (cfg.general.useMultiStream && cfg.gfx.blockOrder > 0)
       errors.push_back({ERR_WARN, "[gfx.blockOrder] will be ignored when running in multi-stream mode"});
 
-    if (cfg.gfx.blockSize < 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
+    if (cfg.gfx.blockSize <= 0 || cfg.gfx.blockSize % 64 || cfg.gfx.blockSize > MAX_BLOCKSIZE)
       errors.push_back({ERR_FATAL,
                         "[gfx.blockSize] must be positive multiple of 64 less than or equal to %d",
                         MAX_BLOCKSIZE});

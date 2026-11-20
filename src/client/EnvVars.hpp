@@ -192,6 +192,10 @@ public:
     pingpongStride     = GetEnvVar("PNP_STRIDE"     , 1);
     outputToCsv        = GetEnvVar("OUTPUT_TO_CSV"       , 0);
     samplingFactor     = GetEnvVar("SAMPLING_FACTOR"     , 1);
+    if (samplingFactor < 1) {
+      printf("[ERROR] SAMPLING_FACTOR must be at least 1 (got %d)\n", samplingFactor);
+      exit(1);
+    }
     showBorders        = GetEnvVar("SHOW_BORDERS"        , 1);
     showIterations     = GetEnvVar("SHOW_ITERATIONS"     , 0);
     showPercentiles    = GetEnvVarArray("SHOW_PERCENTILES", {});
@@ -314,6 +318,13 @@ public:
       }
       cuMask.resize(2 * numXccs, 0);
 
+      for (auto range : ranges) {
+        // Mask holds 64 bits (2 dwords) per XCC, so per-XCC CU indices must be in 0..63
+        if (range.first < 0 || range.second > 63) {
+          printf("[ERROR] CU_MASK index out of range (allowed 0..63): %d-%d\n", range.first, range.second);
+          exit(1);
+        }
+      }
       for (auto range : ranges) {
         for (int i = range.first; i <= range.second; i++) {
           for (int x = 0; x < numXccs; x++) {
@@ -547,7 +558,7 @@ public:
       Print("IB_PORT_NUMBER", ibPort,
             "IB port number is set to %d", ibPort);
       Print("NIC_CHUNK_BYTES", nicChunkBytes,
-            "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
+            "Sending %d bytes at a time for NIC RDMA", nicChunkBytes);
       Print("NIC_CQ_POLL_BATCH", nicCqPollBatch,
             "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
       Print("NIC_RELAX_ORDER", nicRelaxedOrder,
@@ -625,14 +636,20 @@ public:
       if (varStr[0] == '\0') {
         return defaultValue;
       }
-      int val = atoi(varStr);
+      long long val  = strtoll(varStr, NULL, 10);
+      long long mult = 1;
       char units = varStr[strlen(varStr)-1];
       switch (units) {
-      case 'G': case 'g': val *= 1024;
-      case 'M': case 'm': val *= 1024;
-      case 'K': case 'k': val *= 1024;
+      case 'G': case 'g': mult *= 1024;
+      case 'M': case 'm': mult *= 1024;
+      case 'K': case 'k': mult *= 1024;
       }
-      return val;
+      // Reject values that do not fit in an int instead of silently overflowing
+      if (val > INT_MAX / mult || val < INT_MIN / mult) {
+        printf("[ERROR] %s value [%s] is out of range (must fit in a 32-bit signed int)\n", varname.c_str(), varStr);
+        exit(1);
+      }
+      return (int)(val * mult);
     }
     return defaultValue;
   }
