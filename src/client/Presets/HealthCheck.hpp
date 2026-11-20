@@ -187,6 +187,7 @@ int TestUnidir(int modelId, bool verbose)
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       } else {
         Utils::PrintErrors(results.errResults);
+        fails.push_back(std::make_pair(gpuId, 0.0));  // A test that could not run is a failure
       }
     }
 
@@ -233,6 +234,7 @@ int TestUnidir(int modelId, bool verbose)
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       } else {
         Utils::PrintErrors(results.errResults);
+        fails.push_back(std::make_pair(gpuId, 0.0));  // A test that could not run is a failure
       }
     }
 
@@ -299,6 +301,7 @@ int TestBidir(int modelId, bool verbose)
         if (verbose) printf("   GPU %02d: Measured %6.2f Limit %6.2f\n", gpuId, measuredBw, limit);
       } else {
         Utils::PrintErrors(results.errResults);
+        fails.push_back(std::make_pair(gpuId, 0.0));  // A test that could not run is a failure
       }
     }
 
@@ -358,6 +361,11 @@ int TestAllToAll(int modelId, bool verbose)
           transferIdx++;
         }
       }
+    } else {
+      Utils::PrintErrors(results.errResults);
+      for (int i = 0; i < numGpuDevices; i++)
+        for (int j = 0; j < numGpuDevices; j++)
+          if (i != j) fails.push_back(std::make_pair(std::make_pair(i,j), 0.0));  // A test that could not run is a failure
     }
     if (fails.size() == 0) {
       printf("PASS\n");
@@ -424,6 +432,8 @@ int TestHbmPerformance(int modelId, bool verbose)
       }
     } else {
       Utils::PrintErrors(results.errResults);
+      for (int gpuId = 0; gpuId < numGpuDevices; gpuId++)
+        fails.push_back(std::make_pair(gpuId, 0.0));  // A test that could not run is a failure
     }
 
     if (fails.size() == 0) {
