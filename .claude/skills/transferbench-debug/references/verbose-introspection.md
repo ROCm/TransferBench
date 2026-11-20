@@ -76,6 +76,16 @@ The first one is especially valuable when debugging — its banner names every e
 | `NIC_CQ_POLL_BATCH=N` | CQ poll batch size | Reduce to 1 to expose race conditions |
 | `NIC_RELAX_ORDER=0\|1` | Relaxed ordering on the NIC | Disable when ordering bugs suspected |
 
+## Storage (hipFile) debug
+
+| Variable | Effect | Use case |
+|---|---|---|
+| `TB_VERBOSE=1` | Logs storage open, hipFile handle / buffer registration, and `storage I/O path: fastpath\|compat\|mixed\|unknown` per executor (`unknown`: hipFile older than 0.5.0, or `HIPFILE_STATS_LEVEL=0`) | "Did this hipFile number come from direct I/O or from the compatibility path?" |
+| `HIPFILE_FORCE_COMPAT_MODE=true` | hipFile's own variable: never attempt direct I/O | hipFile Transfers fail with "fastpath may not be usable here" |
+| `HIPFILE_ALLOW_COMPAT_MODE=false` | hipFile's own variable: fail instead of falling back | Prove a result is direct I/O |
+| `TB_HIPFILE_SKIP_BUF_REGISTER=1` | Skip `hipFileBufRegister` | Hang or failure while registering the GPU buffer with hipFile |
+| `TB_STORAGE_TIMED_SYNC=1` | Include `fdatasync` in write timing | Compatibility-path write bandwidth looks too good |
+
 ## Pod / multi-rank fallbacks
 
 | Variable | Effect | Use case |

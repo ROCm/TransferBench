@@ -1348,6 +1348,7 @@ namespace PerfReport
     case EXE_NIC_NEAREST: return "NIC_NEAREST";
     case EXE_GPU_BDMA:    return "BDMA";
     case EXE_GPU_TDM:     return "TDM";
+    case EXE_GPU_HIPFILE: return "HIPFILE";
     default:              return "?";
     }
   }

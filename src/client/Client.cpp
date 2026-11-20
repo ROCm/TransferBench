@@ -235,6 +235,7 @@ void DisplayVersion()
 {
   bool nicSupport = false, mpiSupport = false, podSupport = false;
   nicSupport = IsIbvSymbolsReady();
+  bool hipFileSupport = IsHipFileAvailable();
 #if MPI_COMM_ENABLED
   mpiSupport = true;
 #endif
@@ -250,6 +251,8 @@ void DisplayVersion()
   isFound |= nicSupport;
   support += podSupport ? (isFound ? "+POD" : " (with POD") : "";
   isFound |= podSupport;
+  support += hipFileSupport ? (isFound ? "+hipFile" : " (with hipFile") : "";
+  isFound |= hipFileSupport;
   support += isFound ? " support)" : " (No extra feature support)";
 
   std::string multiNodeMode = "";

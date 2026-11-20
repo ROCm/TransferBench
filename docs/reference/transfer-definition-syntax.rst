@@ -1,6 +1,6 @@
 .. meta::
-  :description: Reference for TransferBench transfer definition syntax, including simple and advanced modes, memory and Executor letter codes, and wildcard syntax.
-  :keywords: TransferBench transfer definition, TransferBench syntax, TransferBench memory types, TransferBench Executor types, TransferBench wildcards
+  :description: Reference for TransferBench transfer definition syntax, including simple and advanced modes, memory and Executor letter codes, storage transfers, and wildcard syntax.
+  :keywords: TransferBench transfer definition, TransferBench syntax, TransferBench memory types, TransferBench Executor types, TransferBench wildcards, TransferBench storage, hipFile
 
 .. _transfer-definition-syntax:
 
@@ -26,7 +26,7 @@ Use simple mode when all transfers in a test share the same number of SubExecuto
 The format uses the following fields:
 
 - ``#Transfers``: A positive integer that specifies the number of parallel transfers.
-- ``#SEs``: The number of SubExecutors (CUs, threads, or queue pairs) used by all transfers.
+- ``#SEs``: The number of SubExecutors (CUs, threads, queue pairs, or storage I/O threads) used by all transfers.
 - ``(srcMem Executor dstMem)``: A triplet that describes one transfer.
 
 The transfer size comes from the ``num_bytes`` command-line argument.
@@ -161,6 +161,10 @@ The following table lists the supported memory type letters:
       - Null (empty). Use this to denote read-only or write-only transfers.
       - Index ignored.
 
+    * - ``S``
+      - Storage (a regular file or a raw block device). See :ref:`storage-transfers`.
+      - Position in the ``TB_STORAGE_PATHS`` list (0 to #paths - 1)
+
 You can concatenate multiple memory locations for broadcast or reduce operations. For example, ``G0G1`` refers to GPU 0 and GPU 1.
 
 Executor letters
@@ -213,6 +217,15 @@ The following table lists the supported Executor type letters:
       - Threadblock/CU
       - GPU (0 to #GPUs - 1). Requires AMD gfx1250 or NVIDIA sm_90+.
 
+    * - ``F``
+      - hipFile (``hipFileRead``/``hipFileWrite``)
+      - I/O thread
+      - GPU (0 to #GPUs - 1). See :ref:`storage-transfers`.
+
+.. note::
+
+  The memory and Executor letters are independent. ``F`` in a memory position is fine-grained device memory, while ``F`` in the Executor position is the hipFile Executor. Likewise, ``D`` and ``B`` are host memory types in a memory position and the DMA and Batched DMA Executors in the Executor position.
+
 The optional Executor fields have the following meanings:
 
 - ``Slot`` (``A``, ``B``, ...): Selects which closest NIC to use, where ``A`` is the first and ``B`` is the second, and so on. Used for ``EXE_NIC_NEAREST``.
@@ -222,6 +235,47 @@ The optional Executor fields have the following meanings:
 .. note::
 
     CPU indices are logical. Since v1.70.0, TransferBench hides CPU NUMA nodes that have no cores, so ``C0``, ``C1``, and so on number only the exposed nodes and might not match the physical node IDs reported by ``numactl --hardware``. Set ``TB_SHOW_ALL_NUMA=1`` to expose every configured node and restore the original numbering.
+
+.. _storage-transfers:
+
+Storage transfers
+=================
+
+Storage memory (``S``) together with the hipFile (``F``) Executor benchmarks I/O between storage, such as an NVMe drive, and GPU memory:
+
+.. code-block:: shell
+
+    1 4 (S0->F0->G0)                  # hipFile reads storage 0 into GPU 0 memory using 4 I/O threads
+    1 4 (G0->F0->S0)                  # hipFile writes GPU 0 memory to storage 0 using 4 I/O threads
+    1 4 (S1->F0->G0)                  # hipFile reads storage 1 into GPU 0 memory using 4 I/O threads
+
+Storage index ``N`` refers to the N-th path (starting from 0) in the comma-separated ``TB_STORAGE_PATHS`` environment variable. Each path is either a regular file, typically on an NVMe-backed file system, or a raw block device such as ``/dev/nvme1n1``. A regular file is created if it doesn't exist, except under ``/dev/`` (other than ``/dev/shm/``), where a missing path is rejected as a probable mistyped device name. With multiple ranks, each rank uses its own ``TB_STORAGE_PATHS``.
+
+The following rules apply:
+
+- Storage memory can only be used with the ``F`` Executor, and this Executor can't be used without storage memory.
+- A storage transfer has exactly one SRC and one DST. One of them is storage memory (``S``) and the other is global device memory (``G``) on the GPU that the Executor is indexed by. For example, ``(S0->F1->G1)`` is valid, while ``(S0->F0->G1)``, ``(S0->F0->C0)``, ``(S0->F0->S1)``, and ``(S0->G0->G0)`` are rejected.
+- The storage, the Executor, and the GPU memory must be on the same rank.
+- The number of SubExecutors is the number of threads that issue blocking I/O calls. The data is divided between them in multiples of 4096 bytes; ``BLOCK_BYTES`` isn't used.
+- The transfer size and ``BYTE_OFFSET`` should be multiples of 4096 bytes. Other values are accepted with a warning, because hipFile then uses its compatibility path.
+- A block device is written to only when ``TB_STORAGE_ALLOW_BLOCK_WRITE=1`` is set. Without it, a transfer with a block device as DST is rejected, and a transfer with a block device as SRC transfers the existing contents of the device without data validation.
+- The same applies to a regular file that already holds data, with ``TB_STORAGE_ALLOW_OVERWRITE=1``. A file that TransferBench creates, or finds empty, is always writable for the rest of the run.
+- Executor subindices and PingPong operations aren't supported.
+- The ``F`` Executor requires TransferBench to be built with hipFile support. Without it, the transfer is still parsed and is then rejected with an error that says so. This includes transfers that a ``*`` wildcard for the Executor index expands to. See :ref:`source-build`.
+- The ``F`` Executor isn't supported on NVIDIA hardware.
+
+Numeric wildcards work for the storage index, the Executor index, and the GPU memory index. Because the GPU memory must be on the GPU of the Executor, these two wildcards follow each other instead of expanding to every combination:
+
+.. code-block:: shell
+
+    1 4 (S0->F*->G*)                  # One transfer per GPU: (S0->F0->G0), (S0->F1->G1), ...
+    1 4 (S*->F*->G*)                  # One transfer per storage path and GPU
+    1 4 (S0->F1->G*)                  # (S0->F1->G1) only
+    1 4 (G*->F*->S0)                  # One write per GPU
+
+This applies to the ``*`` wildcard only. An explicit list such as ``(S0->F[0,1]->G[0,1])`` still expands to every combination, and the transfers whose GPU memory isn't on the GPU of the Executor are rejected.
+
+For setup instructions and what to check before trusting the results, see :ref:`storage-benchmarking`.
 
 Wildcards
 =========

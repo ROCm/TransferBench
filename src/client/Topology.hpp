@@ -70,6 +70,26 @@ static void PrintNicToGPUTopo(bool outputToCsv)
   printf("\n");
 }
 
+static void PrintStorageTopo(bool outputToCsv)
+{
+  char sep = (outputToCsv ? ',' : '|');
+  int numStoragePaths = TransferBench::GetNumStoragePaths();
+
+  printf(" Storage %c Path (TB_STORAGE_PATHS)\n", sep);
+  if (!outputToCsv)
+    printf("---------+-------------------------\n");
+  for (int i = 0; i < numStoragePaths; i++)
+    printf(" S%-6d %c %s\n", i, sep, TransferBench::GetStoragePath(i).c_str());
+  if (numStoragePaths == 0)
+    printf(" N/A     %c Not set\n", sep);
+
+  std::string hipFileDesc = "Not available (built without hipFile support)";
+  if (TransferBench::IsHipFileAvailable())
+    hipFileDesc = "Available (hipFile " + TransferBench::GetHipFileVersion() + ")";
+  printf(" hipFile %c %s\n", sep, hipFileDesc.c_str());
+  printf("\n");
+}
+
 void DisplaySingleRankTopology(bool outputToCsv)
 {
   int numCpus = TransferBench::GetNumExecutors(EXE_CPU);
@@ -134,6 +154,9 @@ void DisplaySingleRankTopology(bool outputToCsv)
 
   // Print out detected NIC topology
   PrintNicToGPUTopo(outputToCsv);
+
+  // Print out storage paths and hipFile executor availability
+  PrintStorageTopo(outputToCsv);
 
   // Print out detected GPU topology
 #if defined(__NVCC__)
