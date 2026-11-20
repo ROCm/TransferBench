@@ -27,6 +27,8 @@ An Executor (EXE) is the specific device that performs a transfer — reading fr
 - **CPU threads**
 - **GPU compute kernels** (GFX)
 - **GPU DMA engines** (SDMA)
+- **GPU batched DMA** (must have a single SRC and at least one DST)
+- **GPU TDM** (Tensor Data Mover; requires hardware support: AMD gfx1250 or NVIDIA sm_90+)
 - **NIC RDMA** (via Remote Direct Memory Access network interface cards)
 
 Some Executors support **SubExecutors**, which allow further partitioning of the data to be transferred across multiple execution units within the same device.
@@ -36,7 +38,7 @@ Features
 
 TransferBench supports the following features:
 
-- **Multiple Executors:** CPU threads, GPU compute kernels (GFX), GPU DMA engines (SDMA), and NIC RDMA.
+- **Multiple Executors:** CPU threads, GPU compute kernels (GFX), GPU DMA engines (SDMA), GPU batched DMA, GPU TDM, and NIC RDMA.
 
 - **Multi-input or multi-output (MIMO) transfers:** Element-wise sum from multiple SRCs to multiple DSTs.
 

@@ -11,6 +11,10 @@ with open('../src/header/TransferBench.hpp', encoding='utf-8') as f:
     if not match:
         raise ValueError("VERSION not found!")
     version_number = match[1]
+    # Pad a bare major.minor version (e.g. "1.71") to major.minor.patch (e.g. "1.71.0")
+    # for display purposes, without touching the VERSION string in the source itself.
+    if version_number.count('.') == 1:
+        version_number += ".0"
 
 # for PDF output on Read the Docs
 project = "TransferBench Documentation"

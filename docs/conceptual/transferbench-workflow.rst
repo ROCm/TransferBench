@@ -101,11 +101,11 @@ Each iteration proceeds through the following steps:
 
 5. **Stop CPU timing:** Stops the CPU timer.
 
-6. **Validate (optional):** If ``ALWAYS_VALIDATE`` = 1, performs a correctness check after each iteration to verify that destination memory matches the expected reference results.
+6. **Validate (optional):** Performs a correctness check to verify that destination memory matches the expected reference results. ``ALWAYS_VALIDATE`` > 0 validates after every iteration, ``= 0`` (default) validates once after all iterations, and ``< 0`` disables validation entirely.
 
    .. note::
 
-    By default, validation runs only once after all iterations complete. Setting ``ALWAYS_VALIDATE`` = 1 validates after every iteration, which can help detect transient errors that would otherwise be masked by a passing final iteration.
+    By default, validation runs only once after all iterations complete. Setting ``ALWAYS_VALIDATE`` to a value greater than 0 validates after every iteration, which can help detect transient errors that would otherwise be masked by a passing final iteration. Setting it to a negative value disables validation entirely.
 
 Finalize
 --------
