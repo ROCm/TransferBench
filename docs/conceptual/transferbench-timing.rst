@@ -79,6 +79,9 @@ Executor timing
     * - NIC
       - CPU wall-clock (``std::chrono::high_resolution_clock``)
 
+    * - hipFile
+      - CPU wall-clock (``std::chrono::high_resolution_clock``) around the storage I/O calls only. See :ref:`storage-timing`.
+
 Transfer timing
 ---------------
 
@@ -108,6 +111,21 @@ Transfer timing
 
     * - NIC
       - CPU wall-clock (``std::chrono::high_resolution_clock``)
+
+    * - hipFile
+      - CPU wall-clock (``std::chrono::high_resolution_clock``) around the storage I/O calls only. See :ref:`storage-timing`.
+
+.. _storage-timing:
+
+Storage Executor timing
+-----------------------
+
+The hipFile Executor is always timed with the CPU wall-clock, regardless of ``USE_HIP_EVENTS``. The timed region covers only the blocking read or write calls issued by the I/O threads. The time of a transfer ends when the last of its I/O threads finishes.
+
+The following steps run once, before the first iteration. They are part of neither the Test time nor the overhead:
+
+- Opening the storage path and registering the file and the GPU buffer with hipFile.
+- Filling a storage source with data, and clearing a storage destination.
 
 Overhead
 ========

@@ -42,6 +42,7 @@ THE SOFTWARE.
 #include "NicAllToAll.hpp"
 #include "NicRings.hpp"
 #include "NicPeerToPeer.hpp"
+#include "Nvme.hpp"
 #include "OneToAll.hpp"
 #include "PeerToPeer.hpp"
 #include "PodAllToAll.hpp"
@@ -81,6 +82,7 @@ std::map<std::string, PresetInfo> presetFuncMap =
   {"nica2a",          {NicAllToAllPreset,   "All-to-all GPU traffic over NIC transfers using each NIC's closest GPU/CPU endpoint"}},
   {"nicp2p",          {NicPeerToPeerPreset, "Multi-node peer-to-peer RDMA transfer test between all NICs"}},
   {"nicrings",        {NicRingsPreset,      "Tests NIC rings created across identical NIC indices across ranks"}},
+  {"nvme",            {NvmePreset,          "GPU <-> storage (NVMe) write/read bandwidth test using the hipFile executor"}},
   {"one2all",         {OneToAllPreset,      "Test all subsets of parallel transfers from one GPU to all others"}},
   {"one2all_latency", {LatencyPreset,       "Latency values from one Executor to many, run in parallel"}},
   {"p2p",             {PeerToPeerPreset,    "Peer-to-peer device memory bandwidth test"}},

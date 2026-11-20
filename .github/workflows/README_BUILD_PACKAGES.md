@@ -47,6 +47,7 @@ The workflow always builds with:
 - `ENABLE_MPI_COMM=OFF` — MPI multi-node communicator disabled (would require OpenMPI at runtime; not bundled by TheRock SDK). Packages are built to run out of the box with only `numactl`/`libnuma1` from the OS.
 - `DISABLE_DMABUF=OFF` — DMA-BUF support for GPU Direct RDMA
 - `BUILD_RELOCATABLE_PACKAGE=ON` — RVS-style install prefix + package naming
+- `ENABLE_HIPFILE` is left at its default (`AUTO`) — the hipFile executor is built when the SDK provides `hipfile.h` and `libhipfile`. The binary then needs `libhipfile.so.0` at runtime, and the DEB/RPM packages depend on the hipFile runtime package of the ROCm release they were built against (`amdrocm-hipfile<major>.<minor>`). Pass `-DENABLE_HIPFILE=OFF` to build without it
 - `GPU_TARGETS` — full data-center + consumer set (gfx906, 908, 90a, 942, 950, 1030, 1100/01/02, 1150/51/52/53, 1200/01)
 
 ## Local builds

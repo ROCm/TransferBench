@@ -12,6 +12,7 @@ subtrees:
 - caption: How to
   entries:
   - file: how to/running-transferbench-customized.rst
+  - file: how to/storage-benchmarking.rst
 
 - caption: Conceptual
   entries:

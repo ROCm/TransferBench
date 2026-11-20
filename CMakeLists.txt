@@ -203,6 +203,7 @@ option(ENABLE_MPI_COMM             "Enable MPI Communicator support"            
 option(ENABLE_AMD_SMI              "Enable AMD-SMI pod membership queries"        OFF)
 option(ENABLE_POD_COMM             "Enable pod communication"                     OFF)
 option(BUILD_RELOCATABLE_PACKAGE   "Build with RVS-style relocatable RPATH and amdrocm<MAJOR>-transferbench package naming" OFF)
+option(ENABLE_HIPFILE               "Enable hipFile executor support"               OFF)
 
 include(cmake/Dependencies.cmake) # rocm-cmake, rocm_local_targets, rocm_check_target_ids
 
@@ -321,6 +322,13 @@ endif()
 ## -libverbs nor requires libibverbs-dev to be installed on the build host.
 ## Only libdl needs to be linked so that dlopen/dlsym resolve.
 message(STATUS "NIC executor: libibverbs is loaded dynamically at runtime (no -libverbs link, no build-host dependency)")
+
+## Check for hipFile support
+if(ENABLE_HIPFILE)
+  find_package(hipfile REQUIRED CONFIG PATHS "${ROCM_PATH}" NO_DEFAULT_PATH)
+  set(HIPFILE_FOUND 1)
+  message(STATUS "hipFile executor: found ${hipfile_VERSION}")
+endif()
 
 ## Check for MPI support
 set(MPI_PATH "" CACHE PATH "Path to MPI installation (takes priority over system MPI)")
@@ -465,6 +473,10 @@ if(MPI_COMM_FOUND)
   endif()
   target_compile_definitions(TransferBench PRIVATE MPI_COMM_ENABLED)
 endif()
+if(HIPFILE_FOUND)
+  target_link_libraries(TransferBench PRIVATE hip::hipfile)
+  target_compile_definitions(TransferBench PRIVATE HIPFILE_ENABLED)
+endif()
 if(AMD_SMI_FOUND)
   target_include_directories(TransferBench PRIVATE ${AMD_SMI_INCLUDE_DIR})
   target_link_libraries(TransferBench PRIVATE ${AMD_SMI_LIBRARY})
@@ -526,6 +538,12 @@ if(BUILD_RELOCATABLE_PACKAGE)
   set(CMAKE_INSTALL_RPATH
       "\$ORIGIN:\$ORIGIN/../lib:/opt/rocm/extras-${ROCM_MAJOR_VERSION}/lib:/opt/rocm/lib:/opt/rocm/lib/llvm/lib:/opt/rocm/core-${ROCM_MAJOR_VERSION}/lib:/opt/rocm/core-${ROCM_MAJOR_VERSION}/lib/llvm/lib")
   set(CMAKE_BUILD_RPATH "${CMAKE_INSTALL_RPATH}")
+  # The CMAKE_* variables above only initialise targets created after this point
+  set_target_properties(TransferBench PROPERTIES
+    SKIP_BUILD_RPATH FALSE
+    INSTALL_RPATH_USE_LINK_PATH FALSE
+    INSTALL_RPATH "${CMAKE_INSTALL_RPATH}"
+    BUILD_RPATH "${CMAKE_INSTALL_RPATH}")
   # Strip implicit SDK-from-build-host paths on install so the ephemeral
   # $HOME/rocm-sdk/install path the CI script uses does not leak into the
   # packaged binary's RPATH.

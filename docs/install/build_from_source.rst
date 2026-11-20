@@ -84,6 +84,28 @@ Depending on your requirement, you can install these optional dependencies:
 
         sudo yum install mpich mpich-devel
 
+- ``hipFile``: Required to build and run the hipFile Executor, which benchmarks I/O between storage and GPU memory. See :ref:`storage-benchmarking`.
+
+  - hipFile is an optional build-time dependency. TransferBench includes ``hipfile.h`` and links against ``libhipfile``, both of which come with the hipFile development package of ROCm. The package is named after the ROCm release, for example ``amdrocm-hipfile-dev10.2``:
+
+    - For Ubuntu/Debian:
+
+      .. code-block:: shell
+
+        sudo apt install amdrocm-hipfile-dev10.2
+
+    - For RHEL/CentOS:
+
+      .. code-block:: shell
+
+        sudo yum install amdrocm-hipfile-devel10.2
+
+  - Both build methods look for ``hipfile.h`` under ``ROCM_PATH`` and enable the hipFile Executor when they find it. If it isn't found, TransferBench builds without the hipFile Executor: the ``F`` Executor letter and the ``S`` memory type are still accepted, and a transfer that uses the hipFile Executor stops with an error saying that TransferBench was built without hipFile support. Only ``ROCM_PATH`` is searched. If hipFile is installed somewhere else, set the ``HIPFILE_PATH`` environment variable (for CMake, ``-DHIPFILE_PATH=<path>`` works too): its header and library then take priority over any under ``ROCM_PATH``. Use ``DISABLE_HIPFILE=1`` (Makefile) or ``-DENABLE_HIPFILE=OFF`` (CMake) to build without it.
+
+  - A binary built with hipFile support needs ``libhipfile.so.0`` (the hipFile runtime package, for example ``amdrocm-hipfile10.2``) on every machine that runs it. Packages built with CMake depend on it.
+
+  - The hipFile Executor isn't supported on NVIDIA hardware.
+
 You can build TransferBench from source using two methods: :ref:`Makefile <makefile>` and :ref:`CMake <cmake>`.
 
 .. _makefile:
@@ -128,7 +150,7 @@ To modify the Makefile behavior, use the following environment variables:
         </colgroup>
         <tbody class="makefile-env-variables">
             <tr>
-              <td rowspan="6"><b>Paths and compilers</b> - To customize which compiler to use or the library to link against.</td>
+              <td rowspan="7"><b>Paths and compilers</b> - To customize which compiler to use or the library to link against.</td>
               <td><code>ROCM_PATH</code></td>
               <td>ROCm installation path for HIP compiler, includes, and libs.</td>
               <td><code>/opt/rocm</code></td>
@@ -142,6 +164,11 @@ To modify the Makefile behavior, use the following environment variables:
               <td><code>MPI_PATH</code></td>
               <td>MPI installation path (for <code>mpi.h</code> and MPI libraries).</td>
               <td><code>/usr/local/openmpi</code></td>
+            </tr>
+            <tr>
+              <td><code>HIPFILE_PATH</code></td>
+              <td>hipFile installation path (for <code>include/hipfile.h</code> and <code>lib/libhipfile.so</code>). Takes priority over <code>ROCM_PATH</code>.</td>
+              <td><code>$(ROCM_PATH)</code></td>
             </tr>
             <tr>
               <td><code>HIPCC</code></td>
@@ -159,7 +186,7 @@ To modify the Makefile behavior, use the following environment variables:
               <td><code>(auto)</code></td>
             </tr>
             <tr>
-              <td rowspan="5"><b>Feature flags</b> - To control enabling features that require compile-time support. By default, these are enabled under the right conditions.</td>
+              <td rowspan="6"><b>Feature flags</b> - To control enabling features that require compile-time support. By default, these are enabled under the right conditions.</td>
               <td><code>DISABLE_MPI_COMM</code></td>
               <td>Disables MPI communication backend support for multinode TransferBench.</td>
               <td><code>0</code></td>
@@ -182,6 +209,11 @@ To modify the Makefile behavior, use the following environment variables:
             <tr>
               <td><code>DISABLE_CUMEM</code></td>
               <td>Disables the CUDA driver API. Also disables pod communication support on CUDA.</td>
+              <td><code>0</code></td>
+            </tr>
+            <tr>
+              <td><code>DISABLE_HIPFILE</code></td>
+              <td>Disables hipFile Executor support. By default it is enabled when <code>hipfile.h</code> is found under <code>HIPFILE_PATH</code>.</td>
               <td><code>0</code></td>
             </tr>
             <tr>
@@ -250,7 +282,7 @@ To modify the CMake behavior, use the following environment variables:
         </colgroup>
         <tbody class="cmake-env-variables">
             <tr>
-              <td rowspan="4"><b>Paths and compilers</b> - To customize which compiler to use or the library to link against.</td>
+              <td rowspan="5"><b>Paths and compilers</b> - To customize which compiler to use or the library to link against.</td>
               <td><code>ROCM_PATH</code></td>
               <td>ROCm installation path.</td>
               <td><code>/opt/rocm</code></td>
@@ -271,7 +303,12 @@ To modify the CMake behavior, use the following environment variables:
               <td> </td>
             </tr>
             <tr>
-              <td rowspan="5"><b>Build options (ON/OFF)</b> - Pass -DVAR=value to set</td>
+              <td><code>HIPFILE_PATH</code></td>
+              <td>Path to hipFile installation, from the environment or as <code>-DHIPFILE_PATH=&lt;path&gt;</code>. Takes priority over <code>ROCM_PATH</code>.</td>
+              <td> </td>
+            </tr>
+            <tr>
+              <td rowspan="6"><b>Build options (ON/OFF)</b> - Pass -DVAR=value to set</td>
               <td><code>BUILD_LOCAL_GPU_TARGET_ONLY</code></td>
               <td>Builds only for the GPUs detected on the given machine using <code>rocm_agent_enumerator</code>.</td>
               <td><code>OFF</code></td>
@@ -295,6 +332,11 @@ To modify the CMake behavior, use the following environment variables:
               <td><code>ENABLE_POD_COMM</code></td>
               <td>Enables pod communication (HIP >= 8.0.0).</td>
               <td><code>OFF</code></td>
+            </tr>
+            <tr>
+              <td><code>ENABLE_HIPFILE</code></td>
+              <td>Enables the hipFile Executor. <code>AUTO</code> enables it when hipFile is found, <code>ON</code> stops with an error when it isn't, and <code>OFF</code> builds without it.</td>
+              <td><code>AUTO</code></td>
             </tr>
             <tr>
               <td rowspan="2"><b>Build options</b></td>

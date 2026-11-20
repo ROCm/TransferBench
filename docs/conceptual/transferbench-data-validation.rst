@@ -80,6 +80,19 @@ For each transfer, the SRC memory on the rank that owns it is filled from the co
 ``srcReference`` buffer via ``hipMemcpy`` (host-to-device or device-to-device as appropriate).
 DST memory is zeroed (or memset) before transfers run.
 
+Storage memory (``S``) has no memory pointer, so TransferBench fills and clears it through an aligned
+host buffer with ``pwrite``. Because O_DIRECT is required, writes bypass the host page cache and reach
+storage directly. A storage destination keeps its contents between
+runs, so it is cleared before the first iteration whenever validation is enabled. A write therefore
+can't validate against data that an earlier run, or an earlier test, left in the same place.
+
+.. note::
+
+  A block device that TransferBench isn't allowed to write to (``TB_STORAGE_ALLOW_BLOCK_WRITE`` isn't
+  set to ``1``) is never filled, and neither is a file that already holds data
+  (``TB_STORAGE_ALLOW_OVERWRITE`` isn't set to ``1``). A transfer that reads from one transfers its
+  existing contents, and its data validation is skipped with a warning.
+
 How validation is timed
 ========================
 
@@ -121,6 +134,8 @@ For each transfer and each DST, the following steps are performed:
    - **CPU destination** or ``validateDirect = 1``: Point directly at the destination memory.
    - **GPU destination**, ``validateOnDevice = 0``, and ``validateDirect = 0``: Copy destination to a host ``outputBuffer``
      via ``hipMemcpy``, then compare against ``outputBuffer``.
+   - **Storage destination**: Read the storage region into a host ``outputBuffer`` via ``pread``,
+     then compare against ``outputBuffer``.
 
 3. **Comparison:** Performed using ``memcmp(output, expected, numBytes)``. On mismatch, the code finds the first differing index and returns an error with the index, expected value, and actual value.
 

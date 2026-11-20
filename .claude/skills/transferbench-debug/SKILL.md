@@ -29,6 +29,7 @@ Only after that, branch by symptom — see the table below.
 | Bandwidth varies wildly run-to-run | Warmup too short, NUMA/clock policy | `NUM_WARMUPS=10`, `SHOW_ITERATIONS=1`, `SHOW_PERCENTILES=50,90,99` | `references/common-failures.md` §perf |
 | Crash / segfault | Bad memory code (e.g. `F` on a GPU without fine-grain), bad kernel for arch | Run with `dryrun` first; rebuild without optimization for symbol info | `references/common-failures.md` §crash |
 | "Unsupported" / executor missing | Build-time disable (e.g. `DISABLE_NIC_EXEC=1`, `DISABLE_POD_COMM=1`) | `./TransferBench` (no args) — its banner lists which executors are compiled in | `references/common-failures.md` §unsupported |
+| Storage Transfer (`S` with `F`, or `nvme` preset) rejected or fails | `TB_STORAGE_PATHS` unset, hipFile unavailable, or hipFile direct I/O not usable on this host | `./TransferBench` (no args) — storage section shows paths and hipFile availability; retry with `HIPFILE_FORCE_COMPAT_MODE=true` | `references/common-failures.md` §storage |
 | Output is garbled / interleaved across ranks | MPI stderr buffering, no per-rank labels | `mpirun --tag-output` or pipe each rank into a per-rank log | `references/multi-rank-debug.md` §output |
 
 ## The four "always-on" introspection commands
