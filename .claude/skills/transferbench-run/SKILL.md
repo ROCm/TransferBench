@@ -5,7 +5,7 @@ description: Use when the user wants to *run* TransferBench (the ROCm/CUDA memor
 
 # TransferBench
 
-TransferBench is a command-line utility for benchmarking simultaneous data transfers between CPU, GPU, and NIC memory locations using GPU kernels, DMA engines, RDMA NICs, or CPU threads. It runs on AMD (ROCm/HIP) and NVIDIA (CUDA) platforms.
+TransferBench is a command-line utility for benchmarking simultaneous data transfers between CPU, GPU, and NIC memory locations using GPU kernels, DMA engines, RDMA NICs, or CPU threads. It can also benchmark I/O between storage (NVMe-backed files or block devices) and GPU memory using hipFile. It runs on AMD (ROCm/HIP) and NVIDIA (CUDA) platforms; the hipFile executor is HIP-only.
 
 The binary is named `TransferBench` (HIP build) or `TransferBenchCuda` (CUDA build). A prebuilt `TransferBenchCuda` may exist at the repo root; otherwise build with `make` (HIP) or `make TransferBenchCuda` (CUDA).
 
@@ -25,7 +25,9 @@ A **SubExecutor (SE)** is the unit of parallelism inside an executor:
 - CPU executor → CPU thread
 - GPU executor → threadblock / Compute Unit (CU)
 - DMA / Batched-DMA → stream / batch item (must have a single SRC)
-- NIC → Queue Pair
+- TDM → threadblock / Compute Unit (CU)
+- NIC / Nearest-NIC → Queue Pair
+- hipFile (storage) → I/O thread
 
 ## Invocation
 
@@ -75,6 +77,13 @@ Write a small `.cfg` file (see `references/config-format.md`) and pass it as the
 ./TransferBench nica2a        # NIC all-to-all
 ./TransferBench nicrings      # NIC ring tests
 ```
+
+### "How fast is NVMe ↔ GPU?" → nvme preset or storage Transfers
+```bash
+TB_STORAGE_PATHS=/mnt/nvme0/tb.dat ./TransferBench nvme 1G                           # write + read per GPU, validated
+TB_STORAGE_PATHS=/mnt/nvme0/tb.dat ./TransferBench cmdline 1G "1 4 (S0->F0->G0)"     # one hipFile read, 4 I/O threads
+```
+`S0` is the first path in `TB_STORAGE_PATHS` (a file, or a block device such as `/dev/nvme1n1`). `F` is the hipFile executor. Check the reported I/O path (`fastpath` vs `compat`) before comparing numbers, and never set `TB_STORAGE_ALLOW_BLOCK_WRITE=1` without confirming with the user: it lets TransferBench overwrite the listed block devices. A file that already holds data is read-only (writes rejected, reads unvalidated) unless `TB_STORAGE_ALLOW_OVERWRITE=1` is set; use that only for TransferBench's own scratch file, such as the one an earlier run left behind. See `references/config-format.md` and `references/env-vars.md`.
 
 ### "Pod-aware (multi-rank, single MNNVL/XGMI pod)" → pod presets
 ```bash

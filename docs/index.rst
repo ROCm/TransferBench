@@ -1,14 +1,18 @@
 .. meta::
-  :description: TransferBench documentation home. TransferBench is a utility for benchmarking simultaneous memory transfers between CPUs, GPUs, and NICs.
+  :description: TransferBench documentation home. TransferBench is a utility for benchmarking simultaneous memory transfers between CPUs, GPUs, NICs, and storage.
   :keywords: TransferBench, benchmarking utility, memory transfers, GPU transfers, NIC transfers, multinode benchmark
 
 ****************************
 TransferBench documentation
 ****************************
 
-TransferBench is a utility for benchmarking simultaneous memory transfers between user-specified devices (CPUs, GPUs, and NICs). For more information, see :ref:`what-is-transferbench`
+TransferBench is a utility for benchmarking simultaneous memory transfers between user-specified devices (CPUs, GPUs, NICs, and storage). For more information, see :ref:`what-is-transferbench`
 
 The source code is hosted at `<https://github.com/ROCm/TransferBench>`_.
+
+.. note::
+
+   TransferBench is part of the `ROCmValidationSuite (RVS) <https://rocm.docs.amd.com/projects/ROCmValidationSuite/en/latest/index.html>`_ and is installed with it.
 
 .. grid:: 2
   :gutter: 3
@@ -20,6 +24,7 @@ The source code is hosted at `<https://github.com/ROCm/TransferBench>`_.
   .. grid-item-card:: How to
 
     * :ref:`running-transferbench-customized`
+    * :ref:`storage-benchmarking`
 
   .. grid-item-card:: Conceptual
 

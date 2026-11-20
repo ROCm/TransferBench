@@ -15,11 +15,12 @@ You can control the SRC and DST memory locations by indicating the memory type f
 * Coarse-grained, fine-grained, and uncached global device
 * Managed device
 * Null (for an empty transfer)
+* Storage (a file or a block device listed in ``TB_STORAGE_PATHS``)
 
 In addition, you can determine the size of the transfer (number of bytes to copy) for the tests.
 
-You can also specify transfer executors. The options are CPU, kernel-based GPU, and SDMA-based GPU (DMA) executors. TransferBench also provides the option to choose the number of Sub-Executors (SE). The number of SEs specifies the number of CPU threads in the case of a CPU executor and the number of compute units (CU) for a GPU executor.
-For a DMA executor, the SE argument determines the number of streams to be used.
+You can also specify transfer executors. The options are CPU, kernel-based GPU, SDMA-based GPU (DMA and Batched-DMA), TDM, NIC, and storage (hipFile) executors. TransferBench also provides the option to choose the number of Sub-Executors (SE). The number of SEs specifies the number of CPU threads in the case of a CPU executor and the number of compute units (CU) for a GPU executor.
+For a DMA executor, the SE argument determines the number of streams to be used. For a hipFile executor, it determines the number of I/O threads.
 
 You can specify the transfers in a configuration file or use preset configurations for transfers.
 
@@ -36,14 +37,19 @@ Here's a copy operation from a single SRC to DST:
    SRC 1 -> Executor -> DST 1
    SRC X                DST Y
 
-Three executors are supported by TransferBench:
+Eight executors are supported by TransferBench:
 
 .. code-block:: bash
 
   Executor:        SubExecutor:
   1. CPU           CPU thread
   2. GPU           GPU threadblock/Compute Unit (CU)
-  3. DMA           N/A (Can only be used for a single SRC to DST copy)
+  3. DMA           N/A (Must have single SRC, at least one DST)
+  4. NIC           Queue Pair
+  5. Nearest NIC   Queue Pair (Uses NICs closest to SRC and DST)
+  6. Batched-DMA   Batch item (Must have single SRC, at least one DST)
+  7. TDM           GPU threadblock/Compute Unit (CU) (Requires hardware support: AMD gfx1250 or NVIDIA sm_90+)
+  8. hipFile       I/O thread (Storage <-> GPU device memory via hipFileRead/hipFileWrite)
 
 Each line in the configuration file defines a set of transfers, also known as a test, to run in parallel.
 
@@ -99,7 +105,7 @@ Here is the list of arguments used to specify transfers in the config file:
      - Number of transfers to be run in parallel
 
    * - SE
-     - Number of SEs to use (CPU threads or GPU threadblocks)
+     - Number of SEs to use (CPU threads, GPU threadblocks, NIC queue pairs, or storage I/O threads)
 
    * - srcMemL
      - Source memory locations (where the data is read)
@@ -109,6 +115,11 @@ Here is the list of arguments used to specify transfers in the config file:
        | - C: CPU-executed  (indexed from 0 to NUMA nodes - 1)
        | - G: GPU-executed  (indexed from 0 to GPUs - 1)
        | - D: DMA-executor  (indexed from 0 to GPUs - 1)
+       | - B: Batched-DMA-executor  (indexed from 0 to GPUs - 1)
+       | - I#.#: NIC executor  (indexed from 0 to NICs - 1)
+       | - N#.#: Nearest NIC executor  (indexed from 0 to GPUs - 1)
+       | - T: TDM-executor  (indexed from 0 to GPUs - 1)
+       | - F: hipFile-executor  (indexed from 0 to GPUs - 1)
 
    * - dstMemL
      - Destination memory locations (where the data is written)
@@ -130,9 +141,15 @@ Here is the list of arguments used to specify transfers in the config file:
        | - U:    Uncached device memory          (on GPU device, indexed from 0 to [GPUs-1])
        | - M:    Managed device memory           (on GPU device, indexed from 0 to [GPUs-1])
        | - N:    Null memory                     (index ignored)
+       | - S:    Storage (file or block device)  (indexed from 0 to [paths in TB_STORAGE_PATHS - 1])
        |
        | ``D`` in an executor position is the DMA executor. ``D`` in a SRC/DST position is
-       | non-coherent pinned host memory.
+       | non-coherent pinned host memory. Likewise, ``F`` in an executor position is the
+       | hipFile executor, and ``F`` in a SRC/DST position is fine-grain device memory.
+       |
+       | Storage memory (``S``) can only be used with the hipFile (``F``) executor,
+       | together with global device memory (``G``) on the GPU of the executor.
+       | The hipFile executor requires TransferBench to be built with hipFile support.
 
 Round brackets and arrows "->" can be included for human clarity, but will be ignored.
 Lines starting with # are ignored while lines starting with ## are echoed to the output.
@@ -167,6 +184,10 @@ Broadcast from GPU 0 to GPU 0 and GPU 1::
 
    1 16 (G0->G0->G0G1)
 
+Read from storage 0 (the first path in ``TB_STORAGE_PATHS``) into GPU 0 using hipFile with 4 I/O threads::
+
+   1 4 (S0->F0->G0)
+
 .. note::
 
    Running TransferBench with no arguments displays usage instructions and detected topology information.
@@ -200,6 +221,9 @@ Here is the list of preset configurations that can be used instead of configurat
 
    * - ``nic_rings``
      - Measure performance of NICs set up in a ring across ranks
+
+   * - ``nvme``
+     - GPU to storage write and storage to GPU read benchmark test using the hipFile executor
 
    * - ``p2p``
      - Peer-to-peer benchmark test

@@ -443,6 +443,7 @@ public:
     printf(" TB_DUMP_CFG_FILE    - Writes executed transfers to a config file\n");
     printf(" TB_DUMP_LINES       - Dumps randomized input-line statistics for FILL_COMPRESS setup\n");
     printf(" TB_FORCE_SINGLE_POD - Forces all ranks into one pod (skips pod query)\n");
+    printf(" TB_HIPFILE_SKIP_BUF_REGISTER - Set to 1 to skip registering GPU buffers with hipFile (hipFileBufRegister)\n");
     printf(" TB_MASTER_ADDR      - Rank 0 hostname or IPv4 for workers; optional on rank 0 (auto-detected if unset)\n");
     printf(" TB_MASTER_IFACE     - When TB_MASTER_ADDR unset on rank 0, optional interface for IPv4 detection (e.g. eth0)\n");
     printf(" TB_MASTER_PORT      - Used to set Rank 0 port for socket communicator (default: 29500)\n");
@@ -453,8 +454,21 @@ public:
     printf(" TB_SEND_USLEEP      - Microseconds to sleep after each socket SendData call (default: 0)\n");
     printf(" TB_SHOW_ALL_NUMA    - Shows all CPU NUMA nodes incl. those with no cores (default: skip core-less)\n");
     printf(" TB_SINGLE_LOG       - In socket mode, only rank 0 logs when set\n");
+    printf(" TB_STORAGE_ALLOW_BLOCK_WRITE - Set to 1 to allow writing to block devices listed in TB_STORAGE_PATHS (destroys their contents)\n");
+    printf(" TB_STORAGE_ALLOW_OVERWRITE - Set to 1 to allow overwriting files listed in TB_STORAGE_PATHS that already hold data\n");
+    printf(" TB_STORAGE_PATHS    - Comma-separated list of files / block devices used as storage memory (S). SN refers to the N-th path\n");
     printf(" TB_VERBOSE          - Enables additional internal logging\n");
     printf(" TB_WALLCLOCK_RATE   - Overrides queried GPU wallclock rate if needed\n");
+    if (TransferBench::IsHipFileAvailable()) {
+      printf("\n");
+      printf("Environment variables (hipFile library):\n");
+      printf("====================================\n");
+      printf(" These are read by hipFile itself (once, when the hipFile executor is first used) and are never set by TransferBench\n");
+      printf(" HIPFILE_ALLOW_COMPAT_MODE        - false = fail instead of falling back to POSIX I/O via host memory (default: true)\n");
+      printf(" HIPFILE_FORCE_COMPAT_MODE        - true = never use direct (fastpath) I/O between storage and GPU memory (default: false)\n");
+      printf(" HIPFILE_STATS_LEVEL              - 0 = disable hipFile statistics, which makes the I/O path report as unknown (default: 1)\n");
+      printf(" HIPFILE_UNSUPPORTED_FILE_SYSTEMS - true = attempt direct I/O on file systems other than ext4 (data=ordered) / xfs (default: false)\n");
+    }
   }
 
   void Print(std::string const& name, int32_t const value, const char* format, ...) const

@@ -37,14 +37,16 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                SRC 1 -> Executor -> DST 1\n");
   printf("#                SRC X                DST Y\n");
   printf("\n");
-  printf("# Six Executors are supported by TransferBench\n");
+  printf("# Eight Executors are supported by TransferBench\n");
   printf("#   Executor:              SubExecutor:\n");
   printf("#   1) CPU                 CPU thread\n");
   printf("#   2) GPU                 GPU threadblock/Compute Unit (CU)\n");
   printf("#   3) DMA                 N/A.                                 (Must have single SRC, at least one DST)\n");
   printf("#   4) NIC                 Queue Pair\n");
-  printf("#   5) Batched-DMA         Batch item                           (Must have single SRC, at least one DST)\n");
-  printf("#   6) TDM                 GPU threadblock/Compute Unit (CU)    (Requires hardware support: AMD gfx1250 or NVIDIA sm_90+)\n");
+  printf("#   5) Nearest NIC         Queue Pair                           (Uses NICs closest to SRC and DST)\n");
+  printf("#   6) Batched-DMA         Batch item                           (Must have single SRC, at least one DST)\n");
+  printf("#   7) TDM                 GPU threadblock/Compute Unit (CU)    (Requires hardware support: AMD gfx1250 or NVIDIA sm_90+)\n");
+  printf("#   8) hipFile             I/O thread                           (Storage <-> GPU device memory via hipFileRead/hipFileWrite)\n");
 
   printf("\n");
   printf("# Each single line in the configuration file defines a set of Transfers (a Test) to run in parallel\n");
@@ -64,7 +66,7 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("\n");
   printf("# Argument Details:\n");
   printf("#   #Transfers:   Number of Transfers to be run in parallel\n");
-  printf("#   #SEs      :   Number of SubExecutors to use (CPU threads/ GPU threadblocks)\n");
+  printf("#   #SEs      :   Number of SubExecutors to use (CPU threads/ GPU threadblocks/ NIC queue pairs/ storage I/O threads)\n");
   printf("#   srcMemL   :   Source memory locations (Where the data is to be read from)\n");
   printf("#   Executor  :   Executor is specified by a character indicating type, followed by device index (0-indexed)\n");
   printf("#                 - C:    CPU-executed          (Indexed from 0 to # NUMA nodes - 1)\n");
@@ -74,6 +76,7 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                 - I#.#: NIC executor          (Indexed from 0 to # NICs - 1)\n");
   printf("#                 - N#.#: Nearest NIC executor  (Indexed from 0 to # GPUs - 1)\n");
   printf("#                 - T:    TDM-executor          (Indexed from 0 to # GPUs - 1)\n");
+  printf("#                 - F:    hipFile-executor      (Indexed from 0 to # GPUs - 1)\n");
   printf("#   dstMemL   :   Destination memory locations (Where the data is to be written to)\n");
   printf("#   bytesL    :   Number of bytes to copy (0 means use command-line specified size)\n");
   printf("#                 Must be a multiple of 4 and may be suffixed with ('K','M', or 'G')\n");
@@ -90,7 +93,18 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("#                 - G:    Global device memory            (on GPU device indexed from 0 to [# GPUs - 1])\n");
   printf("#                 - F:    Fine-grain device memory        (on GPU device indexed from 0 to [# GPUs - 1])\n");
   printf("#                 - U:    Uncached device memory          (on GPU device indexed from 0 to [# GPUs - 1])\n");
+  printf("#                 - M:    Managed memory                  (on GPU device indexed from 0 to [# GPUs - 1])\n");
   printf("#                 - N:    Null memory                     (index ignored)\n");
+  printf("#                 - S:    Storage (file or block device)  (indexed from 0 to [# paths in TB_STORAGE_PATHS - 1])\n");
+  printf("#\n");
+  printf("#                 Storage memory (S) can only be used with the hipFile (F) executor\n");
+  printf("#                 - Such a Transfer has exactly one SRC and one DST: one is storage memory (S) and the other is\n");
+  printf("#                   global device memory (G) on the GPU of the executor (S0->F0->G0 reads, G0->F0->S0 writes)\n");
+  printf("#                 - TB_STORAGE_PATHS is a comma-separated list of files and/or block devices.  S0 is its first path\n");
+  printf("#                 - Block devices are only written to if TB_STORAGE_ALLOW_BLOCK_WRITE=1 (this destroys their contents)\n");
+  printf("#                 - Files that already hold data are only written to if TB_STORAGE_ALLOW_OVERWRITE=1\n");
+  printf("#                 - Bytes and BYTE_OFFSET should be multiples of 4096 (hipFile otherwise falls back to non-direct I/O)\n");
+  printf("#                 - The hipFile executor (F) requires TransferBench to be built with hipFile support\n");
   printf("\n");
   printf("\n");
   printf("# Examples:\n");
@@ -102,6 +116,8 @@ int HelpPreset([[maybe_unused]] EnvVars&          ev,
   printf("# 1 1 (F0->N0.1->F1)                 Uses 1 QP to transfer data from GPU0 via GPU0's closest NIC to GPU1 via GPU1's closest NIC\n");
   printf("# -2 (G0->N0.1->G1 2 128M) (G1->N1.0->G0 1 256M) Uses Nearest NIC executor to copy 128Mb from GPU0 to GPU1 with 2 QPs,\n");
   printf("#                                                and 256Mb from GPU1 to GPU0 with 1 QP\n");
+  printf("# 1 4 (S0->F0->G0)                   Uses 4 I/O threads to read from storage 0 into GPU0 via hipFile\n");
+  printf("# 1 4 (G0->F0->S0)                   Uses 4 I/O threads to write from GPU0 to storage 0 via hipFile\n");
   printf("# Round brackets and arrows' ->' may be included for human clarity, but will be ignored and are unnecessary\n");
   printf("# Lines starting with # will be ignored. Lines starting with ## will be echoed to output\n");
   printf("\n");

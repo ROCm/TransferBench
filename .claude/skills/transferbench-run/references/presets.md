@@ -18,6 +18,7 @@ For the live list on a given build, run `./TransferBench presets`.
 | `gfxsweep` | Sweeps GFX kernel options for one Transfer. |
 | `hbm` | Local HBM read bandwidth on each GPU. |
 | `healthcheck` | Quick correctness/perf health check (AMD MI300 series only). |
+| `nvme` | GPU → storage write and storage → GPU read per GPU and storage path, via hipFile, with validation. Needs `TB_STORAGE_PATHS`; non-zero exit on failure. |
 | `one2all` | All subsets of parallel transfers from one GPU to all others. |
 | `p2p` | Peer-to-peer device-memory matrix between every GPU pair. |
 | `pcopy` | Parallel copies from a single GPU to other GPUs. |
@@ -70,5 +71,6 @@ These print and exit; they don't run transfers.
 - "All-pairs simultaneous" → `a2a`.
 - "How does perf scale with CUs?" → `scaling` or `gfxsweep`.
 - "Across two nodes via RDMA" → `nicp2p` for matrix, `nica2a` for collective-style.
+- "How fast can a GPU load from / save to NVMe?" → `nvme` with `TB_STORAGE_PATHS` set.
 - "Within an MNNVL pod" → `podp2p` / `poda2a`.
 - "I want to capture what a preset does and tweak it" → run with `TB_DUMP_CFG_FILE=out.cfg`, then edit `out.cfg`.

@@ -43,6 +43,18 @@ General options
       - Untimed warmup iterations per test.
       - ``3``
 
+    * - ``PNP_FLAG_BUFFER``
+      - Size in bytes of the PingPong flag buffer. Each flag slot is 1 byte. Must be positive.
+      - ``1``
+
+    * - ``PNP_STRIDE``
+      - Stride in bytes between flag slots on successive PingPong laps; wraps within the flag buffer. Must be positive, unless the flag buffer is 1 byte (then ``0`` is also allowed).
+      - ``1``
+
+    * - ``PNP_SPIN_LIMIT``
+      - Polls per PingPong wait before giving up on a stalled partner; the transfer then fails with an error naming the lap. ``0`` disables the watchdog (waits never give up, and the kernel is built without the checks).
+      - ``67108864``
+
     * - ``SHOW_BORDERS``
       - Shows ASCII box-drawing characters in tables. Set to ``1`` to show, ``0`` to hide.
       - ``1``
@@ -69,6 +81,18 @@ General options
       - Controls how many transfer sizes are sampled per power-of-2 range when ``num_bytes`` is set to ``0``. For example, ``SAMPLING_FACTOR=4`` produces four evenly spaced sizes between each power of 2.
       - ``1``
 
+    * - ``SHOW_PERCENTILES``
+      - Comma-separated percentiles of iteration duration to report. Leave unset to skip percentile reporting. Each value must be between 1 and 99.
+      - —
+
+    * - ``SWEEP_MIN_POW2``
+      - When ``num_bytes`` is set to ``0``, the starting power-of-two exponent for the transfer size sweep. Unrelated to ``GFX_WORD_SIZE``.
+      - ``10``
+
+    * - ``SWEEP_MAX_POW2``
+      - When ``num_bytes`` is set to ``0``, the ending power-of-two exponent for the transfer size sweep. Unrelated to ``GFX_WORD_SIZE``.
+      - ``29``
+
 .. _data-validation-var:
 
 Data and validation options
@@ -88,11 +112,11 @@ Data and validation options
       - ``0``
 
     * - ``BLOCK_BYTES``
-      - Granularity in bytes for dividing work across sub-executors.
+      - Granularity in bytes for dividing work across sub-executors. Not used by the hipFile Executor, which always divides work in multiples of 4096 bytes.
       - ``256``
 
     * - ``BYTE_OFFSET``
-      - Initial byte offset for allocations. Must be a multiple of 4.
+      - Initial byte offset for allocations. Must be a multiple of 4. For storage transfers, the same offset is applied to the storage region, and a value that isn't a multiple of 4096 makes hipFile use its compatibility path.
       - ``0``
 
     * - ``FILL_COMPRESS``
@@ -210,7 +234,7 @@ GFX and kernel options
       - ``4``
 
     * - ``USE_HIP_EVENTS``
-      - Timing method for GFX and DMA transfers. ``1`` = use HIP events, ``0`` = use CPU wall time.
+      - Timing method for GFX and DMA transfers. ``1`` = use HIP events, ``0`` = use CPU wall time. The CPU, NIC, and hipFile Executors always use CPU wall time.
       - ``1``
 
     * - ``USE_SINGLE_STREAM``
@@ -225,6 +249,10 @@ GFX and kernel options
       - Preferred XCC per source-by-destination GPU pair, specified as a comma-separated list. Supported on AMD hardware only.
       - —
 
+    * - ``GFX_KERNEL``
+      - Selects the GFX kernel. ``-1`` = auto, ``0`` = force ``GpuReduceKernel``, ``1`` = force ``GpuCopyKernel`` (might error if the transfer is ineligible for this kernel).
+      - ``0``
+
 DMA options
 -----------
 
@@ -238,6 +266,32 @@ DMA options
     * - ``USE_HSA_DMA``
       - DMA implementation. ``1`` = use ``hsa_amd_async_copy`` for direct HSA control, ``0`` = use ``hipMemcpy`` for the standard HIP path.
       - ``0``
+
+TDM options
+-----------
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``TDM_BLOCK_ORDER``
+      - How blocks for TDM transfers are ordered. ``0`` = sequential, ``1`` = interleaved, ``2`` = random.
+      - ``0``
+
+    * - ``TDM_BLOCK_SIZE``
+      - Threads per threadblock for TDM (async tensor) kernels. Must be a multiple of 32.
+      - ``256``
+
+    * - ``TDM_LDS_BYTES``
+      - LDS bytes per workgroup for TDM kernels. ``0`` = device max. Accepts ``K``, ``M``, and ``G`` suffixes.
+      - ``0``
+
+.. note::
+
+    In this release, ``TDM_BLOCK_ORDER`` is validated and reported but doesn't change TDM execution order. A fix is planned for a future release.
 
 Variable SubExecutor options
 ------------------------------
@@ -283,6 +337,8 @@ The following environment variables apply only when NIC support is enabled. To e
 
     * - ``NIC_CHUNK_BYTES``
       - Bytes per NIC RDMA chunk.
+
+        Since v1.71.0, a NIC transfer is rejected during validation if any queue pair's work request (the smaller of ``NIC_CHUNK_BYTES`` and the bytes assigned to that queue pair) exceeds the IBV ``max_msg_sz`` of either NIC. Each NIC's value is shown in the ``MaxMsgSz`` column of the topology output. To fix this, reduce ``NIC_CHUNK_BYTES`` or the transfer size, or use more queue pairs.
       - ``1073741824``
 
     * - ``NIC_RELAX_ORDER``
@@ -292,6 +348,18 @@ The following environment variables apply only when NIC support is enabled. To e
     * - ``ROCE_VERSION``
       - RoCE version.
       - ``2``
+
+    * - ``NIC_CQ_POLL_BATCH``
+      - Number of completion queue entries to poll per ``ibv_poll_cq`` call.
+      - ``4``
+
+    * - ``NIC_SERVICE_LEVEL``
+      - InfiniBand service level (``sl``) for IB queue pairs. Must be between 0 and 15.
+      - ``0``
+
+    * - ``NIC_TRAFFIC_CLASS``
+      - DSCP / traffic-class byte for the RoCE GRH. Must be between 0 and 255.
+      - ``0``
 
 HIP runtime variables (client-read)
 -------------------------------------
@@ -337,6 +405,12 @@ Socket-related variables
 
     * - ``TB_SINGLE_LOG``
       - When set, only rank 0 produces output. Useful for multinode socket mode.
+
+    * - ``TB_MASTER_IFACE``
+      - When ``TB_MASTER_ADDR`` is unset on rank 0, the optional network interface used for IPv4 address detection (for example, ``eth0``).
+
+    * - ``TB_SEND_USLEEP``
+      - Microseconds to sleep after each socket ``SendData`` call. Default: ``0``. Useful for diagnosing socket stability.
 
 Backend variables
 -----------------
@@ -407,6 +481,77 @@ Backend variables
     * - ``TB_FORCE_SINGLE_POD``
       - Forces single pod mode, skipping AMD-SMI and NVML pod queries. This assumes that all GPUs are in the same pod and skips cluster membership API calls.
 
+    * - ``TB_SHOW_ALL_NUMA``
+      - Shows all CPU NUMA nodes, including those with no cores. By default, coreless nodes are hidden, which changes the reported CPU indices.
+
+    * - ``TB_WALLCLOCK_RATE``
+      - Overrides the queried GPU wallclock rate when the query returns ``0``.
+
+.. _storage-env-vars:
+
+Storage variables
+-----------------
+
+The following variables configure storage memory (``S``) and the hipFile (``F``) Executor. See :ref:`storage-benchmarking`.
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+
+    * - ``TB_STORAGE_PATHS``
+      - Comma-separated list of storage paths. Storage memory index ``N`` (``SN``) refers to the N-th path, starting from 0. Each path is a regular file or a raw block device. With multiple ranks, each rank reads its own value.
+
+        Each entry must be a distinct file or device, and ranks running on the same host need distinct paths. An empty entry ahead of a path (for example ``,/mnt/nvme1/tb.dat``) is rejected, because it would renumber the indices that follow it. A trailing comma is ignored.
+
+        Regular files are created if needed, grown to the size required by the test, and left in place afterwards. A file that already holds data when TransferBench first uses it is read-only unless ``TB_STORAGE_ALLOW_OVERWRITE=1`` is set. Block devices are never created or resized. A path under ``/dev/`` (other than ``/dev/shm/``) that doesn't exist is rejected instead of being created as a regular file.
+
+        For example:
+
+        .. code-block:: shell
+
+          TB_STORAGE_PATHS=/mnt/nvme0/tb.dat,/dev/nvme1n1   # S0 is the file, S1 is the block device
+
+    * - ``TB_STORAGE_ALLOW_BLOCK_WRITE``
+      - Set to ``1`` to allow TransferBench to write to block devices listed in ``TB_STORAGE_PATHS``. **This destroys the contents of those devices**, including any file system on them. Any other value, or leaving it unset, keeps block devices read-only: transfers that write to them are rejected, and transfers that read from them transfer the existing contents without data validation.
+
+    * - ``TB_STORAGE_ALLOW_OVERWRITE``
+      - Set to ``1`` to allow TransferBench to overwrite regular files listed in ``TB_STORAGE_PATHS`` that already hold data. **This replaces the contents of those files**, including for transfers that only read from storage, because the source data is written to the file first. Any other value, or leaving it unset, keeps such files read-only: they aren't grown, transfers that write to them are rejected, and transfers that read from them transfer the existing contents without data validation.
+
+        A file that doesn't exist or is empty when TransferBench first uses it has nothing to lose, so it is always writable for the rest of that run. A file left behind by an earlier run holds data, so set this variable (or delete the file) to reuse it.
+
+    * - ``TB_HIPFILE_SKIP_BUF_REGISTER``
+      - Set to ``1`` to skip registering the GPU buffer with hipFile (``hipFileBufRegister``) for the hipFile Executor. hipFile then looks the buffer up on every I/O.
+
+hipFile library variables
+-------------------------
+
+The following variables belong to the hipFile library, not to TransferBench. TransferBench never sets them. hipFile reads them once, when the hipFile Executor is first used, so they apply to every hipFile transfer in the process. Boolean values are ``true`` or ``false``. For the full list, see the hipFile documentation.
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``HIPFILE_FORCE_COMPAT_MODE``
+      - Set to ``true`` to make hipFile always use its compatibility path (POSIX I/O through host memory followed by a copy to or from the GPU) instead of direct I/O between storage and GPU memory.
+      - ``false``
+
+    * - ``HIPFILE_ALLOW_COMPAT_MODE``
+      - Set to ``false`` to make hipFile fail instead of using its compatibility path when direct I/O isn't possible. Use this to make sure that a result measures direct I/O.
+      - ``true``
+
+    * - ``HIPFILE_STATS_LEVEL``
+      - Set to ``0`` to turn off hipFile's statistics. TransferBench derives the I/O path of a hipFile transfer from those statistics, so the path is then reported as ``unknown``.
+      - ``1``
+
+    * - ``HIPFILE_UNSUPPORTED_FILE_SYSTEMS``
+      - Set to ``true`` to let hipFile attempt direct I/O on file systems other than ext4 (``data=ordered``) and xfs.
+      - ``false``
+
 HSA runtime variables
 ---------------------
 
@@ -420,3 +565,6 @@ HSA runtime variables
       - Enables SDMA when set to ``1``. To disable, set to ``0``.
 
         This is a HIP runtime environment variable. When SDMA is disabled, the DMA Executor falls back to using blit kernels (GFX) internally.
+
+    * - ``HSA_ENABLE_DXG_DETECTION``
+      - On WSL2 the GPU is driven through ``/dev/dxg``, where direct I/O between storage and GPU memory isn't available. hipFile 0.7.0 and later therefore use their compatibility path when ``/dev/dxg`` exists. Set to ``0`` to skip this check. TransferBench doesn't read this variable itself. With hipFile 0.5.0 or 0.6.0 (ROCm 10.1 and 10.2), set ``HIPFILE_FORCE_COMPAT_MODE=true`` on WSL2.
