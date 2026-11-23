@@ -1,6 +1,6 @@
 .. meta::
-  :description: Overview of TransferBench, a utility for benchmarking simultaneous memory transfers between CPUs, GPUs, and NICs.
-  :keywords: TransferBench, benchmarking utility, memory transfers, GPU transfers, NIC transfers, memory device, Executor
+  :description: Overview of TransferBench, a utility for benchmarking simultaneous memory transfers between CPUs, GPUs, NICs, and storage.
+  :keywords: TransferBench, benchmarking utility, memory transfers, GPU transfers, NIC transfers, storage transfers, NVMe, memory device, Executor
 
 .. _what-is-transferbench:
 
@@ -8,14 +8,14 @@
 What is TransferBench?
 =======================
 
-TransferBench is a utility for benchmarking simultaneous memory transfers between user-specified devices (CPUs, GPUs, and NICs).
+TransferBench is a utility for benchmarking simultaneous memory transfers between user-specified devices (CPUs, GPUs, NICs, and storage).
 
 Memory transfers
 ================
 
 A memory transfer is a single operation where an Executor (EXE) reads and adds values from source (SRC) memory devices, then writes the sum to destination (DST) memory devices. With a single SRC or DST, a memory transfer reduces to a simple copy operation. The memory transfer is commonly denoted by the ``(SRC->EXE->DST)`` triplet.
 
-A memory device consists of a location (a specific device that owns the memory) and a memory type (usually some attribute about the memory). For example, fine-grained HBM memory (memory type) on GPU 0 (location), or pinned CPU memory on NUMA node 1 (location).
+A memory device consists of a location (a specific device that owns the memory) and a memory type (usually some attribute about the memory). For example, fine-grained HBM memory (memory type) on GPU 0 (location), or pinned CPU memory on NUMA node 1 (location). A file or a block device on storage, such as an NVMe drive, can also act as a memory device.
 
 A set of transfers to be run simultaneously is called a Test.
 
@@ -27,7 +27,10 @@ An Executor (EXE) is the specific device that performs a transfer — reading fr
 - **CPU threads**
 - **GPU compute kernels** (GFX)
 - **GPU DMA engines** (SDMA)
+- **GPU batched DMA** (must have a single SRC and at least one DST)
+- **GPU TDM** (Tensor Data Mover; requires hardware support: AMD gfx1250 or NVIDIA sm_90+)
 - **NIC RDMA** (via Remote Direct Memory Access network interface cards)
+- **Storage I/O** between a file or block device and GPU memory, through the hipFile library
 
 Some Executors support **SubExecutors**, which allow further partitioning of the data to be transferred across multiple execution units within the same device.
 
@@ -36,7 +39,9 @@ Features
 
 TransferBench supports the following features:
 
-- **Multiple Executors:** CPU threads, GPU compute kernels (GFX), GPU DMA engines (SDMA), and NIC RDMA.
+- **Multiple Executors:** CPU threads, GPU compute kernels (GFX), GPU DMA engines (SDMA), GPU batched DMA, GPU TDM, NIC RDMA, and storage I/O (hipFile).
+
+- **Storage benchmarking:** Reads and writes between NVMe-backed files or block devices and GPU memory. See :ref:`storage-benchmarking`.
 
 - **Multi-input or multi-output (MIMO) transfers:** Element-wise sum from multiple SRCs to multiple DSTs.
 

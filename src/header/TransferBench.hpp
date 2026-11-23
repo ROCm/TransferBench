@@ -55,6 +55,8 @@ THE SOFTWARE.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
@@ -85,7 +87,11 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
-
+// hipFile executor is only supported when built with hipFile (HIPFILE_ENABLED)
+#ifdef HIPFILE_ENABLED
+#include <hipfile.h>
+#define HIPFILE_EXEC_ENABLED
+#endif
 #endif
 
 #include "tdmCopy.h"
@@ -119,11 +125,13 @@ namespace TransferBench
     EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
     EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
     EXE_GPU_TDM      = 6,                       ///<  GPU TDM executor          (subExecutor = threadblock/CU)
+    EXE_GPU_HIPFILE  = 7,                       ///<  GPU hipFile executor      (subExecutor = I/O thread)
   };
-  char const ExeTypeStr[8] = "CGDINBT";
+  char const ExeTypeStr[9] = "CGDINBTF";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
   inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA || e == EXE_GPU_TDM; }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
+  inline bool IsFileExeType(ExeType e){ return e == EXE_GPU_HIPFILE; }
 
   /**
    * A ExeDevice defines a specific Executor
@@ -161,10 +169,12 @@ namespace TransferBench
     MEM_GPU_UNCACHED    = 8,                    ///< Uncached GPU memory           (via hipDeviceMallocUncached flag)
     MEM_MANAGED         = 9,                    ///< Managed memory
     MEM_NULL            = 10,                   ///< NULL memory - used for empty
+    MEM_STORAGE         = 11,                   ///< Storage (file or block device, indexed into TB_STORAGE_PATHS)
   };
-  char const MemTypeStr[12] = "CPBDKHGFUMN";
+  char const MemTypeStr[13] = "CPBDKHGFUMNS";
   inline bool IsCpuMemType(MemType m) { return (MEM_CPU <= m && m <= MEM_CPU_UNPINNED);}
   inline bool IsGpuMemType(MemType m) { return (MEM_GPU <= m && m <= MEM_MANAGED);}
+  inline bool IsStorageMemType(MemType m) { return m == MEM_STORAGE;}
 
   /**
    * Enumeration of supported GFX kernels
@@ -401,6 +411,27 @@ namespace TransferBench
   };
 
   /**
+   * Enumeration of storage I/O paths
+   *
+   * @note Reports how data was moved between storage memory (MEM_STORAGE) and GPU memory
+   */
+  enum IoPathType
+  {
+    IO_PATH_NONE     = 0,                       ///< Transfer does not involve storage memory
+    IO_PATH_UNKNOWN  = 1,                       ///< Storage Transfer, but the I/O path could not be determined
+    IO_PATH_FASTPATH = 2,                       ///< hipFile fastpath (direct I/O between storage and GPU memory)
+    IO_PATH_COMPAT   = 3,                       ///< hipFile compatibility path (POSIX I/O via host bounce buffer)
+    IO_PATH_MIXED    = 4,                       ///< Both direct and compatibility path I/O were performed
+  };
+  char const* const IoPathTypeStr[] = {
+    "none",
+    "unknown",
+    "fastpath",
+    "compat",
+    "mixed"
+  };
+
+  /**
    * Results for a single Executor
    */
   struct ExeResult
@@ -427,6 +458,8 @@ namespace TransferBench
 
     ExeDevice exeDevice;                        ///< Tracks which executor performed this Transfer (e.g. for EXE_NIC_NEAREST)
     ExeDevice exeDstDevice;                     ///< Tracks actual destination executor (only valid for EXE_NIC/EXE_NIC_NEAREST)
+
+    IoPathType ioPath = IO_PATH_NONE;           ///< Storage I/O path used (only valid for EXE_GPU_HIPFILE)
   };
 
   /**
@@ -485,6 +518,8 @@ namespace TransferBench
   /**
    * Returns information about number of available Executors given a memory type
    *
+   * @note For storage memory (MEM_STORAGE), this is the number of storage paths
+   *
    * @param[in] memType         Memory type to query
    * @param[in] targetRank      Rank to query (-1 for local rank)
    * @returns Number of detected Executors for memType
@@ -497,6 +532,7 @@ namespace TransferBench
    * @note For CPU, this is 0
    * @note For GFX, this refers to the number of XCDs
    * @note For DMA, this refers to the number of DMA engines
+   * @note For hipFile, this is 0
    *
    * @param[in] exeDevice       The specific Executor to query
    * @returns Number of detected executor subindices
@@ -645,6 +681,56 @@ namespace TransferBench
    * @returns Smallest max_msg_sz across the NIC's active ports in bytes, or 0 if unknown
    */
   uint32_t GetNicMaxMsgSize(int nicIndex, int targetRank = -1);
+
+  /**
+   * Returns the number of storage paths available as storage memory (MEM_STORAGE)
+   *
+   * @note Storage paths are provided as a comma-separated list via the TB_STORAGE_PATHS
+   *       environment variable.  Storage memory index N refers to the N-th path in that list
+   * @note This is equivalent to GetNumExecutors(MEM_STORAGE, targetRank)
+   *
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @returns Number of storage paths defined on the target rank
+   */
+  int GetNumStoragePaths(int targetRank = -1);
+
+  /**
+   * Returns the path backing a storage memory index
+   *
+   * @param[in] storageIndex    Storage memory index to query
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @returns Path of the file or block device, or an empty string if storageIndex is out of range
+   */
+  std::string GetStoragePath(int storageIndex, int targetRank = -1);
+
+  /**
+   * Returns whether the list of storage paths of the local rank is well-formed
+   *
+   * @note An empty entry ahead of a path (e.g. TB_STORAGE_PATHS=",/mnt/nvme1/tb.dat") makes the
+   *       list invalid, as it would renumber the storage memory indices that follow it.  Transfers
+   *       using storage memory are rejected while the list is invalid
+   *
+   * @returns true if and only if storage memory indices can be relied upon
+   */
+  bool IsStoragePathListValid();
+
+  /**
+   * Returns whether the hipFile executor (EXE_GPU_HIPFILE) is usable
+   *
+   * @note hipFile is a build-time dependency: the executor is only available if TransferBench
+   *       was compiled with HIPFILE_ENABLED defined (which requires hipfile.h and linking
+   *       against libhipfile)
+   *
+   * @param[in] targetRank      Rank to query (-1 for local rank)
+   * @returns true if and only if TransferBench was built with hipFile support on the target rank
+   */
+  bool IsHipFileAvailable(int targetRank = -1);
+
+  /**
+   * @returns Version of the hipFile library in use on the local rank ("major.minor.patch"),
+   *          or an empty string if hipFile is not available
+   */
+  std::string GetHipFileVersion();
 
   /**
    * Helper function to parse a line containing Transfers into a vector of Transfers
@@ -1181,6 +1267,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
     uint32_t GetNicMaxMsgSize(int nicIndex, int targetRank) const;
+    int GetNumStoragePaths(int targetRank) const;
+    std::string GetStoragePath(int storageIndex, int targetRank) const;
+    bool IsFileExeAvailable(ExeType exeType, int targetRank) const;
 
     // Translate a logical CPU NUMA index (as exposed to users) into the physical
     // NUMA node id used by libnuma / HSA.  Returns the index unchanged if out of range.
@@ -1258,6 +1347,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       std::map<int,                vector<int>> closestNicsToGpu;
       std::map<int,                vector<int>> closestGpusToNic;
       std::map<pair<ExeType, int>, std::string> executorName;
+      std::map<int,                std::string> storagePath;
+      std::map<ExeType,            int>         fileExeAvailable;
     };
 
     std::vector<RankTopology> rankInfo;       ///< Topology of each rank
@@ -1633,6 +1724,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     case MEM_GPU_UNCACHED:    return "GPU_UNCACHED";
     case MEM_MANAGED:         return "GPU_MANAGED";
     case MEM_NULL:            return "NULL";
+    case MEM_STORAGE:         return "STORAGE";
     default:                  return "UNKNOWN";
     }
   }
@@ -1687,6 +1779,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       return {ERR_FATAL, "Unable to allocate 0 bytes"};
     }
     *memPtr = nullptr;
+
+    // Storage memory has no memory pointer.  It is opened via OpenStorage instead
+    if (IsStorageMemType(memDevice.memType)) {
+      return {ERR_FATAL, "Storage memory cannot be allocated as a memory buffer"};
+    }
 
     MemType const& memType = memDevice.memType;
     int deviceIdx = memDevice.memIndex;
@@ -1834,6 +1931,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   static ErrResult DeallocateMemory(MemType memType, void *memPtr, size_t const bytes,
                                     hipMemGenericAllocationHandle_t* memHandle = nullptr)
   {
+    // Storage memory has no memory pointer.  It is released via CloseStorage instead
+    if (IsStorageMemType(memType))
+      return {ERR_FATAL, "Storage memory cannot be deallocated as a memory buffer"};
+
     // Avoid deallocating nullptr
     if (memPtr == nullptr)
       return {ERR_FATAL, "Attempted to free null pointer for %lu bytes", bytes};
@@ -2037,6 +2138,395 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   }
 #endif
 
+// Storage-related functions
+//========================================================================================
+  size_t constexpr STORAGE_ALIGN_BYTES  = 4096;        // Alignment of storage I/O (file offset, size, buffer)
+  size_t constexpr STORAGE_BOUNCE_BYTES = 16 << 20;    // Max size of host bounce buffer for storage prep/validation
+  size_t constexpr STORAGE_MAX_IO_BYTES = 0x7ffff000;  // Max bytes hipFile moves in a single call
+
+  // A path used as storage memory (MEM_STORAGE)
+  struct StorageDevice
+  {
+    std::string     path;                         ///< Path to a regular file or a block device
+    bool            isBlockDevice = false;        ///< Path refers to a block device
+    bool            isWritable    = true;         ///< Whether TransferBench is allowed to write to this path
+    int             fd            = -1;           ///< File descriptor shared by all Transfers (-1 if closed)
+    int             useCount      = 0;            ///< Number of Transfer endpoints currently using this path
+    void*           fileHandle    = nullptr;      ///< hipFile handle shared by all Transfers (if registered)
+    bool            isScratch     = false;        ///< File did not exist or was empty when first seen (holds no other data)
+    bool            wasCreated    = false;        ///< File was created by TransferBench
+    dev_t           idDevice      = 0;            ///< While open: the block device, or the device holding the file
+    ino_t           idInode       = 0;            ///< While open: inode of the file (0 for block devices)
+  };
+
+  static size_t AlignUp(size_t const value, size_t const alignment)
+  {
+    return (value + alignment - 1) / alignment * alignment;
+  }
+
+  static std::mutex& GetStorageMutex()
+  {
+    static std::mutex storageMutex;
+    return storageMutex;
+  }
+
+  // Storage paths are given as a comma-separated list in TB_STORAGE_PATHS.  A MemDevice is
+  // broadcast between ranks as raw bytes and cannot carry a path, so storage memory index N
+  // refers to the N-th entry of this (per-rank) list
+  struct StorageConfig
+  {
+    std::vector<StorageDevice> list;                  ///< Storage paths in the order they were given
+    bool                       hasEmptyEntry = false; ///< An empty entry was given ahead of a path
+  };
+
+  static StorageConfig& GetStorageConfig()
+  {
+    static StorageConfig storageConfig = [] {
+      StorageConfig config;
+      char const* env = getenv("TB_STORAGE_PATHS");
+      if (env) {
+        std::stringstream ss(env);
+        std::string path;
+        bool emptyPending = false;
+        while (std::getline(ss, path, ',')) {
+          size_t const first = path.find_first_not_of(" \t\r\n");
+          if (first == std::string::npos) {
+            emptyPending = true;
+            continue;
+          }
+          // Trailing commas are harmless, but an empty entry ahead of a path (e.g. from an unset
+          // variable in a script) would silently renumber the storage indices that follow it
+          config.hasEmptyEntry |= emptyPending;
+          size_t const last = path.find_last_not_of(" \t\r\n");
+          StorageDevice dev;
+          dev.path = path.substr(first, last - first + 1);
+          config.list.push_back(dev);
+        }
+      }
+      return config;
+    }();
+    return storageConfig;
+  }
+
+  static std::vector<StorageDevice>& GetStorageDeviceList()
+  {
+    return GetStorageConfig().list;
+  }
+
+  // Storage indices cannot be trusted if TB_STORAGE_PATHS has an empty entry ahead of a path
+  static ErrResult CheckStoragePathList()
+  {
+    if (GetStorageConfig().hasEmptyEntry) {
+      return {ERR_FATAL, "TB_STORAGE_PATHS has an empty entry ahead of a path on rank %d, which would renumber "
+              "the storage indices that follow it.  Remove the empty entry", GetRank()};
+    }
+    return ERR_NONE;
+  }
+
+  // Returns whether a path lies under /dev/, where device nodes live (/dev/shm/ is a tmpfs for files)
+  static bool IsDeviceNodePath(std::string const& path)
+  {
+    std::error_code ec;
+    std::filesystem::path absPath = std::filesystem::absolute(path, ec);
+    if (ec) absPath = path;
+    std::filesystem::path resolvedPath = std::filesystem::weakly_canonical(absPath, ec);
+    if (ec) resolvedPath = absPath.lexically_normal();
+    std::string const resolved = resolvedPath.string();
+    return resolved.rfind("/dev/", 0) == 0 && resolved.rfind("/dev/shm/", 0) != 0;
+  }
+
+  // Determines if a storage path is a block device, and whether it may be written to.
+  // Writing destroys whatever is stored there, so it is only permitted
+  // - for a block device, when TB_STORAGE_ALLOW_BLOCK_WRITE=1 is set
+  // - for a regular file that already holds data, when TB_STORAGE_ALLOW_OVERWRITE=1 is set
+  // A file that did not exist or was empty when first seen has nothing to lose, and stays
+  // writable for the rest of the run (so that Tests can reuse the file an earlier Test created)
+  static void ProbeStorageDevice(StorageDevice& dev)
+  {
+    struct stat st;
+    bool const exists = (stat(dev.path.c_str(), &st) == 0);
+    dev.isBlockDevice = (exists && S_ISBLK(st.st_mode));
+    if (!dev.isBlockDevice && !(exists && S_ISREG(st.st_mode) && st.st_size > 0)) dev.isScratch = true;
+    char const* allowWrite = getenv(dev.isBlockDevice ? "TB_STORAGE_ALLOW_BLOCK_WRITE" : "TB_STORAGE_ALLOW_OVERWRITE");
+    dev.isWritable = (!dev.isBlockDevice && dev.isScratch) || (allowWrite && !strcmp(allowWrite, "1"));
+  }
+
+  // Returns whether TransferBench is allowed to write to a (local) storage index
+  static bool IsStorageWritable(int const storageIndex, bool* isBlockDevice = nullptr)
+  {
+    std::lock_guard<std::mutex> lock(GetStorageMutex());
+    std::vector<StorageDevice>& storageList = GetStorageDeviceList();
+    if (storageIndex < 0 || storageIndex >= (int)storageList.size()) return false;
+    StorageDevice& dev = storageList[storageIndex];
+    if (dev.fd < 0) ProbeStorageDevice(dev);
+    if (isBlockDevice) *isBlockDevice = dev.isBlockDevice;
+    return dev.isWritable;
+  }
+
+  // Returns true if any of the given (local) memory devices is storage that may not be written to
+  static bool HasReadOnlyStorage(vector<MemDevice> const& memDevices)
+  {
+    for (auto const& memDevice : memDevices) {
+      if (IsStorageMemType(memDevice.memType) && memDevice.memRank == GetRank() &&
+          !IsStorageWritable(memDevice.memIndex))
+        return true;
+    }
+    return false;
+  }
+
+  // Storage equivalent of AllocateMemory: opens the path backing a storage index and makes
+  // sure it holds at least numBytes.  There is no memory pointer for storage memory, the file
+  // descriptor is provided instead.  All Transfers using a storage index share one descriptor.
+  // Regular files are created and grown as needed.  Block devices are never created, truncated
+  // or resized.  Block devices and files that already hold data are opened read-only (and are
+  // not resized) unless writing to them has been explicitly allowed
+  static ErrResult OpenStorage(int const storageIndex, size_t const numBytes, int& fd)
+  {
+    fd = -1;
+    ERR_CHECK(CheckStoragePathList());
+
+    std::lock_guard<std::mutex> lock(GetStorageMutex());
+    std::vector<StorageDevice>& storageList = GetStorageDeviceList();
+    if (storageIndex < 0 || storageIndex >= (int)storageList.size()) {
+      return {ERR_FATAL, "Storage index %d is out of range (%lu storage paths defined via TB_STORAGE_PATHS)",
+              storageIndex, storageList.size()};
+    }
+    StorageDevice& dev = storageList[storageIndex];
+    char const* path = dev.path.c_str();
+
+    bool const wasOpen = (dev.fd >= 0);
+    if (!wasOpen) {
+      struct stat st;
+      bool const exists = (stat(path, &st) == 0);
+      if (exists && !S_ISREG(st.st_mode) && !S_ISBLK(st.st_mode)) {
+        return {ERR_FATAL, "Storage %d (%s) must be a regular file or a block device", storageIndex, path};
+      }
+      // A device name that does not exist is most likely mistyped.  Creating it would leave a
+      // regular file in devtmpfs (i.e. in host memory) standing in for the intended block device
+      if (!exists && IsDeviceNodePath(dev.path)) {
+        return {ERR_FATAL, "Storage %d (%s) does not exist.  Paths under /dev/ (other than /dev/shm/) are "
+                "not created, as they are expected to be existing block devices", storageIndex, path};
+      }
+      // Creating through a dangling symbolic link would bypass the check above
+      if (!exists && lstat(path, &st) == 0 && S_ISLNK(st.st_mode)) {
+        return {ERR_FATAL, "Storage %d (%s) is a symbolic link to a path that does not exist",
+                storageIndex, path};
+      }
+      ProbeStorageDevice(dev);
+
+      int flags = (dev.isWritable ? O_RDWR : O_RDONLY) | O_CLOEXEC;
+      if (dev.isWritable) {
+        // An exclusive open of a block device fails if the device, or one of its partitions, is
+        // mounted or otherwise claimed, which catches a device name that now refers to a disk in use
+        flags |= dev.isBlockDevice ? O_EXCL : O_CREAT;
+      }
+
+      dev.fd = open(path, flags | O_DIRECT, 0644);
+      if (dev.fd < 0 && errno == EBUSY && (flags & O_EXCL)) {
+        return {ERR_FATAL, "Unable to open storage %d (%s) for writing: the device, or one of its partitions, is "
+                "mounted or in use (possibly by another TransferBench rank, or by another TB_STORAGE_PATHS entry "
+                "that refers to the same device)", storageIndex, path};
+      }
+      if (dev.fd < 0) {
+        return {ERR_FATAL, "Unable to open storage %d (%s): %s", storageIndex, path, strerror(errno)};
+      }
+
+      // The write permission above was decided from the path, so make sure the opened file agrees
+      if (fstat(dev.fd, &st) != 0 || (bool)S_ISBLK(st.st_mode) != dev.isBlockDevice) {
+        close(dev.fd);
+        dev.fd = -1;
+        return {ERR_FATAL, "Storage %d (%s) changed type while being opened", storageIndex, path};
+      }
+
+      // Regions are assigned per storage index, so two indices that refer to the same file or
+      // device would be handed overlapping regions
+      dev.idDevice = dev.isBlockDevice ? st.st_rdev : st.st_dev;
+      dev.idInode  = dev.isBlockDevice ? 0 : st.st_ino;
+      for (int i = 0; i < (int)storageList.size(); i++) {
+        StorageDevice const& other = storageList[i];
+        if (i == storageIndex || other.fd < 0 || other.isBlockDevice != dev.isBlockDevice ||
+            other.idDevice != dev.idDevice || other.idInode != dev.idInode) continue;
+        close(dev.fd);
+        dev.fd = -1;
+        return {ERR_FATAL, "Storage %d (%s) and storage %d (%s) refer to the same %s.  Each TB_STORAGE_PATHS "
+                "entry must be a distinct file or block device", storageIndex, path, i, other.path.c_str(),
+                dev.isBlockDevice ? "block device" : "file"};
+      }
+
+      // Regions are also assigned per process, so a file shared with another rank or process on
+      // this host would be overwritten by both.  Block devices are left alone, as udev briefly
+      // locks them itself (writers are kept apart by the exclusive open instead)
+      if (!dev.isBlockDevice && flock(dev.fd, (dev.isWritable ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 &&
+          errno == EWOULDBLOCK) {
+        close(dev.fd);
+        dev.fd = -1;
+        return {ERR_FATAL, "Storage %d (%s) is locked by another process, most likely another TransferBench rank "
+                "or run.  Ranks running on the same host need distinct storage paths", storageIndex, path};
+      }
+      dev.wasCreated |= !exists;
+    }
+
+    // Storage I/O is performed in multiples of STORAGE_ALIGN_BYTES
+    size_t const neededBytes = AlignUp(numBytes, STORAGE_ALIGN_BYTES);
+    ErrResult err = ERR_NONE;
+    if (dev.isBlockDevice) {
+      // All storage I/O uses explicit offsets, so moving the file position here is harmless
+      off_t const deviceBytes = lseek(dev.fd, 0, SEEK_END);
+      if (deviceBytes < 0) {
+        err = {ERR_FATAL, "Unable to query size of storage %d (%s): %s", storageIndex, path, strerror(errno)};
+      } else if ((size_t)deviceBytes < neededBytes) {
+        err = {ERR_FATAL, "Storage %d (%s) is too small: %lu bytes are required but only %lu are available",
+               storageIndex, path, neededBytes, (size_t)deviceBytes};
+      }
+    } else {
+      struct stat st;
+      if (fstat(dev.fd, &st) != 0) {
+        err = {ERR_FATAL, "Unable to query size of storage %d (%s): %s", storageIndex, path, strerror(errno)};
+      } else if ((size_t)st.st_size < neededBytes && !dev.isWritable) {
+        err = {ERR_FATAL, "Storage %d (%s) is too small: %lu bytes are required but only %lu are available.  "
+               "An existing file is not grown unless TB_STORAGE_ALLOW_OVERWRITE=1 is set",
+               storageIndex, path, neededBytes, (size_t)st.st_size};
+      } else if ((size_t)st.st_size < neededBytes) {
+        // Allocate the blocks up front so that direct I/O never has to extend the file
+        int rc;
+        do {
+          rc = posix_fallocate(dev.fd, 0, neededBytes);
+        } while (rc == EINTR);
+
+        // Only a filesystem that cannot preallocate gets a sparse file instead.  Any other failure
+        // (e.g. out of space) would otherwise only surface once the filesystem has been filled up
+        if (rc == EOPNOTSUPP || rc == EINVAL || rc == ENOSYS) {
+          rc = (ftruncate(dev.fd, neededBytes) == 0) ? 0 : errno;
+        }
+        if (rc != 0) {
+          err = {ERR_FATAL, "Unable to resize storage %d (%s) to %lu bytes: %s",
+                 storageIndex, path, neededBytes, strerror(rc)};
+
+          // A failed allocation can leave the file partially extended
+          bool const restored = (ftruncate(dev.fd, st.st_size) == 0);
+          if (dev.wasCreated) {
+            unlink(path);
+            dev.wasCreated = false;
+          } else if (!restored) {
+            err.errMsg += " (and unable to restore its previous size)";
+          }
+        }
+      }
+    }
+
+    if (err.errType != ERR_NONE) {
+      if (!wasOpen) {
+        close(dev.fd);
+        dev.fd = -1;
+      }
+      return err;
+    }
+
+    dev.useCount++;
+    fd = dev.fd;
+    return ERR_NONE;
+  }
+
+  // Storage equivalent of DeallocateMemory.  The path is closed once its last user is gone
+  static ErrResult CloseStorage(int const storageIndex)
+  {
+    std::lock_guard<std::mutex> lock(GetStorageMutex());
+    std::vector<StorageDevice>& storageList = GetStorageDeviceList();
+    if (storageIndex < 0 || storageIndex >= (int)storageList.size() ||
+        storageList[storageIndex].fd < 0 || storageList[storageIndex].useCount <= 0) {
+      return {ERR_FATAL, "Attempted to close storage %d which is not open", storageIndex};
+    }
+
+    StorageDevice& dev = storageList[storageIndex];
+    if (--dev.useCount > 0) return ERR_NONE;
+
+#ifdef HIPFILE_EXEC_ENABLED
+    if (dev.fileHandle != nullptr) {
+      hipFileHandleDeregister(dev.fileHandle);
+      dev.fileHandle = nullptr;
+    }
+#endif
+    if (dev.isWritable) fdatasync(dev.fd);
+    close(dev.fd);
+    dev.fd = -1;
+    return ERR_NONE;
+  }
+
+// Reads or writes exactly numBytes at fileOffset (all must be multiples of STORAGE_ALIGN_BYTES)
+  static ErrResult StorageBlockIo(int const fd, bool const isWrite, char* buffer,
+                                  size_t const numBytes, size_t const fileOffset)
+  {
+    size_t done = 0;
+    while (done < numBytes) {
+      ssize_t const ret = isWrite ? pwrite(fd, buffer + done, numBytes - done, fileOffset + done)
+                                  : pread (fd, buffer + done, numBytes - done, fileOffset + done);
+      if (ret < 0) {
+        if (errno == EINTR) continue;
+        return {ERR_FATAL, "Unable to %s %lu bytes at offset %lu of storage: %s",
+                isWrite ? "write" : "read", numBytes - done, fileOffset + done, strerror(errno)};
+      }
+      if (ret == 0) {
+        return {ERR_FATAL, "Unexpected end of storage when %s at offset %lu",
+                isWrite ? "writing" : "reading", fileOffset + done};
+      }
+      done += ret;
+    }
+    return ERR_NONE;
+  }
+
+  // Copies data between host memory and storage.  Storage memory has no memory pointer, so
+  // this replaces the hipMemcpy / memset calls used for regular memory when preparing,
+  // clearing and validating it.  If isWrite is set and data is NULL, storage is zero-filled.
+  // The storage descriptor is typically opened with O_DIRECT, so data moves through an aligned
+  // host bounce buffer and every I/O is issued on STORAGE_ALIGN_BYTES boundaries (reading back
+  // the partial first / last block before writing an unaligned range)
+  static ErrResult StorageCopy(int const fd, bool const isWrite, size_t const fileOffset,
+                               void* data, size_t const numBytes)
+  {
+    if (fd < 0) return {ERR_FATAL, "Storage is not open"};
+    if (numBytes == 0) return ERR_NONE;
+
+    size_t const rangeEnd     = fileOffset + numBytes;
+    size_t const alignedStart = fileOffset / STORAGE_ALIGN_BYTES * STORAGE_ALIGN_BYTES;
+    size_t const alignedEnd   = AlignUp(rangeEnd, STORAGE_ALIGN_BYTES);
+    size_t const bounceBytes  = std::min(alignedEnd - alignedStart, STORAGE_BOUNCE_BYTES);
+
+    void* bounceMem = nullptr;
+    if (posix_memalign(&bounceMem, STORAGE_ALIGN_BYTES, bounceBytes) != 0) {
+      return {ERR_FATAL, "Unable to allocate %lu byte bounce buffer for storage", bounceBytes};
+    }
+    char* const bounce = (char*)bounceMem;
+
+    ErrResult err = ERR_NONE;
+    for (size_t pos = alignedStart; pos < alignedEnd && err.errType == ERR_NONE; pos += bounceBytes) {
+      size_t const chunkBytes = std::min(bounceBytes, alignedEnd - pos);
+
+      // Portion of this chunk that lies within the requested range
+      size_t const lo = std::max(pos, fileOffset);
+      size_t const hi = std::min(pos + chunkBytes, rangeEnd);
+
+      if (!isWrite || lo != pos || hi != pos + chunkBytes) {
+        err = StorageBlockIo(fd, false, bounce, chunkBytes, pos);
+        if (err.errType != ERR_NONE) break;
+      }
+      if (isWrite) {
+        if (data) memcpy(bounce + (lo - pos), (char*)data + (lo - fileOffset), hi - lo);
+        else      memset(bounce + (lo - pos), 0, hi - lo);
+        err = StorageBlockIo(fd, true, bounce, chunkBytes, pos);
+      } else {
+        memcpy((char*)data + (lo - fileOffset), bounce + (lo - pos), hi - lo);
+      }
+    }
+    free(bounceMem);
+    return err;
+  }
+
+  // Zero-fills a region of storage (storage equivalent of clearing a memory buffer)
+  static ErrResult ClearStorage(int const fd, size_t const fileOffset, size_t const numBytes)
+  {
+    return StorageCopy(fd, true, fileOffset, nullptr, numBytes);
+  }
+
 // Setup validation-related functions
 //========================================================================================
   // This function resolves executors that may be indexed by "nearest"
@@ -2110,6 +2600,19 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           return {ERR_FATAL, "CPU %d on rank %d cannot allocate memory due to process memory policy/cpuset",
             memDevice.memIndex, memDevice.memRank};
       }
+      return ERR_NONE;
+    }
+
+    if (IsStorageMemType(memDevice.memType)) {
+      if (GetRank() == memDevice.memRank) ERR_CHECK(CheckStoragePathList());
+      int numStorage = GetNumStoragePaths(memDevice.memRank);
+      if (numStorage == 0)
+        return {ERR_FATAL,
+                "No storage paths are defined on rank %d.  Set TB_STORAGE_PATHS to a comma-separated list of "
+                "files or block devices", memDevice.memRank};
+      if (memDevice.memIndex < 0 || memDevice.memIndex >= numStorage)
+        return {ERR_FATAL,
+                "Storage index must be between 0 and %d (instead of %d) on rank %d", numStorage - 1, memDevice.memIndex, memDevice.memRank};
       return ERR_NONE;
     }
     return {ERR_FATAL, "Unsupported memory type (%d)", memDevice.memType};
@@ -2540,15 +3043,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // transfer is small
 
       if (t.exeDevice.exeType != EXE_GPU_DMA) { // GPU DMA-Executor ignores subexecutors
+        // The hipFile executor splits work in multiples of the storage I/O alignment instead
+        int    const blockBytes      = IsFileExeType(t.exeDevice.exeType) ? (int)STORAGE_ALIGN_BYTES
+                                                                          : cfg.data.blockBytes;
         size_t const N               = t.numBytes / sizeof(float);
-        int    const targetMultiple  = cfg.data.blockBytes / sizeof(float);
+        int    const targetMultiple  = blockBytes / sizeof(float);
         int    const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                                 (size_t)t.numSubExecs);
 
         if (maxSubExecToUse < t.numSubExecs)
           errors.push_back({ERR_WARN,
                             "Transfer %d data size is too small - will only use %d of %d subexecutors due to blockBytes of %d",
-                            i, maxSubExecToUse, t.numSubExecs, cfg.data.blockBytes});
+                            i, maxSubExecToUse, t.numSubExecs, blockBytes});
       }
 
       bool const isPingpong = t.numLaps > 0;
@@ -2597,6 +3103,23 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         }
       }
       if (hasFatalError) break;
+
+      // Storage memory has no memory pointer, so only the hipFile executor is able to access it
+      {
+        bool hasStorage = false;
+        for (auto const* memList : {&t.srcs, &t.dsts})
+          for (auto const& mem : *memList)
+            hasStorage |= IsStorageMemType(mem.memType);
+
+        if (hasStorage && (isPingpong || !IsFileExeType(t.exeDevice.exeType))) {
+          errors.push_back({ERR_FATAL,
+            "Transfer %zu: Storage memory (%c) can only be accessed by the hipFile (%c) executor%s",
+            i, MemTypeStr[MEM_STORAGE], ExeTypeStr[EXE_GPU_HIPFILE],
+            isPingpong ? ", and is not supported for pingpong transfers" : ""});
+          hasFatalError = true;
+          break;
+        }
+      }
 
       if (isPingpong) {
         if (t.exeDevice.exeType != EXE_GPU_GFX || t.exeDevicePong.exeType != EXE_GPU_GFX) {
@@ -2991,6 +3514,108 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         hasFatalError = true;
       }
       break;
+      case EXE_GPU_HIPFILE:
+      {
+#if defined(__NVCC__)
+        errors.push_back({ERR_FATAL, "Transfer %d: hipFile executor is not supported on NVIDIA hardware", i});
+        hasFatalError = true;
+        break;
+#else
+        if (!System::Get().IsFileExeAvailable(t.exeDevice.exeType, t.exeDevice.exeRank)) {
+          errors.push_back({ERR_FATAL, "Transfer %d: hipFile executor is requested but is not available on rank %d "
+              "(TransferBench was built without hipFile support.  Rebuild it with the hipFile development "
+              "package (amdrocm-hipfile-dev<version>, which provides hipfile.h) installed)",
+              i, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
+        }
+
+        // The hipFile executor can only move data between one storage location and one GPU buffer
+        if (t.srcs.size() != 1 || t.dsts.size() != 1) {
+          errors.push_back({ERR_FATAL, "Transfer %d: hipFile executor requires exactly 1 SRC and 1 DST", i});
+          hasFatalError = true;
+          break;
+        }
+
+        bool const srcIsStorage = IsStorageMemType(t.srcs[0].memType);
+        bool const dstIsStorage = IsStorageMemType(t.dsts[0].memType);
+        if (srcIsStorage == dstIsStorage) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: hipFile executor requires exactly one of SRC and DST to be storage memory (%c)",
+              i, MemTypeStr[MEM_STORAGE]});
+          hasFatalError = true;
+          break;
+        }
+
+        MemDevice const& gpuMem     = srcIsStorage ? t.dsts[0] : t.srcs[0];
+        MemDevice const& storageMem = srcIsStorage ? t.srcs[0] : t.dsts[0];
+        if (gpuMem.memType != MEM_GPU) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: hipFile executor requires %s to be GPU device memory (%c) instead of (%c)",
+              i, srcIsStorage ? "DST" : "SRC", MemTypeStr[MEM_GPU], MemTypeStr[gpuMem.memType]});
+          hasFatalError = true;
+          break;
+        }
+
+        if (t.exeDevice.exeIndex < 0 || t.exeDevice.exeIndex >= numExecutors) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: hipFile index must be between 0 and %d (instead of %d) for rank %d",
+                            i, numExecutors - 1, t.exeDevice.exeIndex, t.exeDevice.exeRank});
+          hasFatalError = true;
+          break;
+        }
+
+        if (t.srcs[0].memRank != t.exeDevice.exeRank || t.dsts[0].memRank != t.exeDevice.exeRank) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: hipFile executor rank (%d) must be same as SRC memory rank (%d) and DST memory rank (%d)",
+              i, t.exeDevice.exeRank, t.srcs[0].memRank, t.dsts[0].memRank});
+          hasFatalError = true;
+          break;
+        }
+
+        if (gpuMem.memIndex != t.exeDevice.exeIndex) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: hipFile executor %d requires GPU memory to be on GPU %d (instead of GPU %d)",
+              i, t.exeDevice.exeIndex, t.exeDevice.exeIndex, gpuMem.memIndex});
+          hasFatalError = true;
+          break;
+        }
+
+        if (t.exeSubIndex != -1) {
+          errors.push_back({ERR_FATAL, "Transfer %d: hipFile executor does not support subindices", i});
+          hasFatalError = true;
+          break;
+        }
+
+        // Direct I/O between storage and GPU memory requires aligned sizes and offsets
+        if (t.numBytes % STORAGE_ALIGN_BYTES || cfg.data.byteOffset % STORAGE_ALIGN_BYTES) {
+          errors.push_back({ERR_WARN,
+              "Transfer %d: numBytes (%lu) and [data.byteOffset] (%d) are not both multiples of %lu.  "
+              "hipFile will use its compatibility path for unaligned I/O",
+              i, t.numBytes, cfg.data.byteOffset, STORAGE_ALIGN_BYTES});
+        }
+
+        // Raw block devices and files that already hold data are only written to on explicit request
+        bool isBlockDevice = false;
+        if (storageMem.memRank == GetRank() && !IsStorageWritable(storageMem.memIndex, &isBlockDevice)) {
+          std::string const path  = GetStoragePath(storageMem.memIndex, storageMem.memRank);
+          char const* const kind  = isBlockDevice ? "a block device" : "an existing file that holds data";
+          char const* const allow = isBlockDevice ? "TB_STORAGE_ALLOW_BLOCK_WRITE=1" : "TB_STORAGE_ALLOW_OVERWRITE=1";
+          if (dstIsStorage) {
+            errors.push_back({ERR_FATAL,
+                "Transfer %d: Storage %d (%s) is %s.  Writing to it destroys its contents and "
+                "requires %s", i, storageMem.memIndex, path.c_str(), kind, allow});
+            hasFatalError = true;
+            break;
+          }
+          errors.push_back({ERR_WARN,
+              "Transfer %d: Storage %d (%s) is %s and is used read-only.  Its existing contents are "
+              "transferred and data validation is skipped.  Set %s to allow it "
+              "to be overwritten with source data", i, storageMem.memIndex, path.c_str(), kind, allow});
+        }
+        break;
+#endif
+      }
       }
 
       } // !isPingpong
@@ -3385,6 +4010,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     vector<size_t>             batchBytes;        ///< Bytes to copy (per batch item)
 #endif
 
+    // For storage memory (no memory pointer: srcMem / dstMem stay NULL) and the hipFile executor
+    vector<int>                srcStorageFd;      ///< File descriptor per SRC (-1 if not local storage memory)
+    vector<int>                dstStorageFd;      ///< File descriptor per DST (-1 if not local storage memory)
+    size_t                     storageOffset;     ///< Offset of this Transfer's region within its storage path
+    bool                       fileIsRead;        ///< Storage is the SRC (read into GPU memory) instead of the DST
+    int                        fileFd;            ///< File descriptor of the storage side of the Transfer
+    char*                      fileGpuMem;        ///< GPU buffer on the other side of the Transfer
+    void*                      fileHandle;        ///< hipFile handle for the storage side (hipFile executor only)
+    void*                      fileRegisteredBuf; ///< GPU buffer registered with hipFile (NULL if none)
+
     // Pingpong role/lap count on this resource half (0 = normal, >0 = ping, <0 = pong)
     int                        numLaps = 0;
     float*                     partnerFlagMem = nullptr;        ///< Partner dst imported onto this executor (cross-rank/pod)
@@ -3496,6 +4131,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     bool                            stop = false;    ///< Set at destruction
   };
 
+  // Unit of work for a hipFile executor I/O thread
+  struct FileIoTask
+  {
+    int                        rssIdx;            ///< Index into resources of the Transfer this task belongs to
+    size_t                     byteOffset;        ///< Offset of this task within the Transfer
+    size_t                     numBytes;          ///< Number of bytes this task moves
+  };
+
   // Internal resources allocated per Executor
   struct ExeInfo
   {
@@ -3523,6 +4166,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     // For TDM-Executors
     uint32_t                   ldsBytesActual;       ///< Actual number of LDS bytes to use as buffer
+
+    // For hipFile executors
+    vector<FileIoTask>         fileTasks;         ///< Storage I/O tasks (one per subexecutor with work to do)
 
     // Persistent worker pool servicing this executor's Transfers/subexecutors across all
     // iterations.  Created in PrepareExecutor (NUMA-pinned), destroyed in TeardownExecutor.
@@ -4822,6 +5468,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // hold lap flags that no dstReference entry describes
       if (t.numLaps != 0) continue;
 
+      // Read-only storage sources hold whatever was already stored there instead of reference
+      // data, so there are no expected values to compare against
+      if (HasReadOnlyStorage(t.srcs)) continue;
+
       float const* expected = dstReference[t.srcs.size()].data();
       for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
         // Validation is only done on the rank the destination memory is on
@@ -4846,7 +5496,18 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                       transferIdx, dstIdx, t.dsts[dstIdx].memRank, count, firstOff};
           }
         } else {
-          if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+          if (IsStorageMemType(t.dsts[dstIdx].memType)) {
+            // Storage memory has no memory pointer: read the data back from the file instead
+            size_t const fileOffset = rss->storageOffset + cfg.data.byteOffset;
+            if (verbose) {
+              System::Get().Log("[INFO] Validation read: transfer %d DST[%d] %s%d->host  %zu bytes  offset=%zu dst=%p\n",
+                                transferIdx, dstIdx,
+                                GetMemTypeName(t.dsts[dstIdx].memType), t.dsts[dstIdx].memIndex,
+                                t.numBytes, fileOffset, outputBuffer.data());
+            }
+            ERR_CHECK(StorageCopy(rss->dstStorageFd[dstIdx], false, fileOffset, outputBuffer.data(), t.numBytes));
+            output = outputBuffer.data();
+          } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
             output = (rss->dstMem[dstIdx]) + initOffset;
             if (verbose) {
               System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
@@ -4979,13 +5640,21 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     // Figure out the sub-array each subExecutor works on for this Transfer
     // - Partition N as evenly as possible, but try to keep subarray sizes as multiples of data.blockBytes
     //   except the very last one, for alignment reasons
+    // - The hipFile executor instead uses multiples of the storage I/O alignment, as direct
+    //   I/O between storage and GPU memory requires aligned sizes and offsets
     size_t const N              = transfer.numBytes   / sizeof(float);
     int    const initOffset     = cfg.data.byteOffset / sizeof(float);
-    int    const targetMultiple = cfg.data.blockBytes / sizeof(float);
+    int    const targetMultiple = (IsFileExeType(transfer.exeDevice.exeType) ? (int)STORAGE_ALIGN_BYTES
+                                                                             : cfg.data.blockBytes) / sizeof(float);
 
     // In some cases, there may not be enough data for all subExecutors
     int const maxSubExecToUse = std::min((size_t)(N + targetMultiple - 1) / targetMultiple,
                                          (size_t)transfer.numSubExecs);
+
+    // Storage memory has no memory pointer, which is kept as NULL instead of being offset
+    auto offsetPtr = [](float* const base, size_t const offset) -> float* {
+      return base ? base + offset : nullptr;
+    };
 
     vector<SubExecParam>& subExecParam = rss.subExecParamCpu;
     subExecParam.clear();
@@ -5006,8 +5675,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         p.N        = N;
         p.teamSize = transfer.numSubExecs;
         p.teamIdx  = i;
-        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = rss.srcMem[iSrc] + initOffset;
-        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = rss.dstMem[iDst] + initOffset;
+        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = offsetPtr(rss.srcMem[iSrc], initOffset);
+        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = offsetPtr(rss.dstMem[iDst], initOffset);
       } else {
         // Otherwise, each subexecutor works on separate subarrays
         int    const subExecLeft = std::max(0, maxSubExecToUse - i);
@@ -5017,8 +5686,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         p.N        = subExecLeft ? std::min(leftover, ((roundedN / subExecLeft) * targetMultiple)) : 0;
         p.teamSize = 1;
         p.teamIdx  = 0;
-        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = rss.srcMem[iSrc] + initOffset + assigned;
-        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = rss.dstMem[iDst] + initOffset + assigned;
+        for (int iSrc = 0; iSrc < p.numSrcs; ++iSrc) p.src[iSrc] = offsetPtr(rss.srcMem[iSrc], initOffset + assigned);
+        for (int iDst = 0; iDst < p.numDsts; ++iDst) p.dst[iDst] = offsetPtr(rss.dstMem[iDst], initOffset + assigned);
         assigned += p.N;
       }
 
@@ -5140,6 +5809,14 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   static ErrResult ExchangeMemory(MemDevice const& memDevice, ExeDevice const& exeDevice, size_t* pActualBytes,
                                   float** memPtr, hipMemGenericAllocationHandle_t* memHandle)
   {
+    // Storage memory has no memory pointer to exchange (it stays NULL on every rank), and its
+    // file descriptor is only meaningful on the rank that opened it.  Only the size is shared
+    if (IsStorageMemType(memDevice.memType)) {
+      *memPtr = nullptr;
+      System::Get().Broadcast(memDevice.memRank, sizeof(*pActualBytes), pActualBytes);
+      return ERR_NONE;
+    }
+
     // Pass this pointer to all ranks (Used for pointer arithmetic, not defererenced on non-local ranks)
     // NOTE: This will be overwritten on executor rank if pod communication is required
     System::Get().Broadcast(memDevice.memRank, sizeof(*memPtr), memPtr);
@@ -5205,6 +5882,132 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+#ifdef HIPFILE_EXEC_ENABLED
+  // Describes an error returned by hipFile
+  static std::string HipFileErrorString(hipFileError_t const& err)
+  {
+    std::string errMsg = hipFileGetOpErrorString(err.err);
+    if (err.err == hipFileHipDriverError)
+      errMsg += std::string(" (") + hipGetErrorString(err.hip_drv_err) + ")";
+    return errMsg;
+  }
+
+  // Opens the hipFile driver on first use.  hipFile reads its configuration (HIPFILE_* environment
+  // variables) at this point, and it applies to the whole process.  The driver is never closed,
+  // as doing so drops every registered file and it may still be needed by subsequent tests
+  static ErrResult OpenHipFileDriver()
+  {
+    static std::mutex driverMutex;
+    static bool       driverIsOpen = false;
+
+    std::lock_guard<std::mutex> lock(driverMutex);
+    if (driverIsOpen) return ERR_NONE;
+
+    hipFileError_t err = hipFileDriverOpen();
+    if (err.err != hipFileSuccess) {
+      return {ERR_FATAL, "Unable to open hipFile driver: %s", HipFileErrorString(err).c_str()};
+    }
+    driverIsOpen = true;
+    return ERR_NONE;
+  }
+
+  // Returns the hipFile handle for an open storage index, registering it on first use.
+  // hipFile refuses to register a file descriptor twice, so all Transfers using a storage index
+  // share one handle (deregistered by CloseStorage once the last of them is done)
+  static ErrResult GetStorageFileHandle(int const storageIndex, void*& fileHandle)
+  {
+    std::lock_guard<std::mutex> lock(GetStorageMutex());
+    std::vector<StorageDevice>& storageList = GetStorageDeviceList();
+    if (storageIndex < 0 || storageIndex >= (int)storageList.size() || storageList[storageIndex].fd < 0) {
+      return {ERR_FATAL, "Unable to register storage %d with hipFile as it is not open", storageIndex};
+    }
+
+    StorageDevice& dev = storageList[storageIndex];
+    if (dev.fileHandle == nullptr) {
+      hipFileDescr_t descr = {};
+      descr.type      = hipFileHandleTypeOpaqueFD;
+      descr.handle.fd = dev.fd;
+      hipFileError_t err = hipFileHandleRegister(&dev.fileHandle, &descr);
+      if (err.err != hipFileSuccess) {
+        dev.fileHandle = nullptr;
+        return {ERR_FATAL, "Unable to register storage %d (%s) with hipFile: %s",
+                storageIndex, dev.path.c_str(), HipFileErrorString(err).c_str()};
+      }
+    }
+    fileHandle = dev.fileHandle;
+    return ERR_NONE;
+  }
+
+  // Returns the version of the hipFile library in use as "major.minor.patch"
+  static std::string HipFileVersionString()
+  {
+    unsigned major = 0, minor = 0, patch = 0;
+    if (hipFileGetVersion(&major, &minor, &patch).err != hipFileSuccess) return "";
+    return std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch);
+  }
+#endif
+
+#if !defined(__NVCC__)
+  // Prepares hipFile specific resources for a Transfer (after its memory has been set up)
+  static ErrResult PrepareFileTransferResources(ExeDevice     const& exeDevice,
+                                                Transfer      const& t,
+                                                TransferResources&   rss)
+  {
+    // Validation guarantees exactly one SRC and one DST, one of which is storage memory
+    rss.fileIsRead = IsStorageMemType(t.srcs[0].memType);
+    rss.fileFd     = rss.fileIsRead ? rss.srcStorageFd[0] : rss.dstStorageFd[0];
+    rss.fileGpuMem = (char*)(rss.fileIsRead ? rss.dstMem[0] : rss.srcMem[0]);
+    rss.fileHandle = nullptr;
+    rss.fileRegisteredBuf = nullptr;
+
+    [[maybe_unused]] int    const storageIndex = rss.fileIsRead ? t.srcs[0].memIndex : t.dsts[0].memIndex;
+    [[maybe_unused]] size_t const gpuBytes     = rss.fileIsRead ? rss.dstActualBytes[0] : rss.srcActualBytes[0];
+    [[maybe_unused]] bool   const verbose      = System::Get().IsVerbose();
+
+#ifdef HIPFILE_EXEC_ENABLED
+    ERR_CHECK(OpenHipFileDriver());
+    ERR_CHECK(GetStorageFileHandle(storageIndex, rss.fileHandle));
+
+    // Registering the GPU buffer is optional: it saves hipFile from looking the buffer up on
+    // every I/O.  TB_HIPFILE_SKIP_BUF_REGISTER=1 leaves the buffer unregistered
+    char const* skipRegister = getenv("TB_HIPFILE_SKIP_BUF_REGISTER");
+    if (!(skipRegister && !strcmp(skipRegister, "1"))) {
+      ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
+      hipFileError_t err = hipFileBufRegister(rss.fileGpuMem, gpuBytes, 0);
+      if (err.err == hipFileSuccess) {
+        rss.fileRegisteredBuf = rss.fileGpuMem;
+      } else if (verbose) {
+        System::Get().Log("[INFO]   GPU buffer %p not registered with hipFile: %s\n",
+                          rss.fileGpuMem, HipFileErrorString(err).c_str());
+      }
+    }
+    if (verbose) {
+      System::Get().Log("[INFO]   hipFile %s: storage %d handle=%p  GPU buffer %p (%zu bytes, %s)\n",
+                        rss.fileIsRead ? "read" : "write", storageIndex, rss.fileHandle, rss.fileGpuMem,
+                        gpuBytes, rss.fileRegisteredBuf ? "registered" : "not registered");
+    }
+    return ERR_NONE;
+#else
+    return {ERR_FATAL, "hipFile executor is not supported as TransferBench was built without hipFile support"};
+#endif
+  }
+
+  // Releases hipFile specific resources for a Transfer (before its memory is freed)
+  static void TeardownFileTransferResources(TransferResources& rss)
+  {
+#ifdef HIPFILE_EXEC_ENABLED
+    if (rss.fileRegisteredBuf) {
+      hipFileError_t err = hipFileBufDeregister(rss.fileRegisteredBuf);
+      if (err.err != hipFileSuccess && System::Get().IsVerbose()) {
+        System::Get().Log("[INFO]   Unable to deregister GPU buffer %p from hipFile: %s\n",
+                          rss.fileRegisteredBuf, HipFileErrorString(err).c_str());
+      }
+    }
+#endif
+    rss.fileRegisteredBuf = nullptr;
+  }
+#endif
+
   // Prepare each executor
   // Allocates memory for src/dst, prepares subexecutors, executor-specific data structures
   static ErrResult PrepareExecutor(ConfigOptions    const& cfg,
@@ -5223,8 +6026,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         exeInfo.transferRssIdx.push_back(r);
 
     // Executor BDF and NUMA are constant across all transfers — compute once
-    std::string exeBdf = IsGpuExeType(exeDevice.exeType) ? GetGpuBdf(exeDevice.exeIndex) : "";
-    int exeNuma = IsGpuExeType(exeDevice.exeType)
+    // (The hipFile executor is indexed by the GPU whose memory it reads into / writes from)
+    bool const exeIsOnGpu = IsGpuExeType(exeDevice.exeType) || IsFileExeType(exeDevice.exeType);
+    std::string exeBdf = exeIsOnGpu ? GetGpuBdf(exeDevice.exeIndex) : "";
+    int exeNuma = exeIsOnGpu
                   ? GetClosestCpuNumaToGpu(exeDevice.exeIndex, exeDevice.exeRank)
                   : IsNicExeType(exeDevice.exeType)
                     ? GetClosestCpuNumaToNic(exeDevice.exeIndex, exeDevice.exeRank)
@@ -5257,6 +6062,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       rss.srcMem.resize(srcs.size());
       rss.srcActualBytes.resize(srcs.size());
       rss.srcMemHandle.resize(srcs.size(), NULL);
+      rss.srcStorageFd.assign(srcs.size(), -1);
       for (int iSrc = 0; iSrc < srcs.size(); ++iSrc) {
         MemDevice const& srcMemDevice = srcs[iSrc];
         size_t srcAllocBytes = t.numBytes + cfg.data.byteOffset;
@@ -5279,7 +6085,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
         // Allocate source memory (on the correct rank)
         bool requiresFabricHandle = (srcMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
-        if (srcMemDevice.memRank == localRank) {
+        if (IsStorageMemType(srcMemDevice.memType)) {
+          // Storage memory is opened instead of allocated, and has no memory pointer
+          if (srcMemDevice.memRank == localRank) {
+            if (verbose) {
+              System::Get().Log("[INFO]   SRC[%d]: %s idx=%d (Rank %d) %s  %zu bytes at offset %zu\n",
+                                iSrc, GetMemTypeName(srcMemDevice.memType), srcMemDevice.memIndex,
+                                srcMemDevice.memRank,
+                                GetStoragePath(srcMemDevice.memIndex, srcMemDevice.memRank).c_str(),
+                                srcAllocBytes, rss.storageOffset);
+            }
+            ERR_CHECK(OpenStorage(srcMemDevice.memIndex, rss.storageOffset + srcAllocBytes, rss.srcStorageFd[iSrc]));
+            rss.srcActualBytes[iSrc] = srcAllocBytes;
+          }
+        } else if (srcMemDevice.memRank == localRank) {
           if (verbose) {
             std::string bdf = IsGpuMemType(srcMemDevice.memType) ? GetGpuBdf(srcMemDevice.memIndex) : "";
             System::Get().Log("[INFO]   SRC[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
@@ -5318,6 +6137,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       rss.dstMem.resize(dsts.size());
       rss.dstActualBytes.resize(dsts.size());
       rss.dstMemHandle.resize(dsts.size(), NULL);
+      rss.dstStorageFd.assign(dsts.size(), -1);
       for (int iDst = 0; iDst < dsts.size(); ++iDst) {
         MemDevice const& dstMemDevice = dsts[iDst];
 
@@ -5346,7 +6166,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           if (IsGpuExeType(partnerExe.exeType) && partnerExe.exeRank != dstMemDevice.memRank)
             requiresFabricHandle = true;
         }
-        if (dstMemDevice.memRank == localRank) {
+        if (IsStorageMemType(dstMemDevice.memType)) {
+          // Storage memory is opened instead of allocated, and has no memory pointer
+          if (dstMemDevice.memRank == localRank) {
+            if (verbose) {
+              System::Get().Log("[INFO]   DST[%d]: %s idx=%d (Rank %d) %s  %zu bytes at offset %zu\n",
+                                iDst, GetMemTypeName(dstMemDevice.memType), dstMemDevice.memIndex,
+                                dstMemDevice.memRank,
+                                GetStoragePath(dstMemDevice.memIndex, dstMemDevice.memRank).c_str(),
+                                dstAllocBytes, rss.storageOffset);
+            }
+            ERR_CHECK(OpenStorage(dstMemDevice.memIndex, rss.storageOffset + dstAllocBytes, rss.dstStorageFd[iDst]));
+            rss.dstActualBytes[iDst] = dstAllocBytes;
+          }
+        } else if (dstMemDevice.memRank == localRank) {
           if (verbose) {
             std::string bdf = IsGpuMemType(dstMemDevice.memType) ? GetGpuBdf(dstMemDevice.memIndex) : "";
             System::Get().Log("[INFO]   DST[%d]: %s idx=%d NUMA=%s%s%s (Rank %d) %zu bytes%s\n",
@@ -5574,6 +6407,28 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
     }
 
+    // Prepare for the hipFile executor
+    if (IsFileExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
+#if defined(__NVCC__)
+      return {ERR_FATAL, "hipFile executor is not supported on NVIDIA hardware"};
+#else
+      exeInfo.fileTasks.clear();
+      for (int rssIdx = 0; rssIdx < (int)exeInfo.resources.size(); rssIdx++) {
+        TransferResources& rss = exeInfo.resources[rssIdx];
+        Transfer const& t = transfers[rss.transferIdx];
+        ERR_CHECK(PrepareFileTransferResources(exeDevice, t, rss));
+
+        // Each subexecutor is an I/O thread that works on its own part of the Transfer
+        size_t byteOffset = 0;
+        for (auto const& p : rss.subExecParamCpu) {
+          size_t const numBytes = p.N * sizeof(float);
+          if (numBytes) exeInfo.fileTasks.push_back({rssIdx, byteOffset, numBytes});
+          byteOffset += numBytes;
+        }
+      }
+#endif
+    }
+
     // Check that GPU wallclock rate is non-zero (GFX and TDM both use it for in-kernel cycle timing)
     if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_TDM) &&
         exeInfo.wallClockRate == 0 && exeDevice.exeRank == localRank) {
@@ -5602,6 +6457,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                           [physNode] { numa_run_on_node(physNode); }));
       } else if (IsGpuExeType(exeDevice.exeType)) {
         int const numThreads = std::max({1, (int)exeInfo.resources.size(), (int)exeInfo.streams.size()});
+        int const exeIndex   = exeDevice.exeIndex;
+        int const physNode   = (exeNuma >= 0) ? System::Get().GetCpuPhysicalNode(exeNuma) : -1;
+        exeInfo.pool.reset(new ThreadPool(numThreads, [physNode, exeIndex] {
+          if (physNode >= 0) numa_run_on_node(physNode);
+          (void)hipSetDevice(exeIndex);
+        }));
+      } else if (IsFileExeType(exeDevice.exeType)) {
+        // One thread per subexecutor, as each issues blocking I/O calls.  hipFile acts on
+        // the calling thread's current device, so every thread is bound to the executor's GPU
+        int const numThreads = std::max(1, (int)exeInfo.fileTasks.size());
         int const exeIndex   = exeDevice.exeIndex;
         int const physNode   = (exeNuma >= 0) ? System::Get().GetCpuPhysicalNode(exeNuma) : -1;
         exeInfo.pool.reset(new ThreadPool(numThreads, [physNode, exeIndex] {
@@ -5736,9 +6601,26 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                           rss.numLaps > 0 ? " (ping)" : rss.numLaps < 0 ? " (pong)" : "");
       }
 
+#if !defined(__NVCC__)
+      // Release hipFile related resources (before the GPU buffers they refer to are freed)
+      if (IsFileExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
+        TeardownFileTransferResources(rss);
+      }
+#endif
+
       // Deallocate source memory
       for (int iSrc = 0; iSrc < (int)srcs.size(); ++iSrc) {
-        if (srcs[iSrc].memRank == localRank) {
+        if (IsStorageMemType(srcs[iSrc].memType)) {
+          // Storage memory is closed instead of deallocated (only if this rank managed to open it)
+          if (iSrc < (int)rss.srcStorageFd.size() && rss.srcStorageFd[iSrc] >= 0) {
+            if (verbose) {
+              System::Get().Log("[INFO]   Close SRC[%d]: %s idx=%d\n",
+                                iSrc, GetMemTypeName(srcs[iSrc].memType), srcs[iSrc].memIndex);
+            }
+            ERR_CHECK(CloseStorage(srcs[iSrc].memIndex));
+            rss.srcStorageFd[iSrc] = -1;
+          }
+        } else if (srcs[iSrc].memRank == localRank) {
           if (verbose) {
             System::Get().Log("[INFO]   Free SRC[%d]: %s idx=%d %p (%zu bytes)\n",
                               iSrc, GetMemTypeName(srcs[iSrc].memType),
@@ -5762,7 +6644,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       // Deallocate destination memory
       for (int iDst = 0; iDst < (int)dsts.size(); ++iDst) {
-        if (dsts[iDst].memRank == localRank) {
+        if (IsStorageMemType(dsts[iDst].memType)) {
+          // Storage memory is closed instead of deallocated (only if this rank managed to open it)
+          if (iDst < (int)rss.dstStorageFd.size() && rss.dstStorageFd[iDst] >= 0) {
+            if (verbose) {
+              System::Get().Log("[INFO]   Close DST[%d]: %s idx=%d\n",
+                                iDst, GetMemTypeName(dsts[iDst].memType), dsts[iDst].memIndex);
+            }
+            ERR_CHECK(CloseStorage(dsts[iDst].memIndex));
+            rss.dstStorageFd[iDst] = -1;
+          }
+        } else if (dsts[iDst].memRank == localRank) {
           if (verbose) {
             System::Get().Log("[INFO]   Free DST[%d]: %s idx=%d %p (%zu bytes)\n",
                               iDst, GetMemTypeName(dsts[iDst].memType),
@@ -5852,6 +6744,61 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     }
 
     return ERR_NONE;
+  }
+
+  // Best-effort release of what a local hipFile executor holds, for a Test that is
+  // abandoned after a failure and so never reaches TeardownExecutor.  Open storage paths and
+  // hipFile registrations outlive a Test, so they (and the GPU buffers) would otherwise stay held
+  // for the rest of the process.  Tolerates an executor that was only partially prepared
+  static void AbandonFileExecutor(ExeDevice        const& exeDevice,
+                                  vector<Transfer> const& transfers,
+                                  ExeInfo&                exeInfo)
+  {
+#if !defined(__NVCC__)
+    if (!IsFileExeType(exeDevice.exeType) || exeDevice.exeRank != GetRank()) return;
+
+    exeInfo.pool.reset();
+    for (auto& rss : exeInfo.resources) {
+      Transfer const& t = transfers[rss.transferIdx];
+      if (System::Get().IsVerbose()) {
+        System::Get().Log("[INFO] Rank %d releasing resources of failed transfer %d\n", GetRank(), rss.transferIdx);
+      }
+      TeardownFileTransferResources(rss);
+
+      for (int isDst = 0; isDst <= 1; isDst++) {
+        vector<MemDevice> const& mems       = isDst ? t.dsts                 : t.srcs;
+        vector<int>&             storageFds = isDst ? rss.dstStorageFd       : rss.srcStorageFd;
+        vector<float*>&          memPtrs    = isDst ? rss.dstMem             : rss.srcMem;
+        vector<size_t>&          memBytes   = isDst ? rss.dstActualBytes     : rss.srcActualBytes;
+        vector<float*>&          expected   = isDst ? rss.dstExpectedMem     : rss.srcExpectedMem;
+        vector<size_t>&          expBytes   = isDst ? rss.dstExpectedBytes   : rss.srcExpectedBytes;
+        auto&                    scratch    = isDst ? rss.dstValidateScratch : rss.srcValidateScratch;
+
+        for (size_t i = 0; i < mems.size(); i++) {
+          if (IsStorageMemType(mems[i].memType)) {
+            if (i < storageFds.size() && storageFds[i] >= 0) {
+              (void)CloseStorage(mems[i].memIndex);
+              storageFds[i] = -1;
+            }
+            continue;
+          }
+          MemType const memType = mems[i].memType;
+          if (i < memPtrs.size() && i < memBytes.size() && memPtrs[i]) {
+            (void)DeallocateMemory(memType, memPtrs[i], memBytes[i]);
+            memPtrs[i] = nullptr;
+          }
+          if (i < expected.size() && i < expBytes.size() && expected[i]) {
+            (void)DeallocateMemory(memType, expected[i], expBytes[i]);
+            expected[i] = nullptr;
+          }
+          if (i < scratch.size() && scratch[i]) {
+            (void)DeallocateMemory(memType, scratch[i], 2 * sizeof(unsigned long long));
+            scratch[i] = nullptr;
+          }
+        }
+      }
+    }
+#endif
   }
 
 // PingPong Wait primitives
@@ -7248,6 +8195,179 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   }
 #endif // BMA_EXEC_ENABLED
 
+// hipFile Executor-related functions
+//========================================================================================
+#if !defined(__NVCC__)
+  // Moves one subexecutor's share of a Transfer between storage and GPU memory
+  static ErrResult ExecuteFileTask(ConfigOptions const& cfg,
+                                   TransferResources const& rss,
+                                   FileIoTask    const& task)
+  {
+    char const* const opName = rss.fileIsRead ? "read" : "write";
+
+    // Data is laid out identically in the GPU buffer and in this Transfer's region of storage
+    size_t const gpuOffset  = cfg.data.byteOffset + task.byteOffset;
+    size_t const fileOffset = rss.storageOffset + gpuOffset;
+
+    // A single call moves a limited number of bytes and may move fewer than requested
+    size_t done = 0;
+    while (done < task.numBytes) {
+      [[maybe_unused]] size_t const numBytes = std::min(task.numBytes - done, STORAGE_MAX_IO_BYTES);
+      size_t moved = 0;
+
+#ifdef HIPFILE_EXEC_ENABLED
+      ssize_t const ret = rss.fileIsRead
+        ? hipFileRead (rss.fileHandle, rss.fileGpuMem, numBytes, fileOffset + done, gpuOffset + done)
+        : hipFileWrite(rss.fileHandle, rss.fileGpuMem, numBytes, fileOffset + done, gpuOffset + done);
+      if (ret == -1) {
+        return {ERR_FATAL, "Transfer %d: hipFile %s of %lu bytes at offset %lu failed: %s",
+                rss.transferIdx, opName, numBytes, fileOffset + done, strerror(errno)};
+      } else if (ret < 0) {
+        // Other negative values are either a negated hipFile error or a negated HIP error
+        std::string errMsg;
+        if (-ret > HIPFILE_BASE_ERR) {
+          errMsg = hipFileGetOpErrorString((hipFileOpError_t)(-ret));
+          if (-ret == hipFileHipDriverError)
+            errMsg += std::string(" (") + hipGetErrorString(hipGetLastError()) + ")";
+        } else {
+          // The HIP runtime rejected direct I/O, which hipFile does not retry on its compatibility path
+          errMsg = std::string("HIP Error: ") + hipGetErrorString((hipError_t)(-ret)) +
+                   ".  hipFile's fastpath may not be usable here (HIPFILE_FORCE_COMPAT_MODE=true selects"
+                   " its compatibility path instead)";
+        }
+        return {ERR_FATAL, "Transfer %d: hipFile %s of %lu bytes at offset %lu failed (%ld): %s",
+                rss.transferIdx, opName, numBytes, fileOffset + done, (long)ret, errMsg.c_str()};
+      }
+      moved = ret;
+#else
+      return {ERR_FATAL, "hipFile executor is not supported as TransferBench was built without hipFile support"};
+#endif
+
+      if (moved == 0) {
+        return {ERR_FATAL, "Transfer %d: hipFile %s unexpectedly moved no data at offset %lu",
+                rss.transferIdx, opName, fileOffset + done};
+      }
+      done += moved;
+    }
+    return ERR_NONE;
+  }
+
+  // Execution of a single hipFile executor
+  static ErrResult RunFileExecutor(int           const  iteration,
+                                   ConfigOptions const& cfg,
+                                   int           const  exeIndex,
+                                   ExeInfo&             exeInfo)
+  {
+    using Clock = std::chrono::high_resolution_clock;
+
+    int const numTasks = (int)exeInfo.fileTasks.size();
+    int const numRss   = (int)exeInfo.resources.size();
+
+    std::vector<ErrResult>         taskErr(numTasks);
+    std::vector<Clock::time_point> taskStop(numTasks);
+    std::vector<double>            rssMsec(numRss, 0.0);
+    double exeMsec = 0.0;
+
+    int subIterations = 0;
+    do {
+      // Only the I/O itself is timed
+      auto const cpuStart = Clock::now();
+
+      exeInfo.pool->ParallelFor(numTasks, [&](int i) {
+        FileIoTask const& task = exeInfo.fileTasks[i];
+        taskErr[i]  = ExecuteFileTask(cfg, exeInfo.resources[task.rssIdx], task);
+        taskStop[i] = Clock::now();
+      });
+      for (auto& e : taskErr) ERR_CHECK(e);
+
+      // A Transfer is complete once the last of its subexecutors is
+      std::vector<Clock::time_point> rssStop(numRss, cpuStart);
+      for (int i = 0; i < numTasks; i++) {
+        int const rssIdx = exeInfo.fileTasks[i].rssIdx;
+        rssStop[rssIdx] = std::max(rssStop[rssIdx], taskStop[i]);
+      }
+      for (int rssIdx = 0; rssIdx < numRss; rssIdx++)
+        rssMsec[rssIdx] += std::chrono::duration_cast<std::chrono::duration<double>>(rssStop[rssIdx] - cpuStart).count() * 1000.0;
+
+      auto const cpuDelta = Clock::now() - cpuStart;
+      exeMsec += std::chrono::duration_cast<std::chrono::duration<double>>(cpuDelta).count() * 1000.0;
+    } while (++subIterations != cfg.general.numSubIterations);
+
+    if (iteration >= 0) {
+      exeInfo.totalDurationMsec += exeMsec / cfg.general.numSubIterations;
+      for (int rssIdx = 0; rssIdx < numRss; rssIdx++) {
+        TransferResources& rss = exeInfo.resources[rssIdx];
+        double const deltaMsec = rssMsec[rssIdx] / cfg.general.numSubIterations;
+        rss.totalDurationMsec += deltaMsec;
+        if (cfg.general.recordPerIteration)
+          rss.perIterMsec.push_back(deltaMsec);
+      }
+    }
+    return ERR_NONE;
+  }
+#endif
+
+#ifdef HIPFILE_EXEC_ENABLED
+  // Number of hipFile I/Os performed per GPU on each I/O path (since the driver was opened)
+  struct HipFileIoCounts
+  {
+    std::vector<uint64_t> fastpath;
+    std::vector<uint64_t> compat;
+  };
+
+  // Collects per-GPU hipFile I/O counts.  Returns false if hipFile cannot provide them
+  static bool GetHipFileIoCounts(HipFileIoCounts& counts)
+  {
+    counts = {};
+
+    // hipFile provides I/O statistics since version 0.5.0
+#if HIPFILE_VERSION_MAJOR > 0 || HIPFILE_VERSION_MINOR >= 5
+    // Leave slack after the structure in case a newer hipFile fills in more than the layout
+    // TransferBench was built against
+    std::vector<uint64_t> buffer((sizeof(hipFileStatsLevel3_t) + 65536) / sizeof(uint64_t), 0);
+    hipFileStatsLevel3_t* stats = (hipFileStatsLevel3_t*)buffer.data();
+    hipFileError_t err = hipFileGetStatsL3(stats);
+    if (err.err != hipFileSuccess || stats->num_gpus > HIPFILE_MAX_GPUS) return false;
+
+    for (int i = 0; i < HIPFILE_MAX_GPUS; i++) {
+      hipFilePerGpuStats_t const& gpuStats = stats->per_gpu_stats[i];
+      counts.fastpath.push_back(gpuStats.n_nvfs_reads  + gpuStats.n_nvfs_writes);
+      counts.compat.push_back  (gpuStats.n_posix_reads + gpuStats.n_posix_writes);
+    }
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  // Determines which I/O path hipFile used on a GPU between two sets of I/O counts
+  static IoPathType GetHipFileIoPath(HipFileIoCounts const& before,
+                                     HipFileIoCounts const& after,
+                                     int             const  gpuIndex)
+  {
+    int const numGpus = (int)std::min(before.fastpath.size(), after.fastpath.size());
+
+    uint64_t fastpath = 0, compat = 0;
+    if (gpuIndex >= 0 && gpuIndex < numGpus) {
+      fastpath = after.fastpath[gpuIndex] - before.fastpath[gpuIndex];
+      compat   = after.compat[gpuIndex]   - before.compat[gpuIndex];
+    }
+
+    // hipFile may number GPUs differently.  If nothing was counted for this GPU, go by the totals
+    if (fastpath == 0 && compat == 0) {
+      for (int i = 0; i < numGpus; i++) {
+        fastpath += after.fastpath[i] - before.fastpath[i];
+        compat   += after.compat[i]   - before.compat[i];
+      }
+    }
+
+    if (fastpath && compat) return IO_PATH_MIXED;
+    if (fastpath)           return IO_PATH_FASTPATH;
+    if (compat)             return IO_PATH_COMPAT;
+    return IO_PATH_UNKNOWN;
+  }
+#endif
+
 // TDM Executor-related functions
 //========================================================================================
 #if TDM_SUPPORTED
@@ -7467,6 +8587,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 #ifdef BMA_EXEC_ENABLED
     case EXE_GPU_BDMA: return RunBmaExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
 #endif
+#if !defined(__NVCC__)
+    case EXE_GPU_HIPFILE:   return RunFileExecutor(iteration, cfg, exeDevice.exeIndex, exeInfo);
+#endif
     default:            return {ERR_FATAL, "Unsupported executor (%d)", exeDevice.exeType};
     }
   }
@@ -7595,6 +8718,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int maxNumSrcs = 0;
     size_t maxNumBytes = 0;
     std::map<ExeDevice, ExeInfo> executorMap;
+    std::map<pair<int, int>, size_t> storageBytesUsed;
     for (int i = 0; i < transfers.size(); i++) {
       Transfer const& t = transfers[i];
       ExeDevice exeDevice;
@@ -7603,6 +8727,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       TransferResources resource = {};
       resource.transferIdx = i;
       resource.numLaps = t.numLaps;
+
+      // Each Transfer gets its own (aligned) region of the storage path it uses, so that
+      // Transfers sharing a storage path do not overwrite each other's data
+      for (auto const* memList : {&t.srcs, &t.dsts}) {
+        for (auto const& mem : *memList) {
+          if (!IsStorageMemType(mem.memType)) continue;
+          size_t& bytesUsed = storageBytesUsed[{mem.memRank, mem.memIndex}];
+          resource.storageOffset = bytesUsed;
+          bytesUsed += AlignUp(t.numBytes + cfg.data.byteOffset, STORAGE_ALIGN_BYTES);
+        }
+      }
 
       bool isPingpong = t.numLaps != 0;
 
@@ -7647,6 +8782,21 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int const localRank = GetRank();
     vector<ExeDevice> localExecutors;
     vector<TransferResources*> transferResources;
+
+    // The failure exits from here on return before the executors are torn down
+    struct FileExecutorCleanup
+    {
+      std::map<ExeDevice, ExeInfo>& executorMap;
+      vector<Transfer> const&       transfers;
+      bool                          isNeeded;
+      ~FileExecutorCleanup()
+      {
+        if (!isNeeded) return;
+        for (auto& exeInfoPair : executorMap)
+          AbandonFileExecutor(exeInfoPair.first, transfers, exeInfoPair.second);
+      }
+    } fileExecutorCleanup{executorMap, transfers, true};
+
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
@@ -7694,14 +8844,63 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         for (int numSrcs = 0; numSrcs < minNumSrcs; numSrcs++)
           dstReference[numSrcs].clear();
 
-      // Initialize all src memory buffers (if on local rank)
       bool const verbose = System::Get().IsVerbose();
+
+      // Storage keeps its contents between runs (memory destinations are zeroed when allocated),
+      // so clear storage destinations to make sure validation only passes on data this run delivered
+      if (validateEnabled) {
+        for (auto resource : transferResources) {
+          Transfer const& t = transfers[resource->transferIdx];
+          if (t.numLaps != 0) continue;
+          for (int dstIdx = 0; dstIdx < (int)resource->dstStorageFd.size(); dstIdx++) {
+            MemDevice const& md = t.dsts[dstIdx];
+            if (md.memRank != localRank || !IsStorageMemType(md.memType)) continue;
+            size_t const fileOffset = resource->storageOffset + cfg.data.byteOffset;
+            if (verbose) {
+              System::Get().Log("[INFO] Data prep clear: transfer %d DST[%d] %s%d  %zu bytes  offset=%zu\n",
+                                resource->transferIdx, dstIdx, GetMemTypeName(md.memType), md.memIndex,
+                                resource->numBytes, fileOffset);
+            }
+            ERR_APPEND(ClearStorage(resource->dstStorageFd[dstIdx], fileOffset, resource->numBytes), errResults);
+          }
+        }
+      }
+
+      // Initialize all src memory buffers (if on local rank)
       for (auto resource : transferResources) {
         Transfer const& t = transfers[resource->transferIdx];
         // Ping and Pong will start with src value of 0
         if (t.numLaps != 0) continue;
         for (int srcIdx = 0; srcIdx < resource->srcMem.size(); srcIdx++) {
           if (t.srcs[srcIdx].memRank == localRank) {
+            // Storage memory has no memory pointer: source data is written to the file instead
+            if (IsStorageMemType(t.srcs[srcIdx].memType)) {
+              MemDevice const& md = t.srcs[srcIdx];
+
+              // Read-only storage (e.g. block devices by default) keeps its existing contents
+              if (!IsStorageWritable(md.memIndex)) continue;
+
+              int    const fd         = resource->srcStorageFd[srcIdx];
+              size_t const fileOffset = resource->storageOffset + cfg.data.byteOffset;
+              if (verbose) {
+                System::Get().Log("[INFO] Data prep write: transfer %d SRC[%d] host->%s%d  %zu bytes  offset=%zu src=%p\n",
+                                  resource->transferIdx, srcIdx,
+                                  GetMemTypeName(md.memType), md.memIndex,
+                                  resource->numBytes, fileOffset, srcReference[srcIdx].data());
+              }
+              ERR_APPEND(StorageCopy(fd, true, fileOffset, srcReference[srcIdx].data(), resource->numBytes), errResults);
+
+              // Optionally validate source storage right after preparation
+              if (cfg.data.validateSource) {
+                vector<float> tmp(resource->numBytes / sizeof(float));
+                ERR_APPEND(StorageCopy(fd, false, fileOffset, tmp.data(), resource->numBytes), errResults);
+                if (memcmp(tmp.data(), srcReference[srcIdx].data(), resource->numBytes))
+                  ERR_APPEND((ErrResult{ERR_FATAL, "Transfer %d: Source %d mismatch after prep",
+                                        resource->transferIdx, srcIdx}), errResults);
+              }
+              continue;
+            }
+
             if (IsGpuMemType(t.srcs[srcIdx].memType)) {
               ERR_APPEND(hipSetDevice(t.srcs[srcIdx].memIndex), errResults);
             }
@@ -7801,8 +9000,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             char const* halfStr  = rss->numLaps == 0 ? "" : isPong ? " (pong)" : " (ping)";
 
             // Executor info
-            std::string exeBdf = IsGpuExeType(exe.exeType) ? GetGpuBdf(exe.exeIndex) : "";
-            int exeNuma = IsGpuExeType(exe.exeType)
+            bool const exeIsOnGpu = IsGpuExeType(exe.exeType) || IsFileExeType(exe.exeType);
+            std::string exeBdf = exeIsOnGpu ? GetGpuBdf(exe.exeIndex) : "";
+            int exeNuma = exeIsOnGpu
                           ? System::Get().GetClosestCpuNumaToGpu(exe.exeIndex, exe.exeRank)
                           : IsNicExeType(exe.exeType)
                             ? System::Get().GetClosestCpuNumaToNic(exe.exeIndex, exe.exeRank)
@@ -7854,6 +9054,17 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     ThreadPool executorPool((int)localExecutors.size());
     std::vector<ErrResult> exeErrors(localExecutors.size());
+
+#ifdef HIPFILE_EXEC_ENABLED
+    // hipFile decides per I/O whether to use its fastpath or its compatibility path.  Compare its
+    // I/O counters before and after the Transfers to report which one was actually taken
+    bool hasHipFileExecutor = false;
+    for (auto const& exeDevice : localExecutors)
+      hasHipFileExecutor |= (exeDevice.exeType == EXE_GPU_HIPFILE);
+    bool hasIoCounts = false;
+    HipFileIoCounts ioCountsBefore, ioCountsAfter;
+    if (hasHipFileExecutor) hasIoCounts = GetHipFileIoCounts(ioCountsBefore);
+#endif
 
     size_t numTimedIterations = 0;
     double totalCpuTimeSec = 0.0;
@@ -7935,6 +9146,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           Transfer const& t = transfers[rss->transferIdx];
           for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
             if (t.dsts[dstIdx].memRank != localRank) continue;
+            if (IsStorageMemType(t.dsts[dstIdx].memType)) {
+              // Storage memory has no memory pointer: zero this Transfer's region of the file instead
+              ERR_APPEND(ClearStorage(rss->dstStorageFd[dstIdx], rss->storageOffset + cfg.data.byteOffset,
+                                      rss->numBytes), errResults);
+              continue;
+            }
             float* dstPtr = rss->dstMem[dstIdx] + initOffset;
             if (IsCpuMemType(t.dsts[dstIdx].memType)) {
               memset(dstPtr, 0, rss->numBytes);
@@ -7952,6 +9169,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         totalCpuTimeSec += deltaSec;
       }
     }
+
+#ifdef HIPFILE_EXEC_ENABLED
+    if (hasIoCounts) hasIoCounts = GetHipFileIoCounts(ioCountsAfter);
+#endif
 
     // Interactive per-transfer PASS/FAIL display (skipped when validation disabled). This does its
     // own comparison pass to show results; authoritative error reporting still comes from
@@ -7992,6 +9213,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
             continue;
           }
 
+          // Read-only storage sources were not filled with reference data
+          if (HasReadOnlyStorage(t.srcs)) {
+            System::Get().Log("  Transfer %03d:  SKIP(read-only storage source)\n", transferIdx);
+            continue;
+          }
+
           float const* expected = dstReference[t.srcs.size()].data();
           bool transferOk = true;
           bool anyLocalDst = false;
@@ -8017,7 +9244,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               continue;
             }
             float* output;
-            if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+            if (IsStorageMemType(t.dsts[dstIdx].memType)) {
+              // Storage memory has no memory pointer: read the data back from the file instead
+              (void)StorageCopy(rss->dstStorageFd[dstIdx], false, rss->storageOffset + cfg.data.byteOffset,
+                                outputBuffer.data(), t.numBytes);
+              output = outputBuffer.data();
+            } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
               output = rss->dstMem[dstIdx] + initOffset;
             } else {
               (void)hipSetDevice(t.dsts[dstIdx].memIndex);
@@ -8078,6 +9310,20 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         exeResult.sumBandwidthGbPerSec = 0.0;
         exeResult.transferIdx.clear();
 
+        // Determine how this executor moved data to / from storage
+        IoPathType ioPath = IO_PATH_NONE;
+        if (exeDevice.exeType == EXE_GPU_HIPFILE) {
+          ioPath = IO_PATH_UNKNOWN;
+#ifdef HIPFILE_EXEC_ENABLED
+          if (hasIoCounts) ioPath = GetHipFileIoPath(ioCountsBefore, ioCountsAfter, exeDevice.exeIndex);
+#endif
+        }
+        if (ioPath != IO_PATH_NONE && System::Get().IsVerbose()) {
+          System::Get().Log("[INFO] Executor (R%d%c%d) storage I/O path: %s\n",
+                            exeDevice.exeRank, ExeTypeStr[exeDevice.exeType], exeDevice.exeIndex,
+                            IoPathTypeStr[ioPath]);
+        }
+
         // Copy over transfer results (ping half owns pingpong latency)
         for (auto const& rss : exeInfo.resources) {
           if (rss.numLaps < 0) continue;  // skip pong half — ping owns the result row
@@ -8091,6 +9337,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           TransferResult& tfrResult      = results.tfrResults[transferIdx];
           tfrResult.exeDevice            = exeDevice;
           tfrResult.exeDstDevice         = {exeDevice.exeType, rss.dstNicIndex};
+          tfrResult.ioPath               = ioPath;
           tfrResult.numBytes             = reportedBytes;
           tfrResult.avgDurationMsec      = rss.totalDurationMsec / numTimedIterations;
           tfrResult.avgBandwidthGbPerSec = reportedBytes ? (reportedBytes / 1.0e6) / tfrResult.avgDurationMsec
@@ -8118,6 +9365,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                         : 0.0;
 
     // Teardown executors
+    fileExecutorCleanup.isNeeded = false;
     for (auto& exeInfoPair : executorMap) {
       ExeDevice const& exeDevice = exeInfoPair.first;
       ExeInfo&         exeInfo   = exeInfoPair.second;
@@ -8203,7 +9451,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         } else if (wc.mem[isDst][iMem].memIndices.size() == 1 && wc.mem[isDst][iMem].memIndices[0] == -1) {
           // Wildcard - loop over all possible device indices for this memory type
           int numExecutors = GetNumExecutors(wc.mem[isDst][iMem].memType, wc.mem[isDst][iMem].memRanks[0]);
+
+          // The hipFile executor only accesses the memory of its own GPU, so GPU memory follows the executor
+          int fileGpuIndex = -1;
+          if (IsFileExeType(wc.exe.exeType) && IsGpuMemType(wc.mem[isDst][iMem].memType) &&
+              wc.exe.exeIndices.size() == 1 && wc.exe.exeIndices[0] < numExecutors) {
+            fileGpuIndex = wc.exe.exeIndices[0];
+          }
+
           for (int x = 0; x < numExecutors; x++) {
+            if (fileGpuIndex >= 0 && x != fileGpuIndex) continue;
             wc.mem[isDst][iMem].memIndices[0] = x;
             result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
           }
@@ -8295,8 +9552,25 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       return result;
     } else if (wc.exe.exeIndices[0] == -1) {
       // Wildcard - loop over all possible executor indices
-      int numExecutors = GetNumExecutors(wc.exe.exeType, wc.exe.exeRanks[0]);
+      // (The hipFile executor is expanded over every GPU even if unavailable, so that the Transfers
+      //  are rejected with an explanation instead of silently expanding to nothing)
+      int numExecutors = GetNumExecutors(IsFileExeType(wc.exe.exeType) ? EXE_GPU_GFX : wc.exe.exeType,
+                                         wc.exe.exeRanks[0]);
+
+      // The hipFile executor only accesses the memory of its own GPU, so the executor follows GPU memory
+      // (which has been resolved by this point)
+      int fileGpuIndex = -1;
+      if (IsFileExeType(wc.exe.exeType)) {
+        for (int isDst = 0; isDst <= 1; isDst++) {
+          for (auto const& mem : wc.mem[isDst]) {
+            if (IsGpuMemType(mem.memType) && mem.memIndices[0] < numExecutors)
+              fileGpuIndex = mem.memIndices[0];
+          }
+        }
+      }
+
       for (int x = 0; x < numExecutors; x++) {
+        if (fileGpuIndex >= 0 && x != fileGpuIndex) continue;
         wc.exe.exeIndices[0] = x;
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
       }
@@ -8339,7 +9613,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     // Resolve EXE subindex
     if (wc.exe.exeSubIndices.size() == 0) {
-      if (IsCpuExeType(wc.exe.exeType) || IsGpuExeType(wc.exe.exeType)) {
+      if (IsCpuExeType(wc.exe.exeType) || IsGpuExeType(wc.exe.exeType) || IsFileExeType(wc.exe.exeType)) {
         wc.exe.exeSubIndices = {-1};
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices.clear();
@@ -8374,7 +9648,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       return result;
     } else if (wc.exe.exeSubIndices[0] == -2) {
       switch (wc.exe.exeType) {
-      case EXE_CPU: case EXE_GPU_TDM:
+      case EXE_CPU: case EXE_GPU_TDM: case EXE_GPU_HIPFILE:
         // These Executors do not support subindices
         wc.exe.exeSubIndices[0] = -1;
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
@@ -8492,6 +9766,25 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     int numSubExecs;
     std::string srcStr, exeStr, dstStr, numBytesToken;
 
+    // Storage memory can only be accessed by the hipFile executor.  Anything else is rejected while
+    // parsing, as wildcard expansion for the other executors assumes that memory is indexed by
+    // CPU NUMA node or by GPU
+    auto checkStorageUse = [](WildcardTransfer const& w, int const transferNum) -> ErrResult {
+      if (IsFileExeType(w.exe.exeType)) return ERR_NONE;
+      for (int isDst = 0; isDst <= 1; isDst++) {
+        for (auto const& mem : w.mem[isDst]) {
+          if (IsStorageMemType(mem.memType)) {
+            return {ERR_FATAL,
+                    "Parsing error: Transfer %d: Storage memory (%c) can only be accessed by the hipFile (%c) "
+                    "executor (instead of %c)",
+                    transferNum, MemTypeStr[MEM_STORAGE], ExeTypeStr[EXE_GPU_HIPFILE],
+                    ExeTypeStr[w.exe.exeType]};
+          }
+        }
+      }
+      return ERR_NONE;
+    };
+
     if (!advancedMode) {
       iss >> numSubExecs;
       if (numSubExecs < 0 || iss.fail()) {
@@ -8561,6 +9854,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       ERR_CHECK(ParseMemType(dstStr, wct.mem[1]));
       ERR_CHECK(ParseExeType(exeStr, wct.exe));
 
+      ERR_CHECK(checkStorageUse(wct, i+1));
+
       if (isPingpong) {
         // Parse the pong triplet
         std::string pongSrcStr, pongExeStr, pongDstStr;
@@ -8573,6 +9868,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         ERR_CHECK(ParseMemType(pongSrcStr, pongWct.mem[0]));
         ERR_CHECK(ParseMemType(pongDstStr, pongWct.mem[1]));
         ERR_CHECK(ParseExeType(pongExeStr, pongWct.exe));
+        ERR_CHECK(checkStorageUse(pongWct, i+1));
 
         // Each half exchanges one flag, so it takes at most one SRC and one DST
         std::pair<std::vector<WildcardMemDevice> const&, char const*> const halfMems[] = {
@@ -9478,6 +10774,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     topo.closestCpuNumaToNic.clear();
     topo.closestNicsToGpu.clear();
     topo.closestGpusToNic.clear();
+    topo.storagePath.clear();
+    topo.fileExeAvailable.clear();
 
     memset(topo.hostname, 0, sizeof(topo.hostname));
     gethostname(topo.hostname, 32);
@@ -9597,6 +10895,40 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       topo.closestCpuNumaToGpu[exeIndex] = closestNuma;
       topo.closestNicsToGpu[exeIndex] = {};
+    }
+
+    // hipFile Executor, indexed by the GPU whose memory is read into / written from
+    // hipFile is a build-time dependency
+#ifdef HIPFILE_EXEC_ENABLED
+    bool const hipFileAvailable = true;
+#else
+    bool const hipFileAvailable = false;
+#endif
+    topo.fileExeAvailable[EXE_GPU_HIPFILE] = hipFileAvailable;
+    topo.numExecutors[EXE_GPU_HIPFILE]     = hipFileAvailable ? numGpus : 0;
+    if (hipFileAvailable) {
+      for (int exeIndex = 0; exeIndex < numGpus; exeIndex++) {
+        topo.executorName[{EXE_GPU_HIPFILE, exeIndex}]          = topo.executorName[{EXE_GPU_GFX, exeIndex}];
+        topo.numExecutorSubIndices[{EXE_GPU_HIPFILE, exeIndex}] = 0;
+        topo.numSubExecutors[{EXE_GPU_HIPFILE, exeIndex}]       = numa_num_configured_cpus();
+      }
+    }
+
+    // Storage memory (indexed by position in TB_STORAGE_PATHS)
+    {
+      std::lock_guard<std::mutex> lock(GetStorageMutex());
+      std::vector<StorageDevice> const& storageList = GetStorageDeviceList();
+      for (int i = 0; i < (int)storageList.size(); i++)
+        topo.storagePath[i] = storageList[i].path;
+    }
+
+    if (verbose) {
+      Log("[INFO] Rank %03d: hipFile executor %s\n", rank,
+          hipFileAvailable ? ("available v" + GetHipFileVersion()).c_str() : "not available (built without hipFile)");
+      for (auto const& storage : topo.storagePath) {
+        Log("[INFO] Rank %03d: Storage [%02d/%02d] %s\n", rank, storage.first, (int)topo.storagePath.size(),
+            storage.second.c_str());
+      }
     }
 
     // NIC Executor
@@ -9865,6 +11197,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     SendMap(peerRank, topo.closestNicsToGpu);
     SendMap(peerRank, topo.closestGpusToNic);
     SendMap(peerRank, topo.executorName);
+    SendMap(peerRank, topo.storagePath);
+    SendMap(peerRank, topo.fileExeAvailable);
   };
 
   void System::RecvRankTopo(int peerRank, RankTopology& topo) const
@@ -9882,6 +11216,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     RecvMap(peerRank, topo.closestNicsToGpu);
     RecvMap(peerRank, topo.closestGpusToNic);
     RecvMap(peerRank, topo.executorName);
+    RecvMap(peerRank, topo.storagePath);
+    RecvMap(peerRank, topo.fileExeAvailable);
   }
 
   template <typename T>
@@ -9928,6 +11264,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     BroadcastVector(root, tfrResult.perIterMsec);
     BROADCAST(tfrResult.exeDevice);
     BROADCAST(tfrResult.exeDstDevice);
+    BROADCAST(tfrResult.ioPath);
 
     // Per-Iteration CU results need to be handled in a custom manner
     size_t perIterCuSize = tfrResult.perIterCUs.size();
@@ -10255,6 +11592,26 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return rankInfo[targetRank].nicMaxMsgSize.at(nicIndex);
   }
 
+  int System::GetNumStoragePaths(int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    return (int)rankInfo[targetRank].storagePath.size();
+  }
+
+  std::string System::GetStoragePath(int storageIndex, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].storagePath.count(storageIndex) == 0) return "";
+    return rankInfo[targetRank].storagePath.at(storageIndex);
+  }
+
+  bool System::IsFileExeAvailable(ExeType exeType, int targetRank) const
+  {
+    if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
+    if (rankInfo[targetRank].fileExeAvailable.count(exeType) == 0) return false;
+    return rankInfo[targetRank].fileExeAvailable.at(exeType) != 0;
+  }
+
   int GetNumExecutors(ExeType exeType, int targetRank)
   {
     return System::Get().GetNumExecutors(exeType, targetRank);
@@ -10262,8 +11619,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
   int GetNumExecutors(MemType memType, int targetRank)
   {
-    if (IsCpuMemType(memType)) return GetNumExecutors(EXE_CPU,     targetRank);
-    if (IsGpuMemType(memType)) return GetNumExecutors(EXE_GPU_GFX, targetRank);
+    if (IsCpuMemType(memType))     return GetNumExecutors(EXE_CPU,     targetRank);
+    if (IsGpuMemType(memType))     return GetNumExecutors(EXE_GPU_GFX, targetRank);
+    if (IsStorageMemType(memType)) return GetNumStoragePaths(targetRank);
     return 0;
   }
 
@@ -10372,6 +11730,35 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   uint32_t GetNicMaxMsgSize(int nicIndex, int targetRank)
   {
     return System::Get().GetNicMaxMsgSize(nicIndex, targetRank);
+  }
+
+  int GetNumStoragePaths(int targetRank)
+  {
+    return System::Get().GetNumStoragePaths(targetRank);
+  }
+
+  std::string GetStoragePath(int storageIndex, int targetRank)
+  {
+    return System::Get().GetStoragePath(storageIndex, targetRank);
+  }
+
+  bool IsStoragePathListValid()
+  {
+    return !GetStorageConfig().hasEmptyEntry;
+  }
+
+  bool IsHipFileAvailable(int targetRank)
+  {
+    return System::Get().IsFileExeAvailable(EXE_GPU_HIPFILE, targetRank);
+  }
+
+  std::string GetHipFileVersion()
+  {
+#ifdef HIPFILE_EXEC_ENABLED
+    return HipFileVersionString();
+#else
+    return "";
+#endif
   }
 
 // Undefine CUDA compatibility macros

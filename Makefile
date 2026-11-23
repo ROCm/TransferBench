@@ -24,6 +24,7 @@ DEBUG     ?= 0
 # DISABLE_NVML:     Disable NVML pod membership detection for CUDA builds (default: 0)
 # DISABLE_POD_COMM: Disable pod communication support                     (default: 0)
 # DISABLE_CUMEM:    Disable CUDA driver API (also disables pod on CUDA)   (default: 0)
+# DISABLE_HIPFILE:  Disable hipFile executor support                      (default: 0)
 
 # ROCm device libraries can live in different locations depending on packaging.
 # hipcc/clang needs to find the amdgcn bitcode directory at link time.
@@ -138,6 +139,39 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       else
         $(info - nvml.h not found at $(CUDA_PATH)/include. Building without NVML support)
         $(info - Pod membership may be forced by setting TB_FORCE_SINGLE_POD=1)
+      endif
+    endif
+  endif
+
+  HIPFILE_ENABLED = 0
+  # Compile with hipFile executor support if
+  # 1) DISABLE_HIPFILE is not set to 1
+  # 2) Building TransferBench (hipFile is not available for TransferBenchCuda)
+  # 3) hipfile.h is found under HIPFILE_PATH (ROCM_PATH unless specified)
+  DISABLE_HIPFILE ?= 0
+  HIPFILE_PATH ?= $(ROCM_PATH)
+  ifneq ($(DISABLE_HIPFILE), 1)
+    ifneq ($(MAKECMDGOALS),TransferBenchCuda)
+      $(info Attempting to build with hipFile executor support)
+      ifneq ($(wildcard $(HIPFILE_PATH)/include/hipfile.h),)
+        COMMON_FLAGS += -DHIPFILE_ENABLED
+        # HIPFILE_PATH takes priority over ROCM_PATH: its header is searched first and its
+        # library is linked by full path (ROCM_PATH may hold a different hipFile version).
+        # The path goes through -Wl, as "-x hip" would otherwise have it compiled as source
+        ifneq ($(HIPFILE_PATH),$(ROCM_PATH))
+          CXXFLAGS := -I$(HIPFILE_PATH)/include $(CXXFLAGS)
+        endif
+        HIPFILE_LIB := $(firstword $(wildcard $(HIPFILE_PATH)/lib/libhipfile.so $(HIPFILE_PATH)/lib64/libhipfile.so))
+        ifneq ($(HIPFILE_LIB),)
+          LDFLAGS += -Wl,$(HIPFILE_LIB)
+        else
+          LDFLAGS += -L$(HIPFILE_PATH)/lib -L$(HIPFILE_PATH)/lib64 -lhipfile
+        endif
+        HIPFILE_ENABLED = 1
+        $(info - Building with hipFile executor support.  Can set DISABLE_HIPFILE=1 to disable)
+      else
+        $(info - hipfile.h not found at $(HIPFILE_PATH)/include. Building without hipFile executor support)
+        $(info - To use the hipFile executor, install the hipFile development package (e.g. amdrocm-hipfile-dev<version>) or specify appropriate HIPFILE_PATH)
       endif
     endif
   endif

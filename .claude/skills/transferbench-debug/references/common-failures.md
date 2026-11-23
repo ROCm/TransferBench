@@ -120,6 +120,41 @@ Catalog of the most common "it doesn't work" cases, organized by symptom. Each s
 
 ---
 
+## §storage — storage Transfer (`S` with hipFile `F`) or `nvme` preset fails
+
+### Symptom
+- "No storage paths are defined on rank N" or the `nvme` preset prints `TB_STORAGE_PATHS` instructions and exits.
+- "Storage memory (S) can only be accessed by the hipFile (F) executor".
+- "hipFile executor is requested but is not available".
+- "hipFile read/write ... failed (...): ... hipFile's fastpath may not be usable here".
+- "Storage N (...) is a block device. Writing to it destroys its contents and requires TB_STORAGE_ALLOW_BLOCK_WRITE=1".
+- "Storage N (...) is an existing file that holds data. Writing to it destroys its contents and requires TB_STORAGE_ALLOW_OVERWRITE=1", or the `nvme` preset reports `UNVALIDATED` on a second run.
+- "numBytes (...) and [data.byteOffset] (...) are not both multiples of 4096.  hipFile will use its compatibility path for unaligned I/O" (warning).
+- Suspiciously high bandwidth with I/O path `compat`.
+
+### Cause
+- `TB_STORAGE_PATHS` is unset, or the storage index is beyond the list (`S1` with one path).
+- A combination outside what storage Transfers allow: exactly one SRC and one DST, one of them `S`, the other `G` on the executor's GPU, same rank.
+- The binary was built without hipFile support: `hipfile.h` from the hipFile development package (`amdrocm-hipfile-dev<version>`) was not found at build time. The version line then has no `hipFile`. Rebuilding is the only fix.
+- "error while loading shared libraries: libhipfile.so.0" at startup: the binary was built with hipFile support and the hipFile runtime package (`amdrocm-hipfile<version>`) is missing on this host.
+- A storage path under `/dev/` that does not exist is rejected ("Paths under /dev/ ... are not created"): almost always a mistyped device name.
+- hipFile attempted direct I/O where it can't work (no AIS support in the GPU driver, no PCIe P2PDMA, storage not local NVMe, WSL2 with an older hipFile). It does not always fall back by itself.
+- A write targets a raw block device without the opt-in.
+- A storage file already holds data (a user's file, or the file an earlier run left behind) and `TB_STORAGE_ALLOW_OVERWRITE=1` is not set.
+- Compatibility-path I/O goes through host memory and the page cache; it is not a direct storage ↔ GPU number.
+
+### Fix
+1. `./TransferBench` with no args — the storage section lists the paths and whether hipFile is available on this host.
+2. `./TransferBench dryrun 1M "<expression>"` to see the parsed Transfer; fix the SRC/EXE/DST combination.
+3. `HIPFILE_FORCE_COMPAT_MODE=true` to confirm the Transfer itself is sound; then `ais-check` (ships with hipFile) to see why direct I/O is unavailable.
+4. `TB_VERBOSE=1` and look for `storage I/O path:` — `HIPFILE_ALLOW_COMPAT_MODE=false` makes hipFile fail instead of silently using `compat`.
+5. For direct I/O: use a byte count that is a multiple of 4096, `BYTE_OFFSET=0`, and a file on xfs / ext4 on a local NVMe drive (or the raw block device).
+6. Block devices: **do not** set `TB_STORAGE_ALLOW_BLOCK_WRITE=1` unless the user confirms the device holds nothing of value. Read-only Transfers (`S0->F0->G0`) work without it, but skip validation.
+   Existing files: delete TransferBench's own scratch file or set `TB_STORAGE_ALLOW_OVERWRITE=1` to reuse it; **do not** set it for a file that may hold the user's data.
+7. `TB_HIPFILE_SKIP_BUF_REGISTER=1` if it hangs or fails while registering the GPU buffer.
+
+---
+
 ## §parser — config-file parser rejects a line
 
 ### Symptom

@@ -3,6 +3,52 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## v1.72.00
+### Added
+- Added storage memory type [S] to benchmark I/O between storage and GPU memory. `SN` refers to the N-th path
+  (starting from 0) in the new comma-separated `TB_STORAGE_PATHS` environment variable. Each path is either a regular
+  file (typically on an NVMe-backed filesystem) or a raw block device such as `/dev/nvme1n1`
+  - Regular files are created and grown as needed, and are left in place afterwards. A path under `/dev/` (other
+    than `/dev/shm/`) that does not exist is rejected instead of being created, as it is most likely a mistyped
+    device name
+  - A file that already holds data when TransferBench first uses it (including one left behind by an earlier run)
+    is only written to if `TB_STORAGE_ALLOW_OVERWRITE=1` is set. Otherwise it is treated like a block device:
+    Transfers that write to it are rejected, and Transfers that read from it transfer the existing contents
+    without data validation
+  - Each entry must be a distinct file or device, and ranks on the same host need distinct paths (files are locked
+    while in use, and block devices that are written to are opened exclusively). An empty entry ahead of a path is
+    rejected, as it would renumber the storage indices that follow it
+  - Block devices are never created or resized, and are only written to if `TB_STORAGE_ALLOW_BLOCK_WRITE=1` is set
+    (this destroys their contents). Otherwise Transfers that write to them are rejected, and Transfers that read
+    from them transfer the existing contents without data validation
+- Added hipFile executor [F], which moves data between storage memory and GPU memory using
+  `hipFileRead`/`hipFileWrite`. It is indexed by GPU, and its SubExecutors are I/O threads issuing blocking calls
+  - hipFile is an optional build-time dependency: the executor is built when `hipfile.h` (hipFile development
+    package, e.g. `amdrocm-hipfile-dev10.2`) is found, and TransferBench then links against `libhipfile`
+    - Makefile: detected under `HIPFILE_PATH` (defaults to `ROCM_PATH`); `DISABLE_HIPFILE=1` builds without it
+    - CMake: `-DENABLE_HIPFILE=AUTO|ON|OFF` (default `AUTO`: use hipFile if found under `ROCM_PATH`), with
+      `-DHIPFILE_PATH` (or the `HIPFILE_PATH` environment variable) to point at it. Packages built with hipFile support depend on the hipFile runtime package (e.g. `amdrocm-hipfile10.2`)
+    - Without hipFile support, [F] and [S] are still parsed, and a Transfer using the hipFile executor is rejected
+      with an error saying that TransferBench was built without hipFile support
+  - e.g. `1 4 (S0->F0->G0)` reads storage 0 into GPU 0 memory with 4 I/O threads, and `(G0->F0->S0)` writes
+  - A storage Transfer has exactly one SRC and one DST: one is storage memory and the other is GPU device memory [G]
+    on the Executor's GPU. Other combinations involving [S] or the executor [F] are rejected with a fatal error
+  - Wildcards for the Executor index and the GPU memory index follow each other, e.g. `(S0->F*->G*)` expands to one
+    Transfer per GPU
+  - If the number of bytes or `BYTE_OFFSET` is not a multiple of 4096, a warning is shown, as hipFile then uses its
+    compatibility path
+  - Timing uses CPU wall clock around the I/O calls only. Written data is flushed and the page cache dropped before
+    each timed pass. `TB_STORAGE_TIMED_SYNC=1` includes flushing written data to storage in write timing
+  - `TB_HIPFILE_SKIP_BUF_REGISTER=1` skips registering GPU buffers with hipFile
+  - Not supported on NVIDIA hardware
+- Added "nvme" preset, which writes from each GPU to each storage path and then reads from each storage path into
+  each GPU using the hipFile executor, with data validation of every Transfer. It reports bandwidth and the I/O path
+  used (fastpath / compat) per Transfer, and returns a non-zero exit code if any Transfer fails
+  - Behavior can be modified with `NUM_FILE_SE`, `NUM_GPU_DEVICES`, `NVME_MODE` and `NVME_PAIRED`
+- Topology output now lists storage paths and whether the hipFile executor is available
+### Modified
+- Help text and examples/example.cfg now list all eight Executors and the managed [M] and storage [S] memory types
+
 ## v1.71.02
 ### Added
 - LaunchTransferBench.sh now supports bracketed range wildcards in the host list, e.g. `node[1..4]` or

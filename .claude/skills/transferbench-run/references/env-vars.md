@@ -78,6 +78,30 @@ This is a curated guide to the most-used variables. For the authoritative comple
 | `NIC_RELAX_ORDER` | `1` | Relaxed ordering on the NIC. |
 | `TB_NIC_FILTER` | unset | Restrict which NICs participate. |
 
+## Storage (hipFile executor)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TB_STORAGE_PATHS` | unset | Comma-separated files and/or block devices. `S<n>` in a Transfer is the n-th path (0-based). Required for any storage Transfer and for the `nvme` preset. |
+| `TB_STORAGE_ALLOW_BLOCK_WRITE` | unset | `1` allows writing to block devices in `TB_STORAGE_PATHS`. **Destroys their contents.** |
+| `TB_STORAGE_ALLOW_OVERWRITE` | unset | `1` allows overwriting files in `TB_STORAGE_PATHS` that already hold data (needed to reuse the file an earlier run left behind). **Replaces their contents**, for reads too. |
+| `TB_STORAGE_TIMED_SYNC` | unset | `1` includes flushing written data to storage (`fdatasync`) in write timing. |
+| `TB_HIPFILE_SKIP_BUF_REGISTER` | unset | `1` skips `hipFileBufRegister` for the hipFile executor. |
+| `HIPFILE_FORCE_COMPAT_MODE` | `false` | hipFile's own variable: `true` forces its compatibility path (POSIX I/O via host memory). |
+| `HIPFILE_ALLOW_COMPAT_MODE` | `true` | hipFile's own variable: `false` fails instead of falling back, guaranteeing direct I/O. |
+| `HIPFILE_UNSUPPORTED_FILE_SYSTEMS` | `false` | hipFile's own variable: `true` attempts direct I/O on file systems other than ext4 (`data=ordered`) / xfs. |
+
+The `HIPFILE_*` variables are read by hipFile once per process and are never set by TransferBench.
+
+Used by the `nvme` preset:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `NUM_FILE_SE` | `4` | I/O threads per Transfer. |
+| `NUM_GPU_DEVICES` | all | Limit GPUs tested. |
+| `NVME_MODE` | `0` | `0` write + read, `1` write only, `2` read only. |
+| `NVME_PAIRED` | `0` | `1` = GPU i only uses storage path (i mod #paths); `0` = every GPU × every path. |
+
 ## Multi-rank / pod
 
 | Variable | Default | Effect |

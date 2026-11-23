@@ -52,6 +52,10 @@ Example:
 | `B` | Batched-DMA | GPU device | `hipMemcpyBatchAsync`-based; HIP 7.1 / CUDA 12.8+ |
 | `I#.#` | NIC executor | NIC index `.` QP index | e.g. `I0.2` |
 | `N#.#` | Nearest-NIC executor | GPU index `.` QP index | Picks each end's closest NIC |
+| `T` | TDM | GPU device | SubExecutor = threadblock / CU; AMD gfx1250 or NVIDIA sm_90+ |
+| `F` | hipFile | GPU device | SubExecutor = I/O thread; storage ↔ GPU memory via `hipFileRead`/`hipFileWrite` |
+
+Executor and memory codes are independent: `F` as an executor is hipFile, `F` as a memory location is fine-grain device memory.
 
 ## Memory-location codes
 
@@ -68,9 +72,35 @@ A memory location is `<code><index>`. Multiple locations can be concatenated for
 | `G` | Global device memory | GPU |
 | `F` | Fine-grain device memory | GPU |
 | `U` | Uncached device memory | GPU |
+| `M` | Managed memory | GPU |
 | `N` | Null (no read or no write) | ignored |
+| `S` | Storage (regular file or raw block device) | position in `TB_STORAGE_PATHS` |
 
 `N` on the SRC side gives a "memset-like" write benchmark; `N` on the DST side gives a "read-only" benchmark.
+
+## Storage transfers (`S` with `F`)
+
+`S<n>` is the n-th path (0-based) in the comma-separated `TB_STORAGE_PATHS` environment variable. Rules:
+
+- `S` only works with the `F` (hipFile) executor, and that executor needs exactly one `S`.
+- Exactly one SRC and one DST: one is `S`, the other is `G` on the executor's GPU (`S0->F1->G1` is valid, `S0->F0->G1` is not). Same rank for all three.
+- The byte count and `BYTE_OFFSET` should be multiples of 4096. Other values are accepted with a warning (hipFile uses its compatibility path).
+- A block device is only written to with `TB_STORAGE_ALLOW_BLOCK_WRITE=1` (destroys its contents). Without it, writes are rejected and reads skip validation.
+- A file that already holds data (including one left by an earlier run) is only written to with `TB_STORAGE_ALLOW_OVERWRITE=1`. Without it, writes are rejected and reads skip validation.
+- A missing regular file is created; a missing path under `/dev/` (other than `/dev/shm/`) is an error.
+- `F` needs a binary built with hipFile support (the version line shows `hipFile`).
+- No executor subindices, no PingPong, HIP builds only.
+
+```
+## hipFile read: storage 0 into GPU0 with 4 I/O threads
+1 4 (S0->F0->G0)
+
+## hipFile write: GPU0 to storage 0 with 4 I/O threads
+1 4 (G0->F0->S0)
+
+## Two GPUs each reading from their own drive in parallel
+2 4 (S0->F0->G0) (S1->F1->G1)
+```
 
 ## Idiomatic patterns
 

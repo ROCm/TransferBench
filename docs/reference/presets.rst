@@ -1,6 +1,6 @@
 .. meta::
-  :description: Reference for TransferBench presets, including all-to-all, peer-to-peer, NIC rings, sweep, and scaling tests with supported environment variables and example outputs.
-  :keywords: TransferBench presets, TransferBench a2a, TransferBench p2p, TransferBench nicrings, TransferBench nicp2p, TransferBench sweep, TransferBench scaling
+  :description: Reference for TransferBench presets, including all-to-all, peer-to-peer, NIC rings, NVMe storage, sweep, and scaling tests with supported environment variables and example outputs.
+  :keywords: TransferBench presets, TransferBench a2a, TransferBench p2p, TransferBench nicrings, TransferBench nicp2p, TransferBench nvme, TransferBench sweep, TransferBench scaling
 
 .. _running-presets:
 
@@ -10,7 +10,7 @@ TransferBench presets
 
 Presets are a predefined series of transfers that can be used instead of manually configuring the transfers.
 
-The following table lists the presets available on TransferBench 1.67.0:
+The following table lists the presets available on TransferBench 1.71.0:
 
 .. list-table::
     :header-rows: 1
@@ -42,6 +42,10 @@ The following table lists the presets available on TransferBench 1.67.0:
     * - :ref:`NIC rings preset (nicrings) <nicrings>`
       - Tests NIC rings created across identical NIC indices across ranks.
       - ✅
+
+    * - :ref:`NVMe storage preset (nvme) <nvme>`
+      - Tests writes from GPU memory to storage and reads from storage to GPU memory using the hipFile Executor.
+      - ❌
 
     * - :ref:`One-to-all preset (one2all) <one2all>`
       - Tests all subsets of parallel transfers from one GPU to the others.
@@ -1087,6 +1091,108 @@ Example output
   │                    31.36 │ R01:bnxt_re3 │ R01:bnxt_re3 │                    31.30 │ R01:bnxt_re6 │ R01:bnxt_re7 │
   │                    31.35 │ R01:bnxt_re7 │ R01:bnxt_re7 │                    31.30 │ R01:bnxt_re2 │ R01:bnxt_re6 │
   └--------------------------┴--------------┴--------------┴--------------------------┴--------------┴--------------┘
+
+.. _nvme:
+
+NVMe storage preset (nvme)
+===========================
+
+The nvme preset measures the bandwidth of writes from GPU memory to storage and of reads from storage to GPU memory, with data validation. It runs each transfer with the hipFile Executor. For background and setup, see :ref:`storage-benchmarking`.
+
+**Key features:**
+
+- For each GPU and each storage path, runs a write ``(G<gpu>->F<gpu>->S<path>)`` followed by a read ``(S<path>->F<gpu>->G<gpu>)``.
+
+- By default, every GPU is tested against every path in ``TB_STORAGE_PATHS``. With ``NVME_PAIRED=1``, GPU ``i`` is only tested against path ``i`` modulo the number of paths.
+
+- Transfers run one at a time, so the results are not affected by contention between GPUs or between storage paths.
+
+- Validates the data of every transfer, following ``ALWAYS_VALIDATE``.
+
+- Reports the bandwidth and the I/O path of each transfer. The I/O path is ``fastpath`` for direct I/O between storage and GPU memory, ``compat`` for hipFile's compatibility path through host memory, ``mixed`` if both were used, or ``unknown`` if hipFile doesn't provide the statistics to tell (hipFile older than 0.5.0, or statistics turned off with ``HIPFILE_STATS_LEVEL=0``).
+
+- Returns a non-zero exit code if any transfer fails, so it can be used as a pass/fail test.
+
+**Restrictions:**
+
+- Single-node only.
+
+- **Storage paths required:** Prints instructions and exits with an error if ``TB_STORAGE_PATHS`` isn't set.
+
+- **hipFile required:** Exits with an error if TransferBench was built without hipFile support. See :ref:`source-build`.
+
+- **Block devices are read-only by default:** For a block device, the write is skipped and the read transfers the existing contents of the device without data validation (result ``UNVALIDATED``), unless ``TB_STORAGE_ALLOW_BLOCK_WRITE=1`` is set. Setting it destroys the contents of the device.
+
+- **Regular files are left in place:** Files are created if needed, grown to the transfer size, and not deleted afterwards.
+
+- **Existing files are read-only by default:** A file that already holds data when the preset starts, including one left behind by an earlier run, is treated like a block device: the write is skipped and the read transfers the existing contents without data validation (result ``UNVALIDATED``), unless ``TB_STORAGE_ALLOW_OVERWRITE=1`` is set. Setting it replaces the contents of the file, for reads as well as writes, because the source data of a read is written to the file first.
+
+- Not supported on NVIDIA hardware.
+
+**Usage:**
+
+.. code-block:: shell
+
+  TB_STORAGE_PATHS=/mnt/nvme0/tb.dat ./TransferBench nvme 1G
+
+To test two drives with 8 I/O threads per transfer, using only hipFile's compatibility path:
+
+.. code-block:: shell
+
+  TB_STORAGE_PATHS=/mnt/nvme0/tb.dat,/mnt/nvme1/tb.dat NUM_FILE_SE=8 HIPFILE_FORCE_COMPAT_MODE=true ./TransferBench nvme 1G
+
+Environment variables
+----------------------
+
+To modify the behavior of nvme preset, use the following environment variables. The storage paths come from ``TB_STORAGE_PATHS``. See :ref:`storage-env-vars`.
+
+.. list-table::
+    :header-rows: 1
+
+    * - Environment variable
+      - Description
+      - Default value
+
+    * - ``NUM_FILE_SE``
+      - I/O threads per transfer.
+      - ``4``
+
+    * - ``NUM_GPU_DEVICES``
+      - Number of GPUs. This can be modified to reduce the number of GPUs to test.
+      - (all detected)
+
+    * - ``NVME_MODE``
+      - 1=Write only, 2=Read only, 0=both.
+      - ``0``
+
+    * - ``NVME_PAIRED``
+      - To test each GPU against a single storage path (GPU index modulo the number of paths), set to ``1``. To test each GPU against every storage path, set to ``0``.
+      - ``0``
+
+Example output
+---------------
+
+The following output is from a system with hipFile forced to its compatibility path. The bandwidth values aren't representative of direct I/O.
+
+.. code-block:: shell
+
+  [NVMe Related]
+  NUM_FILE_SE          =            4 : Using 4 I/O thread(s) per Transfer
+  NUM_GPU_DEVICES      =            1 : Using 1 GPUs
+  NVME_MODE            =            0 : Running write + read transfers
+  NVME_PAIRED          =            0 : Each GPU uses every storage path
+
+  Storage 0 (S0): /mnt/nvme0/tb.dat (file)
+  Storage 1 (S1): /mnt/nvme1/tb.dat (file)
+  Bytes Per Transfer 268435456
+  GPU <-> storage bandwidth GB/s (hipFile 0.5.0, 4 I/O thread(s) per Transfer)
+  ┌--------┬---------┬--------------┬------------┬-------------┬-----------┬--------┐
+  │    GPU │ Storage │ Write (GB/s) │ Write path │ Read (GB/s) │ Read path │ Result │
+  ├--------┼---------┼--------------┼------------┼-------------┼-----------┼--------┤
+  │ GPU 00 │      S0 │        0.689 │     compat │       0.778 │    compat │   PASS │
+  │ GPU 00 │      S1 │        0.677 │     compat │       0.829 │    compat │   PASS │
+  └--------┴---------┴--------------┴------------┴-------------┴-----------┴--------┘
+  All 4 Transfers passed
 
 .. _one2all:
 
