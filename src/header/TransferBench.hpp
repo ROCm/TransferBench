@@ -988,10 +988,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   size_t constexpr NEAR_AID_REGION_BYTES      = 1024 * 1024;
   size_t constexpr NEAR_AID_PIECES_PER_REGION = NEAR_AID_REGION_BYTES / 2 / NEAR_AID_PIECE_BYTES;
   // One RDMA WRITE per piece, posted as chains of one region with only the tail signaled. Long
-  // unsignaled runs (about 256 WRs per queue pair) stall ionic, so at most 8 chains are in flight.
-  // ionic also stalls when those WRs fill more than half of the send queue.
+  // unsignaled runs stall ionic: 8 chains in flight (248 unsignaled WRs per queue pair) hang now and
+  // then, so at most 4 are in flight. ionic also stalls when those WRs fill more than half of the
+  // send queue.
   size_t constexpr NEAR_AID_PIECES_PER_CHAIN  = NEAR_AID_PIECES_PER_REGION;
-  size_t constexpr NEAR_AID_CHAINS_IN_FLIGHT  = 8;
+  size_t constexpr NEAR_AID_CHAINS_IN_FLIGHT  = 4;
   size_t constexpr NEAR_AID_MIN_SEND_WR       = 2 * NEAR_AID_CHAINS_IN_FLIGHT * NEAR_AID_PIECES_PER_CHAIN;
 
   int GetWarpSize(std::vector<ErrResult>* errors = nullptr) {
@@ -4267,23 +4268,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   }
 
 #if defined(__x86_64__) && !defined(__NVCC__)
-  // Median CPU load latency, in TSC ticks, of uncached cache lines at the start of `block`
-  static uint64_t NearAidLoadTicks(char const* block)
+  // Median time, in nanoseconds, of one CPU read at the start of `block`. The CPU caches the DMA-BUF
+  // mapping, so each line is flushed first to make the read go to the GPU.
+  static uint64_t NearAidReadNsec(char const* block)
   {
     int constexpr NUM_REPS = 16;
-    uint64_t ticks[NUM_REPS];
+    uint64_t nsec[NUM_REPS];
     for (int rep = 0; rep < NUM_REPS; rep++) {
-      volatile uint64_t const* line = (volatile uint64_t const*)(block + rep * 64);
-      _mm_clflush((void const*)line);
+      volatile uint64_t const* word = (volatile uint64_t const*)(block + rep * 64);
+      _mm_clflush((void const*)word);
       _mm_mfence();
-      _mm_lfence();
-      uint64_t const start = __rdtsc();
-      (void)*line;
-      _mm_lfence();
-      ticks[rep] = __rdtsc() - start;
+      auto const start = std::chrono::steady_clock::now();
+      (void)*word;
+      nsec[rep] = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
     }
-    std::nth_element(ticks, ticks + NUM_REPS / 2, ticks + NUM_REPS);
-    return ticks[NUM_REPS / 2];
+    std::nth_element(nsec, nsec + NUM_REPS / 2, nsec + NUM_REPS);
+    return nsec[NUM_REPS / 2];
   }
 
   // Sets rss.nearAidPhases from CPU load latencies of the DST, read through an mmap of its DMA-BUF.
@@ -4299,16 +4299,16 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     char const* dst = (char const*)mapping + rss.dstDmabufOffset;
     size_t numAmbiguous = 0;
-    uint64_t region0Ticks[2] = {};
+    uint64_t region0Nsec[2] = {};
     for (size_t region = 0; region < rss.nearAidPhases.size(); region++) {
       char const* regionBase = dst + region * NEAR_AID_REGION_BYTES;
-      uint64_t const t0 = NearAidLoadTicks(regionBase);
-      uint64_t const t1 = NearAidLoadTicks(regionBase + 1 * NEAR_AID_PIECE_BYTES);
-      uint64_t const t8 = NearAidLoadTicks(regionBase + 8 * NEAR_AID_PIECE_BYTES);
-      uint64_t const t9 = NearAidLoadTicks(regionBase + 9 * NEAR_AID_PIECE_BYTES);
+      uint64_t const t0 = NearAidReadNsec(regionBase);
+      uint64_t const t1 = NearAidReadNsec(regionBase + 1 * NEAR_AID_PIECE_BYTES);
+      uint64_t const t8 = NearAidReadNsec(regionBase + 8 * NEAR_AID_PIECE_BYTES);
+      uint64_t const t9 = NearAidReadNsec(regionBase + 9 * NEAR_AID_PIECE_BYTES);
       if (region == 0) {
-        region0Ticks[0] = t0;
-        region0Ticks[1] = t1;
+        region0Nsec[0] = t0;
+        region0Nsec[1] = t1;
       }
 
       // Blocks 1 and 8 share an AID, as do blocks 0 and 9; each pair must differ by at least 10%
@@ -4328,8 +4328,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       printf("[WARN] Transfer %d: NIC_NEAR_AID probe found no clear AID split in %lu of %lu DST regions\n",
              rss.transferIdx, numAmbiguous, rss.nearAidPhases.size());
     if (System::Get().IsVerbose())
-      printf("[INFO] Transfer %d: NIC_NEAR_AID probed %lu DST regions (region 0 block ticks %lu %lu)\n",
-             rss.transferIdx, rss.nearAidPhases.size(), region0Ticks[0], region0Ticks[1]);
+      printf("[INFO] Transfer %d: NIC_NEAR_AID probed %lu DST regions (region 0 block reads %lu %lu ns)\n",
+             rss.transferIdx, rss.nearAidPhases.size(), region0Nsec[0], region0Nsec[1]);
     return ERR_NONE;
   }
 #else
