@@ -341,6 +341,12 @@ The following environment variables apply only when NIC support is enabled. To e
         Since v1.71.0, a NIC transfer is rejected during validation if any queue pair's work request (the smaller of ``NIC_CHUNK_BYTES`` and the bytes assigned to that queue pair) exceeds the IBV ``max_msg_sz`` of either NIC. Each NIC's value is shown in the ``MaxMsgSz`` column of the topology output. To fix this, reduce ``NIC_CHUNK_BYTES`` or the transfer size, or use more queue pairs.
       - ``1073741824``
 
+    * - ``NIC_NEAR_AID``
+      - Placement of NIC RDMA WRITEs into a GPU destination on MI4XX (gfx1250) in SPX/NPS1 mode, where GPU memory alternates between the two AIDs every 16 KiB. ``0`` = contiguous (unchanged behavior), ``1`` = write only the 16 KiB blocks on the AID closest to the NIC, ``2`` = write only the blocks on the other AID (negative control).
+
+        In modes ``1`` and ``2`` the destination is allocated at twice its size, each 16 KiB piece is posted as its own RDMA WRITE, and the AID layout is probed once per Transfer from CPU load latencies through an mmap of the destination DMA-BUF. Validation gathers the pieces back into logical order. Requires an x86 host, DMA-BUF support, a single GPU destination, the NIC executor on the source rank, ``BYTE_OFFSET=0`` and ``VALIDATE_ON_DEVICE=0``. The difference between modes is largest when NICs send and receive at the same time.
+      - ``0``
+
     * - ``NIC_RELAX_ORDER``
       - RDMA ordering. ``1`` = relaxed, ``0`` = strict.
       - ``1``

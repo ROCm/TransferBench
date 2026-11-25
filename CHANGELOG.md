@@ -3,6 +3,13 @@
 Documentation for TransferBench is available at
 [https://rocm.docs.amd.com/projects/TransferBench](https://rocm.docs.amd.com/projects/TransferBench).
 
+## Unreleased
+### Added
+- `NIC_NEAR_AID` places NIC RDMA WRITEs into a GPU destination by AID on MI4XX (gfx1250) in SPX/NPS1 mode, where
+  GPU memory alternates between the two AIDs every 16 KiB. `1` writes only the blocks on the AID closest to the NIC
+  and `2` only the blocks on the other AID, so the cost of NIC writes crossing AIDs can be measured directly. The
+  destination is allocated at twice its size, and validation gathers the pieces back into logical order
+
 ## v1.71.02
 ### Added
 - LaunchTransferBench.sh now supports bracketed range wildcards in the host list, e.g. `node[1..4]` or

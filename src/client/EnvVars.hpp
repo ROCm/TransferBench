@@ -126,6 +126,7 @@ public:
   int ipAddressFamily;               // IP Address Famliy
   int nicChunkBytes;                 // Number of bytes to send per chunk for RDMA operations
   int nicCqPollBatch;                // Number of CQ entries to poll per ibv_poll_cq call
+  int nicNearAid;                    // Placement of RDMA WRITEs into the 16 KiB blocks of a GPU DST
   int nicRelaxedOrder;               // Use relaxed ordering for RDMA
   int nicServiceLevel;               // IB service level (sl) for InfiniBand QPs
   int nicTrafficClass;               // DSCP/traffic class byte for RoCE GRH
@@ -217,6 +218,7 @@ public:
     ipAddressFamily    = GetEnvVar("IP_ADDRESS_FAMILY"   , 4);
     nicChunkBytes      = GetEnvVar("NIC_CHUNK_BYTES"     , 1073741824);
     nicCqPollBatch     = GetEnvVar("NIC_CQ_POLL_BATCH"   , 4);
+    nicNearAid         = GetEnvVar("NIC_NEAR_AID"        , 0);
     nicRelaxedOrder    = GetEnvVar("NIC_RELAX_ORDER"     , 1);
     nicServiceLevel    = GetEnvVar("NIC_SERVICE_LEVEL"   , 0);
     nicTrafficClass    = GetEnvVar("NIC_TRAFFIC_CLASS"   , 0);
@@ -406,6 +408,7 @@ public:
       printf(" IP_ADDRESS_FAMILY   - IP address family (4=v4, 6=v6, default=v4)\n");
       printf(" NIC_CHUNK_BYTES     - Number of bytes to send at a time using NIC (default = 1GB)\n");
       printf(" NIC_CQ_POLL_BATCH   - Number of CQ entries to poll per ibv_poll_cq call (default = 4)\n");
+      printf(" NIC_NEAR_AID        - RDMA WRITE into NIC-near (1) or far (2) 16 KiB blocks of a GPU DST (default = 0/off)\n");
       printf(" NIC_RELAX_ORDER     - Set to non-zero to use relaxed ordering\n");
       printf(" NIC_SERVICE_LEVEL   - IB service level (sl) for InfiniBand QPs (default=0)\n");
       printf(" NIC_TRAFFIC_CLASS   - DSCP/traffic class byte for RoCE GRH (default=0)\n");
@@ -550,6 +553,10 @@ public:
             "Sending %lu bytes at a time for NIC RDMA", nicChunkBytes);
       Print("NIC_CQ_POLL_BATCH", nicCqPollBatch,
             "Polling %d CQ entries per ibv_poll_cq call", nicCqPollBatch);
+      Print("NIC_NEAR_AID", nicNearAid,
+            "%s", nicNearAid == 0 ? "Contiguous NIC RDMA destination" :
+                  nicNearAid == 1 ? "NIC RDMA WRITEs into NIC-near 16 KiB blocks of GPU DST" :
+                                    "NIC RDMA WRITEs into NIC-far 16 KiB blocks of GPU DST");
       Print("NIC_RELAX_ORDER", nicRelaxedOrder,
             "Using %s ordering for NIC RDMA", nicRelaxedOrder ? "relaxed" : "strict");
       Print("NIC_SERVICE_LEVEL", nicServiceLevel,
@@ -794,6 +801,7 @@ public:
 
     cfg.nic.chunkBytes             = nicChunkBytes;
     cfg.nic.cqPollBatch            = nicCqPollBatch;
+    cfg.nic.nearAidMode            = nicNearAid;
     cfg.nic.ibGidIndex             = ibGidIndex;
     cfg.nic.ibPort                 = ibPort;
     cfg.nic.ipAddressFamily        = ipAddressFamily;
