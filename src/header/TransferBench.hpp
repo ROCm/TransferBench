@@ -2534,6 +2534,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return false;
   }
 
+  // Largest RDMA work request a NIC Transfer posts, before capping by the bytes of its queue pair
+  static size_t NicWorkRequestBytes(ConfigOptions const& cfg)
+  {
+    return (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF) ? NicNearAid::PIECE_BYTES : cfg.nic.chunkBytes;
+  }
+
   // Validate Transfers to execute - returns true if and only if fatal error detected
   static bool TransfersHaveErrors(ConfigOptions         const& cfg,
                                   std::vector<Transfer> const& transfers,
@@ -2945,6 +2951,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           hasFatalError = true;
           break;
         }
+        if (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF &&
+            (srcExeRank != srcMemRank || !IsGpuMemType(t.dsts[0].memType))) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: NIC_NEAR_AID needs the NIC executor on the SRC memory rank and a GPU DST", i});
+          hasFatalError = true;
+          break;
+        }
 
         // The SRC NIC executor is the one that initiates either a (remote read/local write) or (local read/remote write) copy operation
         ExeDevice srcExeDevice;
@@ -3002,9 +3015,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           maxQpBytes = std::max(maxQpBytes, qpN * sizeof(float));
           assigned  += qpN;
         }
-        size_t const wrChunkBytes = (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF) ? NicNearAid::PIECE_BYTES
-                                                                              : cfg.nic.chunkBytes;
-        size_t const maxWrBytes = maxQpBytes ? std::min(wrChunkBytes, maxQpBytes) : 0;
+        size_t const maxWrBytes = maxQpBytes ? std::min(NicWorkRequestBytes(cfg), maxQpBytes) : 0;
         uint32_t const maxMsgSz = std::min(GetNicMaxMsgSize(srcExeDevice.exeIndex, srcExeDevice.exeRank),
                                            GetNicMaxMsgSize(dstExeDevice.exeIndex, dstExeDevice.exeRank));
         if (maxMsgSz && maxWrBytes > maxMsgSz) {
@@ -3407,10 +3418,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
-    vector<uint8_t>            nearAidPhases;     ///< NIC_NEAR_AID: per DST region, 1 if its block 1 is NIC-near
-    vector<vector<ibv_send_wr*>> nearAidChains;   ///< NIC_NEAR_AID: per queue pair, heads of the WR chains
-    vector<size_t>             nearAidChainsPosted; ///< NIC_NEAR_AID: per queue pair, chains posted this iteration
-    vector<size_t>             nearAidChainsDone;   ///< NIC_NEAR_AID: per queue pair, chains completed this iteration
+    NicNearAid::State          nearAid;           ///< NIC_NEAR_AID placement
 
     // For BMA executor
 #ifdef BMA_EXEC_ENABLED
@@ -4229,22 +4237,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
-  // Sets rss.nearAidPhases by probing the DST through its DMA-BUF. A region without a clear split keeps
-  // phase 0 and only costs bandwidth.
-  static ErrResult ProbeNearAidPhases(TransferResources& rss)
+  // Sets rss.nearAid.inverted by probing the DST through its DMA-BUF. A region without a clear split is
+  // treated as regular, which only costs bandwidth.
+  static ErrResult ProbeNearAidRegions(TransferResources& rss)
   {
     NicNearAid::ProbeResult probe;
-    int const error = NicNearAid::ProbePhases(rss.dstDmabufFd, rss.dstDmabufOffset, rss.nearAidPhases, probe);
+    int const error = NicNearAid::ProbeInverted(rss.dstDmabufFd, rss.dstDmabufOffset, rss.nearAid.inverted, probe);
     if (error)
       return {ERR_FATAL, "Transfer %d: Unable to probe DST DMA-BUF for NIC_NEAR_AID (%s)",
               rss.transferIdx, strerror(error)};
 
     if (probe.numAmbiguous)
       printf("[WARN] Transfer %d: NIC_NEAR_AID probe found no clear AID split in %lu of %lu DST regions\n",
-             rss.transferIdx, probe.numAmbiguous, rss.nearAidPhases.size());
+             rss.transferIdx, probe.numAmbiguous, rss.nearAid.inverted.size());
     if (System::Get().IsVerbose())
       printf("[INFO] Transfer %d: NIC_NEAR_AID probed %lu DST regions (region 0 block reads %lu %lu ns)\n",
-             rss.transferIdx, rss.nearAidPhases.size(), probe.region0Nsec[0], probe.region0Nsec[1]);
+             rss.transferIdx, rss.nearAid.inverted.size(), probe.region0Nsec[0], probe.region0Nsec[1]);
     return ERR_NONE;
   }
 
@@ -4256,8 +4264,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     NicNearAid::BuildWorkRequests((uintptr_t)p.src[0], rss.srcMemRegion->lkey,
                                   dstConnInfo.vaddr - qpStart, dstConnInfo.rkey,
                                   qpStart, p.N * sizeof(float), cfg.nic.nearAidMode == NIC_NEAR_AID_FAR,
-                                  rss.nearAidPhases, qpIndex, rss.sgePerQueuePair[qpIndex],
-                                  rss.sendWorkRequests[qpIndex], rss.nearAidChains[qpIndex]);
+                                  rss.nearAid.inverted, qpIndex, rss.sgePerQueuePair[qpIndex],
+                                  rss.sendWorkRequests[qpIndex], rss.nearAid.chains[qpIndex]);
   }
 
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
@@ -4287,14 +4295,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     rss.qpCount     = t.numSubExecs;
 
     bool const nearAid = (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF);
-    if (nearAid) {
-      if (!rss.srcIsExeNic)
-        return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs the executing NIC on the SRC rank (RDMA WRITE)",
-                rss.transferIdx};
-      if (t.dsts.size() != 1 || !IsGpuMemType(t.dsts[0].memType))
-        return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs a single GPU DST", rss.transferIdx};
-      rss.nearAidPhases.assign(NicNearAid::NumRegions(rss.numBytes), 0);
-    }
+    if (nearAid)
+      rss.nearAid.inverted.assign(NicNearAid::NumRegions(rss.numBytes), 0);
     size_t const dstRegBytes = nearAid ? NicNearAid::DstBytes(rss.numBytes) : rss.numBytes;
 
     // Initialize DMA-BUF fields
@@ -4329,12 +4331,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     int const port = cfg.nic.ibPort;
 
-    size_t const wrChunkBytes = nearAid ? NicNearAid::PIECE_BYTES : cfg.nic.chunkBytes;
     size_t maxWrBytes = 0;
     for (int i = 0; i < rss.qpCount; i++) {
       size_t qpBytes = rss.subExecParamCpu[i].N * sizeof(float);
       if (qpBytes)
-        maxWrBytes = std::max(maxWrBytes, std::min(wrChunkBytes, qpBytes));
+        maxWrBytes = std::max(maxWrBytes, std::min(NicWorkRequestBytes(cfg), qpBytes));
     }
 
     // Prepare NIC on SRC mem rank
@@ -4436,7 +4437,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         if ((uint64_t)rss.dstMem[0] % NicNearAid::REGION_BYTES)
           return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs a DST aligned to %lu bytes",
                   rss.transferIdx, NicNearAid::REGION_BYTES};
-        ERR_CHECK(ProbeNearAidPhases(rss));
+        ERR_CHECK(ProbeNearAidRegions(rss));
       }
 
       // Register DST memory region
@@ -4489,14 +4490,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (GetRank() == nicExeRank) {
       rss.sgePerQueuePair.resize(rss.qpCount);
       rss.sendWorkRequests.resize(rss.qpCount);
-      if (nearAid) {
-        rss.nearAidChains.resize(rss.qpCount);
-        rss.nearAidChainsPosted.resize(rss.qpCount);
-        rss.nearAidChainsDone.resize(rss.qpCount);
-      }
+      if (nearAid)
+        rss.nearAid.chains.resize(rss.qpCount);
     }
     if (nearAid)
-      System::Get().Broadcast(dstMemRank, rss.nearAidPhases.size(), rss.nearAidPhases.data());
+      System::Get().Broadcast(dstMemRank, rss.nearAid.inverted.size(), rss.nearAid.inverted.data());
 
     // Broadcast SRC/DST port link_layer so that all ranks know it so that they can be compared
     System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
@@ -4911,7 +4909,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     ERR_CHECK(hipDeviceSynchronize());
 
     NicNearAid::GatherDst(staged.data(), rss.numBytes, cfg.nic.nearAidMode == NIC_NEAR_AID_FAR,
-                          rss.nearAidPhases, (uint8_t*)outputBuffer.data());
+                          rss.nearAid.inverted, (uint8_t*)outputBuffer.data());
     return ERR_NONE;
   }
 
@@ -4959,7 +4957,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                       transferIdx, dstIdx, t.dsts[dstIdx].memRank, count, firstOff};
           }
         } else {
-          if (!rss->nearAidPhases.empty()) {
+          if (!rss->nearAid.inverted.empty()) {
             ERR_CHECK(GatherNearAidDst(cfg, *rss, t.dsts[dstIdx].memIndex, outputBuffer));
             output = outputBuffer.data();
           } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
@@ -6138,16 +6136,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
-  static ErrResult PostNextNearAidChain(TransferResources& rss, int qpIndex)
+  static ErrResult NearAidPostError(TransferResources const& rss, int qpIndex, int error)
   {
-    size_t&      posted = rss.nearAidChainsPosted[qpIndex];
-    ibv_send_wr* badWorkReq;
-    int error = ibv_post_send(rss.srcQueuePairs[qpIndex], rss.nearAidChains[qpIndex][posted], &badWorkReq);
-    if (error)
-      return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d chain %lu of %lu (Error code %d = %s)\n",
-        rss.transferIdx, qpIndex, posted, rss.nearAidChains[qpIndex].size(), error, strerror(error)};
-    posted++;
-    return ERR_NONE;
+    return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d (Error code %d = %s)\n",
+            rss.transferIdx, qpIndex, error, strerror(error)};
   }
 
   // Execution of a single NIC Transfer
@@ -6157,14 +6149,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                       TransferResources&   rss)
   {
     // NIC_NEAR_AID keeps a window of chains per queue pair; RunNicExecutor posts the rest on completion
-    if (!rss.nearAidChains.empty()) {
-      for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
-        rss.nearAidChainsPosted[qpIndex] = 0;
-        rss.nearAidChainsDone[qpIndex]   = 0;
-        size_t const numInitial = std::min(NicNearAid::CHAINS_IN_FLIGHT, rss.nearAidChains[qpIndex].size());
-        for (size_t chainIdx = 0; chainIdx < numInitial; chainIdx++)
-          ERR_CHECK(PostNextNearAidChain(rss, qpIndex));
-      }
+    if (!rss.nearAid.chains.empty()) {
+      int       failedQp;
+      int const error = NicNearAid::PostFirstChains(rss.nearAid, rss.srcQueuePairs, failedQp);
+      if (error) return NearAidPostError(rss, failedQp, error);
       return ERR_NONE;
     }
 
@@ -6229,16 +6217,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                 if (wc_array[j].status != IBV_WC_SUCCESS) {
                   return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
                 }
-                if (rss.nearAidChains.empty()) {
+                if (rss.nearAid.chains.empty()) {
                   receivedQPs[i]++;
                   continue;
                 }
-                int    const qpIndex   = wc_array[j].wr_id;
-                size_t const numChains = rss.nearAidChains[qpIndex].size();
-                if (++rss.nearAidChainsDone[qpIndex] == numChains)
-                  receivedQPs[i]++;
-                else if (rss.nearAidChainsPosted[qpIndex] < numChains)
-                  ERR_CHECK(PostNextNearAidChain(rss, qpIndex));
+                int  const qpIndex = wc_array[j].wr_id;
+                bool       qpDone;
+                int  const error   = NicNearAid::OnChainDone(rss.nearAid, rss.srcQueuePairs[qpIndex], qpIndex, qpDone);
+                if (error) return NearAidPostError(rss, qpIndex, error);
+                if (qpDone) receivedQPs[i]++;
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
@@ -8084,7 +8071,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           // Pingpong flag buffers are reset at the start of every iteration instead
           if (rss->numLaps != 0) continue;
           Transfer const& t = transfers[rss->transferIdx];
-          size_t const clearBytes = rss->nearAidPhases.empty() ? rss->numBytes : NicNearAid::DstBytes(rss->numBytes);
+          size_t const clearBytes = rss->nearAid.inverted.empty() ? rss->numBytes : NicNearAid::DstBytes(rss->numBytes);
           for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
             if (t.dsts[dstIdx].memRank != localRank) continue;
             float* dstPtr = rss->dstMem[dstIdx] + initOffset;
@@ -8169,7 +8156,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               continue;
             }
             float* output;
-            if (!rss->nearAidPhases.empty()) {
+            if (!rss->nearAid.inverted.empty()) {
               (void)GatherNearAidDst(cfg, *rss, t.dsts[dstIdx].memIndex, outputBuffer);
               output = outputBuffer.data();
             } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {

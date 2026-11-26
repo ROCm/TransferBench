@@ -342,7 +342,7 @@ The following environment variables apply only when NIC support is enabled. To e
       - ``1073741824``
 
     * - ``NIC_NEAR_AID``
-      - Placement of NIC RDMA WRITEs into a GPU destination on MI4XX (gfx1250) in SPX/NPS1 mode, where GPU memory alternates between the two AIDs every 16 KiB. ``0`` = contiguous (unchanged behavior), ``1`` = write only the 16 KiB blocks on the AID closest to the NIC, ``2`` = write only the blocks on the other AID (negative control).
+      - Placement of NIC RDMA WRITEs into a GPU destination on gfx1250 in SPX/NPS1 mode, where GPU memory alternates between the two AIDs every 16 KiB. ``0`` = contiguous (unchanged behavior), ``1`` = write only the 16 KiB blocks on the AID closest to the NIC, ``2`` = write only the blocks on the other AID (negative control).
 
         In modes ``1`` and ``2`` the destination is allocated at twice its size, each 16 KiB piece is posted as its own RDMA WRITE, and the AID layout is probed once per Transfer from CPU load latencies through an mmap of the destination DMA-BUF. Validation gathers the pieces back into logical order. Requires an x86 host, DMA-BUF support, a single GPU destination, the NIC executor on the source rank, ``BYTE_OFFSET=0`` and ``VALIDATE_ON_DEVICE=0``. The difference between modes is largest when NICs send and receive at the same time.
       - ``0``
