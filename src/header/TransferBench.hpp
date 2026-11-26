@@ -89,6 +89,7 @@ THE SOFTWARE.
 #endif
 
 #include "tdmCopy.h"
+#include "NicNearAid.hpp"
 /// @endcond
 
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
@@ -295,6 +296,16 @@ namespace TransferBench
   };
 
   /**
+   * Placement of NIC RDMA WRITEs into the 16 KiB blocks of a GPU destination (NicOptions::nearAidMode)
+   */
+  enum NicNearAidMode
+  {
+    NIC_NEAR_AID_OFF  = 0,                      ///< Contiguous destination
+    NIC_NEAR_AID_NEAR = 1,                      ///< Only blocks on the AID closest to the NIC
+    NIC_NEAR_AID_FAR  = 2,                      ///< Only blocks on the other AID (negative control)
+  };
+
+  /**
    * NIC Executor options
    */
   struct NicOptions
@@ -306,6 +317,7 @@ namespace TransferBench
     int         ipAddressFamily = 4;            ///< 4=IPv4, 6=IPv6 (used for auto GID detection)
     int         maxRecvWorkReq  = 16;           ///< Maximum number of recv work requests per queue pair
     int         maxSendWorkReq  = 1024;         ///< Maximum number of send work requests per queue pair
+    int         nearAidMode     = 0;            ///< NicNearAidMode for GPU destinations of RDMA WRITEs
     int         queueSize       = 100;          ///< Completion queue size
     int         roceVersion     = 2;            ///< RoCE version (used for auto GID detection)
     int         useRelaxedOrder = 1;            ///< Use relaxed ordering
@@ -2230,6 +2242,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (nic.ipAddressFamily != cfg.nic.ipAddressFamily) ADD_ERROR("cfg.nic.ipAddressFamily");
       if (nic.maxRecvWorkReq  != cfg.nic.maxRecvWorkReq)  ADD_ERROR("cfg.nic.maxRecvWorkReq");
       if (nic.maxSendWorkReq  != cfg.nic.maxSendWorkReq)  ADD_ERROR("cfg.nic.maxSendWorkReq");
+      if (nic.nearAidMode     != cfg.nic.nearAidMode)     ADD_ERROR("cfg.nic.nearAidMode");
       // nic.queueSize   is permitted to be different across ranks
       if (nic.roceVersion     != cfg.nic.roceVersion)     ADD_ERROR("cfg.nic.roceVersion");
       if (nic.serviceLevel    != cfg.nic.serviceLevel)    ADD_ERROR("cfg.nic.serviceLevel");
@@ -2391,6 +2404,21 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (cfg.nic.cqPollBatch <= 0) {
         errors.push_back({ERR_FATAL, "[nic.cqPollBatch] must be positive"});
       }
+      if (cfg.nic.nearAidMode < NIC_NEAR_AID_OFF || cfg.nic.nearAidMode > NIC_NEAR_AID_FAR) {
+        errors.push_back({ERR_FATAL, "[nic.nearAidMode] must be 0 (off), 1 (near) or 2 (far)"});
+      }
+      if (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF) {
+#if !defined(__x86_64__) || defined(__NVCC__)
+        errors.push_back({ERR_FATAL, "[nic.nearAidMode] needs an x86 host and AMD GPUs"});
+#endif
+        if (cfg.data.byteOffset != 0)
+          errors.push_back({ERR_FATAL, "[nic.nearAidMode] requires [data.byteOffset] to be 0"});
+        if (cfg.data.validateOnDevice)
+          errors.push_back({ERR_FATAL, "[nic.nearAidMode] does not support [data.validateOnDevice]"});
+        if ((size_t)cfg.nic.maxSendWorkReq < NicNearAid::MIN_SEND_WR)
+          errors.push_back({ERR_FATAL, "[nic.nearAidMode] requires [nic.maxSendWorkReq] of at least %lu",
+                            NicNearAid::MIN_SEND_WR});
+      }
     }
 
     // NVIDIA specific
@@ -2504,6 +2532,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         if (dst.memRank != t.exeDevice.exeRank) return true;
     }
     return false;
+  }
+
+  // Largest RDMA work request a NIC Transfer posts, before capping by the bytes of its queue pair
+  static size_t NicWorkRequestBytes(ConfigOptions const& cfg)
+  {
+    return (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF) ? NicNearAid::PIECE_BYTES : cfg.nic.chunkBytes;
   }
 
   // Validate Transfers to execute - returns true if and only if fatal error detected
@@ -2917,6 +2951,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           hasFatalError = true;
           break;
         }
+        if (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF &&
+            (srcExeRank != srcMemRank || !IsGpuMemType(t.dsts[0].memType))) {
+          errors.push_back({ERR_FATAL,
+              "Transfer %d: NIC_NEAR_AID needs the NIC executor on the SRC memory rank and a GPU DST", i});
+          hasFatalError = true;
+          break;
+        }
 
         // The SRC NIC executor is the one that initiates either a (remote read/local write) or (local read/remote write) copy operation
         ExeDevice srcExeDevice;
@@ -2974,7 +3015,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           maxQpBytes = std::max(maxQpBytes, qpN * sizeof(float));
           assigned  += qpN;
         }
-        size_t const maxWrBytes = maxQpBytes ? std::min(cfg.nic.chunkBytes, maxQpBytes) : 0;
+        size_t const maxWrBytes = maxQpBytes ? std::min(NicWorkRequestBytes(cfg), maxQpBytes) : 0;
         uint32_t const maxMsgSz = std::min(GetNicMaxMsgSize(srcExeDevice.exeIndex, srcExeDevice.exeRank),
                                            GetNicMaxMsgSize(dstExeDevice.exeIndex, dstExeDevice.exeRank));
         if (maxMsgSz && maxWrBytes > maxMsgSz) {
@@ -3377,6 +3418,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     bool                       srcIsExeNic;       ///< Whether SRC or DST NIC initiates traffic
     vector<vector<ibv_sge>>    sgePerQueuePair;   ///< Scatter-gather elements per queue pair
     vector<vector<ibv_send_wr>>sendWorkRequests;  ///< Send work requests per queue pair
+    NicNearAid::State          nearAid;           ///< NIC_NEAR_AID placement
 
     // For BMA executor
 #ifdef BMA_EXEC_ENABLED
@@ -4195,6 +4237,37 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+  // Sets rss.nearAid.inverted by probing the DST through its DMA-BUF. A region without a clear split is
+  // treated as regular, which only costs bandwidth.
+  static ErrResult ProbeNearAidRegions(TransferResources& rss)
+  {
+    NicNearAid::ProbeResult probe;
+    int const error = NicNearAid::ProbeInverted(rss.dstDmabufFd, rss.dstDmabufOffset, rss.nearAid.inverted, probe);
+    if (error)
+      return {ERR_FATAL, "Transfer %d: Unable to probe DST DMA-BUF for NIC_NEAR_AID (%s)",
+              rss.transferIdx, strerror(error)};
+
+    if (probe.numAmbiguous)
+      printf("[WARN] Transfer %d: NIC_NEAR_AID probe found no clear AID split in %lu of %lu DST regions\n",
+             rss.transferIdx, probe.numAmbiguous, rss.nearAid.inverted.size());
+    if (System::Get().IsVerbose())
+      printf("[INFO] Transfer %d: NIC_NEAR_AID probed %lu DST regions (region 0 block reads %lu %lu ns)\n",
+             rss.transferIdx, rss.nearAid.inverted.size(), probe.region0Nsec[0], probe.region0Nsec[1]);
+    return ERR_NONE;
+  }
+
+  static void PrepareNearAidWorkRequests(ConfigOptions const& cfg, TransferResources& rss, int qpIndex,
+                                         ConnInfo const& dstConnInfo)
+  {
+    SubExecParam const& p       = rss.subExecParamCpu[qpIndex];
+    size_t const        qpStart = (uint8_t*)p.dst[0] - (uint8_t*)rss.dstMem[0];
+    NicNearAid::BuildWorkRequests((uintptr_t)p.src[0], rss.srcMemRegion->lkey,
+                                  dstConnInfo.vaddr - qpStart, dstConnInfo.rkey,
+                                  qpStart, p.N * sizeof(float), cfg.nic.nearAidMode == NIC_NEAR_AID_FAR,
+                                  rss.nearAid.inverted, qpIndex, rss.sgePerQueuePair[qpIndex],
+                                  rss.sendWorkRequests[qpIndex], rss.nearAid.chains[qpIndex]);
+  }
+
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
                                                ExeDevice     const& nicExeDevice,
                                                Transfer      const& t,
@@ -4220,6 +4293,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     rss.srcNicIndex = (nicExeRank == srcMemRank ? nicExeDevice.exeIndex : nonExeDevice.exeIndex);
     rss.dstNicIndex = (nicExeRank == srcMemRank ? nonExeDevice.exeIndex : nicExeDevice.exeIndex);
     rss.qpCount     = t.numSubExecs;
+
+    bool const nearAid = (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF);
+    if (nearAid)
+      rss.nearAid.inverted.assign(NicNearAid::NumRegions(rss.numBytes), 0);
+    size_t const dstRegBytes = nearAid ? NicNearAid::DstBytes(rss.numBytes) : rss.numBytes;
 
     // Initialize DMA-BUF fields
     rss.srcDmabufFd = -1;
@@ -4257,7 +4335,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     for (int i = 0; i < rss.qpCount; i++) {
       size_t qpBytes = rss.subExecParamCpu[i].N * sizeof(float);
       if (qpBytes)
-        maxWrBytes = std::max(maxWrBytes, std::min(cfg.nic.chunkBytes, qpBytes));
+        maxWrBytes = std::max(maxWrBytes, std::min(NicWorkRequestBytes(cfg), qpBytes));
     }
 
     // Prepare NIC on SRC mem rank
@@ -4298,6 +4376,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Create SRC completion queues
       // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
       int srcCQSize = std::max(cfg.nic.queueSize, static_cast<int>(rss.qpCount));
+      if (nearAid)
+        srcCQSize = std::max(srcCQSize, static_cast<int>(rss.qpCount * NicNearAid::CHAINS_IN_FLIGHT));
       IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, srcCQSize, NULL, NULL, 0);
       // Get SRC port attributes
       IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
@@ -4344,22 +4424,31 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
       // Export DMA-BUF for DST memory if it's GPU memory
       if (CheckDmabufSupport() && !t.dsts.empty() && IsGpuMemType(t.dsts[0].memType)) {
-        ERR_CHECK(ExportDmabuf(rss.dstMem[0], rss.numBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
+        ERR_CHECK(ExportDmabuf(rss.dstMem[0], dstRegBytes, rss.dstDmabufFd, rss.dstDmabufOffset));
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d exported DST GPU memory as DMA-BUF (fd=%d, offset=%lu)\n",
                  GetRank(), rss.dstDmabufFd, rss.dstDmabufOffset);
         }
       }
 
+      if (nearAid) {
+        if (rss.dstDmabufFd < 0)
+          return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs DMA-BUF support to probe the DST", rss.transferIdx};
+        if ((uint64_t)rss.dstMem[0] % NicNearAid::REGION_BYTES)
+          return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs a DST aligned to %lu bytes",
+                  rss.transferIdx, NicNearAid::REGION_BYTES};
+        ERR_CHECK(ProbeNearAidRegions(rss));
+      }
+
       // Register DST memory region
       if (rss.dstDmabufFd >= 0) {
         IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_dmabuf_mr, rss.dstProtect, rss.dstDmabufOffset,
-                     rss.numBytes, (uint64_t)rss.dstMem[0], rss.dstDmabufFd, rdmaMemRegFlags);
+                     dstRegBytes, (uint64_t)rss.dstMem[0], rss.dstDmabufFd, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered DST memory using ibv_reg_dmabuf_mr\n", GetRank());
         }
       } else {
-        IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], rss.numBytes, rdmaMemRegFlags);
+        IBV_PTR_CALL(rss.dstMemRegion, ibv_reg_mr, rss.dstProtect, rss.dstMem[0], dstRegBytes, rdmaMemRegFlags);
         if (System::Get().IsVerbose()) {
           printf("[INFO] Rank %d registered DST memory using ibv_reg_mr (standard path)\n", GetRank());
         }
@@ -4401,7 +4490,11 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     if (GetRank() == nicExeRank) {
       rss.sgePerQueuePair.resize(rss.qpCount);
       rss.sendWorkRequests.resize(rss.qpCount);
+      if (nearAid)
+        rss.nearAid.chains.resize(rss.qpCount);
     }
+    if (nearAid)
+      System::Get().Broadcast(dstMemRank, rss.nearAid.inverted.size(), rss.nearAid.inverted.data());
 
     // Broadcast SRC/DST port link_layer so that all ranks know it so that they can be compared
     System::Get().Broadcast(srcMemRank, sizeof(rss.srcPortAttr.link_layer), &rss.srcPortAttr.link_layer);
@@ -4473,7 +4566,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       }
 
       // Prepare scatter-gather element / work request for this queue pair in advance
-      if (GetRank() == nicExeRank) {
+      if (GetRank() == nicExeRank && nearAid) {
+        PrepareNearAidWorkRequests(cfg, rss, i, dstConnInfo);
+      } else if (GetRank() == nicExeRank) {
         // Process the data to transfer in chunks (of cfg.nic.chunkBytes)
         size_t       remaining = rss.subExecParamCpu[i].N * sizeof(float);
         size_t const numChunks = (remaining + cfg.nic.chunkBytes - 1) / cfg.nic.chunkBytes;
@@ -4802,6 +4897,22 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+  // Copies a NIC_NEAR_AID DST to the host and gathers its pieces into logical order
+  static ErrResult GatherNearAidDst(ConfigOptions     const& cfg,
+                                    TransferResources const& rss,
+                                    int               const  gpuIndex,
+                                    vector<float>&           outputBuffer)
+  {
+    vector<uint8_t> staged(NicNearAid::DstBytes(rss.numBytes));
+    ERR_CHECK(hipSetDevice(gpuIndex));
+    ERR_CHECK(hipMemcpy(staged.data(), rss.dstMem[0], staged.size(), hipMemcpyDefault));
+    ERR_CHECK(hipDeviceSynchronize());
+
+    NicNearAid::GatherDst(staged.data(), rss.numBytes, cfg.nic.nearAidMode == NIC_NEAR_AID_FAR,
+                          rss.nearAid.inverted, (uint8_t*)outputBuffer.data());
+    return ERR_NONE;
+  }
+
   // Checks that destination buffers match expected values
   static ErrResult ValidateAllTransfers(ConfigOptions              const& cfg,
                                         vector<Transfer>           const& transfers,
@@ -4846,7 +4957,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                       transferIdx, dstIdx, t.dsts[dstIdx].memRank, count, firstOff};
           }
         } else {
-          if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+          if (!rss->nearAid.inverted.empty()) {
+            ERR_CHECK(GatherNearAidDst(cfg, *rss, t.dsts[dstIdx].memIndex, outputBuffer));
+            output = outputBuffer.data();
+          } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
             output = (rss->dstMem[dstIdx]) + initOffset;
             if (verbose) {
               System::Get().Log("[INFO] Validation: transfer %d DST[%d] direct read from %s%d  %zu bytes  ptr=%p\n",
@@ -5339,6 +5453,8 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         size_t dstAllocBytes = t.numBytes + cfg.data.byteOffset;
         if (rss.numLaps != 0)
           dstAllocBytes = std::max(dstAllocBytes, (size_t)cfg.general.pingpongFlagBuffer);
+        if (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF && IsNicExeType(exeDevice.exeType))
+          dstAllocBytes = NicNearAid::DstBytes(t.numBytes);
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (rss.numLaps != 0 && IsGpuMemType(dstMemDevice.memType)) {
           // Partner half's executor may fabric-import this flag buffer for cross-rank pingpong
@@ -6020,12 +6136,26 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
+  static ErrResult NearAidPostError(TransferResources const& rss, int qpIndex, int error)
+  {
+    return {ERR_FATAL, "Transfer %d: Error when calling ibv_post_send for QP %d (Error code %d = %s)\n",
+            rss.transferIdx, qpIndex, error, strerror(error)};
+  }
+
   // Execution of a single NIC Transfer
   static ErrResult ExecuteNicTransfer(int           const  iteration,
                                       ConfigOptions const& cfg,
                                       int           const  exeIndex,
                                       TransferResources&   rss)
   {
+    // NIC_NEAR_AID keeps a window of chains per queue pair; RunNicExecutor posts the rest on completion
+    if (!rss.nearAid.chains.empty()) {
+      int       failedQp;
+      int const error = NicNearAid::PostFirstChains(rss.nearAid, rss.srcQueuePairs, failedQp);
+      if (error) return NearAidPostError(rss, failedQp, error);
+      return ERR_NONE;
+    }
+
     // Loop over each of the queue pairs and post work request
     ibv_send_wr* badWorkReq;
     for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
@@ -6087,7 +6217,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                 if (wc_array[j].status != IBV_WC_SUCCESS) {
                   return {ERR_FATAL, "Transfer %d: Received unsuccessful work completion [status code %d]", rss.transferIdx, wc_array[j].status};
                 }
-                receivedQPs[i]++;
+                if (rss.nearAid.chains.empty()) {
+                  receivedQPs[i]++;
+                  continue;
+                }
+                int  const qpIndex = wc_array[j].wr_id;
+                bool       qpDone;
+                int  const error   = NicNearAid::OnChainDone(rss.nearAid, rss.srcQueuePairs[qpIndex], qpIndex, qpDone);
+                if (error) return NearAidPostError(rss, qpIndex, error);
+                if (qpDone) receivedQPs[i]++;
               }
             } else if (nc < 0) {
               return {ERR_FATAL, "Transfer %d: Received negative work completion", rss.transferIdx};
@@ -7933,14 +8071,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           // Pingpong flag buffers are reset at the start of every iteration instead
           if (rss->numLaps != 0) continue;
           Transfer const& t = transfers[rss->transferIdx];
+          size_t const clearBytes = rss->nearAid.inverted.empty() ? rss->numBytes : NicNearAid::DstBytes(rss->numBytes);
           for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
             if (t.dsts[dstIdx].memRank != localRank) continue;
             float* dstPtr = rss->dstMem[dstIdx] + initOffset;
             if (IsCpuMemType(t.dsts[dstIdx].memType)) {
-              memset(dstPtr, 0, rss->numBytes);
+              memset(dstPtr, 0, clearBytes);
             } else if (IsGpuMemType(t.dsts[dstIdx].memType)) {
               ERR_APPEND(hipSetDevice(t.dsts[dstIdx].memIndex), errResults);
-              ERR_APPEND(hipMemset(dstPtr, 0, rss->numBytes), errResults);
+              ERR_APPEND(hipMemset(dstPtr, 0, clearBytes), errResults);
               ERR_APPEND(hipDeviceSynchronize(), errResults);
             }
           }
@@ -8017,7 +8156,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               continue;
             }
             float* output;
-            if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+            if (!rss->nearAid.inverted.empty()) {
+              (void)GatherNearAidDst(cfg, *rss, t.dsts[dstIdx].memIndex, outputBuffer);
+              output = outputBuffer.data();
+            } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
               output = rss->dstMem[dstIdx] + initOffset;
             } else {
               (void)hipSetDevice(t.dsts[dstIdx].memIndex);
