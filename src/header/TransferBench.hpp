@@ -3002,7 +3002,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           maxQpBytes = std::max(maxQpBytes, qpN * sizeof(float));
           assigned  += qpN;
         }
-        size_t const maxWrBytes = maxQpBytes ? std::min(cfg.nic.chunkBytes, maxQpBytes) : 0;
+        size_t const wrChunkBytes = (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF) ? NicNearAid::PIECE_BYTES
+                                                                              : cfg.nic.chunkBytes;
+        size_t const maxWrBytes = maxQpBytes ? std::min(wrChunkBytes, maxQpBytes) : 0;
         uint32_t const maxMsgSz = std::min(GetNicMaxMsgSize(srcExeDevice.exeIndex, srcExeDevice.exeRank),
                                            GetNicMaxMsgSize(dstExeDevice.exeIndex, dstExeDevice.exeRank));
         if (maxMsgSz && maxWrBytes > maxMsgSz) {
@@ -4327,11 +4329,12 @@ const auto& AmdSmiFabricInfoV1(const T& info)
 
     int const port = cfg.nic.ibPort;
 
+    size_t const wrChunkBytes = nearAid ? NicNearAid::PIECE_BYTES : cfg.nic.chunkBytes;
     size_t maxWrBytes = 0;
     for (int i = 0; i < rss.qpCount; i++) {
       size_t qpBytes = rss.subExecParamCpu[i].N * sizeof(float);
       if (qpBytes)
-        maxWrBytes = std::max(maxWrBytes, std::min(cfg.nic.chunkBytes, qpBytes));
+        maxWrBytes = std::max(maxWrBytes, std::min(wrChunkBytes, qpBytes));
     }
 
     // Prepare NIC on SRC mem rank
@@ -8081,14 +8084,15 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           // Pingpong flag buffers are reset at the start of every iteration instead
           if (rss->numLaps != 0) continue;
           Transfer const& t = transfers[rss->transferIdx];
+          size_t const clearBytes = rss->nearAidPhases.empty() ? rss->numBytes : NicNearAid::DstBytes(rss->numBytes);
           for (int dstIdx = 0; dstIdx < (int)rss->dstMem.size(); dstIdx++) {
             if (t.dsts[dstIdx].memRank != localRank) continue;
             float* dstPtr = rss->dstMem[dstIdx] + initOffset;
             if (IsCpuMemType(t.dsts[dstIdx].memType)) {
-              memset(dstPtr, 0, rss->numBytes);
+              memset(dstPtr, 0, clearBytes);
             } else if (IsGpuMemType(t.dsts[dstIdx].memType)) {
               ERR_APPEND(hipSetDevice(t.dsts[dstIdx].memIndex), errResults);
-              ERR_APPEND(hipMemset(dstPtr, 0, rss->numBytes), errResults);
+              ERR_APPEND(hipMemset(dstPtr, 0, clearBytes), errResults);
               ERR_APPEND(hipDeviceSynchronize(), errResults);
             }
           }
@@ -8165,7 +8169,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
               continue;
             }
             float* output;
-            if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
+            if (!rss->nearAidPhases.empty()) {
+              (void)GatherNearAidDst(cfg, *rss, t.dsts[dstIdx].memIndex, outputBuffer);
+              output = outputBuffer.data();
+            } else if (IsCpuMemType(t.dsts[dstIdx].memType) || cfg.data.validateDirect) {
               output = rss->dstMem[dstIdx] + initOffset;
             } else {
               (void)hipSetDevice(t.dsts[dstIdx].memIndex);
