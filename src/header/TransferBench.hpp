@@ -55,7 +55,6 @@ THE SOFTWARE.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
@@ -83,9 +82,6 @@ THE SOFTWARE.
 #include "hip/hip_runtime.h"
 #include "hsa/hsa.h"
 #include "hsa/hsa_ext_amd.h"
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
@@ -93,6 +89,7 @@ THE SOFTWARE.
 #endif
 
 #include "tdmCopy.h"
+#include "NicNearAid.hpp"
 /// @endcond
 
 // Batched DMA executor is only supported with HIP >= 7.1 and CUDA 12.8
@@ -980,20 +977,6 @@ const auto& AmdSmiFabricInfoV1(const T& info)
   int   constexpr MAX_DSTS       = 8;                  // Max dsts per Transfer
   int   constexpr MEMSET_CHAR    = 75;                 // Value to memset (char)
   float constexpr MEMSET_VAL     = 13323083.0f;        // Value to memset (double)
-
-  // NIC_NEAR_AID layout: in SPX/NPS1 GPU memory alternates between the two AIDs every 16 KiB, and the
-  // AID of block k (0..63) of a 1 MiB region is parity(k bit 0, k bit 3) up to one phase bit per region.
-  // Each 512 KiB of destination data therefore occupies one 1 MiB region, on the blocks of one AID.
-  size_t constexpr NEAR_AID_PIECE_BYTES       = 16 * 1024;
-  size_t constexpr NEAR_AID_REGION_BYTES      = 1024 * 1024;
-  size_t constexpr NEAR_AID_PIECES_PER_REGION = NEAR_AID_REGION_BYTES / 2 / NEAR_AID_PIECE_BYTES;
-  // One RDMA WRITE per piece, posted as chains of one region with only the tail signaled. Long
-  // unsignaled runs stall ionic: 8 chains in flight (248 unsignaled WRs per queue pair) hang now and
-  // then, so at most 4 are in flight. ionic also stalls when those WRs fill more than half of the
-  // send queue.
-  size_t constexpr NEAR_AID_PIECES_PER_CHAIN  = NEAR_AID_PIECES_PER_REGION;
-  size_t constexpr NEAR_AID_CHAINS_IN_FLIGHT  = 4;
-  size_t constexpr NEAR_AID_MIN_SEND_WR       = 2 * NEAR_AID_CHAINS_IN_FLIGHT * NEAR_AID_PIECES_PER_CHAIN;
 
   int GetWarpSize(std::vector<ErrResult>* errors = nullptr) {
     int warpSize = 0;
@@ -2432,9 +2415,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
           errors.push_back({ERR_FATAL, "[nic.nearAidMode] requires [data.byteOffset] to be 0"});
         if (cfg.data.validateOnDevice)
           errors.push_back({ERR_FATAL, "[nic.nearAidMode] does not support [data.validateOnDevice]"});
-        if ((size_t)cfg.nic.maxSendWorkReq < NEAR_AID_MIN_SEND_WR)
+        if ((size_t)cfg.nic.maxSendWorkReq < NicNearAid::MIN_SEND_WR)
           errors.push_back({ERR_FATAL, "[nic.nearAidMode] requires [nic.maxSendWorkReq] of at least %lu",
-                            NEAR_AID_MIN_SEND_WR});
+                            NicNearAid::MIN_SEND_WR});
       }
     }
 
@@ -4244,145 +4227,35 @@ const auto& AmdSmiFabricInfoV1(const T& info)
     return ERR_NONE;
   }
 
-  static size_t NearAidNumRegions(size_t numBytes)
+  // Sets rss.nearAidPhases by probing the DST through its DMA-BUF. A region without a clear split keeps
+  // phase 0 and only costs bandwidth.
+  static ErrResult ProbeNearAidPhases(TransferResources& rss)
   {
-    size_t const regionDataBytes = NEAR_AID_PIECES_PER_REGION * NEAR_AID_PIECE_BYTES;
-    return (numBytes + regionDataBytes - 1) / regionDataBytes;
-  }
+    NicNearAid::ProbeResult probe;
+    int const error = NicNearAid::ProbePhases(rss.dstDmabufFd, rss.dstDmabufOffset, rss.nearAidPhases, probe);
+    if (error)
+      return {ERR_FATAL, "Transfer %d: Unable to probe DST DMA-BUF for NIC_NEAR_AID (%s)",
+              rss.transferIdx, strerror(error)};
 
-  static size_t NearAidDstBytes(size_t numBytes)
-  {
-    return NearAidNumRegions(numBytes) * NEAR_AID_REGION_BYTES;
-  }
-
-  // Offset in the NIC_NEAR_AID destination of logical destination byte `offset`
-  static size_t NearAidDstOffset(size_t offset, int mode, vector<uint8_t> const& phases)
-  {
-    size_t const piece         = offset / NEAR_AID_PIECE_BYTES;
-    size_t const region        = piece / NEAR_AID_PIECES_PER_REGION;
-    size_t const pieceInRegion = piece % NEAR_AID_PIECES_PER_REGION;
-    int    const phase         = phases[region] ^ (mode == NIC_NEAR_AID_FAR);
-    // Exactly one block of each pair (2j, 2j+1) has the wanted parity
-    size_t const block         = 2 * pieceInRegion + (((pieceInRegion >> 2) & 1) ^ phase);
-    return region * NEAR_AID_REGION_BYTES + block * NEAR_AID_PIECE_BYTES + offset % NEAR_AID_PIECE_BYTES;
-  }
-
-#if defined(__x86_64__) && !defined(__NVCC__)
-  // Median time, in nanoseconds, of one CPU read at the start of `block`. The CPU caches the DMA-BUF
-  // mapping, so each line is flushed first to make the read go to the GPU.
-  static uint64_t NearAidReadNsec(char const* block)
-  {
-    int constexpr NUM_REPS = 16;
-    uint64_t nsec[NUM_REPS];
-    for (int rep = 0; rep < NUM_REPS; rep++) {
-      volatile uint64_t const* word = (volatile uint64_t const*)(block + rep * 64);
-      _mm_clflush((void const*)word);
-      _mm_mfence();
-      auto const start = std::chrono::steady_clock::now();
-      (void)*word;
-      nsec[rep] = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-    }
-    std::nth_element(nsec, nsec + NUM_REPS / 2, nsec + NUM_REPS);
-    return nsec[NUM_REPS / 2];
-  }
-
-  // Sets rss.nearAidPhases from CPU load latencies of the DST, read through an mmap of its DMA-BUF.
-  // The CPU reaches device memory through the same PCIe entry as the NIC, so the faster block is
-  // taken as NIC-near. A region without a clear split keeps phase 0 and only costs bandwidth.
-  static ErrResult ProbeNearAidPhases(TransferResources& rss, size_t dstBytes)
-  {
-    size_t const mapBytes = rss.dstDmabufOffset + dstBytes;
-    void* mapping = mmap(NULL, mapBytes, PROT_READ, MAP_SHARED, rss.dstDmabufFd, 0);
-    if (mapping == MAP_FAILED)
-      return {ERR_FATAL, "Transfer %d: Unable to mmap DST DMA-BUF for NIC_NEAR_AID probe (%s)",
-              rss.transferIdx, strerror(errno)};
-
-    char const* dst = (char const*)mapping + rss.dstDmabufOffset;
-    size_t numAmbiguous = 0;
-    uint64_t region0Nsec[2] = {};
-    for (size_t region = 0; region < rss.nearAidPhases.size(); region++) {
-      char const* regionBase = dst + region * NEAR_AID_REGION_BYTES;
-      uint64_t const t0 = NearAidReadNsec(regionBase);
-      uint64_t const t1 = NearAidReadNsec(regionBase + 1 * NEAR_AID_PIECE_BYTES);
-      uint64_t const t8 = NearAidReadNsec(regionBase + 8 * NEAR_AID_PIECE_BYTES);
-      uint64_t const t9 = NearAidReadNsec(regionBase + 9 * NEAR_AID_PIECE_BYTES);
-      if (region == 0) {
-        region0Nsec[0] = t0;
-        region0Nsec[1] = t1;
-      }
-
-      // Blocks 1 and 8 share an AID, as do blocks 0 and 9; each pair must differ by at least 10%
-      bool const block1Near = t1 < t0;
-      bool const clearSplit = ((t8 < t9) == block1Near) &&
-                              std::max(t0, t1) * 10 >= std::min(t0, t1) * 11 &&
-                              std::max(t8, t9) * 10 >= std::min(t8, t9) * 11;
-      if (!clearSplit) {
-        numAmbiguous++;
-        continue;
-      }
-      rss.nearAidPhases[region] = block1Near;
-    }
-    munmap(mapping, mapBytes);
-
-    if (numAmbiguous)
+    if (probe.numAmbiguous)
       printf("[WARN] Transfer %d: NIC_NEAR_AID probe found no clear AID split in %lu of %lu DST regions\n",
-             rss.transferIdx, numAmbiguous, rss.nearAidPhases.size());
+             rss.transferIdx, probe.numAmbiguous, rss.nearAidPhases.size());
     if (System::Get().IsVerbose())
       printf("[INFO] Transfer %d: NIC_NEAR_AID probed %lu DST regions (region 0 block reads %lu %lu ns)\n",
-             rss.transferIdx, rss.nearAidPhases.size(), region0Nsec[0], region0Nsec[1]);
+             rss.transferIdx, rss.nearAidPhases.size(), probe.region0Nsec[0], probe.region0Nsec[1]);
     return ERR_NONE;
   }
-#else
-  static ErrResult ProbeNearAidPhases(TransferResources& rss, size_t dstBytes)
-  {
-    return {ERR_FATAL, "NIC_NEAR_AID needs an x86 host and AMD GPUs"};
-  }
-#endif
 
-  // Prepares the WRs of queue pair qpIndex for NIC_NEAR_AID: one RDMA WRITE per 16 KiB logical piece,
-  // aimed at that piece's block of the DST, in chains of NEAR_AID_PIECES_PER_CHAIN
   static void PrepareNearAidWorkRequests(ConfigOptions const& cfg, TransferResources& rss, int qpIndex,
                                          ConnInfo const& dstConnInfo)
   {
-    SubExecParam const& p        = rss.subExecParamCpu[qpIndex];
-    size_t const        qpBytes  = p.N * sizeof(float);
-    size_t const        qpStart  = (uint8_t*)p.dst[0] - (uint8_t*)rss.dstMem[0];
-    size_t const        qpEnd    = qpStart + qpBytes;
-    uint64_t const      dstBase  = dstConnInfo.vaddr - qpStart;
-
-    size_t const firstPiece = qpStart / NEAR_AID_PIECE_BYTES;
-    size_t const numPieces  = qpBytes ? (qpEnd - 1) / NEAR_AID_PIECE_BYTES - firstPiece + 1 : 0;
-    vector<ibv_sge>&      sges   = rss.sgePerQueuePair[qpIndex];
-    vector<ibv_send_wr>&  wrs    = rss.sendWorkRequests[qpIndex];
-    vector<ibv_send_wr*>& chains = rss.nearAidChains[qpIndex];
-    sges.assign(numPieces, {});
-    wrs.assign(numPieces, {});
-    chains.clear();
-
-    size_t offset = qpStart;
-    for (size_t pieceIdx = 0; pieceIdx < numPieces; pieceIdx++) {
-      size_t const pieceEnd    = std::min((offset / NEAR_AID_PIECE_BYTES + 1) * NEAR_AID_PIECE_BYTES, qpEnd);
-      bool   const isChainTail = (pieceIdx % NEAR_AID_PIECES_PER_CHAIN == NEAR_AID_PIECES_PER_CHAIN - 1) ||
-                                 (pieceIdx == numPieces - 1);
-
-      ibv_sge& sg = sges[pieceIdx];
-      sg.addr   = (uintptr_t)p.src[0] + (offset - qpStart);
-      sg.length = pieceEnd - offset;
-      sg.lkey   = rss.srcMemRegion->lkey;
-
-      ibv_send_wr& wr = wrs[pieceIdx];
-      wr.wr_id               = qpIndex;
-      wr.next                = isChainTail ? NULL : &wrs[pieceIdx + 1];
-      wr.sg_list             = &sg;
-      wr.num_sge             = 1;
-      wr.send_flags          = isChainTail ? IBV_SEND_SIGNALED : 0;
-      wr.opcode              = IBV_WR_RDMA_WRITE;
-      wr.wr.rdma.remote_addr = dstBase + NearAidDstOffset(offset, cfg.nic.nearAidMode, rss.nearAidPhases);
-      wr.wr.rdma.rkey        = dstConnInfo.rkey;
-
-      if (pieceIdx % NEAR_AID_PIECES_PER_CHAIN == 0) chains.push_back(&wr);
-      offset = pieceEnd;
-    }
+    SubExecParam const& p       = rss.subExecParamCpu[qpIndex];
+    size_t const        qpStart = (uint8_t*)p.dst[0] - (uint8_t*)rss.dstMem[0];
+    NicNearAid::BuildWorkRequests((uintptr_t)p.src[0], rss.srcMemRegion->lkey,
+                                  dstConnInfo.vaddr - qpStart, dstConnInfo.rkey,
+                                  qpStart, p.N * sizeof(float), cfg.nic.nearAidMode == NIC_NEAR_AID_FAR,
+                                  rss.nearAidPhases, qpIndex, rss.sgePerQueuePair[qpIndex],
+                                  rss.sendWorkRequests[qpIndex], rss.nearAidChains[qpIndex]);
   }
 
   static ErrResult PrepareNicTransferResources(ConfigOptions const& cfg,
@@ -4418,9 +4291,9 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                 rss.transferIdx};
       if (t.dsts.size() != 1 || !IsGpuMemType(t.dsts[0].memType))
         return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs a single GPU DST", rss.transferIdx};
-      rss.nearAidPhases.assign(NearAidNumRegions(rss.numBytes), 0);
+      rss.nearAidPhases.assign(NicNearAid::NumRegions(rss.numBytes), 0);
     }
-    size_t const dstRegBytes = nearAid ? NearAidDstBytes(rss.numBytes) : rss.numBytes;
+    size_t const dstRegBytes = nearAid ? NicNearAid::DstBytes(rss.numBytes) : rss.numBytes;
 
     // Initialize DMA-BUF fields
     rss.srcDmabufFd = -1;
@@ -4500,7 +4373,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       // Ensure CQ size is at least as large as the number of queue pairs to avoid overflow
       int srcCQSize = std::max(cfg.nic.queueSize, static_cast<int>(rss.qpCount));
       if (nearAid)
-        srcCQSize = std::max(srcCQSize, static_cast<int>(rss.qpCount * NEAR_AID_CHAINS_IN_FLIGHT));
+        srcCQSize = std::max(srcCQSize, static_cast<int>(rss.qpCount * NicNearAid::CHAINS_IN_FLIGHT));
       IBV_PTR_CALL(rss.srcCompQueue, ibv_create_cq, rss.srcContext, srcCQSize, NULL, NULL, 0);
       // Get SRC port attributes
       IBV_CALL(ibv_query_port, rss.srcContext, port, &rss.srcPortAttr);
@@ -4557,10 +4430,10 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       if (nearAid) {
         if (rss.dstDmabufFd < 0)
           return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs DMA-BUF support to probe the DST", rss.transferIdx};
-        if ((uint64_t)rss.dstMem[0] % NEAR_AID_REGION_BYTES)
+        if ((uint64_t)rss.dstMem[0] % NicNearAid::REGION_BYTES)
           return {ERR_FATAL, "Transfer %d: NIC_NEAR_AID needs a DST aligned to %lu bytes",
-                  rss.transferIdx, NEAR_AID_REGION_BYTES};
-        ERR_CHECK(ProbeNearAidPhases(rss, dstRegBytes));
+                  rss.transferIdx, NicNearAid::REGION_BYTES};
+        ERR_CHECK(ProbeNearAidPhases(rss));
       }
 
       // Register DST memory region
@@ -5029,17 +4902,13 @@ const auto& AmdSmiFabricInfoV1(const T& info)
                                     int               const  gpuIndex,
                                     vector<float>&           outputBuffer)
   {
-    vector<uint8_t> staged(NearAidDstBytes(rss.numBytes));
+    vector<uint8_t> staged(NicNearAid::DstBytes(rss.numBytes));
     ERR_CHECK(hipSetDevice(gpuIndex));
     ERR_CHECK(hipMemcpy(staged.data(), rss.dstMem[0], staged.size(), hipMemcpyDefault));
     ERR_CHECK(hipDeviceSynchronize());
 
-    uint8_t* gathered = (uint8_t*)outputBuffer.data();
-    for (size_t offset = 0; offset < rss.numBytes; offset += NEAR_AID_PIECE_BYTES) {
-      size_t const pieceBytes = std::min(NEAR_AID_PIECE_BYTES, rss.numBytes - offset);
-      memcpy(gathered + offset,
-             staged.data() + NearAidDstOffset(offset, cfg.nic.nearAidMode, rss.nearAidPhases), pieceBytes);
-    }
+    NicNearAid::GatherDst(staged.data(), rss.numBytes, cfg.nic.nearAidMode == NIC_NEAR_AID_FAR,
+                          rss.nearAidPhases, (uint8_t*)outputBuffer.data());
     return ERR_NONE;
   }
 
@@ -5584,7 +5453,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
         if (rss.numLaps != 0)
           dstAllocBytes = std::max(dstAllocBytes, (size_t)cfg.general.pingpongFlagBuffer);
         if (cfg.nic.nearAidMode != NIC_NEAR_AID_OFF && IsNicExeType(exeDevice.exeType))
-          dstAllocBytes = NearAidDstBytes(t.numBytes);
+          dstAllocBytes = NicNearAid::DstBytes(t.numBytes);
         bool requiresFabricHandle = (dstMemDevice.memRank != exeDevice.exeRank) && IsGpuExeType(exeDevice.exeType);
         if (rss.numLaps != 0 && IsGpuMemType(dstMemDevice.memType)) {
           // Partner half's executor may fabric-import this flag buffer for cross-rank pingpong
@@ -6289,7 +6158,7 @@ const auto& AmdSmiFabricInfoV1(const T& info)
       for (int qpIndex = 0; qpIndex < rss.qpCount; qpIndex++) {
         rss.nearAidChainsPosted[qpIndex] = 0;
         rss.nearAidChainsDone[qpIndex]   = 0;
-        size_t const numInitial = std::min(NEAR_AID_CHAINS_IN_FLIGHT, rss.nearAidChains[qpIndex].size());
+        size_t const numInitial = std::min(NicNearAid::CHAINS_IN_FLIGHT, rss.nearAidChains[qpIndex].size());
         for (size_t chainIdx = 0; chainIdx < numInitial; chainIdx++)
           ERR_CHECK(PostNextNearAidChain(rss, qpIndex));
       }
